@@ -84,7 +84,7 @@ impl TypeConversionPolicy {
             CppConversionType::None | CppConversionType::FromReturnValueToPlacementPtr => {
                 Some(var_name.to_string())
             }
-            CppConversionType::FromPointerToReference { .. } => Some(format!("(*{var_name})")),
+            CppConversionType::FromPointerToReference => Some(format!("(*{var_name})")),
             CppConversionType::Move => Some(format!("std::move({var_name})")),
             CppConversionType::FromUniquePtrToValue | CppConversionType::FromPtrToMove => {
                 Some(format!("std::move(*{var_name})"))
@@ -103,7 +103,7 @@ impl TypeConversionPolicy {
                 })
             }
             CppConversionType::IgnoredPlacementPtrParameter => None,
-            CppConversionType::FromReferenceToPointer { .. } => Some(format!("&{var_name}")),
+            CppConversionType::FromReferenceToPointer => Some(format!("&{var_name}")),
         })
     }
 }

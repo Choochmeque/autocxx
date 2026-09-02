@@ -212,8 +212,8 @@ impl TypeConversionPolicy {
             RustConversionType::FromValueParamToPtr
                 | RustConversionType::FromRValueParamToPtr
                 | RustConversionType::FromPlacementParamToNewReturn
-                | RustConversionType::FromPointerToReferenceWrapper { .. }
-                | RustConversionType::FromReferenceWrapperToPointer { .. }
+                | RustConversionType::FromPointerToReferenceWrapper
+                | RustConversionType::FromReferenceWrapperToPointer
         )
     }
 
