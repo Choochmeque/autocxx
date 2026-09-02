@@ -32,7 +32,7 @@ impl<'a, T: HasNs> NamespaceEntries<'a, T> {
         &self.entries
     }
 
-    pub(crate) fn children(&self) -> impl Iterator<Item = (&&str, &NamespaceEntries<T>)> {
+    pub(crate) fn children(&self) -> impl Iterator<Item = (&&str, &NamespaceEntries<'_, T>)> {
         self.children.iter()
     }
 
