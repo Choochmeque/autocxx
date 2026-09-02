@@ -79,7 +79,7 @@ impl ByValueChecker {
         let mut byvalue_checker = ByValueChecker::new();
         for blocklisted in config.get_blocklist() {
             let tn = QualifiedName::new_from_cpp_name(blocklisted);
-            let safety = PodState::UnsafeToBePod(format!("type {} is on the blocklist", &tn));
+            let safety = PodState::UnsafeToBePod(format!("type {tn} is on the blocklist"));
             byvalue_checker
                 .results
                 .insert(tn, StructDetails::new(safety));
