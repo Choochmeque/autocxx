@@ -22,7 +22,7 @@ use itertools::Itertools;
 use mdbook::{book::Book, preprocess::CmdPreprocessor};
 use proc_macro2::{Span, TokenStream};
 use rayon::prelude::*;
-use syn::{Expr, __private::ToTokens, spanned::Spanned};
+use syn::{__private::ToTokens, spanned::Spanned, Expr};
 
 static LONG_ABOUT: &str =
     "This is an mdbook preprocessor tailored for autocxx code examples. Autocxx
