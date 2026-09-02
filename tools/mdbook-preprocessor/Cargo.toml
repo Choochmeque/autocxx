@@ -22,10 +22,11 @@ autocxx-integration-tests = { path = "../../integration-tests", version = "=0.30
 rayon = "1.5"
 gag = "1.0"
 env_logger = "0.9.0"
+quote = "1"
 
 [dependencies.syn]
-version = "1.0.39"
-features = ["parsing"]
+version = "2"
+features = ["parsing", "full"]
 
 [dependencies.proc-macro2]
 version = "1.0.11"
