@@ -130,7 +130,7 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
                     "Running doctest {}/{} at {}",
                     counter + 1,
                     num_tests,
-                    &case.location
+                    case.location
                 );
                 let err = autocxx_integration_tests::doctest(
                     &case.cpp,
@@ -146,7 +146,7 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
                     "Doctest {}/{} at {} {}.",
                     counter + 1,
                     num_tests,
-                    &case.location,
+                    case.location,
                     desc
                 );
                 if err.is_err() {
