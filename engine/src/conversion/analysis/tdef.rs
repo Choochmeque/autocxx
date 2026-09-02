@@ -61,7 +61,7 @@ pub(crate) fn convert_typedef_targets(
             Ok(Box::new(std::iter::once(match item {
                 TypedefKind::Type(ity) => get_replacement_typedef(
                     name,
-                    ity.into(),
+                    (*ity).into(),
                     old_tyname,
                     &mut type_converter,
                     &mut extra_apis,
@@ -121,10 +121,10 @@ fn get_replacement_typedef(
             extra_apis.append(&mut final_type.extra_apis);
             Ok(Api::Typedef {
                 name,
-                item: TypedefKind::Type(ity.into()),
+                item: TypedefKind::Type(Box::new(ity.into())),
                 old_tyname,
                 analysis: TypedefAnalysis {
-                    kind: TypedefKind::Type(converted_type.into()),
+                    kind: TypedefKind::Type(Box::new(converted_type.into())),
                     deps: final_type.types_encountered,
                 },
             })

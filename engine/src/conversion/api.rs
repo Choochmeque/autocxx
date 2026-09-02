@@ -208,7 +208,7 @@ impl AnalysisPhase for NullPhase {
 #[derive(Clone, Debug)]
 pub(crate) enum TypedefKind {
     Use(Box<Type>),
-    Type(ItemType),
+    Type(Box<ItemType>),
 }
 
 /// Name information for an API. This includes the name by
