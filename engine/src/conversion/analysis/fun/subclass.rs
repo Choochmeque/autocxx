@@ -225,7 +225,7 @@ pub(super) fn create_subclass_constructor(
         existing_params.first_mut().map(DerefMut::deref_mut)
     {
         if let Type::Ptr(TypePtr { elem, .. }) = &mut **ty {
-            *elem = Box::new(Type::Path(sub.cpp().to_type_path()));
+            **elem = Type::Path(sub.cpp().to_type_path());
         } else {
             panic!("Unexpected self type parameter when creating subclass constructor");
         }
