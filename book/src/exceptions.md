@@ -69,12 +69,14 @@ include_cpp! {
 }
 
 fn main() {
-    // Successful call - unwrap the Result
-    let value = ffi::parse_number(c"42".as_ptr()).unwrap();
+    // Successful call - unwrap the Result.
+    // The function takes a raw pointer, so it stays unsafe
+    // even under safety!(unsafe_ffi).
+    let value = unsafe { ffi::parse_number(c"42".as_ptr()) }.unwrap();
     assert_eq!(value, 42);
 
     // Exception is caught and converted to Err
-    let result = ffi::parse_number(std::ptr::null());
+    let result = unsafe { ffi::parse_number(std::ptr::null()) };
     assert!(result.is_err());
 }
 }
