@@ -21,7 +21,7 @@ fn unqualify_type_path(typ: TypePath) -> TypePath {
     // This is 'safe' because earlier code will already have
     // failed with 'DuplicateType' if we had several types called
     // the same thing.
-    let last_seg = typ.path.segments.into_iter().last().unwrap();
+    let last_seg = typ.path.segments.into_iter().next_back().unwrap();
     let ident = &last_seg.ident;
     let args = match last_seg.arguments {
         PathArguments::AngleBracketed(mut ab) => {
