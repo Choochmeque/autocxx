@@ -1,12 +1,9 @@
-[![GitHub](https://img.shields.io/crates/l/autocxx)](https://github.com/google/autocxx)
+[![GitHub](https://img.shields.io/crates/l/autocxx)](https://github.com/Choochmeque/autocxx)
 [![crates.io](https://img.shields.io/crates/d/autocxx)](https://crates.io/crates/autocxx)
 [![docs.rs](https://docs.rs/autocxx/badge.svg)](https://docs.rs/autocxx)
 
 > [!NOTE]
-Autocxx is looking for a new maintainer! Regular maintenance work involves occasionally merging upstream bindgen fixes into the autocxx-bindgen fork (or if you’re more ambitious, finish the work to unfork bindgen, which seems achievable and would greatly simplify everything) as well as keeping an eye on bug reports. If you use autocxx, please consider taking this on!
-
-> [!NOTE]
-As a new user, you might consider using [cxx](https://cxx.rs/) or [crubit](https://github.com/google/crubit) instead.
+> This is the actively maintained continuation of [google/autocxx](https://github.com/google/autocxx), which is no longer maintained by Google (see [google/autocxx#1507](https://github.com/google/autocxx/issues/1507)). Bug reports, feature requests and pull requests are welcome here.
 
 # autocxx — automatic safe interop between Rust and C++
 
