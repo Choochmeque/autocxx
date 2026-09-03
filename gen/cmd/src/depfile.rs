@@ -50,6 +50,11 @@ impl Depfile {
     }
 
     /// Return a string giving a relative path from the depfile.
+    // TODO: both .expect()s below are reachable from user input: --outdir
+    // accepts non-UTF-8 paths (panics at to_str), and on Windows a
+    // dependency on a different drive root than the depfile makes
+    // diff_paths return None. Should propagate a clean error like
+    // main.rs does, but relativize's callers don't return Result yet.
     fn relativize(&self, path: &Path) -> String {
         pathdiff::diff_paths(path, &self.depfile_dir)
             .expect("Unable to make a relative path from the depfile's directory to the dependency")

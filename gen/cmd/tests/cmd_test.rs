@@ -30,6 +30,8 @@ static DIRECTIVE1_RS: &str = include_str!("data/directive1.rs");
 static DIRECTIVE2_RS: &str = include_str!("data/directive2.rs");
 static INPUT2_H: &str = include_str!("data/input2.h");
 static INPUT3_H: &str = include_str!("data/input3.h");
+static CXX_VOCABULARY_H: &str = include_str!("data/cxx_vocabulary.h");
+static CXX_VOCABULARY_RS: &str = include_str!("data/cxx_vocabulary.rs");
 
 const KEEP_TEMPDIRS: bool = true;
 
@@ -303,6 +305,80 @@ fn test_gen_repro() -> Result<(), Box<dyn std::error::Error>> {
     // Check that a random thing from one of the headers in
     // `ALL_KNOWN_SYSTEM_HEADERS` is included.
     assert!(std::fs::read_to_string(repro_path)?.contains("integer_sequence"));
+    Ok(())
+}
+
+/// A C++ class called `String` collides with cxx's reserved vocabulary types,
+/// so cxx refuses the bridge we generate for it (google/autocxx#1371). We can't
+/// yet generate bindings for such a class, but we must say so rather than
+/// panicking with a backtrace.
+#[test]
+fn test_reports_cxx_rejection_without_panicking() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let demo_code_dir = tmp_dir.path().join("demo");
+    std::fs::create_dir(&demo_code_dir).unwrap();
+    write_to_file(
+        &demo_code_dir,
+        "cxx_vocabulary.h",
+        CXX_VOCABULARY_H.as_bytes(),
+    );
+    write_to_file(&demo_code_dir, "main.rs", CXX_VOCABULARY_RS.as_bytes());
+    let mut cmd = Command::cargo_bin("autocxx-gen")?;
+    cmd.arg("--inc")
+        .arg(demo_code_dir.to_str().unwrap())
+        .arg("--outdir")
+        .arg(tmp_dir.path().to_str().unwrap())
+        .arg("--gen-cpp")
+        .arg("--gen-rs-include")
+        .arg(demo_code_dir.join("main.rs"));
+    let output = cmd.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("Cmd stderr: {stderr}");
+    assert!(
+        !output.status.success(),
+        "autocxx-gen unexpectedly succeeded"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "autocxx-gen panicked instead of reporting an error"
+    );
+    assert!(
+        stderr.contains("cxx couldn't handle our generated bindings"),
+        "autocxx-gen didn't explain why it failed"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_reports_bad_generate_exact_without_panicking() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let demo_code_dir = tmp_dir.path().join("demo");
+    std::fs::create_dir(&demo_code_dir).unwrap();
+    write_to_file(&demo_code_dir, "input.h", b"inline void foo() {}\n");
+    let mut cmd = Command::cargo_bin("autocxx-gen")?;
+    cmd.arg("--inc")
+        .arg(demo_code_dir.to_str().unwrap())
+        .arg("--outdir")
+        .arg(tmp_dir.path().to_str().unwrap())
+        .arg("--gen-cpp")
+        .arg("--generate-exact")
+        .arg("nope")
+        .arg(demo_code_dir.join("input.h"));
+    let output = cmd.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("Cmd stderr: {stderr}");
+    assert!(
+        !output.status.success(),
+        "autocxx-gen unexpectedly succeeded"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "autocxx-gen panicked instead of reporting an error"
+    );
+    assert!(
+        stderr.contains("--generate-exact requires a number"),
+        "autocxx-gen didn't explain why it failed"
+    );
     Ok(())
 }
 
