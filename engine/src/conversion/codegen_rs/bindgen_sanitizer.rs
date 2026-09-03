@@ -24,20 +24,43 @@
 //! with E0425 "cannot find type `_CharT` in this scope". See
 //! google/autocxx#1480 and google/autocxx#1051. Since autocxx
 //! includes bindgen's output verbatim, we must prune such items
-//! before emitting the mod. Nothing can reference these aliases
-//! successfully anyway, so removing them is safe.
+//! before emitting the mod.
+//!
+//! Removal is safe for anything that referenced a pruned alias by
+//! that bare name: it could not have compiled either, and alias
+//! chains are handled by pruning to a fixpoint. Known limitation:
+//! a struct *field* typed via a multi-segment path to a pruned
+//! alias (e.g. `root::std::__tree___end_node_t`) is left dangling —
+//! the struct was equally uncompilable before, but fixing it needs
+//! a cascade to opaque the containing struct, tracked separately.
 
 use indexmap::set::IndexSet as HashSet;
-use syn::{GenericArgument, GenericParam, Item, ItemMod, PathArguments, ReturnType, Type};
+use syn::{
+    GenericArgument, GenericParam, Item, ItemMod, PathArguments, ReturnType, Type, TypeParamBound,
+    UseTree,
+};
 
 /// Remove type aliases in the bindgen mod (recursively) which refer
 /// to type names that are not bound anywhere: not a generic parameter
-/// of the alias, not a type defined in the bindgen output, and not a
-/// Rust primitive.
+/// of the alias, not a type defined or imported in the bindgen output,
+/// and not a Rust primitive.
+///
+/// Pruning iterates to a fixpoint: removing an alias takes its name
+/// out of scope, which can in turn invalidate aliases that referenced
+/// it (`type Good = BadAlias;`).
 pub(super) fn remove_unbound_type_aliases(bindgen_mod: &mut ItemMod) {
     let mut defined = HashSet::new();
     collect_defined_type_names(bindgen_mod, &mut defined);
-    prune_mod(bindgen_mod, &defined);
+    loop {
+        let mut pruned = Vec::new();
+        prune_mod(bindgen_mod, &defined, &mut pruned);
+        if pruned.is_empty() {
+            break;
+        }
+        for name in pruned {
+            defined.swap_remove(&name);
+        }
+    }
 }
 
 fn collect_defined_type_names(item_mod: &ItemMod, defined: &mut HashSet<String>) {
@@ -56,6 +79,12 @@ fn collect_defined_type_names(item_mod: &ItemMod, defined: &mut HashSet<String>)
                 Item::Type(t) => {
                     defined.insert(t.ident.to_string());
                 }
+                // Imports bind bare names too. In particular autocxx
+                // injects `use super::{...}` and `use autocxx::c_char16_t
+                // as bindgen_cchar16_t` into every bindgen module, and
+                // aliases like `pub type Foo = bindgen_cchar16_t;` are
+                // legitimate.
+                Item::Use(u) => collect_use_names(&u.tree, defined),
                 Item::Mod(m) => collect_defined_type_names(m, defined),
                 _ => {}
             }
@@ -63,7 +92,25 @@ fn collect_defined_type_names(item_mod: &ItemMod, defined: &mut HashSet<String>)
     }
 }
 
-fn prune_mod(item_mod: &mut ItemMod, defined: &HashSet<String>) {
+fn collect_use_names(tree: &UseTree, defined: &mut HashSet<String>) {
+    match tree {
+        UseTree::Path(p) => collect_use_names(&p.tree, defined),
+        UseTree::Name(n) => {
+            defined.insert(n.ident.to_string());
+        }
+        UseTree::Rename(r) => {
+            defined.insert(r.rename.to_string());
+        }
+        UseTree::Group(g) => {
+            for t in &g.items {
+                collect_use_names(t, defined);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn prune_mod(item_mod: &mut ItemMod, defined: &HashSet<String>, pruned: &mut Vec<String>) {
     if let Some((_, items)) = &mut item_mod.content {
         items.retain(|item| match item {
             Item::Type(t) => {
@@ -76,13 +123,18 @@ fn prune_mod(item_mod: &mut ItemMod, defined: &HashSet<String>) {
                         _ => None,
                     })
                     .collect();
-                !has_unbound_ident(&t.ty, &params, defined)
+                if has_unbound_ident(&t.ty, &params, defined) {
+                    pruned.push(t.ident.to_string());
+                    false
+                } else {
+                    true
+                }
             }
             _ => true,
         });
         for item in items {
             if let Item::Mod(m) = item {
-                prune_mod(m, defined);
+                prune_mod(m, defined, pruned);
             }
         }
     }
@@ -157,6 +209,17 @@ fn has_unbound_ident(ty: &Type, params: &HashSet<String>, defined: &HashSet<Stri
             .elems
             .iter()
             .any(|ty| has_unbound_ident(ty, params, defined)),
+        // For trait objects and impl-trait, only inspect the generic
+        // arguments of the bounds; the trait names themselves are not
+        // collected in `defined`, so checking them would false-positive.
+        Type::TraitObject(t) => t
+            .bounds
+            .iter()
+            .any(|b| bound_has_unbound_ident(b, params, defined)),
+        Type::ImplTrait(t) => t
+            .bounds
+            .iter()
+            .any(|b| bound_has_unbound_ident(b, params, defined)),
         Type::BareFn(f) => {
             f.inputs
                 .iter()
@@ -166,6 +229,36 @@ fn has_unbound_ident(ty: &Type, params: &HashSet<String>, defined: &HashSet<Stri
                     ReturnType::Default => false,
                 }
         }
+        // Type::Macro, Type::Verbatim etc.: we can't see inside, so
+        // conservatively keep the alias (false negatives are safe;
+        // false positives would remove legitimate API).
+        _ => false,
+    }
+}
+
+fn bound_has_unbound_ident(
+    bound: &TypeParamBound,
+    params: &HashSet<String>,
+    defined: &HashSet<String>,
+) -> bool {
+    match bound {
+        TypeParamBound::Trait(tb) => tb.path.segments.iter().any(|seg| match &seg.arguments {
+            PathArguments::AngleBracketed(ab) => ab.args.iter().any(|arg| match arg {
+                GenericArgument::Type(ty) => has_unbound_ident(ty, params, defined),
+                GenericArgument::AssocType(at) => has_unbound_ident(&at.ty, params, defined),
+                _ => false,
+            }),
+            PathArguments::Parenthesized(p) => {
+                p.inputs
+                    .iter()
+                    .any(|ty| has_unbound_ident(ty, params, defined))
+                    || match &p.output {
+                        ReturnType::Type(_, ty) => has_unbound_ident(ty, params, defined),
+                        ReturnType::Default => false,
+                    }
+            }
+            PathArguments::None => false,
+        }),
         _ => false,
     }
 }
@@ -237,6 +330,51 @@ mod tests {
         };
         remove_unbound_type_aliases(&mut m);
         assert_eq!(count_aliases(&m), 4);
+    }
+
+    #[test]
+    fn keeps_alias_to_imported_name() {
+        // autocxx injects imports (including a rename) into every
+        // bindgen module; aliases to those names are legitimate.
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                #[allow(unused_imports)]
+                use super::{cxxbridge, output};
+                use autocxx::c_char16_t as bindgen_cchar16_t;
+                pub type Foo = bindgen_cchar16_t;
+            }
+        };
+        remove_unbound_type_aliases(&mut m);
+        assert_eq!(count_aliases(&m), 1);
+    }
+
+    #[test]
+    fn prunes_alias_chains_to_fixpoint() {
+        // GoodLooking references BadAlias which itself gets pruned;
+        // both must go.
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub struct Real {
+                    _p: u8,
+                }
+                pub type BadAlias = Real<_CharT>;
+                pub type GoodLooking = BadAlias;
+                pub type Unaffected = Real;
+            }
+        };
+        remove_unbound_type_aliases(&mut m);
+        assert_eq!(count_aliases(&m), 1);
+    }
+
+    #[test]
+    fn removes_unbound_in_trait_object_bound_args() {
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub type Bad = *const dyn SomeTrait<_CharT>;
+            }
+        };
+        remove_unbound_type_aliases(&mut m);
+        assert_eq!(count_aliases(&m), 0);
     }
 
     #[test]
