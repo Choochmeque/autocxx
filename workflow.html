@@ -1,0 +1,333 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Workflow - Rust ♡ Existing C++</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="autocxx — safe interop between Rust and existing C++">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Rust ♡ Existing C++</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/google/autocxx" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="workflow"><a class="header" href="#workflow">Workflow</a></h1>
+<p>C++ is complex, and <code>autocxx</code> can't ingest everything.</p>
+<p>First tip - use an IDE. Type annotation and autocompletion is <em>incredibly</em> helpful in an <code>autocxx</code>
+context, where you may be dealing with <code>UniquePtr&lt;T&gt;</code> and <code>Option&lt;&amp;T&gt;</code> and <code>Pin&lt;&amp;mut T&gt;</code> very often.
+<img src="vscode1.png" alt="VSCode autocompletion of autocxx APIs" /></p>
+<p>As you'll see, it's also <em>essential</em> when <code>autocxx</code> can't produce bindings for some reason.</p>
+<h2 id="what-if-autocxx-cant-generate-bindings"><a class="header" href="#what-if-autocxx-cant-generate-bindings">What if <code>autocxx</code> can't generate bindings?</a></h2>
+<p>This bit is important.</p>
+<p>When you use <code>autocxx</code>, you'll ask it to generate Rust bindings for <a href="allowlist.html">C++ types or functions</a> using
+<code>generate!</code> directives.</p>
+<p>If you ask to generate bindings for a specific function, and it can't: the build will fail.</p>
+<p>If you ask to generate bindings for an entire type, <code>autocxx</code> will generate bindings for as
+many methods as possible. For those methods where it can't generate bindings, it will instead
+generate some placeholder function or struct with documentation explaining what went wrong:</p>
+<p><img src="vscode2.png" alt="VSCode showing an error for an API where autocxx couldn&#39;t generate bindings" /></p>
+<p><em>This</em> is why it's crucial to use an IDE with <code>autocxx</code>.</p>
+<h2 id="how-can-i-see-what-bindings-autocxx-has-generated"><a class="header" href="#how-can-i-see-what-bindings-autocxx-has-generated">How can I see what bindings <code>autocxx</code> has generated?</a></h2>
+<p>Options:</p>
+<ul>
+<li>Use an IDE. (Did we mention, you should use an IDE?)</li>
+<li>Run <code>cargo doc --document-private-items</code>.</li>
+<li>Use <code>cargo expand</code>.</li>
+</ul>
+<h2 id="how-to-work-around-cases-where-autocxx-cant-generate-bindings"><a class="header" href="#how-to-work-around-cases-where-autocxx-cant-generate-bindings">How to work around cases where <code>autocxx</code> can't generate bindings</a></h2>
+<p>Your options are:</p>
+<ul>
+<li>Write extra C++ functions with simpler parameters or return types, and generate
+bindings to them, instead.</li>
+<li>Write some manual <code>#[cxx::bridge]</code> bindings - see below.</li>
+</ul>
+<p>Usually, you can solve problems by writing a bit of additional C++ code. For example,
+supposing autocxx can't understand your type <code>Sandwich&lt;Ham&gt;</code>. Instead it will give
+you a fairly useless opaque type such as <code>Sandwich_Ham</code>. You can write additional
+C++ functions to unpack the opaque type into something useful:</p>
+<pre><code class="language-cpp">const Ham&amp; get_filling(const Sandwich&lt;Ham&gt;&amp; ham_sandwich);
+</code></pre>
+<h2 id="mixing-manual-and-automated-bindings"><a class="header" href="#mixing-manual-and-automated-bindings">Mixing manual and automated bindings</a></h2>
+<p><code>autocxx</code> uses <a href="https://cxx.rs"><code>cxx</code></a> underneath, and its build process will happily spot and
+process manually-crafted <a href="https://cxx.rs/concepts.html"><code>cxx::bridge</code> mods</a> which you include in your
+Rust source code. A common pattern could be to use <code>autocxx</code> to generate
+all the bindings possible, then hand-craft a <code>cxx::bridge</code> mod for the
+remainder where <code>autocxx</code> falls short.</p>
+<p>To do this, you'll need to use the <a href="https://cxx.rs/extern-c++.html#reusing-existing-binding-types">ability of one cxx::bridge mod to refer to types from another</a>,
+for example:</p>
+<pre><code class="language-rust ignore">autocxx::include_cpp! {
+    #include "foo.h"
+    safety!(unsafe_ffi)
+    generate!("take_A")
+    generate!("A")
+}
+#[cxx::bridge]
+mod ffi2 {
+    unsafe extern "C++" {
+        include!("foo.h");
+        type A = crate::ffi::A;
+        fn give_A() -&gt; UniquePtr&lt;A&gt;; // in practice, autocxx could happily do this
+    }
+}
+fn main() {
+    let a = ffi2::give_A();
+    assert_eq!(ffi::take_A(&amp;a), autocxx::c_int(5));
+}</code></pre>
+<p>In the example above, we're referring <em>from</em> manual bindings <em>to</em> automated bindings.</p>
+<p>You can also do it the other way round using <code>extern_cpp_opaque_type!</code>:</p>
+<pre><code class="language-rust ignore">autocxx::include_cpp! {
+    #hexathorpe include "input.h"
+    safety!(unsafe_ffi)
+    generate!("handle_a")
+    generate!("create_a")
+    extern_cpp_opaque_type!("A", ffi2::A)
+}
+#[cxx::bridge]
+pub mod ffi2 {
+    unsafe extern "C++" {
+        include!("input.h");
+        type A;
+    }
+    impl UniquePtr&lt;A&gt; {}
+}
+fn main() {
+    let a = ffi::create_a();
+    ffi::handle_a(&amp;a);
+}</code></pre>
+<h2 id="my-build-entirely-failed"><a class="header" href="#my-build-entirely-failed">My build entirely failed</a></h2>
+<p><code>autocxx</code> should nearly always successfully parse the C++ codebase and
+generate <em>some</em> APIs. It's reliant on <code>bindgen</code>, but <code>bindgen</code> is excellent
+and rarely bails out entirely.</p>
+<p>If it does, you may be able to use the <a href="https://docs.rs/autocxx/latest/autocxx/macro.block.html"><code>block!</code> macro</a>.</p>
+<p>We'd appreciate a minimized bug report of the troublesome code - see <a href="contributing.html">contributing</a>.</p>
+<h2 id="enabling-autocompletion-in-a-rust-analyzer-ide"><a class="header" href="#enabling-autocompletion-in-a-rust-analyzer-ide">Enabling autocompletion in a rust-analyzer IDE</a></h2>
+<p>You'll need to enable <em>both</em>:</p>
+<ul>
+<li>Rust-analyzer: Proc Macro: Enable</li>
+<li>Rust-analyzer: Experimental: Proc Attr Macros</li>
+</ul>
+<h2 id="next-steps"><a class="header" href="#next-steps">Next steps</a></h2>
+<p>Now you've read what can go wrong with <code>autocxx</code>, and how to diagnose problems - the next step is to give it a try!
+Treat the rest of this manual as a reference.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="tutorial.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="allowlist.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="tutorial.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="allowlist.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="mermaid.min.js"></script>
+        <script src="mermaid-init.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

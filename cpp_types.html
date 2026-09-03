@@ -1,0 +1,450 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>C++ structs, enums and classes - Rust ♡ Existing C++</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="autocxx — safe interop between Rust and existing C++">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Rust ♡ Existing C++</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/google/autocxx" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="c-structs-enums-and-classes"><a class="header" href="#c-structs-enums-and-classes">C++ structs, enums and classes</a></h1>
+<p>If you add a C++ struct, class or enum to the <a href="allowlist.html">allowlist</a>, Rust bindings will be generated to that type and to any methods it has.
+Even if you don't add it to the allowlist, the type may be generated if it's required by some other function - but in this case
+all its methods won't be generated.</p>
+<p>Rust and C++ differ in an important way:</p>
+<ul>
+<li>In Rust, the compiler is free to pick up some data and move it to somewhere else (in a <code>memcpy</code> sense). The object is none the wiser.</li>
+<li>In C++, once created, an object stays where it is, until or unless it has its "move constructor" invoked.</li>
+</ul>
+<p>This makes a big difference: C++ objects can have self-referential pointers, and any such pointer would be invalidated by Rust doing
+a memcpy. Such self-referential pointers are common - even some implementations of <code>std::string</code> do it.</p>
+<h2 id="pod-and-non-pod"><a class="header" href="#pod-and-non-pod">POD and non-POD</a></h2>
+<p>When asking <code>autocxx</code> to generate bindings for a type, then, you have to make a choice.</p>
+<ul>
+<li><em>This C++ type is trivial</em>. It has no destructor or move constructor (or they're trivial), and thus Rust is free to move it around the stack as it wishes. <code>autocxx</code> calls these types POD ("plain old data"). Alternatively,</li>
+<li><em>This C++ type has a non-trivial destructor or move constructor, so we can't allow Rust to move this around</em>. <code>autocxx</code> calls these types non-POD.</li>
+</ul>
+<p>POD types are nicer:</p>
+<ul>
+<li>You can just use them as regular Rust types.</li>
+<li>You get direct field access.</li>
+<li>No funny business.</li>
+</ul>
+<p>Non-POD types are awkward:</p>
+<ul>
+<li>You can't just <em>have</em> one as a Rust variable. Normally you hold them in a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>, though there are other options.</li>
+<li>There is no access to fields (yet).</li>
+<li>You can't even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
+</ul>
+<p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don't worry: you can't mess this up. If the C++ type doesn't in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you're <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they're trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
+<p>See <a href="storage.html">the chapter on storage</a> for lots more detail on how you can hold onto non-POD types.</p>
+<h2 id="construction"><a class="header" href="#construction">Construction</a></h2>
+<p>Constructing a POD object is simple: call its <code>new</code> associated function. <a href="https://en.wikipedia.org/wiki/Bob%27s_your_uncle">Bob's your uncle!</a></p>
+<p>Multiple constructors (aka constructor overloading) follows the same <a href="cpp_functions.html#overloads---and-identifiers-ending-in-digits">rules as other functions</a>.</p>
+<p>Constructing a non-POD object requires two steps.</p>
+<ul>
+<li>Call the <code>new</code> associated function in the same way. This will give you something implementing <a href="https://docs.rs/moveit/latest/moveit/new/trait.New.html"><code>moveit::New</code></a>/</li>
+<li>Use this to make the object on the heap or stack, in any of the following ways:</li>
+</ul>
+<div class="table-wrapper"><table><thead><tr><th>Where you want to create it</th><th>How to create it</th><th>What you get</th><th>Example</th></tr></thead><tbody>
+<tr><td>C++ heap (<em>recommended for simplicity</em>)</td><td><a href="https://docs.rs/autocxx/latest/autocxx/trait.Within.html"><code>Within.within_unique_ptr()</code></a> or <a href="https://docs.rs/moveit/latest/moveit/new/trait.EmplaceUnpinned.html#method.emplace"><code>UniquePtr::emplace</code></a></td><td><a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a></td><td><code>let mut obj = ffi::Goldfish::new().within_unique_ptr()</code> or <code>let mut obj = UniquePtr::emplace(ffi::Goldfish::new())</code></td></tr>
+<tr><td>Rust heap</td><td><a href="https://docs.rs/autocxx/latest/autocxx/trait.Within.html"><code>Within.within_box()</code></a> or <a href="https://docs.rs/moveit/latest/moveit/new/trait.Emplace.html#method.emplace"><code>Box::emplace</code></a></td><td><code>Pin&lt;Box&lt;T&gt;&gt;</code></td><td><code>let mut obj = ffi::Goldfish::new().within_box()</code> or <code>let mut obj = Box::emplace(ffi::Goldfish::new())</code></td></tr>
+<tr><td>Rust stack</td><td><a href="https://docs.rs/moveit/latest/moveit/macro.moveit.html"><code>moveit</code> macro</a></td><td><code>&amp;mut T</code> (more or less)</td><td><code>moveit! { let mut obj = ffi::Goldfish::new() }</code></td></tr>
+</tbody></table>
+</div>
+<p>For heap construction, the prefix (<code>emplace</code>) and postfix (<code>.within_...</code>) forms are exactly identical. Choose whichever suits your needs best.</p>
+<h3 id="should-you-construct-on-the-rust-heap-or-the-c-heap"><a class="header" href="#should-you-construct-on-the-rust-heap-or-the-c-heap">Should you construct on the Rust heap or the C++ heap?</a></h3>
+<p>Use <code>.within_unique_ptr()</code> to create objects on the C++ heap. This gives you a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a> which works well with other autocxx and cxx APIs.</p>
+<p>There is a small disadvantage - <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a> is able to store <code>NULL</code> values. Therefore, each time you use the resulting object, there is an <code>unwrap()</code> (explicit or implicit). If this bothers you, use the <code>Box</code> option instead which can never be <code>NULL</code>.</p>
+<h3 id="construction-sounds-complicated-do-you-have-a-code-example"><a class="header" href="#construction-sounds-complicated-do-you-have-a-code-example">Construction sounds complicated. Do you have a code example?</a></h3>
+<h4 id="c-header"><a class="header" href="#c-header">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;stdint.h&gt;
+#include &lt;string&gt;
+struct A {
+    A() {}
+    void set(uint32_t val);
+    uint32_t get() const;
+    uint32_t a;
+};
+
+</code></pre>
+<h4 id="rust"><a class="header" href="#rust">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("A")
+}
+
+fn main() {
+    moveit! {
+        let mut stack_obj = ffi::A::new();
+    }
+    stack_obj.as_mut().set(42);
+    assert_eq!(stack_obj.get(), 42);
+
+    let mut heap_obj = ffi::A::new().within_unique_ptr();
+    heap_obj.pin_mut().set(42);
+    assert_eq!(heap_obj.get(), 42);
+
+    let mut another_heap_obj = ffi::A::new().within_box();
+    another_heap_obj.as_mut().set(42);
+    assert_eq!(another_heap_obj.get(), 42);
+}
+</code></pre>
+<h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
+<p>A type which is incomplete in the C++ headers (i.e. represented only by a forward
+declaration) can't be held in a <code>UniquePtr</code> within Rust (because Rust can't know
+if it has a destructor that will need to be called if the object is dropped.)
+Naturally, such an object can't be passed by value either; it can still be
+referenced in Rust references.</p>
+<h2 id="generic-templated-types"><a class="header" href="#generic-templated-types">Generic (templated) types</a></h2>
+<p>If you're using one of the generic types which is supported natively by cxx,
+e.g. <code>std::unique_ptr</code>, it should work as you expect. For other generic types,
+we synthesize a concrete Rust type, corresponding to a C++ typedef, for each
+concrete instantiation of the type. Such generated types are always opaque,
+and never have methods attached. That's therefore enough to pass them
+between return types and parameters of other functions within <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>s
+but not really enough to do anything else with these types yet<sup class="footnote-reference" id="fr-templated-1"><a href="#footnote-templated">1</a></sup>.</p>
+<p>To make them more useful, you might have to add extra C++ functions to extract
+data or otherwise deal with them.</p>
+<p>Usually, such concrete types are synthesized automatically because they're
+parameters or return values from functions. Very rarely, you may
+want to synthesize them yourself - you can do this using the
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.concrete.html"><code>concrete!</code></a>
+directive. As noted, though, these types are currently opaque and fairly
+useless without passing them back and forth to C++, so this is not a commonly
+used facility. It does, however, allow you to give a more descriptive name
+to the type in Rust:</p>
+<h4 id="c-header-1"><a class="header" href="#c-header-1">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;string&gt;
+struct Tapioca {
+  std::string yuck;
+};
+template&lt;typename Floaters&gt;
+struct Tea {
+  Tea() : floaters(nullptr) {}
+  Floaters* floaters;
+};
+inline Tea&lt;Tapioca&gt; prepare() {
+  Tea&lt;Tapioca&gt; mixture;
+  // prepare...
+  return mixture;
+}
+inline void drink(const Tea&lt;Tapioca&gt;&amp;) {}
+
+</code></pre>
+<h4 id="rust-1"><a class="header" href="#rust-1">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("prepare")
+    generate!("drink")
+    concrete!("Tea&lt;Tapioca&gt;", Boba)
+}
+
+fn main() {
+    let nicer_than_it_sounds: cxx::UniquePtr&lt;ffi::Boba&gt; = ffi::prepare();
+    ffi::drink(&amp;nicer_than_it_sounds);
+}
+</code></pre>
+<h2 id="implicit-member-functions"><a class="header" href="#implicit-member-functions">Implicit member functions</a></h2>
+<p>Most of the API of a C++ type is contained within the type, so <code>autocxx</code> can
+understand what is available for Rust to call when that type is analyzed.
+However, there is an important exception for the so-called special
+member functions, which will be implicitly generated by the C++ compiler for
+some types. <code>autocxx</code> makes use of these types of special members:</p>
+<ul>
+<li>Default constructor</li>
+<li>Destructor</li>
+<li>Copy constructor</li>
+<li>Move constructor</li>
+</ul>
+<p>Explicitly declared versions of these special members are easy: <code>autocxx</code> knows
+they exist and uses them.</p>
+<p><code>autocxx</code> currently uses its own analysis to determine when implicit versions of
+these exist. This analysis tries to be conservative (avoid generating wrappers
+that require the existence of C++ functions that don't exist), but sometimes
+this goes wrong and understanding the details is necessary to get the correct
+Rust wrappers generated.</p>
+<p>In particular, determing whether an implicit version of any of these exists
+requires analyzing the types of all bases and members. <code>autocxx</code> only analyzes
+types when requested, because some may be un-analyzable. If the types of any
+bases or members are not analyzed, <code>autocxx</code> will assume a public destructor
+exists (in the absence of any other destructors), and avoid using any other
+implicit special member functions. Notably this includes the default
+constructor, so types with un-analyzed bases or members and no explicit
+constructors will not get a <code>make_unique</code> or <code>new</code> generated. If <code>autocxx</code> isn't
+generating a <code>make_unique</code> or <code>CopyNew</code> or <code>MoveNew</code> for a type which permits
+the corresponding operations in C++, make sure the types of all bases and
+members are analyzed or implement it explicitly.</p>
+<p><code>autocxx</code> currently does not take member initializers (<code>const int x = 5</code>) into
+account when determining whether a default constructor
+exists<sup class="footnote-reference" id="fr-member-initializers-1"><a href="#footnote-member-initializers">2</a></sup>. Explicitly declared default destructors still
+work though.</p>
+<p>Currently, <code>autocxx</code> assumes that an explicitly defaulted (<code>= default</code>) member
+function exists, although it is valid C++ for that to be
+deleted<sup class="footnote-reference" id="fr-explicitly-defaulted-1"><a href="#footnote-explicitly-defaulted">3</a></sup>. Clang's
+<a href="https://clang.llvm.org/docs/DiagnosticsReference.html#wdefaulted-function-deleted">-Wdefaulted-function-deleted</a>
+flag (enabled by default) will warn about types like this.</p>
+<p>A C++ type which can be instantiated but has an inaccessible constructor will
+be leaked by Rust<sup class="footnote-reference" id="fr-inaccessible-destructor-1"><a href="#footnote-inaccessible-destructor">4</a></sup>. The object's memory itself will be
+freed without calling any C++ destructor, which will leak any resources tracked
+by the C++ implementation.</p>
+<p>Many of the special members may be overloaded in C++. This generally means
+adding <code>const</code> or <code>volatile</code> qualifiers or extra arguments with defaults.
+<code>autocxx</code> avoids using any overloaded special members because choosing which
+one to call from Rust gets tricky.</p>
+<h2 id="abstract-types"><a class="header" href="#abstract-types">Abstract types</a></h2>
+<p><code>autocxx</code> does not allow instantiation of abstract types<sup class="footnote-reference" id="fr-abstract-1"><a href="#footnote-abstract">5</a></sup> (aka types with pure virtual methods).</p>
+<hr>
+<ol class="footnote-definition"><li id="footnote-templated">
+<p>Future improvements tracked <a href="https://github.com/google/autocxx/issues/349">here</a> <a href="#fr-templated-1">↩</a></p>
+</li>
+<li id="footnote-member-initializers">
+<p>Handling of member initializers is tracked
+<a href="https://github.com/google/autocxx/issues/816">here</a>. <a href="#fr-member-initializers-1">↩</a></p>
+</li>
+<li id="footnote-explicitly-defaulted">
+<p>Fix for explicitly defaulted special member functions
+that are deleted is tracked <a href="https://github.com/google/autocxx/issues/815">here</a>. <a href="#fr-explicitly-defaulted-1">↩</a></p>
+</li>
+<li id="footnote-inaccessible-destructor">
+<p>Discussion around what to do about inaccessible or
+deleted destructors <a href="https://github.com/google/autocxx/issues/829">here</a>. <a href="#fr-inaccessible-destructor-1">↩</a></p>
+</li>
+<li id="footnote-abstract">
+<p><code>autocxx</code>'s determination of abstract types is a bit approximate and
+<a href="https://github.com/google/autocxx/issues/774">could be improved</a>. <a href="#fr-abstract-1">↩</a></p>
+</li>
+</ol>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="building.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="references_etc.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="building.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="references_etc.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="mermaid.min.js"></script>
+        <script src="mermaid-init.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
