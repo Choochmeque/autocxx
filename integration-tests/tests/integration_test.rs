@@ -7840,6 +7840,86 @@ fn test_overload_rename_collision_chain() {
 }
 
 #[test]
+fn test_typedef_to_char_pointer_field() {
+    // Typedef-resolved pointer as a struct field must follow the
+    // same path as a directly written pointer field.
+    let cxx = indoc! {"
+    "};
+    let hdr = indoc! {"
+        typedef char Standard_Character;
+        typedef Standard_Character* Standard_CString;
+        struct Holder {
+            Standard_CString s;
+        };
+    "};
+    let rs = quote! {
+        let h = ffi::Holder { s: std::ptr::null_mut() };
+        assert!(h.s.is_null());
+    };
+    run_test(cxx, hdr, rs, &[], &["Holder"]);
+}
+
+#[test]
+fn test_typedef_to_char_pointer_return() {
+    // https://github.com/google/autocxx/issues/1368: a typedef chain
+    // ending in a pointer (typedef char C; typedef C* S;) previously
+    // made generation fail outright with "unsupported type: C",
+    // because the resolved pointer was passed through without
+    // converting its pointee.
+    let cxx = indoc! {"
+        Standard_CString foo() { return nullptr; }
+    "};
+    let hdr = indoc! {"
+        typedef char Standard_Character;
+        typedef Standard_Character* Standard_CString;
+        Standard_CString foo();
+    "};
+    let rs = quote! {
+        let p = ffi::foo();
+        assert!(p.is_null());
+    };
+    run_test(cxx, hdr, rs, &["foo"], &[]);
+}
+
+#[test]
+fn test_typedef_to_char_pointer_param() {
+    let cxx = indoc! {"
+        uint32_t take_str(Standard_CString s) { return s ? 1 : 0; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef char Standard_Character;
+        typedef Standard_Character* Standard_CString;
+        uint32_t take_str(Standard_CString s);
+    "};
+    let rs = quote! {
+        let r = unsafe { ffi::take_str(std::ptr::null_mut()) };
+        assert_eq!(r, 0);
+    };
+    run_test(cxx, hdr, rs, &["take_str"], &[]);
+}
+
+#[test]
+fn test_typedef_to_uint_pointer_chain() {
+    // Deeper chain, non-char primitive.
+    let cxx = indoc! {"
+        Ptr get_ptr() { return nullptr; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t Base;
+        typedef Base Alias;
+        typedef Alias* Ptr;
+        Ptr get_ptr();
+    "};
+    let rs = quote! {
+        let p = ffi::get_ptr();
+        assert!(p.is_null());
+    };
+    run_test(cxx, hdr, rs, &["get_ptr"], &[]);
+}
+
+#[test]
 fn test_issue_956() {
     let hdr = indoc! {"
         #include <cstdint>
