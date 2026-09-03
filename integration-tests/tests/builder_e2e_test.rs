@@ -17,6 +17,13 @@ use std::process::Command;
 
 /// Build a minimal fixture crate using autocxx with the given
 /// custom_gendir expression (or none), returning (success, stderr).
+/// Windows paths contain backslashes, which are escape characters in
+/// both TOML basic strings and Rust string literals; forward slashes
+/// are valid on all platforms.
+fn slashify(p: &Path) -> String {
+    p.display().to_string().replace('\\', "/")
+}
+
 fn build_fixture_crate(test_name: &str, custom_gendir_line: &str) -> (bool, String) {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let tmp = tempfile::tempdir().unwrap();
@@ -39,7 +46,7 @@ autocxx-build = {{ path = "{ws}/gen/build" }}
 
 [workspace]
 "#,
-            ws = workspace.display(),
+            ws = slashify(workspace),
         ),
     )
     .unwrap();
@@ -119,7 +126,7 @@ fn test_relative_custom_gendir() {
 fn test_absolute_custom_gendir() {
     let tmp = tempfile::tempdir().unwrap();
     let gendir = tmp.path().join("gen");
-    let line = format!(r#".custom_gendir("{}".into())"#, gendir.display());
+    let line = format!(r#".custom_gendir("{}".into())"#, slashify(&gendir));
     let (ok, stderr) = build_fixture_crate("absolute", &line);
     assert!(
         ok,
