@@ -7699,6 +7699,39 @@ fn test_typedef_to_char16() {
 }
 
 #[test]
+fn test_nested_class_defined_out_of_line() {
+    // Red-team test for the clang 22 libclang behavior change:
+    // clang_getTypeDeclaration returns the in-class forward
+    // declaration rather than the out-of-line definition, so bindgen
+    // sees A::I as incomplete, collapses it to an empty stub and
+    // silently drops its methods. See upstream google/autocxx#1509
+    // and rust-lang/rust-bindgen#3278. Passes on libclang <= 21;
+    // fails on 22+ until the bindgen fix is adopted.
+    let cxx = indoc! {"
+        uint32_t A::use_i(const A::I& i) { return i.val + i.get(); }
+        int32_t A::I::get() const { return val * 2; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        class A {
+        public:
+            class I;
+            uint32_t use_i(const I& i);
+        };
+        class A::I {
+        public:
+            int32_t val;
+            int32_t get() const;
+        };
+    "};
+    let rs = quote! {
+        let i = ffi::A_I { val: 21 };
+        assert_eq!(i.get(), 42);
+    };
+    run_test(cxx, hdr, rs, &["A"], &["A_I"]);
+}
+
+#[test]
 fn test_issue_956() {
     let hdr = indoc! {"
         #include <cstdint>
