@@ -176,8 +176,10 @@ impl<'a> RsCodeGenerator<'a> {
             .unzip();
         // First, the hierarchy of mods containing lots of 'use' statements
         // and other items which are the final API exposed as 'ffi'.
-        let mut output_mod_items =
-            Self::generate_final_output_namespace(&rs_codegen_results_and_namespaces);
+        let mut output_mod_items = Self::generate_final_output_namespace(
+            &rs_codegen_results_and_namespaces,
+            !self.config.exclude_utilities(),
+        );
         // Both of the above ('use' hierarchy and bindgen mod) are organized into
         // sub-mods by namespace. From here on, things are flat.
         let (_, rs_codegen_results): (Vec<_>, Vec<_>) =
@@ -303,16 +305,18 @@ impl<'a> RsCodeGenerator<'a> {
     /// interact with. This is mostly lots of 'use' statements.
     fn generate_final_output_namespace(
         input_items: &[(QualifiedName, RsCodegenResult)],
+        include_string_trait: bool,
     ) -> Vec<Item> {
         let mut output_items = Vec::new();
         let ns_entries = NamespaceEntries::new(input_items);
-        Self::append_child_output_namespace(&ns_entries, &mut output_items);
+        Self::append_child_output_namespace(&ns_entries, &mut output_items, include_string_trait);
         output_items
     }
 
     fn append_child_output_namespace(
         ns_entries: &NamespaceEntries<(QualifiedName, RsCodegenResult)>,
         output_items: &mut Vec<Item>,
+        include_string_trait: bool,
     ) {
         for (_name, codegen) in ns_entries.entries() {
             output_items.extend(codegen.output_mod_items.iter().cloned());
@@ -357,15 +361,25 @@ impl<'a> RsCodeGenerator<'a> {
                 continue;
             }
             let child_id = make_ident(child_name);
-            let mut new_mod: ItemMod = parse_quote!(
-                pub mod #child_id {
-                    #[allow(unused_imports)]
-                    use super::{cxxbridge, output, bindgen};
-                }
-            );
+            let mut new_mod: ItemMod = if include_string_trait {
+                parse_quote!(
+                    pub mod #child_id {
+                        #[allow(unused_imports)]
+                        use super::{cxxbridge, output, bindgen, ToCppString};
+                    }
+                )
+            } else {
+                parse_quote!(
+                    pub mod #child_id {
+                        #[allow(unused_imports)]
+                        use super::{cxxbridge, output, bindgen};
+                    }
+                )
+            };
             Self::append_child_output_namespace(
                 child_ns_entries,
                 &mut new_mod.content.as_mut().unwrap().1,
+                include_string_trait,
             );
             output_items.push(Item::Mod(new_mod));
         }
