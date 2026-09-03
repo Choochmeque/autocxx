@@ -178,28 +178,12 @@ impl TypeDatabase {
     /// unique_ptr, bindgen would normally give us std_unique_ptr
     /// as opposed to std_unique_ptr<T>.)
     pub(crate) fn get_prelude(&self) -> String {
-        let mut prelude = itertools::join(
+        itertools::join(
             self.by_rs_name
                 .values()
                 .filter_map(|t| t.get_prelude_entry()),
             "",
-        );
-        // Make std::size_t resolve through a typedef literally named
-        // "size_t", which bindgen maps to usize by name. Some standard
-        // libraries (notably MSVC's) declare std::size_t only via
-        // 'using ::size_t;', which bindgen resolves straight to the
-        // underlying integer type (rust-lang/rust-bindgen#2869),
-        // leaking e.g. c_ulonglong into bindings. Redeclaring a
-        // typedef-name for the same type is legal C++, and this
-        // translation unit is only ever seen by bindgen. See
-        // google/autocxx#1504.
-        prelude.push_str(indoc! {"
-            #include <cstddef>
-            namespace std {
-                typedef ::size_t size_t;
-            }
-        "});
-        prelude
+        )
     }
 
     /// Returns all known types.
