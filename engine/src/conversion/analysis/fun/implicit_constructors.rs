@@ -256,11 +256,25 @@ pub(super) fn find_constructors_present(
                         },
                         _ => None,
                     },
-                    // TODO: https://github.com/google/autocxx/issues/865 Figure out how to
-                    // differentiate between pointers and references coming from C++. Pointers
-                    // have a default constructor.
-                    TypeKind::Pointer
-                    | TypeKind::Reference
+                    // A pointer field does not delete the implicit default constructor: it is
+                    // simply left uninitialized. bindgen tells pointers and references apart for
+                    // us by wrapping the latter in its `__bindgen_marker_Reference` /
+                    // `__bindgen_marker_RValueReference` markers, which the type converter turns
+                    // into the reference `TypeKind`s below, so a `TypeKind::Pointer` here really
+                    // is a C++ pointer. Treating it like a reference silently suppressed `new()`
+                    // for any struct with a pointer member.
+                    // See https://github.com/google/autocxx/issues/1366.
+                    TypeKind::Pointer => Some(ItemsFound {
+                        default_constructor: SpecialMemberFound::Implicit,
+                        destructor: SpecialMemberFound::Implicit,
+                        const_copy_constructor: SpecialMemberFound::Implicit,
+                        non_const_copy_constructor: SpecialMemberFound::NotPresent,
+                        move_constructor: SpecialMemberFound::Implicit,
+                        name: Some(name.clone()),
+                    }),
+                    // A reference field, by contrast, does delete the implicit default
+                    // constructor unless it has a default member initializer.
+                    TypeKind::Reference
                     | TypeKind::MutableReference
                     | TypeKind::RValueReference => Some(ItemsFound {
                         default_constructor: SpecialMemberFound::NotPresent,
