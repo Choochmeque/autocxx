@@ -2715,6 +2715,42 @@ fn test_use_pod_typedef() {
 }
 
 #[test]
+fn test_class_with_unordered_map_member() {
+    // https://github.com/google/autocxx/issues/1491
+    let cxx = indoc! {"
+        MyMapWrapper::MyMapWrapper() {}
+        void MyMapWrapper::insert(const std::string& key, uint32_t value) {
+            map_[key] = value;
+        }
+        uint32_t MyMapWrapper::count() const {
+            return map_.size();
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        #include <unordered_map>
+        class MyMapWrapper {
+        public:
+            MyMapWrapper();
+            void insert(const std::string& key, uint32_t value);
+            uint32_t count() const;
+        private:
+            std::unordered_map<std::string, uint32_t> map_;
+        };
+    "};
+    let rs = quote! {
+        let mut w = ffi::MyMapWrapper::new().within_unique_ptr();
+        let ka = ffi::make_string("a");
+        let kb = ffi::make_string("b");
+        w.pin_mut().insert(ka.as_ref().unwrap(), 1);
+        w.pin_mut().insert(kb.as_ref().unwrap(), 2);
+        assert_eq!(w.count(), 2);
+    };
+    run_test(cxx, hdr, rs, &["MyMapWrapper"], &[]);
+}
+
+#[test]
 fn test_typedef_to_ns() {
     let hdr = indoc! {"
         #include <cstdint>
