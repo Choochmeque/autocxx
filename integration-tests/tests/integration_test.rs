@@ -13334,7 +13334,15 @@ fn test_issue_1229() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/1265
+// Upstream #1265. Un-ignored by PR #1459, then re-disabled as "Passes
+// locally but not on CI". A 2026-09-04 CI probe pinned it down: the
+// generated Rust fails to compile (TestError::RsBuild) on every Linux
+// job (stable, nightly, forced wrappers) while macOS passes — a real
+// platform-specific codegen bug, so the test now runs where it works
+// and is ignored only on Linux. TODO: diagnose the Linux-only RsBuild
+// failure; note the harness's RsBuild error does not capture rustc's
+// diagnostics, which makes the CI logs unhelpfully silent about why.
+#[cfg_attr(target_os = "linux", ignore)]
 fn test_issue_1265() {
     let hdr = indoc! {"
         #include <string>
