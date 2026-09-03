@@ -683,10 +683,14 @@ function exists, although it is valid C++ for that to be
 deleted<sup class="footnote-reference" id="fr-explicitly-defaulted-1"><a href="#footnote-explicitly-defaulted">3</a></sup>. Clang's
 <a href="https://clang.llvm.org/docs/DiagnosticsReference.html#wdefaulted-function-deleted">-Wdefaulted-function-deleted</a>
 flag (enabled by default) will warn about types like this.</p>
-<p>A C++ type which can be instantiated but has an inaccessible constructor will
-be leaked by Rust<sup class="footnote-reference" id="fr-inaccessible-destructor-1"><a href="#footnote-inaccessible-destructor">4</a></sup>. The object's memory itself will be
-freed without calling any C++ destructor, which will leak any resources tracked
-by the C++ implementation.</p>
+<p>A C++ type whose destructor is inaccessible - <code>private</code>, <code>protected</code>, or
+<code>= delete</code>d, whether declared that way or made so by a base or member - is one
+Rust could never destroy. <code>autocxx</code> therefore does not generate any way for
+Rust to own one<sup class="footnote-reference" id="fr-inaccessible-destructor-1"><a href="#footnote-inaccessible-destructor">4</a></sup>: no <code>new</code>, no <code>make_unique</code>, no
+<code>CopyNew</code> or <code>MoveNew</code>. Its methods are still generated, so you can call them
+through a reference or pointer that C++ hands you, which is how such types are
+normally meant to be used. Asking for the constructor anyway gives a compile
+error naming the reason.</p>
 <p>Many of the special members may be overloaded in C++. This generally means
 adding <code>const</code> or <code>volatile</code> qualifiers or extra arguments with defaults.
 <code>autocxx</code> avoids using any overloaded special members because choosing which
@@ -706,8 +710,11 @@ one to call from Rust gets tricky.</p>
 that are deleted is tracked <a href="https://github.com/google/autocxx/issues/815">here</a>. <a href="#fr-explicitly-defaulted-1">↩</a></p>
 </li>
 <li id="footnote-inaccessible-destructor">
-<p>Discussion around what to do about inaccessible or
-deleted destructors <a href="https://github.com/google/autocxx/issues/829">here</a>. <a href="#fr-inaccessible-destructor-1">↩</a></p>
+<p>Until this was fixed, such a type could be
+constructed and put in a <code>Box</code> or on the stack, and its memory was then freed
+without running any C++ destructor - leaking whatever resources the C++
+implementation tracked. See
+<a href="https://github.com/google/autocxx/issues/829">here</a>. <a href="#fr-inaccessible-destructor-1">↩</a></p>
 </li>
 <li id="footnote-abstract">
 <p><code>autocxx</code>'s determination of abstract types is a bit approximate and
