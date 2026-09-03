@@ -43,6 +43,7 @@ use self::{
 
 use super::{
     analysis::{
+        doc_label::make_doc_attrs,
         fun::{FnPhase, PodAndDepAnalysis, ReceiverMutability},
         pod::PodAnalysis,
     },
@@ -435,7 +436,21 @@ impl<'a> RsCodeGenerator<'a> {
                     },
                 ..
             } => {
-                let doc_attrs = get_doc_attrs(&details.item.attrs);
+                let mut doc_attrs = get_doc_attrs(&details.item.attrs);
+                if constructors.destructor_inaccessible {
+                    // Say so on the type itself, because for a type with no
+                    // public constructor there'd otherwise be nothing at all
+                    // in the output to explain why it can only be borrowed.
+                    // See google/autocxx#829.
+                    doc_attrs.extend(make_doc_attrs(
+                        "autocxx has not generated any way for Rust to own one of these, \
+                         because this type's C++ destructor is inaccessible (private, \
+                         protected or deleted) and so Rust could never destroy one. \
+                         You can still call its methods via a reference or pointer \
+                         obtained from C++."
+                            .to_string(),
+                    ));
+                }
                 self.generate_type(
                     &name,
                     id,

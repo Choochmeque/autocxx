@@ -217,10 +217,14 @@ deleted[^explicitly-defaulted]. Clang's
 [-Wdefaulted-function-deleted](https://clang.llvm.org/docs/DiagnosticsReference.html#wdefaulted-function-deleted)
 flag (enabled by default) will warn about types like this.
 
-A C++ type which can be instantiated but has an inaccessible constructor will
-be leaked by Rust[^inaccessible-destructor]. The object's memory itself will be
-freed without calling any C++ destructor, which will leak any resources tracked
-by the C++ implementation.
+A C++ type whose destructor is inaccessible - `private`, `protected`, or
+`= delete`d, whether declared that way or made so by a base or member - is one
+Rust could never destroy. `autocxx` therefore does not generate any way for
+Rust to own one[^inaccessible-destructor]: no `new`, no `make_unique`, no
+`CopyNew` or `MoveNew`. Its methods are still generated, so you can call them
+through a reference or pointer that C++ hands you, which is how such types are
+normally meant to be used. Asking for the constructor anyway gives a compile
+error naming the reason.
 
 Many of the special members may be overloaded in C++. This generally means
 adding `const` or `volatile` qualifiers or extra arguments with defaults.
@@ -231,8 +235,11 @@ one to call from Rust gets tricky.
 [here](https://github.com/google/autocxx/issues/816).
 [^explicitly-defaulted]: Fix for explicitly defaulted special member functions
 that are deleted is tracked [here](https://github.com/google/autocxx/issues/815).
-[^inaccessible-destructor]: Discussion around what to do about inaccessible or
-deleted destructors [here](https://github.com/google/autocxx/issues/829).
+[^inaccessible-destructor]: Until this was fixed, such a type could be
+constructed and put in a `Box` or on the stack, and its memory was then freed
+without running any C++ destructor - leaking whatever resources the C++
+implementation tracked. See
+[here](https://github.com/google/autocxx/issues/829).
 
 ## Abstract types
 
