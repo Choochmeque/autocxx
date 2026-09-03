@@ -80,6 +80,37 @@ jobs:
         shell: bash
       - run: cargo test --workspace ${{steps.testsuite.outputs.exclude}}
 
+  # Run the integration suite under pinned libclang versions rather
+  # than whatever the runner ships. libclang 22 changed
+  # clang_getTypeDeclaration to return forward declarations (see
+  # upstream google/autocxx#1509 and rust-lang/rust-bindgen#3278),
+  # which silently corrupts bindings for out-of-line nested class
+  # definitions. The 22/23 cells are expected to stay red until a
+  # bindgen with that fix is adopted; afterwards this matrix guards
+  # against future libclang behavior changes.
+  test-libclang:
+    name: Test libclang ${{matrix.libclang}}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        libclang: [19, 21, 22, 23]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v1
+        with: { sharedKey: fullBuild }
+      - name: Install LLVM ${{matrix.libclang}}
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{matrix.libclang}}
+      - run: cargo test -p autocxx-integration-tests
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-${{matrix.libclang}}/lib
+
   examples:
     name: Examples ${{matrix.name || format('Rust {0}', matrix.rust)}}
     runs-on: ${{matrix.os || 'ubuntu'}}-latest
