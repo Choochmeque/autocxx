@@ -2799,6 +2799,38 @@ fn test_class_with_unordered_map_member() {
 }
 
 #[test]
+fn test_nested_typedef_in_class() {
+    // https://github.com/google/autocxx/issues/1498
+    let hdr = indoc! {"
+        #include <functional>
+        class Foo {
+        public:
+            typedef std::function<void(int)> CallbackType;
+            explicit Foo(const CallbackType &) {}
+        };
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["Foo"], &[]);
+}
+
+#[test]
+fn test_nested_typedef_in_class_in_ns() {
+    // https://github.com/google/autocxx/issues/1498
+    let hdr = indoc! {"
+        #include <functional>
+        namespace ns {
+            class Foo {
+            public:
+                typedef std::function<void(int)> CallbackType;
+                explicit Foo(const CallbackType &) {}
+            };
+        }
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["ns::Foo"], &[]);
+}
+
+#[test]
 fn test_typedef_to_ns() {
     let hdr = indoc! {"
         #include <cstdint>

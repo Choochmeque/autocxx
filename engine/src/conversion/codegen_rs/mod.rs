@@ -832,6 +832,27 @@ impl<'a> RsCodeGenerator<'a> {
             TypeKind::Abstract => {
                 if num_generics > 0 {
                     RsCodegenResult::default()
+                } else if self.is_nested_in_class(name) {
+                    // For types nested within a class (e.g. Foo::CallbackType),
+                    // a bare "type T;" makes cxx emit a forward declaration
+                    // 'namespace Foo { using CallbackType = ...; }' which
+                    // treats the enclosing class as a namespace and fails to
+                    // compile. Alias the bindgen definition instead; cxx does
+                    // not forward-declare aliases.
+                    output_mod_items.push(non_pod_struct::generate_opaque_type(
+                        name,
+                        num_generics,
+                        &doc_attrs,
+                    ));
+                    output_mod_items.append(&mut self.generate_extern_type_impl(type_kind, name));
+                    RsCodegenResult {
+                        extern_c_mod_items: vec![
+                            self.generate_cxxbridge_type(name, true, doc_attrs)
+                        ],
+                        bridge_items: create_impl_items(&id, movable, destroyable, self.config),
+                        output_mod_items,
+                        ..Default::default()
+                    }
                 } else {
                     // Feed cxx "type T;"
                     // We MUST do this because otherwise cxx assumes this can be
@@ -971,6 +992,23 @@ impl<'a> RsCodeGenerator<'a> {
             #[allow(unused_imports)]
             pub use #(#segs)::*;
         })
+    }
+
+    /// Whether this type is nested within a C++ class (as opposed to a
+    /// namespace), e.g. a class-scoped typedef or nested class. Such types
+    /// have an original C++ name with extra path segments relative to their
+    /// enclosing namespace.
+    fn is_nested_in_class(&self, name: &QualifiedName) -> bool {
+        self.original_name_map
+            .get(name)
+            .map(|cpp_name| {
+                cpp_name
+                    .to_qualified_name()
+                    .ns_segment_iter()
+                    .next()
+                    .is_some()
+            })
+            .unwrap_or(false)
     }
 
     fn generate_extern_type_impl(&self, type_kind: TypeKind, tyname: &QualifiedName) -> Vec<Item> {
