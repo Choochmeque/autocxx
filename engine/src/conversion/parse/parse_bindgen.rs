@@ -408,7 +408,26 @@ impl<'a> ParseBindgen<'a> {
         let api_names: HashSet<_> = self
             .apis
             .iter()
-            .map(|api| api.name().to_cpp_name())
+            .flat_map(|api| {
+                let name = api.name().to_cpp_name();
+                // Internal dedup names (from bindgen overload suffix
+                // reconstruction) also match the legacy user-visible
+                // form, e.g. generate!("daft1") -- but only for
+                // functions genuinely renamed by bindgen (original
+                // C++ name differs), so a real function literally
+                // named x_autocxx_dedup_2 is left alone.
+                let allowlist_form = match api {
+                    Api::Function { fun, .. }
+                        if fun.original_name.as_ref().is_some_and(|original| {
+                            fun.ident != original.to_string_for_rust_name()
+                        }) =>
+                    {
+                        Some(crate::types::dedup_name_to_allowlist_form(&name))
+                    }
+                    _ => None,
+                };
+                std::iter::once(name).chain(allowlist_form)
+            })
             .collect();
         for generate_directive in self.config.must_generate_list() {
             if !api_names.contains(&generate_directive) {

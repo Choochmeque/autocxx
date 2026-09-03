@@ -7699,6 +7699,147 @@ fn test_typedef_to_char16() {
 }
 
 #[test]
+fn test_overload_rename_collision() {
+    // https://github.com/google/autocxx/issues/1316, reproducer from
+    // upstream PR #1317 (credit: sdroege). The third byteSwap overload
+    // must not be renamed onto the real byteSwap2; it skips to the
+    // next free suffix instead.
+    let cxx = indoc! {"
+        uint64_t Image::byteSwap(uint64_t, bool) { return 1; }
+        uint32_t Image::byteSwap(uint32_t, bool) { return 2; }
+        uint16_t Image::byteSwap(uint16_t, bool) { return 3; }
+        uint16_t Image::byteSwap2(uint16_t, uint16_t) { return 4; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Image {
+        public:
+            static uint64_t byteSwap(uint64_t value, bool bSwap);
+            static uint32_t byteSwap(uint32_t value, bool bSwap);
+            static uint16_t byteSwap(uint16_t value, bool bSwap);
+            static uint16_t byteSwap2(uint16_t a, uint16_t b);
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Image::byteSwap(0u64, true), 1);
+        assert_eq!(ffi::Image::byteSwap1(0u32, true), 2);
+        assert_eq!(ffi::Image::byteSwap3(0u16, true), 3);
+        assert_eq!(ffi::Image::byteSwap2(0u16, 0u16), 4);
+    };
+    run_test(cxx, hdr, rs, &["Image"], &[]);
+}
+
+#[test]
+fn test_overload_rename_collision_reversed() {
+    // Like test_overload_rename_collision, but the real byteSwap2 is
+    // declared before the overloads: renaming must be order-independent.
+    let cxx = indoc! {"
+        uint16_t Image::byteSwap2(uint16_t, uint16_t) { return 4; }
+        uint64_t Image::byteSwap(uint64_t, bool) { return 1; }
+        uint32_t Image::byteSwap(uint32_t, bool) { return 2; }
+        uint16_t Image::byteSwap(uint16_t, bool) { return 3; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Image {
+        public:
+            static uint16_t byteSwap2(uint16_t a, uint16_t b);
+            static uint64_t byteSwap(uint64_t value, bool bSwap);
+            static uint32_t byteSwap(uint32_t value, bool bSwap);
+            static uint16_t byteSwap(uint16_t value, bool bSwap);
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Image::byteSwap2(0u16, 0u16), 4);
+        assert_eq!(ffi::Image::byteSwap(0u64, true), 1);
+        assert_eq!(ffi::Image::byteSwap1(0u32, true), 2);
+        assert_eq!(ffi::Image::byteSwap3(0u16, true), 3);
+    };
+    run_test(cxx, hdr, rs, &["Image"], &[]);
+}
+
+#[test]
+fn test_overload_rename_collision_instance_methods() {
+    // Like test_overload_rename_collision but with instance methods
+    // rather than static ones (different self_ty plumbing).
+    let cxx = indoc! {"
+        uint64_t Image::byteSwap(uint64_t, bool) { return 1; }
+        uint32_t Image::byteSwap(uint32_t, bool) { return 2; }
+        uint16_t Image::byteSwap(uint16_t, bool) { return 3; }
+        uint16_t Image::byteSwap2(uint16_t, uint16_t) { return 4; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Image {
+        public:
+            uint64_t byteSwap(uint64_t value, bool bSwap);
+            uint32_t byteSwap(uint32_t value, bool bSwap);
+            uint16_t byteSwap(uint16_t value, bool bSwap);
+            uint16_t byteSwap2(uint16_t a, uint16_t b);
+        };
+    "};
+    let rs = quote! {
+        let mut img = ffi::Image::new().within_unique_ptr();
+        assert_eq!(img.pin_mut().byteSwap(0u64, true), 1);
+        assert_eq!(img.pin_mut().byteSwap1(0u32, true), 2);
+        assert_eq!(img.pin_mut().byteSwap3(0u16, true), 3);
+        assert_eq!(img.pin_mut().byteSwap2(0u16, 0u16), 4);
+    };
+    run_test(cxx, hdr, rs, &["Image"], &[]);
+}
+
+#[test]
+fn test_overload_rename_collision_free_functions() {
+    // Same disease for free functions in a namespace.
+    let cxx = indoc! {"
+        uint32_t ff(uint32_t) { return 1; }
+        uint16_t ff(uint16_t) { return 2; }
+        uint32_t ff1(uint32_t) { return 3; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint32_t ff(uint32_t a);
+        uint16_t ff(uint16_t a);
+        uint32_t ff1(uint32_t a);
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::ff(0u32), 1);
+        assert_eq!(ffi::ff2(0u16), 2);
+        assert_eq!(ffi::ff1(0u32), 3);
+    };
+    run_test(cxx, hdr, rs, &["ff", "ff1"], &[]);
+}
+
+#[test]
+fn test_overload_rename_collision_chain() {
+    // Multiple real names occupying consecutive suffixes: the
+    // overloads must skip over all of them.
+    let cxx = indoc! {"
+        uint64_t gg(uint64_t) { return 1; }
+        uint32_t gg(uint32_t) { return 2; }
+        uint16_t gg(uint16_t) { return 3; }
+        uint32_t gg1(uint32_t) { return 4; }
+        uint32_t gg2(uint32_t) { return 5; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint64_t gg(uint64_t a);
+        uint32_t gg(uint32_t a);
+        uint16_t gg(uint16_t a);
+        uint32_t gg1(uint32_t a);
+        uint32_t gg2(uint32_t a);
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::gg(0u64), 1);
+        assert_eq!(ffi::gg3(0u32), 2);
+        assert_eq!(ffi::gg4(0u16), 3);
+        assert_eq!(ffi::gg1(0u32), 4);
+        assert_eq!(ffi::gg2(0u32), 5);
+    };
+    run_test(cxx, hdr, rs, &["gg", "gg1", "gg2"], &[]);
+}
+
+#[test]
 fn test_issue_956() {
     let hdr = indoc! {"
         #include <cstdint>
