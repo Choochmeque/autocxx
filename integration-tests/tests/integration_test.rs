@@ -18,7 +18,8 @@ use crate::{
 };
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
-    run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, BuilderModifier, TestError,
+    run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, BuilderModifier, CodeCheckerFns,
+    TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -8043,6 +8044,123 @@ fn test_typedef_to_uint_pointer_chain() {
         assert!(p.is_null());
     };
     run_test(cxx, hdr, rs, &["get_ptr"], &[]);
+}
+
+#[test]
+fn test_alias_template_typedef_ignored() {
+    // Guard for the google/autocxx#1094/#1501 family: alias
+    // templates with type parameters are flagged by bindgen and must
+    // be ignored (not declared to cxx), while instantiations of them
+    // must keep working. Note the literal #1094 reproduction (an
+    // alias template with only NON-type parameters) is
+    // indistinguishable from a plain typedef in the information
+    // bindgen currently surfaces, and remains unfixable engine-side.
+    let hdr = indoc! {"
+        namespace b {
+            template <typename> struct c;
+            template <typename T> using f = c<T>;
+            typedef f<int> g_user;
+        }
+    "};
+    run_generate_all_test(hdr);
+}
+
+#[test]
+fn test_alias_template_make_index_sequence_style() {
+    // https://github.com/google/autocxx/issues/1501: the same
+    // disease via a make_index_sequence-style alias template.
+    let hdr = indoc! {"
+        template <typename T, T... Is> struct integer_sequence {};
+        template <typename T, T N> using make_integer_sequence_like =
+            integer_sequence<T, N>;
+        template <int N> using make_index_sequence_like =
+            make_integer_sequence_like<int, N>;
+        struct User { int x; };
+    "};
+    run_generate_all_test(hdr);
+}
+
+#[test]
+fn test_alias_template_two_hop_chain() {
+    // A two-hop chain of bindgen-erased alias templates: ignoring
+    // must propagate to a fixed point, or the outermost alias is
+    // promoted to a first-class type and cxx emits an invalid
+    // argument-less using declaration.
+    let hdr = indoc! {"
+        template <typename T, T N> struct seq {};
+        template <typename T, T N> using A = seq<T, N>;
+        template <int N> using B = A<int, N>;
+        template <int N> using C = B<N>;
+        struct User { int x; };
+    "};
+    run_generate_all_test(hdr);
+}
+
+#[test]
+fn test_concrete_typedef_of_erased_alias_still_generated() {
+    // Cascade boundary: a CONCRETE instantiation (typedef B<3>) of an
+    // erased alias template must remain generated (as an opaque type,
+    // with its functions) rather than being swallowed by the
+    // alias-template ignoring above — only bare references to the
+    // alias template itself are ignored. This asserts generation via
+    // a code checker; actually *calling* take() through the opaque
+    // typedef currently trips the wrapper cast mismatch tracked as
+    // upstream google/autocxx#1302, so the build step is skipped.
+    struct FindConcreteAndTake;
+    impl CodeCheckerFns for FindConcreteAndTake {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if text.contains("Concrete") && text.contains("fn take") {
+                Ok(())
+            } else {
+                Err(TestError::RsCodeExaminationFail(
+                    "Concrete or take missing from generated code".into(),
+                ))
+            }
+        }
+        fn skip_build(&self) -> bool {
+            true
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T, T N> struct seq { int x[N ? N : 1]; };
+        template <typename T, T N> using A = seq<T, N>;
+        template <int N> using B = A<int, N>;
+        typedef B<3> Concrete;
+        const Concrete& get_conc();
+        uint32_t take(const Concrete&);
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("get_conc")
+            generate!("take")
+        },
+        None,
+        Some(Box::new(FindConcreteAndTake)),
+        None,
+    );
+}
+
+#[test]
+fn test_plain_typedef_to_hopeless_template_still_works() {
+    // Control: a NON-template typedef to a hopeless templated type
+    // must keep becoming a usable opaque first-class type
+    // (the OpaqueTypedef mechanism).
+    let hdr = indoc! {"
+        template <typename T> struct Tricky {
+            typename T::iterator field;
+        };
+        struct HasIter {
+            typedef int iterator;
+        };
+        typedef Tricky<HasIter> UsableAlias;
+        inline void take(const UsableAlias&) {}
+    "};
+    run_generate_all_test(hdr);
 }
 
 #[test]
