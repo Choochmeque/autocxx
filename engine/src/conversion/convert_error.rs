@@ -115,6 +115,8 @@ pub enum ConvertErrorFromCpp {
     RValueReturn,
     #[error("This method is private")]
     PrivateMethod,
+    #[error("This type's C++ destructor is inaccessible (private, protected or deleted), so Rust could never destroy one of these. autocxx therefore does not generate constructors, copy/move support or smart pointer support for it; you can still call its methods on a reference or pointer obtained from C++. See https://github.com/google/autocxx/issues/829.")]
+    DestructorInaccessible,
     #[error("autocxx does not know how to generate bindings to operator=")]
     AssignmentOperator,
     #[error("This function was marked =delete")]

@@ -11762,9 +11762,11 @@ fn test_implicit_constructor_rules() {
         // produce, because we have C++ types which can't be constructed (for example). In a real
         // program, there might be other C++ APIs which can instantiate these types.
 
-        // TODO: https://github.com/google/autocxx/issues/829: Should this be merged with
-        // `test_make_unique`? Currently types where the Rust wrappers permit this but not that
-        // aren't running C++ destructors.
+        // Since google/autocxx#829 was fixed, a type autocxx lets Rust
+        // construct is always a type autocxx lets Rust destroy, so this and
+        // `test_make_unique` now hold for exactly the same set of types and
+        // could be merged. They're kept apart so that a future regression in
+        // either half shows up on its own.
         macro_rules! test_constructible {
             [$t:ty] => {
                 moveit! {
@@ -11854,8 +11856,9 @@ fn test_implicit_constructor_rules() {
         test_make_unique![ffi::PublicDeletedMove];
         test_call_a![ffi::PublicDeletedMove];
 
-        test_constructible![ffi::PublicDeletedDestructor];
-        test_copyable![ffi::PublicDeletedDestructor];
+        // google/autocxx#829: this type's destructor is inaccessible, so Rust
+        // may never own one. It therefore gets no constructor and no copy
+        // support - just the borrow-based surface.
         test_call_a![ffi::PublicDeletedDestructor];
 
         test_constructible![ffi::PublicDestructor];
@@ -11883,12 +11886,14 @@ fn test_implicit_constructor_rules() {
         test_make_unique![ffi::ProtectedDeletedMove];
         test_call_a![ffi::ProtectedDeletedMove];
 
-        test_constructible![ffi::ProtectedDeletedDestructor];
-        test_copyable![ffi::ProtectedDeletedDestructor];
+        // google/autocxx#829: this type's destructor is inaccessible, so Rust
+        // may never own one. It therefore gets no constructor and no copy
+        // support - just the borrow-based surface.
         test_call_a![ffi::ProtectedDeletedDestructor];
 
-        test_constructible![ffi::ProtectedDestructor];
-        test_copyable![ffi::ProtectedDestructor];
+        // google/autocxx#829: this type's destructor is inaccessible, so Rust
+        // may never own one. It therefore gets no constructor and no copy
+        // support - just the borrow-based surface.
         test_call_a![ffi::ProtectedDestructor];
 
         test_call_a![ffi::PrivateDeleted];
@@ -11911,12 +11916,14 @@ fn test_implicit_constructor_rules() {
         test_make_unique![ffi::PrivateDeletedMove];
         test_call_a![ffi::PrivateDeletedMove];
 
-        test_constructible![ffi::PrivateDeletedDestructor];
-        test_copyable![ffi::PrivateDeletedDestructor];
+        // google/autocxx#829: this type's destructor is inaccessible, so Rust
+        // may never own one. It therefore gets no constructor and no copy
+        // support - just the borrow-based surface.
         test_call_a![ffi::PrivateDeletedDestructor];
 
-        test_constructible![ffi::PrivateDestructor];
-        test_copyable![ffi::PrivateDestructor];
+        // google/autocxx#829: this type's destructor is inaccessible, so Rust
+        // may never own one. It therefore gets no constructor and no copy
+        // support - just the borrow-based surface.
         test_call_a![ffi::PrivateDestructor];
 
         test_constructible![ffi::NonConstCopy];
@@ -13442,6 +13449,178 @@ fn test_cpp_union_pod() {
     "};
     run_test("", hdr, quote! {}, &["CorrelationId_t_"], &[]);
     run_test_expect_fail("", hdr, quote! {}, &[], &["CorrelationId_t_"]);
+}
+
+/// The shape of a class which C++ deliberately forbids anyone else from
+/// destroying: an accessible constructor, but a destructor which is
+/// `private`, `protected` or `= delete`d. `dtor` is spliced in as the
+/// access specifier plus destructor declaration.
+fn inaccessible_destructor_header(dtor: &str) -> String {
+    format!(
+        indoc! {"
+        class A {{
+        public:
+            A() {{}}
+            int get() const {{ return 42; }}
+        {0}
+        }};
+        inline A* get_a() {{
+            static A* a = new A();
+            return a;
+        }}
+    "},
+        dtor
+    )
+}
+
+/// Common assertions for a type which C++ won't let us destroy.
+/// See https://github.com/google/autocxx/issues/829.
+fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
+    // Borrowing such a type is fine and must keep working: C++ hands us a
+    // pointer to something it owns, and we never take ownership.
+    // Meanwhile, none of the machinery which lets Rust own one by value may
+    // be emitted - in particular no `MakeCppStorage` impl, whose C++ side
+    // (`autocxx_alloc`/`autocxx_free`) frees the storage with a bare
+    // `operator delete`, never running `~A()`.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = unsafe { &*ffi::get_a() };
+            assert_eq!(a.get(), autocxx::c_int(42));
+        },
+        directives_from_lists(&["A", "get_a"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &[],
+            &["_autocxx_alloc", "_autocxx_free"],
+        ))),
+        None,
+    );
+    // Constructing one and letting Rust own it used to compile, then free the
+    // memory without ever running the C++ destructor.
+    run_test_expect_fail(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::A::new().within_box();
+        },
+        &["A", "get_a"],
+        &[],
+    );
+    // Nor may it be owned via a UniquePtr...
+    run_test_expect_fail(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::A::new().within_unique_ptr();
+        },
+        &["A", "get_a"],
+        &[],
+    );
+    // ...nor on the Rust stack.
+    run_test_expect_fail(
+        "",
+        hdr,
+        quote! {
+            moveit! { let _a = ffi::A::new(); }
+        },
+        &["A", "get_a"],
+        &[],
+    );
+}
+
+#[test]
+fn test_private_destructor_no_owning_apis() {
+    assert_no_owning_apis_for_inaccessible_destructor(&inaccessible_destructor_header(indoc! {"
+        private:
+            ~A() {}
+    "}));
+}
+
+#[test]
+fn test_protected_destructor_no_owning_apis() {
+    assert_no_owning_apis_for_inaccessible_destructor(&inaccessible_destructor_header(indoc! {"
+        protected:
+            ~A() {}
+    "}));
+}
+
+#[test]
+fn test_deleted_destructor_no_owning_apis() {
+    assert_no_owning_apis_for_inaccessible_destructor(&inaccessible_destructor_header(indoc! {"
+        public:
+            ~A() = delete;
+    "}));
+}
+
+#[test]
+/// A type whose constructor *and* destructor are both inaccessible, reached
+/// only by a factory which lends out a pointer (the `flatbuffers::Table`
+/// shape from google/autocxx#829). This was already sound; it must stay
+/// working, because refusing to destroy a type must not stop us borrowing it.
+fn test_inaccessible_destructor_borrow_only() {
+    let hdr = indoc! {"
+        class A {
+        public:
+            static A* instance() {
+                static A a;
+                return &a;
+            }
+            int get() const { return 42; }
+        private:
+            A() {}
+            ~A() {}
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let a = unsafe { &*ffi::A::instance() };
+            assert_eq!(a.get(), autocxx::c_int(42));
+        },
+        &["A"],
+        &[],
+    );
+}
+
+#[test]
+/// Control for the tests above: an ordinary public destructor still gets the
+/// full set of owning APIs, and dropping actually runs `~A()`.
+fn test_public_destructor_keeps_owning_apis() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& destructor_count() {
+            static uint32_t count = 0;
+            return count;
+        }
+        class A {
+        public:
+            A() {}
+            ~A() { destructor_count()++; }
+            int get() const { return 42; }
+        };
+        inline uint32_t get_destructor_count() { return destructor_count(); }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            {
+                let a = ffi::A::new().within_box();
+                assert_eq!(a.get(), autocxx::c_int(42));
+            }
+            assert_eq!(ffi::get_destructor_count(), 1);
+            {
+                let a = ffi::A::new().within_unique_ptr();
+                assert_eq!(a.get(), autocxx::c_int(42));
+            }
+            assert_eq!(ffi::get_destructor_count(), 2);
+        },
+        &["A", "get_destructor_count"],
+        &[],
+    );
 }
 
 #[test]

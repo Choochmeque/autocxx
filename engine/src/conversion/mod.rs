@@ -43,6 +43,7 @@ use self::{
         casts::add_casts,
         check_names,
         constructor_deps::decorate_types_with_constructor_deps,
+        destructibility::remove_ownership_of_non_destructible_types,
         fun::FnPhase,
         gc::filter_apis_by_following_edges_from_allowlist,
         pod::analyze_pod_apis,
@@ -162,6 +163,15 @@ impl<'a> BridgeConverter<'a> {
                 Self::dump_apis("analyze fns", &analyzed_apis);
                 let analyzed_apis = mark_types_abstract(analyzed_apis);
                 Self::dump_apis("marking abstract", &analyzed_apis);
+                // Similarly, if a type's destructor turned out to be
+                // inaccessible, Rust must never own one, so withdraw the
+                // constructors and allocators which would let it.
+                // See google/autocxx#829.
+                let analyzed_apis = remove_ownership_of_non_destructible_types(analyzed_apis);
+                Self::dump_apis(
+                    "removing ownership of non-destructible types",
+                    &analyzed_apis,
+                );
                 // Annotate structs with a note of any copy/move constructors which
                 // we may want to retain to avoid garbage collecting them later.
                 let analyzed_apis = decorate_types_with_constructor_deps(analyzed_apis);

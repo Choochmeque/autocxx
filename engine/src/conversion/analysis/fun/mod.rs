@@ -259,7 +259,18 @@ pub(crate) struct FnPhase;
 #[derive(Debug, Default, Copy, Clone)]
 pub(crate) struct PublicConstructors {
     pub(crate) move_constructor: bool,
+    /// Whether anyone outside the class can destroy one of these.
+    /// Beware: `false` also arises for the many types we never analyzed at
+    /// all (generics, opaque types, types in anonymous namespaces, ...), so
+    /// this may only be used to decide whether to *add* API surface.
     pub(crate) destructor: bool,
+    /// Whether we positively established that nobody outside the class may
+    /// destroy one of these, because the destructor is private, protected,
+    /// deleted, or implicitly deleted by a base or member. Unlike
+    /// [`Self::destructor`] this is never set for types we didn't analyze,
+    /// so it is safe to use it to *remove* API surface.
+    /// See <https://github.com/google/autocxx/issues/829>.
+    pub(crate) destructor_inaccessible: bool,
 }
 
 impl PublicConstructors {
@@ -267,6 +278,7 @@ impl PublicConstructors {
         Self {
             move_constructor: items_found.move_constructor.callable_any(),
             destructor: items_found.destructor.callable_any(),
+            destructor_inaccessible: !items_found.destructor.callable_any(),
         }
     }
 }
