@@ -155,11 +155,11 @@ fn test_gen_archive_first_entry() -> Result<(), Box<dyn std::error::Error>> {
         vec![tmp_dir.path().join("gen.rs.json")],
         &["gen0.cc"],
         RsFindMode::Custom(Box::new(|path: &Path| {
-            std::env::set_var(
-                "AUTOCXX_RS_JSON_ARCHIVE",
+            vec![(
+                "AUTOCXX_RS_JSON_ARCHIVE".to_string(),
                 std::env::join_paths([&path.join("gen.rs.json"), Path::new("/nonexistent")])
                     .unwrap(),
-            )
+            )]
         })),
     );
     if KEEP_TEMPDIRS {
@@ -179,11 +179,11 @@ fn test_gen_archive_second_entry() -> Result<(), Box<dyn std::error::Error>> {
         vec![tmp_dir.path().join("gen.rs.json")],
         &["gen0.cc"],
         RsFindMode::Custom(Box::new(|path: &Path| {
-            std::env::set_var(
-                "AUTOCXX_RS_JSON_ARCHIVE",
+            vec![(
+                "AUTOCXX_RS_JSON_ARCHIVE".to_string(),
                 std::env::join_paths([Path::new("/nonexistent"), &path.join("gen.rs.json")])
                     .unwrap(),
-            )
+            )]
         })),
     );
     if KEEP_TEMPDIRS {
@@ -417,4 +417,19 @@ fn assert_contains(outdir: &TempDir, fname: &str, pattern: &str) {
     let content = std::fs::read_to_string(p).expect(fname);
     eprintln!("content = {content}");
     assert!(content.contains(pattern));
+}
+
+/// Re-entry point for the child process the harness uses to build generated Rust
+/// code, so that the compiler's diagnostics can be captured and reported. Does
+/// nothing unless the harness asked for it; see
+/// `autocxx_integration_tests::run_trybuild_child_if_requested`.
+#[test]
+#[ignore = "not a test: the harness re-runs this binary with this filter"]
+fn autocxx_trybuild_child() {
+    assert_eq!(
+        autocxx_integration_tests::TRYBUILD_CHILD_TEST_NAME,
+        "autocxx_trybuild_child",
+        "this test's name has to match the one the harness filters on"
+    );
+    autocxx_integration_tests::run_trybuild_child_if_requested();
 }

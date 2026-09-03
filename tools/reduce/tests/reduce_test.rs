@@ -165,7 +165,14 @@ fn do_reduce<F>(get_repro_case: F, include_cxx_h: bool) -> Result<(), Box<dyn st
 where
     F: FnOnce(&str, &Path) -> Result<Input, Box<dyn std::error::Error>>,
 {
+    // Without creduce there is nothing to test, so we skip rather than fail.
+    // Say so loudly: a silent `Ok(())` here reports as a passing test that
+    // actually ran no assertions at all, which is worse than no test.
     if creduce_is_broken() {
+        eprintln!(
+            "SKIPPED: creduce is missing or broken, so this test ran no assertions. \
+             Install creduce to get any coverage from it."
+        );
         return Ok(());
     }
     let tmp_dir = tempdir()?;

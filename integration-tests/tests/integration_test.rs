@@ -13997,3 +13997,39 @@ fn test_throws_partial_match() {
         None,
     );
 }
+
+/// Guards the harness itself rather than autocxx: when the generated Rust fails
+/// to compile, the resulting `TestError` must carry rustc's diagnostics. It used
+/// to carry nothing at all, so a Rust build failure that only reproduced on one
+/// platform's CI was undiagnosable from the logs.
+#[test]
+fn test_rs_build_error_reports_rustc_diagnostics() {
+    let err = do_run_test(
+        "",
+        "inline int give_int() { return 5; }",
+        quote! {
+            let _ = ffi::no_such_function_exists_in_this_test();
+        },
+        directives_from_lists(&["give_int"], &[], None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("expected the deliberately broken Rust code to fail to build");
+    let TestError::RsBuild(diagnostics) = &err else {
+        panic!("expected an RsBuild failure, got {err:?}");
+    };
+    assert!(
+        !diagnostics.trim().is_empty(),
+        "the error should carry rustc's diagnostics, but they were empty"
+    );
+    // Deliberately not asserting on the exact rustc error code, which is not
+    // ours to keep stable. The item name is unique to this test, so finding it
+    // proves the diagnostics for *this* failure made it through.
+    assert!(
+        diagnostics.contains("no_such_function_exists_in_this_test"),
+        "the error should name the item rustc complained about, but was:\n{diagnostics}"
+    );
+}
