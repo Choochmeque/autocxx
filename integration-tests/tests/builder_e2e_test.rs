@@ -94,6 +94,15 @@ fn main() {
         .arg("build")
         .current_dir(root)
         .env("CARGO_TARGET_DIR", &shared_target)
+        // The fixture build must be insulated from the outer test
+        // environment: CI jobs run this suite with RUSTFLAGS such as
+        // -Zsanitizer=address or -Dwarnings, which must not leak into
+        // the inner build (ASAN-built proc-macros fail to dlopen).
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTDOCFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("AUTOCXX_ASAN")
+        .env_remove("AUTOCXX_FORCE_WRAPPER_GENERATION")
         .output()
         .unwrap();
     (
