@@ -532,7 +532,11 @@ fn create_type_database() -> TypeDatabase {
         "usize",
         "size_t",
         Behavior::CByValueVecSafe,
-        None,
+        // std::size_t must resolve identically to plain size_t; on
+        // MSVC (and some libc++ versions) it otherwise leaks the
+        // underlying platform typedef, e.g. c_ulonglong. See
+        // upstream google/autocxx#1504.
+        Some("std::size_t".into()),
         true,
         true,
     ));
