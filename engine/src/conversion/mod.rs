@@ -27,6 +27,8 @@ use autocxx_parser::IncludeCppConfig;
 pub(crate) use codegen_cpp::CppCodeGenerator;
 pub(crate) use convert_error::ConvertError;
 use convert_error::{ConvertErrorFromCpp, ConvertErrorWithContext, ErrorContext};
+use indexmap::map::IndexMap as HashMap;
+use indexmap::set::IndexSet as HashSet;
 use itertools::Itertools;
 use syn::{Item, ItemMod};
 
@@ -41,13 +43,14 @@ use self::{
         casts::add_casts,
         check_names,
         constructor_deps::decorate_types_with_constructor_deps,
+        fun::FnPhase,
         gc::filter_apis_by_following_edges_from_allowlist,
         pod::analyze_pod_apis,
         remove_ignored::filter_apis_by_ignored_dependents,
         replace_hopeless_typedef_targets,
         tdef::convert_typedef_targets,
     },
-    api::AnalysisPhase,
+    api::{AnalysisPhase, Api},
     apivec::ApiVec,
     codegen_rs::RsCodeGenerator,
     parse::ParseBindgen,
@@ -180,6 +183,15 @@ impl<'a> BridgeConverter<'a> {
                 // Determine what variably-sized C types (e.g. int) we need to include
                 analysis::ctypes::append_ctype_information(&mut analyzed_apis);
                 Self::dump_apis("GC", &analyzed_apis);
+                // The parse phase confirmed that each explicitly requested item
+                // was present in the bindgen output, but the analysis phases above
+                // may since have discarded some of them (usually turning them into
+                // an `Api::IgnoredItem`, which yields nothing but a documentation
+                // stub). Check again now that all analysis is complete, so that an
+                // explicit `generate!` which produced nothing usable is a hard
+                // error instead of a silent failure. See google/autocxx#1269.
+                confirm_all_generate_directives_still_obeyed(self.config, &analyzed_apis)
+                    .map_err(ConvertError::Cpp)?;
                 // And finally pass them to the code gen phases, which outputs
                 // code suitable for cxx to consume.
                 let cxxgen_header_name = codegen_options
@@ -275,6 +287,69 @@ impl CppEffectiveName {
     fn is_nested(&self) -> bool {
         self.0.contains("::")
     }
+}
+
+/// The names by which an API might satisfy a `generate!` directive.
+/// An API may be known by its own name, or - for things which belong to a
+/// type, such as methods and constructors - by the name of that type.
+/// Names which bindgen renamed to disambiguate overloads additionally
+/// answer to the form users write in allowlists (`daft1` for
+/// `daft_autocxx_dedup_1`).
+fn allowlist_forms_of_name(api: &Api<FnPhase>) -> impl Iterator<Item = String> {
+    [
+        api.name().to_cpp_name(),
+        api.name_for_allowlist().to_cpp_name(),
+    ]
+    .into_iter()
+    .flat_map(|name| {
+        let dedup_form = crate::types::dedup_name_to_allowlist_form(&name);
+        let dedup_form = (dedup_form != name).then_some(dedup_form);
+        std::iter::once(name).chain(dedup_form)
+    })
+}
+
+/// Confirm that each item which the user explicitly asked us to generate
+/// still exists after all the analysis phases have run.
+///
+/// [`ParseBindgen::confirm_all_generate_directives_obeyed`] does the same job
+/// at the end of the parse phase, but items which parse happily can still be
+/// discarded later on, for instance because their name isn't acceptable to
+/// cxx or because they depend on something we couldn't generate. Such items
+/// normally become an [`Api::IgnoredItem`], which results in nothing but a
+/// documentation stub in the generated code - so without this check, an
+/// explicit `generate!` can appear to succeed yet produce no usable API.
+///
+/// This applies only to items named explicitly with `generate!` or
+/// `generate_pod!`: `generate_ns!` and `generate_all!` sweep up whatever
+/// they can find, and must remain tolerant of items we can't handle.
+fn confirm_all_generate_directives_still_obeyed(
+    config: &IncludeCppConfig,
+    apis: &ApiVec<FnPhase>,
+) -> Result<(), ConvertErrorFromCpp> {
+    let mut generated: HashSet<String> = HashSet::new();
+    let mut discarded: HashMap<String, &ConvertErrorFromCpp> = HashMap::new();
+    for api in apis.iter() {
+        match api {
+            Api::IgnoredItem { err, .. } => {
+                for name in allowlist_forms_of_name(api) {
+                    discarded.entry(name).or_insert(err);
+                }
+            }
+            _ => generated.extend(allowlist_forms_of_name(api)),
+        }
+    }
+    for generate_directive in config.must_generate_list() {
+        if !generated.contains(&generate_directive) {
+            return Err(match discarded.get(&generate_directive) {
+                Some(err) => ConvertErrorFromCpp::DidNotGenerateAnythingUsable(
+                    generate_directive,
+                    Box::new((*err).clone()),
+                ),
+                None => ConvertErrorFromCpp::DidNotGenerateAnything(generate_directive),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Some attributes indicate we can never handle a given item. Check for those.

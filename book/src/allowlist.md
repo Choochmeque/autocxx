@@ -22,7 +22,9 @@ be generated, some placeholder item with explanatory documentation [will be gene
 Various other directives are possible inside this macro, most notably:
 
 * You can ask to generate all the items in a namespace using
-  [`generate_ns!`](https://docs.rs/autocxx/latest/autocxx/macro.generate_ns.html)
+  [`generate_ns!`](https://docs.rs/autocxx/latest/autocxx/macro.generate_ns.html). Unlike
+  `generate!`, whole-namespace generation is tolerant: items which can't be generated get a
+  placeholder, whereas anything you name explicitly and which can't be generated fails the build.
 * You might sometimes want to ask that a type is generated as 'plain old data' using
   [`generate_pod!`](https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html) instead of `generate!` -
   see the chapter on [C++ types](cpp_types.md).
