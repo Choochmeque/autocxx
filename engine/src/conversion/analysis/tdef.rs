@@ -80,7 +80,59 @@ pub(crate) fn convert_typedef_targets(
         },
     );
     results.extend(extra_apis.into_iter().map(add_analysis));
-    results
+    ignore_typedefs_to_alias_templates(results)
+}
+
+/// An alias template reaches us as a plain typedef, because bindgen discards
+/// its template parameters, and we ignore it above because bindgen tells us
+/// that happened. Where bindgen left a further typedef pointing at such an
+/// alias template - rather than resolving through it to a concrete type - that
+/// typedef is parameterized too, so we must ignore it as well: cxx would
+/// otherwise emit a forward declaration naming the alias template without its
+/// template arguments, which isn't valid C++.
+/// See google/autocxx#1094 and google/autocxx#1501.
+/// This must happen here, rather than later, because at this point the only
+/// items ignored for this reason are typedefs.
+fn ignore_typedefs_to_alias_templates(mut apis: ApiVec<TypedefPhase>) -> ApiVec<TypedefPhase> {
+    // Propagate to a fixed point: each newly ignored typedef can in
+    // turn invalidate typedefs which point at *it* bare (chains of
+    // erased alias templates wrap each other). Terminates because
+    // every round strictly shrinks the set of Typedef apis.
+    loop {
+        let alias_templates: HashSet<QualifiedName> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::IgnoredItem {
+                    err: ConvertErrorFromCpp::UnusedTemplateParam,
+                    ..
+                } => Some(api.name()),
+                _ => None,
+            })
+            .cloned()
+            .collect();
+        let mut changed = false;
+        apis = apis
+            .into_iter()
+            .map(|api| match api {
+                Api::Typedef {
+                    ref name,
+                    analysis: TypedefAnalysis { ref deps, .. },
+                    ..
+                } if !alias_templates.is_disjoint(deps) => {
+                    changed = true;
+                    Api::IgnoredItem {
+                        name: api.name_info().clone(),
+                        err: ConvertErrorFromCpp::UnusedTemplateParam,
+                        ctx: Some(ErrorContext::new_for_item(name.name.get_final_ident())),
+                    }
+                }
+                _ => api,
+            })
+            .collect();
+        if !changed {
+            return apis;
+        }
+    }
 }
 
 fn get_replacement_typedef(
