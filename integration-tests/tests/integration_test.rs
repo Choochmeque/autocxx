@@ -7699,6 +7699,13 @@ fn test_typedef_to_char16() {
 }
 
 #[test]
+// On MSVC, std::size_t is declared via 'using ::size_t' and bindgen
+// resolves it straight to the underlying integer (c_ulonglong) before
+// autocxx sees any name, so no engine-side fix is possible. This is
+// vanilla bindgen bug rust-lang/rust-bindgen#2869. The test guards
+// every other platform and becomes the acceptance test for a future
+// bindgen fix.
+#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_std_size_t() {
     // https://github.com/google/autocxx/issues/1504
     // std::size_t must map to usize just like unqualified size_t,
