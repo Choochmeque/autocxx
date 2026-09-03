@@ -7606,6 +7606,19 @@ fn test_extern_rust_fn_in_mod() {
 }
 
 #[test]
+fn test_typedef_to_char16() {
+    // A C++ typedef to char16_t makes bindgen emit
+    // `pub type my_char = bindgen_cchar16_t;` where
+    // bindgen_cchar16_t is bound by an injected `use` rename.
+    // The bindgen sanitizer must not prune it.
+    let hdr = indoc! {"
+        typedef char16_t my_char;
+        inline void take_my_char(my_char) {}
+    "};
+    run_test("", hdr, quote! {}, &["take_my_char"], &[]);
+}
+
+#[test]
 fn test_issue_956() {
     let hdr = indoc! {"
         #include <cstdint>
