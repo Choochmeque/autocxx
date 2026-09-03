@@ -4352,7 +4352,10 @@ fn test_abstract_nested_type() {
         void take_A_B(const N::A::B&);
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["take_A_B", "N::A_B"], &[]);
+    // N::A_B is an abstract nested type which we can't represent, so the
+    // explicitly requested take_A_B can't be generated either - and saying so
+    // beats silently generating nothing (google/autocxx#1269).
+    run_test_expect_fail("", hdr, rs, &["take_A_B", "N::A_B"], &[]);
 }
 
 #[test]
@@ -6001,7 +6004,10 @@ fn test_type_called_type() {
         inline void take_type(a::b<4>::type) {}
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["take_type"], &[]);
+    // We can't generate `take_type` (its parameter is a forward declaration
+    // as far as we're concerned) and it was explicitly requested, so this is
+    // reported rather than silently skipped - google/autocxx#1269.
+    run_test_expect_fail("", hdr, rs, &["take_type"], &[]);
 }
 
 #[test]
@@ -6015,7 +6021,9 @@ fn test_bridge_conflict_ty() {
         }
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
+    // Neither type can be represented in the flat cxx::bridge namespace, and
+    // both were explicitly requested, so we say so - google/autocxx#1269.
+    run_test_expect_fail("", hdr, rs, &["a::Key", "b::Key"], &[]);
 }
 
 #[test]
@@ -6029,7 +6037,16 @@ fn test_bridge_conflict_ty_fn() {
         }
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
+    if std::env::var_os("AUTOCXX_FORCE_WRAPPER_GENERATION").is_some() {
+        // Forced wrapper generation renames the function, so the flat
+        // cxx::bridge namespace conflict never arises and generation
+        // legitimately succeeds.
+        run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
+    } else {
+        // As test_bridge_conflict_ty: explicitly requested, can't be
+        // generated, therefore reported - google/autocxx#1269.
+        run_test_expect_fail("", hdr, rs, &["a::Key", "b::Key"], &[]);
+    }
 }
 
 #[test]
@@ -6087,6 +6104,10 @@ fn test_private_inheritance() {
 
 #[test]
 fn test_error_generated_for_static_data() {
+    // Blanket generation is tolerant of items we can't handle, and documents
+    // the problem with a placeholder item. (Naming FOO explicitly in a
+    // `generate!` is a hard error instead - see
+    // test_error_fatal_for_explicitly_generated_static_data.)
     let hdr = indoc! {"
         #include <cstdint>
         struct A {
@@ -6100,17 +6121,37 @@ fn test_error_generated_for_static_data() {
         "",
         hdr,
         rs,
-        quote! { generate!("FOO")},
+        quote! { generate_all!() },
         None,
         Some(make_error_finder("FOO")),
         None,
     );
 }
 
+/// An explicit `generate!` for something we can't generate must fail the
+/// build rather than silently emitting a placeholder - google/autocxx#1269.
+#[test]
+fn test_error_fatal_for_explicitly_generated_static_data() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            A() {}
+            uint32_t a;
+        };
+        static A FOO = A();
+    "};
+    let rs = quote! {};
+    run_test_expect_fail("", hdr, rs, &["FOO"], &[]);
+}
+
 #[test]
 #[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_error_generated_for_array_dependent_function() {
+    // An explicitly requested function whose parameter we can't handle is a
+    // hard error - google/autocxx#1269. (The equivalent method on a type which
+    // is itself generated remains a documented placeholder - see
+    // test_error_generated_for_array_dependent_method.)
     let hdr = indoc! {"
         #include <cstdint>
         #include <functional>
@@ -6118,13 +6159,13 @@ fn test_error_generated_for_array_dependent_function() {
         }
     "};
     let rs = quote! {};
-    run_test_ex(
+    run_test_expect_fail_ex(
         "",
         hdr,
         rs,
         quote! { generate! ("take_func")},
         None,
-        Some(make_error_finder("take_func")),
+        None,
         None,
     );
 }
@@ -6175,7 +6216,6 @@ fn test_error_generated_for_pod_with_nontrivial_destructor() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/1269
 fn test_error_generated_for_double_underscore() {
     // take_a is necessary here because cxx won't generate the required
     // static assertions unless the type is actually used in some context
@@ -6407,7 +6447,9 @@ fn test_underscored_namespace_for_inner_type() {
         inline void bar(__foo::daft::bob) {}
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["bar"], &[]);
+    // The namespace name isn't acceptable to cxx, so the explicitly requested
+    // `bar` can't be generated and we say so - google/autocxx#1269.
+    run_test_expect_fail("", hdr, rs, &["bar"], &[]);
 }
 
 #[test]
@@ -6444,7 +6486,9 @@ fn test_ref_qualified_method() {
 #[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[test]
 fn test_stringview() {
-    // Test that APIs using std::string_view do not otherwise cause errors.
+    // Test that APIs using std::string_view are handled gracefully. We can't
+    // generate them, and here they're requested by name, so we report that
+    // rather than generating nothing - google/autocxx#1269.
     let hdr = indoc! {"
         #include <string_view>
         #include <string>
@@ -6452,7 +6496,7 @@ fn test_stringview() {
         std::string_view return_string_view(const std::string& a) { return std::string_view(a); }
     "};
     let rs = quote! {};
-    run_test_ex(
+    run_test_expect_fail_ex(
         "",
         hdr,
         rs,
@@ -7154,7 +7198,11 @@ fn test_issue486() {
         } // namespace spanner
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["spanner::Key"], &[]);
+    // Both Keys would land on the same name within the cxx::bridge, so
+    // neither can be generated; spanner::Key was requested explicitly, so we
+    // report that instead of quietly generating nothing
+    // (google/autocxx#1269).
+    run_test_expect_fail("", hdr, rs, &["spanner::Key"], &[]);
 }
 
 #[test]
@@ -7692,11 +7740,17 @@ fn test_typedef_to_char16() {
     // `pub type my_char = bindgen_cchar16_t;` where
     // bindgen_cchar16_t is bound by an injected `use` rename.
     // The bindgen sanitizer must not prune it.
+    //
+    // We can't yet generate anything usable for a char16_t parameter:
+    // `bindgen_cchar16_t` is neither a known type nor an API of its own, so
+    // the function is discarded during analysis. That used to pass silently;
+    // since google/autocxx#1269 an explicitly requested item which generates
+    // nothing is reported instead.
     let hdr = indoc! {"
         typedef char16_t my_char;
         inline void take_my_char(my_char) {}
     "};
-    run_test("", hdr, quote! {}, &["take_my_char"], &[]);
+    run_test_expect_fail("", hdr, quote! {}, &["take_my_char"], &[]);
 }
 
 #[test]
@@ -8046,6 +8100,94 @@ fn test_typedef_to_uint_pointer_chain() {
     run_test(cxx, hdr, rs, &["get_ptr"], &[]);
 }
 
+/// An explicitly requested function which parses fine but is discarded
+/// later (here, because cxx can't cope with `__` in names) must be a hard
+/// error, not a silent doc-comment stub. This is the exact scenario in
+/// google/autocxx#1269.
+#[test]
+fn test_issue_1269_explicit_fn_discarded_by_name_check() {
+    let hdr = indoc! {"
+        inline int __ykllvmwrap_irtrace_compile(int a) { return a; }
+    "};
+    run_test_expect_fail("", hdr, quote! {}, &["__ykllvmwrap_irtrace_compile"], &[]);
+}
+
+/// An explicitly requested function whose parameter type is rejected during
+/// function analysis must be a hard error.
+#[test]
+fn test_issue_1269_explicit_fn_discarded_due_to_param() {
+    let hdr = indoc! {"
+        struct Blocked { int a; };
+        inline int uses_blocked(Blocked& b) { return b.a; }
+    "};
+    run_test_expect_fail_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("uses_blocked")
+            block!("Blocked")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Explicitly requested types which are both discarded during analysis
+/// (here, because they'd collide within the flat cxx::bridge namespace)
+/// must be a hard error.
+#[test]
+fn test_issue_1269_explicit_type_discarded_by_name_check() {
+    let hdr = indoc! {"
+        namespace a { struct Dupe { int q; }; }
+        namespace b { struct Dupe { int r; }; }
+    "};
+    run_test_expect_fail_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("a::Dupe")
+            generate!("b::Dupe")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Control: blanket generation must remain tolerant of items which can't
+/// be generated - only explicit `generate!` directives are fatal.
+#[test]
+fn test_issue_1269_generate_all_remains_tolerant() {
+    let hdr = indoc! {"
+        inline int __reserved_name_fn(int a) { return a; }
+        inline int fine_fn(int a) { return a; }
+    "};
+    run_generate_all_test(hdr);
+}
+
+/// Control: an explicit `generate!` for something which works must still
+/// work, including when the type carries a method which itself has to be
+/// ignored.
+#[test]
+fn test_issue_1269_explicit_generate_still_works() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Fine {
+            int a;
+            int get() const { return a; }
+            int __bad_method(int b) const { return b; }
+        };
+        inline int fine_fn(int a) { return a; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::fine_fn(autocxx::c_int(3)), autocxx::c_int(3));
+    };
+    run_test("", hdr, rs, &["fine_fn", "Fine"], &[]);
+}
+
 #[test]
 fn test_alias_template_typedef_ignored() {
     // Guard for the google/autocxx#1094/#1501 family: alias
@@ -8106,6 +8248,10 @@ fn test_concrete_typedef_of_erased_alias_still_generated() {
     // a code checker; actually *calling* take() through the opaque
     // typedef currently trips the wrapper cast mismatch tracked as
     // upstream google/autocxx#1302, so the build step is skipped.
+    // get_conc() is deliberately NOT in the allowlist: returning a
+    // reference from a function with no reference parameters has never
+    // been generatable (no lifetime to elide), and explicitly
+    // requesting it is a hard error per google/autocxx#1269.
     struct FindConcreteAndTake;
     impl CodeCheckerFns for FindConcreteAndTake {
         fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
@@ -8136,7 +8282,6 @@ fn test_concrete_typedef_of_erased_alias_still_generated() {
         hdr,
         quote! {},
         quote! {
-            generate!("get_conc")
             generate!("take")
         },
         None,
@@ -8170,24 +8315,30 @@ fn test_issue_956() {
         inline void take_int(int&) {}
         inline void take_uint16(uint16_t) {}
         inline void take_us(unsigned short) {}
-        inline void take_char16(char16_t) {}
         inline void take_uint16_ref(uint16_t&) {}
-        inline void take_char16_ref(char16_t &) {}
     "};
     run_test(
         "",
         hdr,
         quote! {},
-        &[
-            "take_int",
-            "take_uint16",
-            "take_char16",
-            "take_uint16_ref",
-            "take_char16_ref",
-            "take_us",
-        ],
+        &["take_int", "take_uint16", "take_uint16_ref", "take_us"],
         &[],
     );
+}
+
+/// The char16_t half of test_issue_956. We don't currently manage to generate
+/// anything for a char16_t parameter - the injected `bindgen_cchar16_t` alias
+/// is neither a known type nor an API in its own right, so such functions are
+/// discarded during analysis. Until that's fixed, an explicit request for one
+/// is reported rather than silently ignored (google/autocxx#1269).
+#[test]
+fn test_issue_956_char16() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void take_char16(char16_t) {}
+        inline void take_char16_ref(char16_t &) {}
+    "};
+    run_test_expect_fail("", hdr, quote! {}, &["take_char16", "take_char16_ref"], &[]);
 }
 
 #[test]
@@ -10824,7 +10975,9 @@ fn test_issue486_multi_types() {
         } // namespace spanner
     "};
     let rs = quote! {};
-    run_test(
+    // As test_issue486: these all collide within the cxx::bridge, and they
+    // were requested by name, so this is reported - google/autocxx#1269.
+    run_test_expect_fail(
         "",
         hdr,
         rs,
@@ -12348,7 +12501,9 @@ fn test_array_trouble2() {
           typedef c d;
         };
     "};
-    run_test("", hdr, quote! {}, &["array_d"], &[]);
+    // The typedef takes generic parameters so we can't generate it; it was
+    // asked for by name, so we report that - google/autocxx#1269.
+    run_test_expect_fail("", hdr, quote! {}, &["array_d"], &[]);
 }
 
 #[test]
@@ -13071,7 +13226,10 @@ fn test_using_string_function() {
         void foo(const string &a);
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["foo"], &[]);
+    // The `using` alias means bindgen hands us an opaque blob rather than
+    // something we recognize as std::string, so `foo` can't be generated.
+    // It was requested by name, so we report it - google/autocxx#1269.
+    run_test_expect_fail("", hdr, rs, &["foo"], &[]);
 }
 
 #[test]

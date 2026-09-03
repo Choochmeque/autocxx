@@ -15,7 +15,9 @@ This bit is important.
 When you use `autocxx`, you'll ask it to generate Rust bindings for [C++ types or functions](allowlist.md) using
 `generate!` directives.
 
-If you ask to generate bindings for a specific function, and it can't: the build will fail.
+If you name something specifically in a `generate!` or `generate_pod!` directive - a function
+or a type - and `autocxx` can't generate bindings for it: the build will fail, and the error
+will say what stopped it.
 
 If you ask to generate bindings for an entire type, `autocxx` will generate bindings for as
 many methods as possible. For those methods where it can't generate bindings, it will instead
