@@ -386,6 +386,28 @@ impl IncludeCppEngine {
             builder = builder.opaque_type(item);
         }
 
+        // Make C++ standard library implementation details opaque.
+        // Names such as std::__tree (libc++) or std::_Rb_tree
+        // (libstdc++) are reserved implementation-detail names which
+        // bindgen descends into when a user type holds a std container
+        // member; with newer standard library headers this produces
+        // uncompilable bindings (unresolved template parameters such
+        // as _CharT or _Hashtable). See google/autocxx#1491 and
+        // google/autocxx#1480. Opaque types keep the correct layout
+        // (a [u8; N] blob), so containing structs still work. This is
+        // deliberately scoped to reserved names: ordinary std types
+        // and user types are unaffected, so the implicit-constructor
+        // analysis discussed below still sees the fields it needs.
+        for pattern in [
+            // libc++ details, e.g. std::__tree, std::__hash_table
+            "std::__[a-zA-Z0-9_]+.*",
+            // libstdc++ and MSVC STL details, e.g. std::_Rb_tree, std::_Tree
+            "std::_[A-Z].*",
+            "__gnu_cxx::.*",
+        ] {
+            builder = builder.opaque_type(pattern);
+        }
+
         // At this point it woul be great to use `Builder::opaque_type` for
         // everything which is on the allowlist but not on the POD list.
         // This would free us from a large proportion of bindgen bugs which
