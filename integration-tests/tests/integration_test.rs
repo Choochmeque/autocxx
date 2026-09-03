@@ -1072,7 +1072,11 @@ fn test_make_up_with_args() {
 }
 
 #[test]
-#[ignore] // because we don't support unique_ptrs to primitives
+// Fails with E0609 "no field `b` on type `&ffi::Bob`". Bob is only
+// generate!()d, not generate_pod!()d, so it is opaque to Rust and its fields
+// are not exposed -- nothing to do with unique_ptrs to primitives, which is
+// what this comment used to claim.
+#[ignore]
 fn test_make_up_int() {
     let cxx = indoc! {"
         Bob::Bob(uint32_t a) : b(a) {
@@ -2329,8 +2333,12 @@ fn test_overload_functions() {
 }
 
 #[test]
-#[ignore] // At present, bindgen generates two separate 'daft1'
-          // functions here, and there's not much we can do about that.
+// Fails with DidNotGenerateAnything("daft3"). The overload deduplication
+// machinery does run over these functions -- this is no longer bindgen handing
+// us two indistinguishable 'daft1's -- but one of the renamed overloads is
+// dropped on the floor without a diagnostic. Adjacent to the scoped
+// overload-tracker fix, though not covered by it.
+#[ignore]
 fn test_overload_numeric_functions() {
     // Because bindgen deals with conflicting overloaded functions by
     // appending a numeric suffix, let's see if we can cope.
@@ -3356,7 +3364,14 @@ fn test_enum_typedef() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/264
+// No longer the google/autocxx#264 stack overflow. It now fails in the POD
+// safety analysis with UnsafePodType: "Type B could not be POD because its
+// dependent type B_diff isn't safe to be POD. Because: Type B_diff is a
+// typedef to a complex type". The nested `using diff = diff;` shadows the
+// outer typedef with its own name, and we never resolve that chain through to
+// size_t, so the alias looks like an unknown complex type rather than an
+// integer.
+#[ignore]
 fn test_conflicting_usings() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -4880,7 +4895,13 @@ fn test_issues_217_222() {
 }
 
 #[test]
-#[ignore] // https://github.com/rust-lang/rust-bindgen/pull/1975, https://github.com/google/autocxx/issues/106
+// Still gated on bindgen. bindgen can't represent the dependent qualified name
+// `typename T::value_type`, so it reports MyStringView (and its
+// view_value_type member) as UnusedTemplateParam; we then fail with
+// DidNotGenerateAnythingUsable("take_string_view", IgnoredDependent({MyStringView})).
+// This is the google/autocxx#106 family; see also
+// https://github.com/rust-lang/rust-bindgen/pull/1975.
+#[ignore]
 fn test_dependent_qualified_type() {
     let hdr = indoc! {"
     #include <stddef.h>
@@ -5820,7 +5841,23 @@ fn test_string_transparent_static_method() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/490
+// The bindgen stack overflow of google/autocxx#490 is fixed, but this reduced
+// repro still cannot run, for two independent reasons.
+//
+// 1. The fixture declares its own placement `void *operator new(size_t, void *)`,
+//    which cannot be reconciled with libc++'s <new>: as written it fails the
+//    final C++ compile with "exception specification in declaration does not
+//    match previous declaration", and adding the standard `noexcept` merely
+//    moves it on to "cannot add 'abi_tag' attribute in a redeclaration",
+//    because the SDK's declaration carries _LIBCPP_HIDE_FROM_ABI.
+// 2. Underneath that sits a real codegen bug. Dropping the operator new
+//    declaration gets as far as rustc, which then rejects the generated
+//    bindings with E0428 "the name `iterator` is defined multiple times":
+//    `absl::cj<l>::iterator` and `absl::j::ct<...>::iterator` are distinct C++
+//    types that both land as `root::iterator`.
+//
+// So fixing the fixture alone is not enough; (2) needs an engine fix.
+#[ignore]
 fn test_issue_490() {
     let hdr = indoc! {"
         typedef int a;
@@ -7206,7 +7243,9 @@ fn test_issue486() {
 }
 
 #[test]
-#[ignore]
+// The stack overflow of google/autocxx#616 is fixed; this test now only needed
+// a fixture tweak, because clang's -Wunused-private-field (an error under the
+// tests' -Werror) fired on the never-referenced private field `u`.
 fn test_issue616() {
     let hdr = indoc! {"
         namespace N {
@@ -7218,6 +7257,7 @@ fn test_issue616() {
             }
             class A : N::C<A> {
             U u;
+            void use_u() const { (void)u; }
         };
     "};
     let rs = quote! {};
@@ -11213,7 +11253,13 @@ fn test_issue486_multi_types() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/774
+// "Bug 2" of google/autocxx#774 -- a concrete subclass of an abstract base got
+// no constructor wrapper -- is fixed. Two fixture repairs were needed to see
+// that: a virtual destructor on the base, because deleting a `B` through the
+// generated unique_ptr otherwise trips clang's
+// -Wdelete-non-abstract-non-virtual-dtor and -Werror makes that fatal; and the
+// Rust side, which still called the long-gone `cxx::B::make_unique()` API
+// rather than today's `ffi::B::new().within_unique_ptr()`.
 fn test_virtual_methods_additional() {
     let hdr = indoc! {"
         #pragma once
@@ -11221,9 +11267,10 @@ fn test_virtual_methods_additional() {
         class A {
         public:
           A() {}
-          ~A() {}
-          // the following line makes Test2 Opaque, and deprives it of a make_unique()
-          // comment next line, uncomment the one after to obtain a make_unique() for Test2
+          virtual ~A() {}
+          // the following line makes A abstract; B overrides it and so should
+          // still get a constructor wrapper. Swap it for the line below to
+          // check the non-abstract case.
           virtual int b() = 0;
           // int b() { return 2; }
         };
@@ -11236,7 +11283,7 @@ fn test_virtual_methods_additional() {
         };
     "};
     let rs = quote! {
-        let b = cxx::B::make_unique();
+        let _b = ffi::B::new().within_unique_ptr();
     };
     run_test("", hdr, rs, &["B"], &[]);
 }
