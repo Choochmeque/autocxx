@@ -54,4 +54,8 @@ features = ["full"]
 [[test]]
 name = "integration_tests"
 path = "tests/lib.rs"
+
+[[test]]
+name = "builder_e2e_test"
+path = "tests/builder_e2e_test.rs"
 harness = true
