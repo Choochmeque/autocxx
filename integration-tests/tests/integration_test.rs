@@ -7699,6 +7699,27 @@ fn test_typedef_to_char16() {
 }
 
 #[test]
+fn test_std_size_t() {
+    // https://github.com/google/autocxx/issues/1504
+    // std::size_t must map to usize just like unqualified size_t,
+    // rather than leaking the standard library's underlying typedef
+    // (u_long on libc++, u_longlong on MSVC).
+    let cxx = indoc! {"
+        std::size_t double_it(std::size_t n) { return n * 2; }
+    "};
+    let hdr = indoc! {"
+        #include <cstddef>
+        std::size_t double_it(std::size_t n);
+    "};
+    let rs = quote! {
+        let v: usize = 21;
+        let r: usize = ffi::double_it(v);
+        assert_eq!(r, 42);
+    };
+    run_test(cxx, hdr, rs, &["double_it"], &[]);
+}
+
+#[test]
 fn test_issue_956() {
     let hdr = indoc! {"
         #include <cstdint>
