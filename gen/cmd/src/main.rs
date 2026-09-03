@@ -223,7 +223,12 @@ fn main() -> miette::Result<()> {
     let suppress_system_headers = matches.is_present("suppress-system-headers");
     let desired_number = matches
         .value_of("generate-exact")
-        .map(|s| s.parse::<usize>().unwrap());
+        .map(|s| {
+            s.parse::<usize>().map_err(|err| {
+                miette::Report::msg(format!("--generate-exact requires a number: {err}"))
+            })
+        })
+        .transpose()?;
     let autocxxgen_header_counter = Cell::new(0);
     let autocxxgen_header_namer = if desired_number.is_some() {
         AutocxxgenHeaderNamer(Box::new(|_| {
@@ -313,9 +318,14 @@ fn main() -> miette::Result<()> {
             .iter()
             .flat_map(|file| file.get_cpp_buildables())
         {
+            // This is where cxx rejects the bridge we built for it. Some of
+            // those rejections are our user's C++ tripping over cxx's reserved
+            // vocabulary - a C++ class called `String`, for instance - which
+            // autocxx still can't handle: https://github.com/google/autocxx/issues/1371.
+            // Until it can, say so rather than panicking at the user.
             let generations = include_cxx
                 .generate_h_and_cxx(&codegen_options.cpp_codegen_options)
-                .expect("Unable to generate header and C++ code");
+                .map_err(report_cxx_rejection)?;
             for pair in generations.0 {
                 let cppname = name_cc_file(counter);
                 writer.write_to_file(cppname, &pair.implementation.unwrap_or_default())?;
@@ -378,6 +388,14 @@ fn main() -> miette::Result<()> {
         depfile.borrow_mut().write().into_diagnostic()?;
     }
     Ok(())
+}
+
+/// Explain a refusal from cxx, using the same wording as the equivalent
+/// failure in `autocxx_build`.
+fn report_cxx_rejection(err: impl std::fmt::Display) -> miette::Report {
+    miette::Report::msg(format!(
+        "cxx couldn't handle our generated bindings - could be a bug in autocxx: {err}"
+    ))
 }
 
 fn name_autocxxgen_h(counter: usize) -> String {
