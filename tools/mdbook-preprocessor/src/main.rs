@@ -21,8 +21,9 @@ use clap::{crate_authors, crate_version, Arg, ArgMatches, Command};
 use itertools::Itertools;
 use mdbook::{book::Book, preprocess::CmdPreprocessor};
 use proc_macro2::{Span, TokenStream};
+use quote::ToTokens;
 use rayon::prelude::*;
-use syn::{Expr, __private::ToTokens, spanned::Spanned};
+use syn::{spanned::Spanned, Expr};
 
 static LONG_ABOUT: &str =
     "This is an mdbook preprocessor tailored for autocxx code examples. Autocxx
@@ -130,7 +131,7 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
                     "Running doctest {}/{} at {}",
                     counter + 1,
                     num_tests,
-                    &case.location
+                    case.location
                 );
                 let err = autocxx_integration_tests::doctest(
                     &case.cpp,
@@ -146,7 +147,7 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
                     "Doctest {}/{} at {} {}.",
                     counter + 1,
                     num_tests,
-                    &case.location,
+                    case.location,
                     desc
                 );
                 if err.is_err() {

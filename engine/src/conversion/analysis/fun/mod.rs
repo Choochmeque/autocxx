@@ -2229,14 +2229,9 @@ fn special_member_to_string(special_member: SpecialMemberKind) -> &'static str {
 /// Attempts to determine whether this function name is a constructor, and if so,
 /// returns the suffix.
 fn constructor_with_suffix<'a>(rust_name: &'a str, nested_type_ident: &str) -> Option<&'a str> {
-    let suffix = rust_name.strip_prefix(nested_type_ident);
-    suffix.and_then(|suffix| {
-        if suffix.is_empty() || suffix.parse::<u32>().is_ok() {
-            Some(suffix)
-        } else {
-            None
-        }
-    })
+    rust_name
+        .strip_prefix(nested_type_ident)
+        .filter(|suffix| suffix.is_empty() || suffix.parse::<u32>().is_ok())
 }
 
 impl Api<FnPhase> {

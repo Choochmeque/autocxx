@@ -344,8 +344,12 @@ impl<'a> TypeConverter<'a> {
         // (We may entirely reject some types at this point too.)
         let mut typ = match known_types().consider_substitution(&tn) {
             Some(mut substitute_type) => {
-                if let Some(last_seg_args) =
-                    typ.path.segments.into_iter().last().map(|ps| ps.arguments)
+                if let Some(last_seg_args) = typ
+                    .path
+                    .segments
+                    .into_iter()
+                    .next_back()
+                    .map(|ps| ps.arguments)
                 {
                     let last_seg = substitute_type.path.segments.last_mut().unwrap();
                     last_seg.arguments = last_seg_args;

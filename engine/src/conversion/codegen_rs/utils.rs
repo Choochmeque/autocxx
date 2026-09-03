@@ -25,5 +25,5 @@ pub(super) fn generate_cxx_use_stmt(name: &QualifiedName, alias: Option<&Ident>)
 }
 
 pub(super) fn find_output_mod_root(ns: &Namespace) -> impl Iterator<Item = crate::minisyn::Ident> {
-    std::iter::repeat(make_ident("super")).take(ns.depth())
+    (0..ns.depth()).map(|_| make_ident("super"))
 }

@@ -29,17 +29,12 @@ use crate::{directives::get_directives, RustPath};
 
 use quote::quote;
 
-#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash, Default)]
 pub enum UnsafePolicy {
     AllFunctionsSafe,
+    #[default]
     AllFunctionsUnsafe,
     ReferencesWrappedAllFunctionsSafe,
-}
-
-impl Default for UnsafePolicy {
-    fn default() -> Self {
-        Self::AllFunctionsUnsafe
-    }
 }
 
 impl Parse for UnsafePolicy {

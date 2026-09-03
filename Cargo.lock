@@ -288,10 +288,11 @@ dependencies = [
  "itertools 0.10.5",
  "mdbook",
  "proc-macro2",
+ "quote",
  "rayon",
  "regex",
  "serde_json",
- "syn 1.0.109",
+ "syn 2.0.98",
 ]
 
 [[package]]

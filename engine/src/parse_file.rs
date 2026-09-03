@@ -305,7 +305,7 @@ impl ParsedFile {
 
     /// Get all the areas of Rust code which need to be built for these bindings.
     /// A shortcut for `get_autocxxes()` then calling `get_rs_output` on each.
-    pub fn get_rs_outputs(&self) -> impl Iterator<Item = RsOutput> {
+    pub fn get_rs_outputs(&self) -> impl Iterator<Item = RsOutput<'_>> {
         self.get_autocxxes().map(|autocxx| autocxx.get_rs_output())
     }
 

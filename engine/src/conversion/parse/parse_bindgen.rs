@@ -373,7 +373,7 @@ impl<'a> ParseBindgen<'a> {
                 // same name - see test_issue_264.
                 self.apis.push(UnanalyzedApi::Typedef {
                     name: api_name(ns, ity.ident.clone(), self.parse_callback_results),
-                    item: TypedefKind::Type(ity.clone().into()),
+                    item: TypedefKind::Type(Box::new(ity.clone().into())),
                     old_tyname: None,
                     analysis: (),
                 });

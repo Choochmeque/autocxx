@@ -414,7 +414,7 @@ impl IncludeCppEngine {
     }
 
     /// Generate the Rust bindings. Call `generate` first.
-    pub fn get_rs_output(&self) -> RsOutput {
+    pub fn get_rs_output(&self) -> RsOutput<'_> {
         RsOutput {
             config: &self.config,
             rs: match &self.state {
