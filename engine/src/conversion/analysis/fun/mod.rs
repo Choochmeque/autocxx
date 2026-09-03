@@ -326,6 +326,7 @@ impl<'a> FnAnalyzer<'a> {
             types_in_anonymous_namespace: Self::build_types_in_anonymous_namespace(&apis),
             force_wrapper_generation,
         };
+        me.reserve_ideal_names(&apis);
         let mut results = ApiVec::new();
         convert_apis(
             apis,
@@ -1542,6 +1543,50 @@ impl<'a> FnAnalyzer<'a> {
         })
     }
 
+    /// Reserve, in each namespace's overload tracker, the name every
+    /// real function will ideally take, so that overload suffix
+    /// generation cannot collide with a real name which happens to be
+    /// processed later (google/autocxx#1316, e.g. overloads of
+    /// `byteSwap` alongside a real `byteSwap2`). This mirrors the
+    /// `ideal_rust_name` derivation in
+    /// [`Self::analyze_foreign_fn_and_subclasses`]. Reservations are
+    /// namespace-wide and over-reservation is harmless (a generated
+    /// suffix just skips a number), so approximations err in that
+    /// direction.
+    fn reserve_ideal_names(&mut self, apis: &ApiVec<PodPhase>) {
+        for api in apis.iter() {
+            if let Api::Function { name, fun, .. } = api {
+                let initial_rust_name = fun.ident.to_string();
+                let bare = match name.cpp_name_if_present() {
+                    None => initial_rust_name,
+                    Some(cpp_original_name) => {
+                        if initial_rust_name.ends_with('_') {
+                            initial_rust_name
+                        } else if validate_ident_ok_for_rust(cpp_original_name).is_err() {
+                            format!("{}_", cpp_original_name.to_string_for_rust_name())
+                        } else {
+                            cpp_original_name.to_string_for_rust_name()
+                        }
+                    }
+                };
+                let ns = name.name.get_namespace().clone();
+                // Methods reserve within their type's scope; free
+                // functions within the namespace's function scope --
+                // mirroring how names are later assigned, so a real
+                // name on one type cannot perturb numbering on an
+                // unrelated type.
+                let type_scope = fun
+                    .self_ty
+                    .as_ref()
+                    .map(|ty| ty.get_final_item().to_string());
+                self.overload_trackers_by_mod
+                    .entry(ns)
+                    .or_default()
+                    .reserve(type_scope.as_deref(), &bare);
+            }
+        }
+    }
+
     fn get_overload_name(&mut self, ns: &Namespace, type_ident: &str, rust_name: String) -> String {
         let overload_tracker = self.overload_trackers_by_mod.entry(ns.clone()).or_default();
         overload_tracker.get_method_real_name(type_ident, rust_name)
@@ -2241,7 +2286,24 @@ impl Api<FnPhase> {
                 FnKind::Method { ref impl_for, .. } => impl_for.clone(),
                 FnKind::TraitMethod { ref impl_for, .. } => impl_for.clone(),
                 FnKind::Function => {
-                    QualifiedName::new(self.name().get_namespace(), fun.ident.clone())
+                    // Internal dedup names must match the legacy
+                    // user-visible allowlist form (e.g. generate!("daft1")
+                    // for a bindgen-renamed overload of daft). Only
+                    // translate names which genuinely came from bindgen
+                    // overload renaming (the C++ original name differs)
+                    // so that a real C++ function literally named
+                    // x_autocxx_dedup_2 is left alone.
+                    let ident = fun.ident.to_string();
+                    let was_renamed_by_bindgen = fun
+                        .original_name
+                        .as_ref()
+                        .is_some_and(|original| ident != original.to_string_for_rust_name());
+                    let allowlist_ident = if was_renamed_by_bindgen {
+                        crate::types::dedup_name_to_allowlist_form(&ident)
+                    } else {
+                        ident
+                    };
+                    QualifiedName::new(self.name().get_namespace(), make_ident(allowlist_ident))
                 }
             },
             Api::RustSubclassFn { subclass, .. } => subclass.0.name.clone(),

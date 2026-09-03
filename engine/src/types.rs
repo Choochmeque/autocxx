@@ -281,11 +281,40 @@ fn validate_str_ok_for_rust(label: &str) -> Result<(), InvalidIdentError> {
 }
 
 /// When we're given a name like `some_function_bindgen_original1` returns
-/// `some_function1`
+/// `some_function_autocxx_dedup_1`
 pub(crate) fn strip_bindgen_original_suffix(effective_fun_name: &str) -> String {
     let bindgen_original_re = regex_static::static_regex!(r"(.*)_bindgen_original(\d*)");
     bindgen_original_re
         .captures(effective_fun_name)
+        .map(|m| {
+            let stem = m.get(1).unwrap().as_str();
+            let overload_digits = m.get(2).unwrap().as_str();
+            if overload_digits.is_empty() {
+                stem.to_string()
+            } else {
+                // bindgen appended digits to disambiguate an overload.
+                // Do NOT reconstruct this as `{stem}{digits}`: that can
+                // collide with a *real* function of that name (e.g.
+                // overloads of `byteSwap` colliding with an actual
+                // `byteSwap2`), whereupon ApiVec's duplicate handling
+                // silently drops both. See google/autocxx#1316. This
+                // name is engine-internal (user-visible names come from
+                // the C++ original-name annotation plus the overload
+                // tracker), so make it collision-proof by construction.
+                format!("{stem}_autocxx_dedup_{overload_digits}")
+            }
+        })
+        .unwrap_or_else(|| effective_fun_name.to_string())
+}
+
+/// Convert an internal dedup name (`{stem}_autocxx_dedup_{N}`) back to
+/// the form users have historically written in allowlists for
+/// bindgen-renamed overloads (`{stem}{N}`), e.g. for `generate!("daft1")`.
+/// Names without the dedup marker are returned unchanged.
+pub(crate) fn dedup_name_to_allowlist_form(name: &str) -> String {
+    let dedup_re = regex_static::static_regex!(r"(.*)_autocxx_dedup_(\d+)$");
+    dedup_re
+        .captures(name)
         .map(|m| {
             format!(
                 "{}{}",
@@ -293,11 +322,11 @@ pub(crate) fn strip_bindgen_original_suffix(effective_fun_name: &str) -> String 
                 m.get(2).unwrap().as_str()
             )
         })
-        .unwrap_or_else(|| effective_fun_name.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// When we're given a name like `some_function_bindgen_original1` returns
-/// `some_function1`
+/// `some_function_autocxx_dedup_1`
 pub(crate) fn strip_bindgen_original_suffix_from_ident(
     effective_fun_name: &syn::Ident,
 ) -> syn::Ident {
@@ -331,11 +360,17 @@ mod tests {
         assert_eq!(strip_bindgen_original_suffix("foo_bindgen_original"), "foo");
         assert_eq!(
             strip_bindgen_original_suffix("foo_bindgen_original1"),
-            "foo1"
+            "foo_autocxx_dedup_1"
         );
         assert_eq!(
             strip_bindgen_original_suffix("foo_bindgen_original1234"),
-            "foo1234"
+            "foo_autocxx_dedup_1234"
+        );
+        // The reconstruction must never equal a plausible real
+        // function name: a real foo1 strips to itself.
+        assert_ne!(
+            strip_bindgen_original_suffix("foo_bindgen_original1"),
+            strip_bindgen_original_suffix("foo1_bindgen_original")
         );
     }
 }
