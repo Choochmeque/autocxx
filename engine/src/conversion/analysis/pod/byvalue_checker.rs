@@ -109,6 +109,19 @@ impl ByValueChecker {
                             _ => None,
                         },
                     };
+                    // A typedef to a raw pointer is trivially
+                    // copyable regardless of pointee, exactly like a
+                    // directly written pointer field; previously it
+                    // fell through to "typedef to a complex type" and
+                    // poisoned containing PODs. See google/autocxx#1368.
+                    let target_is_pointer = match analysis.kind {
+                        TypedefKind::Type(ref type_item) => {
+                            matches!(type_item.ty.as_ref(), Type::Ptr(_))
+                        }
+                        TypedefKind::Use(ref ty) => {
+                            matches!(**ty, crate::minisyn::Type(Type::Ptr(_)))
+                        }
+                    };
                     match &typedef_type {
                         Some(typ) => {
                             byvalue_checker.results.insert(
@@ -117,6 +130,11 @@ impl ByValueChecker {
                                     QualifiedName::from_type_path(typ),
                                 )),
                             );
+                        }
+                        None if target_is_pointer => {
+                            byvalue_checker
+                                .results
+                                .insert(name.clone(), StructDetails::new(PodState::IsPod));
                         }
                         None => byvalue_checker.ingest_nonpod_type(name.clone()),
                     }

@@ -323,12 +323,16 @@ impl<'a> TypeConverter<'a> {
                 (resolved_tp.clone(), resolved_tn)
             }
             Some(Type::Ptr(resolved_tp)) => {
-                return Ok(Annotated::new(
-                    Type::Ptr(resolved_tp.clone()),
-                    deps,
-                    ApiVec::new(),
-                    TypeKind::Pointer,
-                ))
+                // The typedef resolves to a pointer. Its pointee may
+                // itself involve typedefs (e.g. typedef char C;
+                // typedef C* S;), so convert it like any directly
+                // written pointer instead of passing it through
+                // verbatim — otherwise the unresolved pointee name
+                // reaches cxx and generation fails with
+                // "unsupported type". See google/autocxx#1368.
+                let mut annotated = self.convert_ptr(resolved_tp.clone(), ns)?;
+                annotated.types_encountered.extend(deps);
+                return Ok(annotated);
             }
             Some(other) => {
                 return Ok(Annotated::new(
