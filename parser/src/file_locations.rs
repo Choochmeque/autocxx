@@ -146,8 +146,30 @@ impl FileLocationStrategy {
             println!(
                 "cargo:rustc-env={}={}",
                 AUTOCXX_RS,
-                self.get_rs_dir().to_str().unwrap()
+                self.get_rs_dir_for_macro().to_str().unwrap()
             );
+        }
+    }
+
+    /// The Rust generation directory in the form the procedural macro
+    /// must receive it: absolute. A relative `custom_gendir` is
+    /// interpreted relative to the build script's working directory
+    /// (the package manifest directory, per cargo's contract), but the
+    /// macro would pass a relative path into `include!`, which rustc
+    /// resolves relative to the *source file containing the macro* —
+    /// producing doubled paths like `src/src/...`. See
+    /// google/autocxx#1499.
+    fn get_rs_dir_for_macro(&self) -> PathBuf {
+        Self::absolutize(self.get_rs_dir())
+    }
+
+    fn absolutize(path: PathBuf) -> PathBuf {
+        if path.is_relative() {
+            std::env::current_dir()
+                .expect("could not determine current directory to absolutize custom_gendir")
+                .join(path)
+        } else {
+            path
         }
     }
 }
@@ -155,5 +177,53 @@ impl FileLocationStrategy {
 impl Default for FileLocationStrategy {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileLocationStrategy;
+    use std::path::PathBuf;
+
+    fn rs_dir_for_macro(gendir: &str) -> PathBuf {
+        FileLocationStrategy::Custom(PathBuf::from(gendir)).get_rs_dir_for_macro()
+    }
+
+    #[test]
+    fn test_relative_gendir_becomes_absolute() {
+        // google/autocxx#1499: a relative custom_gendir must reach the
+        // macro as an absolute path, else include! resolves it
+        // relative to the source file and doubles the prefix.
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            rs_dir_for_macro("src/subdirectory"),
+            cwd.join("src/subdirectory").join("rs")
+        );
+        assert_eq!(rs_dir_for_macro("gen"), cwd.join("gen").join("rs"));
+        assert_eq!(rs_dir_for_macro("./gen"), cwd.join("./gen").join("rs"));
+        assert_eq!(
+            rs_dir_for_macro("a/b/../c"),
+            cwd.join("a/b/../c").join("rs")
+        );
+        assert_eq!(
+            rs_dir_for_macro("dir with space"),
+            cwd.join("dir with space").join("rs")
+        );
+    }
+
+    #[test]
+    fn test_absolute_gendir_unchanged() {
+        let abs = if cfg!(windows) {
+            "C:\\some\\gendir"
+        } else {
+            "/some/gendir"
+        };
+        assert_eq!(rs_dir_for_macro(abs), PathBuf::from(abs).join("rs"));
+    }
+
+    #[test]
+    fn test_result_is_absolute() {
+        assert!(rs_dir_for_macro("anything").is_absolute());
+        assert!(rs_dir_for_macro("a/b/c").is_absolute());
     }
 }
