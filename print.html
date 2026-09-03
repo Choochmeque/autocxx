@@ -323,7 +323,9 @@ context, where you may be dealing with <code>UniquePtr&lt;T&gt;</code> and <code
 <p>This bit is important.</p>
 <p>When you use <code>autocxx</code>, you'll ask it to generate Rust bindings for <a href="allowlist.html">C++ types or functions</a> using
 <code>generate!</code> directives.</p>
-<p>If you ask to generate bindings for a specific function, and it can't: the build will fail.</p>
+<p>If you name something specifically in a <code>generate!</code> or <code>generate_pod!</code> directive - a function
+or a type - and <code>autocxx</code> can't generate bindings for it: the build will fail, and the error
+will say what stopped it.</p>
 <p>If you ask to generate bindings for an entire type, <code>autocxx</code> will generate bindings for as
 many methods as possible. For those methods where it can't generate bindings, it will instead
 generate some placeholder function or struct with documentation explaining what went wrong:</p>
@@ -428,7 +430,9 @@ be generated, some placeholder item with explanatory documentation <a href="work
 <p>Various other directives are possible inside this macro, most notably:</p>
 <ul>
 <li>You can ask to generate all the items in a namespace using
-<a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_ns.html"><code>generate_ns!</code></a></li>
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_ns.html"><code>generate_ns!</code></a>. Unlike
+<code>generate!</code>, whole-namespace generation is tolerant: items which can't be generated get a
+placeholder, whereas anything you name explicitly and which can't be generated fails the build.</li>
 <li>You might sometimes want to ask that a type is generated as 'plain old data' using
 <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a> instead of <code>generate!</code> -
 see the chapter on <a href="cpp_types.html">C++ types</a>.</li>
