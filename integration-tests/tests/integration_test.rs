@@ -10444,6 +10444,232 @@ fn test_emplace_uses_overridden_new_and_delete() {
     );
 }
 
+// https://github.com/google/autocxx/issues/1342
+// A class-specific operator new hides the global placement form, so the
+// generated C++ must say `::new (ptr) T(...)` rather than `new (ptr) T(...)`.
+#[test]
+fn test_ctor_with_class_specific_operator_new() {
+    let hdr = indoc! {"
+    #include <stddef.h>
+    #include <stdint.h>
+    #include <string>
+    struct A {
+        A() : count(0) {}
+        void set(uint32_t val) { count = val; }
+        uint32_t get() const { return count; }
+        void* operator new(size_t count);
+        void operator delete(void* ptr) noexcept;
+        uint32_t count;
+        std::string so_we_are_non_trivial;
+    };
+    "};
+    let cxx = indoc! {"
+        void* A::operator new(size_t count) {
+            return ::operator new(count);
+        }
+        void A::operator delete(void* ptr) noexcept {
+            ::operator delete(ptr);
+        }
+    "};
+    let rs = quote! {
+        let mut up_obj = ffi::A::new().within_unique_ptr();
+        up_obj.pin_mut().set(42);
+        assert_eq!(up_obj.get(), 42);
+        moveit! { let mut stack_obj = ffi::A::new(); }
+        stack_obj.as_mut().set(43);
+        assert_eq!(stack_obj.get(), 43);
+    };
+    run_test(cxx, hdr, rs, &["A"], &[]);
+}
+
+// https://github.com/google/autocxx/issues/1342
+#[test]
+fn test_ctor_with_deleted_class_specific_placement_new() {
+    let hdr = indoc! {"
+    #include <stddef.h>
+    #include <stdint.h>
+    #include <string>
+    struct A {
+        A() : count(0) {}
+        void set(uint32_t val) { count = val; }
+        uint32_t get() const { return count; }
+        void* operator new(size_t count, void* ptr) = delete;
+        uint32_t count;
+        std::string so_we_are_non_trivial;
+    };
+    "};
+    let rs = quote! {
+        let mut up_obj = ffi::A::new().within_unique_ptr();
+        up_obj.pin_mut().set(42);
+        assert_eq!(up_obj.get(), 42);
+        moveit! { let mut stack_obj = ffi::A::new(); }
+        stack_obj.as_mut().set(43);
+        assert_eq!(stack_obj.get(), 43);
+    };
+    run_test("", hdr, rs, &["A"], &[]);
+}
+
+// https://github.com/google/autocxx/issues/1342
+#[test]
+fn test_ctor_with_private_class_specific_placement_new() {
+    let hdr = indoc! {"
+    #include <stddef.h>
+    #include <stdint.h>
+    #include <string>
+    class A {
+    public:
+        A() : count(0) {}
+        void set(uint32_t val) { count = val; }
+        uint32_t get() const { return count; }
+        uint32_t count;
+        std::string so_we_are_non_trivial;
+    private:
+        void* operator new(size_t count, void* ptr);
+    };
+    "};
+    let rs = quote! {
+        let mut up_obj = ffi::A::new().within_unique_ptr();
+        up_obj.pin_mut().set(42);
+        assert_eq!(up_obj.get(), 42);
+    };
+    run_test("", hdr, rs, &["A"], &[]);
+}
+
+// https://github.com/google/autocxx/issues/1342
+// The class-specific operator new is declared on a base class; the derived
+// class inherits it and so also hides the global placement form.
+#[test]
+fn test_ctor_with_inherited_class_specific_operator_new() {
+    let hdr = indoc! {"
+    #include <stddef.h>
+    #include <stdint.h>
+    #include <string>
+    struct Base {
+        void* operator new(size_t count);
+        void operator delete(void* ptr) noexcept;
+    };
+    struct A : public Base {
+        A() : count(0) {}
+        A(uint32_t val) : count(val) {}
+        void set(uint32_t val) { count = val; }
+        uint32_t get() const { return count; }
+        uint32_t count;
+        std::string so_we_are_non_trivial;
+    };
+    "};
+    let cxx = indoc! {"
+        void* Base::operator new(size_t count) {
+            return ::operator new(count);
+        }
+        void Base::operator delete(void* ptr) noexcept {
+            ::operator delete(ptr);
+        }
+    "};
+    let rs = quote! {
+        let mut up_obj = ffi::A::new().within_unique_ptr();
+        up_obj.pin_mut().set(42);
+        assert_eq!(up_obj.get(), 42);
+        let boxed_obj = ffi::A::new1(12).within_box();
+        assert_eq!(boxed_obj.get(), 12);
+    };
+    run_test(cxx, hdr, rs, &["A"], &[]);
+}
+
+// https://github.com/google/autocxx/issues/1342
+// The other placement-new emission site: a function returning by value into a
+// caller-provided slot.
+#[test]
+fn test_return_by_value_with_class_specific_operator_new() {
+    let hdr = indoc! {"
+    #include <stddef.h>
+    #include <stdint.h>
+    #include <string>
+    struct A {
+        A() : count(0) {}
+        A(const A& other) : count(other.count), so_we_are_non_trivial(other.so_we_are_non_trivial) {}
+        uint32_t get() const { return count; }
+        void* operator new(size_t count);
+        void operator delete(void* ptr) noexcept;
+        uint32_t count;
+        std::string so_we_are_non_trivial;
+    };
+    A make_a();
+    "};
+    let cxx = indoc! {"
+        void* A::operator new(size_t count) {
+            return ::operator new(count);
+        }
+        void A::operator delete(void* ptr) noexcept {
+            ::operator delete(ptr);
+        }
+        A make_a() {
+            A a;
+            a.count = 7;
+            return a;
+        }
+    "};
+    let rs = quote! {
+        let obj = ffi::make_a().within_unique_ptr();
+        assert_eq!(obj.get(), 7);
+    };
+    run_test(cxx, hdr, rs, &["A", "make_a"], &[]);
+}
+
+// https://github.com/google/autocxx/issues/1342
+// The subclass machinery also constructs its C++ peer via placement new.
+#[test]
+fn test_subclass_with_class_specific_operator_new() {
+    let hdr = indoc! {"
+    #include <stddef.h>
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const = 0;
+        virtual ~Observer() {}
+        void* operator new(size_t count);
+        void operator delete(void* ptr) noexcept;
+    };
+    inline void bar() {}
+    "};
+    let cxx = indoc! {"
+        void* Observer::operator new(size_t count) {
+            return ::operator new(count);
+        }
+        void Observer::operator delete(void* ptr) noexcept {
+            ::operator delete(ptr);
+        }
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().a, 3);
+        },
+        quote! {
+            generate!("bar")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    self.a
+                }
+            }
+        }),
+    );
+}
+
 #[test]
 fn test_pass_by_reference_to_value_param() {
     let hdr = indoc! {"

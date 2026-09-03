@@ -471,6 +471,9 @@ impl<'a> CppCodeGenerator<'a> {
         } else {
             arg_list.join(", ")
         };
+        // Whether we emit a global placement new, and therefore need <new> for
+        // its declaration.
+        let mut need_placement_new = false;
         let (mut underlying_function_call, field_assignments, need_allocators) = match &details
             .payload
         {
@@ -478,8 +481,15 @@ impl<'a> CppCodeGenerator<'a> {
             CppFunctionBody::PlacementNew(ns, id) => {
                 let ty_id = QualifiedName::new(ns, id.clone());
                 let ty_id = self.namespaced_name(&ty_id);
+                // `::new` (not plain `new`) so that we always get the global
+                // placement operator new from <new>. A class-specific
+                // `operator new` hides all the global forms, including the
+                // placement one, so unqualified `new (ptr) T(...)` would either
+                // fail to compile or call the wrong operator.
+                // https://github.com/google/autocxx/issues/1342
+                need_placement_new = true;
                 (
-                    format!("new ({}) {}({})", receiver.unwrap(), ty_id, arg_list),
+                    format!("::new ({}) {}({})", receiver.unwrap(), ty_id, arg_list),
                     "".to_string(),
                     false,
                 )
@@ -591,7 +601,9 @@ impl<'a> CppCodeGenerator<'a> {
             underlying_function_call = match placement_param {
                 Some(placement_param) => {
                     let tyname = self.original_name_map.type_to_cpp(ret.cxxbridge_type())?;
-                    format!("new({placement_param}) {tyname}({call_itself})")
+                    // `::new` for the same reason as in `PlacementNew` above.
+                    need_placement_new = true;
+                    format!("::new({placement_param}) {tyname}({call_itself})")
                 }
                 None => format!("return {call_itself}"),
             };
@@ -623,6 +635,9 @@ impl<'a> CppCodeGenerator<'a> {
             )
         };
         let mut headers = vec![Header::System("memory")];
+        if need_placement_new {
+            headers.push(Header::System("new"));
+        }
         if need_allocators {
             headers.push(Header::System("stddef.h"));
             headers.push(Header::NewDeletePrelude);
