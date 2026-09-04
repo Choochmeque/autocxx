@@ -50,7 +50,7 @@ Constructing a non-POD object requires two steps.
 | --------------------------- | ---------------- | ------------ | ------- |
 | C++ heap (*recommended for simplicity*) | [`Within.within_unique_ptr()`](https://docs.rs/autocxx/latest/autocxx/trait.Within.html) or [`UniquePtr::emplace`](https://docs.rs/moveit/latest/moveit/new/trait.EmplaceUnpinned.html#method.emplace) | [`cxx::UniquePtr<T>`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html) | `let mut obj = ffi::Goldfish::new().within_unique_ptr()` or `let mut obj = UniquePtr::emplace(ffi::Goldfish::new())` |
 | Rust heap | [`Within.within_box()`](https://docs.rs/autocxx/latest/autocxx/trait.Within.html) or [`Box::emplace`](https://docs.rs/moveit/latest/moveit/new/trait.Emplace.html#method.emplace) | `Pin<Box<T>>` | `let mut obj = ffi::Goldfish::new().within_box()` or `let mut obj = Box::emplace(ffi::Goldfish::new())` |
-| Rust stack | [`moveit` macro](https://docs.rs/moveit/latest/moveit/macro.moveit.html) | `&mut T` (more or less) | `moveit! { let mut obj = ffi::Goldfish::new() }` |
+| Rust stack | [`moveit` macro](https://docs.rs/moveit/latest/moveit/macro.moveit.html) | `Pin<MoveRef<T>>` | `moveit! { let mut obj = ffi::Goldfish::new() }` |
 
 For heap construction, the prefix (`emplace`) and postfix (`.within_...`) forms are exactly identical. Choose whichever suits your needs best.
 

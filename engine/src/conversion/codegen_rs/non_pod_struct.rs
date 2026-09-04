@@ -23,7 +23,16 @@ use quote::quote;
 // (see https://doc.rust-lang.org/1.47.0/reference/behavior-considered-undefined.html).
 // Rustc can use least-significant bits of the reference for other storage.
 // (if we have layout information from bindgen we use that instead)
-// (2) We want to ensure the type is !Unpin
+// (2) We want to ensure the type is !Unpin. This is load-bearing for
+// soundness, not just ergonomics: a non-POD C++ type is not necessarily
+// trivially relocatable (libstdc++'s std::string, for instance, stores a
+// pointer to its own inline SSO buffer), so moving one bitwise within Rust
+// memory corrupts it. Rust hands out `&mut T` freely once `T: Unpin`, and
+// safe code can then call `core::mem::swap`, which is exactly such a bitwise
+// move. The `_pinned` field below is what actually makes the type !Unpin;
+// without it the type would inherit Unpin from the bindgen struct (whose
+// fields are plain pointers and byte arrays) and safe Rust could corrupt
+// C++ objects with no `unsafe` anywhere. See google/autocxx#1265.
 // (3) We want to ensure it's not Send or Sync
 // In addition, we want to avoid UB:
 // (4) By marking the data as MaybeUninit we ensure there's no UB
@@ -90,6 +99,9 @@ pub(super) fn generate_opaque_type(
         #(#doc_attrs)*
         pub struct #final_name #generics {
             _hidden_contents: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<#(#segs)::* #generics>>,
+            // Zero-sized, so `repr(transparent)` still applies to the field
+            // above; its only job is to make this type !Unpin. See note (2).
+            _pinned: ::core::marker::PhantomData<::core::marker::PhantomPinned>,
         }
     })
 }
