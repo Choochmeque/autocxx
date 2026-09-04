@@ -356,7 +356,7 @@ fn handle_code_block(
     output.into_iter()
 }
 
-fn extract_span(text: &[String], span: Span) -> Cow<str> {
+fn extract_span(text: &[String], span: Span) -> Cow<'_, str> {
     let start_line = span.start().line - 1;
     let start_col = span.start().column;
     let end_line = span.end().line - 1;
@@ -376,7 +376,7 @@ fn extract_span(text: &[String], span: Span) -> Cow<str> {
     }
 }
 
-fn escape_hexathorpes(input: &str) -> Cow<str> {
+fn escape_hexathorpes(input: &str) -> Cow<'_, str> {
     let re = regex::Regex::new(r"(?m)^(?P<ws>\s*)#(?P<c>.*)").unwrap();
     re.replace_all(input, "$ws##$c")
 }
