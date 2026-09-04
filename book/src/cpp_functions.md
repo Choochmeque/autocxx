@@ -264,3 +264,42 @@ fn main() {
 }
 )
 ```
+
+## Ref-qualified methods
+
+A method qualified with `&` is called just like any other method - autocxx
+always has an lvalue to call it on, so the qualifier makes no difference to
+how you use it.
+
+```rust,ignore,autocxx,hidecpp
+autocxx_integration_tests::doctest(
+"",
+"
+#include <cstdint>
+class Sloth {
+public:
+    uint32_t claws() const & { return 3; }
+};
+",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("Sloth")
+}
+
+fn main() {
+    let sloth = ffi::Sloth::new().within_unique_ptr();
+    assert_eq!(sloth.claws(), 3);
+}
+}
+)
+```
+
+A method qualified with `&&` is a different matter: it can only be called on an
+object which is about to be discarded, and autocxx only ever holds a C++ object
+behind a reference or a smart pointer. There's no way to express that, so no
+bindings are generated for such methods. The rest of the type is unaffected,
+and the generated code carries an explanation where the method would have been.

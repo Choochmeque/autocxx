@@ -6505,16 +6505,282 @@ fn test_blocklist_not_overly_broad() {
     run_test("", hdr, rs, &["rust_func", "std_func"], &[]);
 }
 
+// The following tests concern C++ ref-qualified methods, i.e.
+// `void foo() &` and `void foo() &&` - google/autocxx#837.
+//
+// `&`-qualified methods work, because autocxx always has an lvalue to call
+// them on. `&&`-qualified methods can't: they're only callable on an object
+// which is about to be discarded, and autocxx only ever holds a C++ object
+// behind a reference or a smart pointer. Those are therefore skipped, with an
+// explanation in the generated docs.
+//
+// bindgen doesn't tell us which methods are ref-qualified, so we work it out
+// from the mangled name; see engine/src/conversion/parse/ref_qualifier.rs.
+
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/837
 fn test_ref_qualified_method() {
     let hdr = indoc! {"
+        #include <cstdint>
         struct A {
-            void foo() & {}
+            uint32_t foo() & { return 4; }
         };
     "};
     let rs = quote! {
-        A::new().within_unique_ptr().foo();
+        assert_eq!(ffi::A::new().within_unique_ptr().pin_mut().foo(), 4);
+    };
+    run_test("", hdr, rs, &["A"], &[]);
+}
+
+#[test]
+fn test_const_ref_qualified_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            uint32_t foo() const & { return 4; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::A::new().within_unique_ptr().foo(), 4);
+    };
+    run_test("", hdr, rs, &["A"], &[]);
+}
+
+#[test]
+fn test_rvalue_ref_qualified_method_skipped() {
+    // The `&&`-qualified method can't be generated, but that must not stop us
+    // generating the type or its other methods, and the reason must appear in
+    // the generated code rather than the method silently vanishing.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            uint32_t rvalue_only() && { return 1; }
+            uint32_t lvalue_only() & { return 2; }
+            uint32_t plain() { return 3; }
+            uint32_t plain_const() const { return 4; }
+            static uint32_t stat() { return 5; }
+        };
+    "};
+    let rs = quote! {
+        let mut a = ffi::A::new().within_unique_ptr();
+        assert_eq!(a.pin_mut().lvalue_only(), 2);
+        assert_eq!(a.pin_mut().plain(), 3);
+        assert_eq!(a.plain_const(), 4);
+        assert_eq!(ffi::A::stat(), 5);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["A"], &[], None),
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            fn rvalue_only(_uhoh: autocxx::BindingGenerationFailure) {}
+        }])),
+        None,
+    );
+}
+
+#[test]
+fn test_only_method_is_rvalue_ref_qualified() {
+    // An explicit `generate!` for a type whose *only* method we can't generate
+    // must still succeed: the type itself is generated, so the directive is
+    // obeyed and we don't trip the "didn't generate anything usable" check.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            uint32_t rvalue_only() && { return 1; }
+        };
+    "};
+    let rs = quote! {
+        let _a = ffi::A::new().within_unique_ptr();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["A"], &[], None),
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            fn rvalue_only(_uhoh: autocxx::BindingGenerationFailure) {}
+        }])),
+        None,
+    );
+}
+
+#[test]
+fn test_const_rvalue_ref_qualified_method_skipped() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            uint32_t rvalue_only() const && { return 1; }
+            uint32_t plain() const { return 2; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::A::new().within_unique_ptr().plain(), 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["A"], &[], None),
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            fn rvalue_only(_uhoh: autocxx::BindingGenerationFailure) {}
+        }])),
+        None,
+    );
+}
+
+#[test]
+fn test_ref_qualified_overload() {
+    // The idiomatic use of ref-qualifiers: one overload for lvalues and one
+    // for rvalues, as `std::optional::value` does. We should keep the lvalue
+    // one and discard the other.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            uint32_t get() & { return 1; }
+            uint32_t get() && { return 2; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::A::new().within_unique_ptr().pin_mut().get(), 1);
+    };
+    run_test("", hdr, rs, &["A"], &[]);
+}
+
+#[test]
+fn test_ref_qualified_method_in_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace ns {
+            struct A {
+                uint32_t foo() & { return 4; }
+                uint32_t bar() && { return 5; }
+            };
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::ns::A::new().within_unique_ptr().pin_mut().foo(), 4);
+    };
+    run_test("", hdr, rs, &["ns::A"], &[]);
+}
+
+#[test]
+fn test_subclass_ref_qualified_virtual_method() {
+    // Subclassing a class whose virtual methods are ref-qualified: the C++
+    // override we generate has to repeat the ref-qualifier, or it doesn't
+    // override anything and doesn't even compile. The `&&`-qualified method
+    // here is non-pure, so it drops out along with its `_super` helper; see
+    // test_subclass_pure_virtual_rvalue_ref_qualified_method for the pure
+    // case, where the override stays.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t pure_lvalue() const & = 0;
+        virtual uint32_t default_lvalue() const & { return 2; }
+        virtual uint32_t rvalue_only() const && { return 3; }
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_pure(const Observer& o) { return o.pure_lvalue(); }
+    inline uint32_t call_default(const Observer& o) { return o.default_lvalue(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_pure(o.borrow().as_ref()), 7);
+            assert_eq!(ffi::call_default(o.borrow().as_ref()), 2);
+        },
+        quote! {
+            generate!("call_pure")
+            generate!("call_default")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn pure_lvalue(&self) -> u32 {
+                    7
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_pure_virtual_rvalue_ref_qualified_method() {
+    // A *pure* virtual `&&`-qualified method is a different case from the
+    // non-pure one. autocxx generates no Rust binding for calling it, but the
+    // subclass must still override it or it can't be instantiated - and there
+    // is no `_super` helper for a pure virtual, so nothing forces the override
+    // out. The override keeps the `&&` and dispatches C++ -> Rust as usual.
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <utility>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t rvalue_only() const && = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_rvalue_only(const Observer& o) {
+        return std::move(o).rvalue_only();
+    }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_rvalue_only(o.borrow().as_ref()), 9);
+        },
+        quote! {
+            generate!("call_rvalue_only")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn rvalue_only(&self) -> u32 {
+                    9
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_ref_qualified_virtual_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class A {
+        public:
+            virtual ~A() {}
+            virtual uint32_t foo() & { return 4; }
+            virtual uint32_t bar() && { return 5; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::A::new().within_unique_ptr().pin_mut().foo(), 4);
     };
     run_test("", hdr, rs, &["A"], &[]);
 }

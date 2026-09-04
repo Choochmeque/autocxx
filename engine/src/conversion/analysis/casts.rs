@@ -15,6 +15,7 @@ use crate::{
     conversion::{
         api::{Api, ApiName, CastMutability, Provenance, TraitSynthesis},
         apivec::ApiVec,
+        parse::CppRefQualifier,
     },
     types::{make_ident, QualifiedName},
 };
@@ -114,6 +115,7 @@ fn create_cast(from: &QualifiedName, to: &QualifiedName, mutable: CastMutability
             is_deleted: None,
             provenance: Provenance::SynthesizedOther,
             variadic: false,
+            ref_qualifier: CppRefQualifier::None,
         }),
         analysis: (),
     }

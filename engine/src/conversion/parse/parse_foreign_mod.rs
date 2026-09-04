@@ -23,7 +23,12 @@ use crate::{
     types::{Namespace, QualifiedName},
 };
 use std::collections::HashMap;
-use syn::{Block, Expr, ExprCall, ForeignItem, Ident, ImplItem, ItemImpl, Stmt, Type};
+use syn::{
+    Attribute, Block, Expr, ExprCall, ExprLit, ForeignItem, Ident, ImplItem, ItemImpl, Lit, Meta,
+    MetaNameValue, Stmt, Type,
+};
+
+use super::ref_qualifier::{ref_qualifier_from_mangled_name, CppRefQualifier};
 
 /// Parses a given bindgen-generated 'mod' into suitable
 /// [Api]s. In bindgen output, a given mod concerns
@@ -90,6 +95,7 @@ impl<'a> ParseForeignMod<'a> {
                     is_deleted: self.parse_callback_results.get_deleted_or_defaulted(&qn),
                     synthetic_cpp: None,
                     variadic: item.sig.variadic.is_some(),
+                    ref_qualifier: ref_qualifier_from_attrs(&item.attrs),
                 });
                 Ok(())
             }
@@ -146,6 +152,33 @@ impl<'a> ParseForeignMod<'a> {
             })
         }
     }
+}
+
+/// Work out whether a function is ref-qualified (`void foo() &` /
+/// `void foo() &&`).
+///
+/// bindgen has no idea about ref-qualifiers, so its Rust output for a
+/// ref-qualified method is identical to that for an unqualified one. The
+/// mangled name in the `#[link_name]` attribute is the only place the
+/// information survives, so that's where we look. See
+/// [`super::ref_qualifier`] for the gory details.
+fn ref_qualifier_from_attrs(attrs: &[Attribute]) -> CppRefQualifier {
+    attrs
+        .iter()
+        .find_map(|attr| match &attr.meta {
+            Meta::NameValue(MetaNameValue {
+                path,
+                value:
+                    Expr::Lit(ExprLit {
+                        lit: Lit::Str(link_name),
+                        ..
+                    }),
+                ..
+            }) if path.is_ident("link_name") => Some(link_name.value()),
+            _ => None,
+        })
+        .map(|link_name| ref_qualifier_from_mangled_name(&link_name))
+        .unwrap_or_default()
 }
 
 /// bindgen sometimes generates an impl fn called a which calls

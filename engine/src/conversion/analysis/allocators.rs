@@ -14,6 +14,7 @@ use crate::{
     conversion::{
         api::{Api, ApiName, CppVisibility, FuncToConvert, Provenance, TraitSynthesis},
         apivec::ApiVec,
+        parse::CppRefQualifier,
     },
     minisyn::minisynize_punctuated,
     types::{make_ident, QualifiedName},
@@ -88,6 +89,7 @@ fn create_alloc_and_free(ty_name: QualifiedName) -> impl Iterator<Item = Api<Pod
                     is_deleted: None,
                     provenance: Provenance::SynthesizedOther,
                     variadic: false,
+                    ref_qualifier: CppRefQualifier::None,
                 }),
                 analysis: (),
             }
