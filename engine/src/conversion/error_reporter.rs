@@ -37,8 +37,12 @@ where
             None
         }
         Err(ConvertErrorWithContext(err, Some(ctx))) => {
+            // The sanitized name, deliberately: this becomes the API's own
+            // name, and an API named after something autocxx builds in
+            // would collide with the very type sanitization avoids.
             let id = match ctx.get_type() {
-                ErrorContextType::Item(id) | ErrorContextType::SanitizedItem(id) => id,
+                ErrorContextType::Item(id)
+                | ErrorContextType::SanitizedItem { display: id, .. } => id,
                 ErrorContextType::Method { self_ty, .. } => self_ty,
             };
             let name = ApiName::new_from_qualified_name(QualifiedName::new(ns, id.clone()));

@@ -2522,14 +2522,9 @@ fn test_overload_numeric_functions_discarded_overload_still_errors() {
     // pp2 is a name an overload really does get (the second pp, numbered
     // around the real pp1), but that overload is discarded during analysis
     // because we can't handle char16_t. Deferring the check on such a
-    // directive past the parse phase must not let that pass silently.
-    //
-    // The error doesn't say *why* it was discarded. That's a pre-existing
-    // limitation with nothing to do with overloads: a function needing a
-    // C++ wrapper carries the wrapper's name in its error context, so the
-    // item is garbage collected before the check can attribute a reason to
-    // it. Plain take_my_char in test_typedef_to_char16 loses the reason in
-    // exactly the same way.
+    // directive past the parse phase must not let that pass silently, and
+    // the error must name pp2 - the name the user wrote - even though the
+    // discarded API is internally called after the C++ wrapper it needed.
     let hdr = indoc! {"
         #include <cstdint>
         typedef char16_t my_char;
@@ -2543,7 +2538,7 @@ fn test_overload_numeric_functions_discarded_overload_still_errors() {
         quote! {},
         &["pp", "pp1", "pp2"],
         &[],
-        "DidNotGenerateAnything(\"pp2\")",
+        "DidNotGenerateAnythingUsable(\"pp2\", UnknownDependentType(",
     );
 }
 
@@ -8562,12 +8557,157 @@ fn test_typedef_to_char16() {
     // `bindgen_cchar16_t` is neither a known type nor an API of its own, so
     // the function is discarded during analysis. That used to pass silently;
     // since google/autocxx#1269 an explicitly requested item which generates
-    // nothing is reported instead.
+    // nothing is reported instead, naming the reason it was discarded.
     let hdr = indoc! {"
         typedef char16_t my_char;
         inline void take_my_char(my_char) {}
     "};
-    run_test_expect_fail("", hdr, quote! {}, &["take_my_char"], &[]);
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_my_char"],
+        &[],
+        "DidNotGenerateAnythingUsable(\"take_my_char\", UnknownDependentType(",
+    );
+}
+
+#[test]
+fn test_discarded_wrapper_fn_error_stub_uses_user_facing_name() {
+    // take_my_char needs a C++ wrapper (its char16_t parameter has to be
+    // passed by pointer), so the API's own name is the wrapper's internal
+    // name. When the function is then discarded, the documentation stub
+    // must still be filed under the name the user knows the function by.
+    let hdr = indoc! {"
+        typedef char16_t my_char;
+        inline void take_my_char(my_char) {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(make_error_finder("take_my_char")),
+        None,
+    );
+}
+
+#[test]
+fn test_discarded_wrapper_fn_with_sanitized_name_still_attributed() {
+    // A C++ function whose name collides with a type autocxx builds in
+    // (here Pin) can't have its documentation stub generated under that
+    // name, so the error context holds a scrubbed one. The scrubbed name
+    // must not be what we match the user's directive against, or the
+    // reason for the failure is lost all over again.
+    let hdr = indoc! {"
+        typedef char16_t my_char;
+        inline void Pin(my_char) {}
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["Pin"],
+        &[],
+        "DidNotGenerateAnythingUsable(\"Pin\", UnknownDependentType(",
+    );
+}
+
+#[test]
+fn test_discarded_overload_with_sanitized_name_still_attributed() {
+    // The colliding name need not be one the C++ author chose: the ninth
+    // overload of `i` is numbered `i8`, which is a type autocxx builds in.
+    // On top of the scrubbing above, `to_cpp_name` would render that name
+    // back as `int8_t`, so the item has to offer the Rust name verbatim or
+    // the user's own spelling of the directive never matches it.
+    // `i` is in the directive list because bindgen needs the C++ name to
+    // emit the family at all.
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef char16_t my_char;
+        inline void i(uint8_t) {}
+        inline void i(uint16_t) {}
+        inline void i(uint32_t) {}
+        inline void i(uint64_t) {}
+        inline void i(int8_t) {}
+        inline void i(int16_t) {}
+        inline void i(int32_t) {}
+        inline void i(int64_t) {}
+        inline void i(my_char) {}
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["i", "i8"],
+        &[],
+        "DidNotGenerateAnythingUsable(\"i8\", UnknownDependentType(",
+    );
+}
+
+#[test]
+fn test_discarded_wrapper_fn_with_sanitized_name_stub_stays_scrubbed() {
+    // The other half of the above: the stub itself must keep the scrubbed
+    // name, since that is the whole point of scrubbing it.
+    let hdr = indoc! {"
+        typedef char16_t my_char;
+        inline void Pin(my_char) {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(make_error_finder("Pin_autocxx_error")),
+        None,
+    );
+}
+
+#[test]
+fn test_discarded_wrapper_method_error_stub_uses_user_facing_name() {
+    // As above, but for a method: the stub belongs in an impl block for the
+    // owning type, named after the method rather than after its wrapper. The
+    // type itself is unaffected by the method we couldn't generate, so an
+    // explicit directive for it must still be satisfied.
+    struct FindMethodStub;
+    impl CodeCheckerFns for FindMethodStub {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if !text.contains("fn take_my_char") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "no stub named after the method".into(),
+                ));
+            }
+            if text.contains("take_my_char_autocxx_wrapper") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "stub named after the C++ wrapper".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef char16_t my_char;
+        struct Bob {
+            uint32_t a;
+            void take_my_char(my_char) const {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let b = ffi::Bob { a: 12 };
+            assert_eq!(b.a, 12);
+        },
+        quote! { generate_pod!("Bob") },
+        None,
+        Some(Box::new(FindMethodStub)),
+        None,
+    );
 }
 
 #[test]
