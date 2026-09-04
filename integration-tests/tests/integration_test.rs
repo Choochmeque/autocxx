@@ -5840,7 +5840,14 @@ fn test_type_aliased_anonymous_nested_struct_ignored() {
     run_test("", hdr, rs, &["test::Outer_Struct"], &[]);
 }
 
-#[ignore] // https://github.com/google/autocxx/issues/1251
+/// Types whose names C++ reserves can't be given bindings, but their presence
+/// mustn't stop us generating anything else - and each one they do stop us
+/// generating must get its own explanatory stub (google/autocxx#1251).
+///
+/// `generate_all!` rather than naming these types in `generate!`, because
+/// asking explicitly for a type we can't generate is an error in its own
+/// right, and we want this test to be about the types we sweep up alongside
+/// the ones we can generate.
 #[test]
 fn test_double_underscores_ignored() {
     let hdr = indoc! {"
@@ -5869,21 +5876,7 @@ fn test_double_underscores_ignored() {
         let b = ffi::B::new().within_unique_ptr();
         assert_eq!(b.get_a(), 2);
     };
-    run_test(
-        "",
-        hdr,
-        rs,
-        &[
-            "B",
-            "__default",
-            "__destructor",
-            "__copy",
-            "__copy_operator",
-            "__move",
-            "__move_operator",
-        ],
-        &[],
-    );
+    run_test_ex("", hdr, rs, quote! { generate_all!() }, None, None, None);
 }
 
 // This test fails on Windows gnu but not on Windows msvc
@@ -14057,10 +14050,44 @@ fn test_issue_1096e() {
     run_generate_all_test(hdr);
 }
 
-/// Unclear why minimization resulted in this particular test case.
+/// This is the shape `cxx.h` gives `rust::Str`, one of the types we replace
+/// with something of our own - Rust's `&str`. `generate_all!` finds the
+/// destructor of the C++ class, and we used to generate an `impl Drop for str`
+/// around a C++ `arg0->~rust::Str()` (google/autocxx#1097): a trait impl on a
+/// Rust type we don't own, calling a destructor through a name that isn't the
+/// type's.
+///
+/// The build step is skipped because this header can't be compiled whatever we
+/// generate: declaring `rust::Str` alongside the `cxx.h` every translation
+/// unit of ours includes makes `::rust::Str` genuinely ambiguous to C++.
 #[test]
-#[ignore] // https://github.com/google/autocxx/pull/1097
 fn test_issue_1097() {
+    struct NoBindingsForStr;
+    impl CodeCheckerFns for NoBindingsForStr {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if text.contains("impl Drop for str") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "generated a Drop impl for Rust's str".into(),
+                ));
+            }
+            Ok(())
+        }
+        fn check_cpp(&self, cpp: &[std::path::PathBuf]) -> Result<(), TestError> {
+            for filename in cpp {
+                if std::fs::read_to_string(filename)
+                    .unwrap()
+                    .contains("~rust::Str")
+                {
+                    return Err(TestError::CppCodeExaminationFail);
+                }
+            }
+            Ok(())
+        }
+        fn skip_build(&self) -> bool {
+            true
+        }
+    }
     let hdr = indoc! {"
         namespace rust {
         inline namespace a {
@@ -14071,7 +14098,79 @@ fn test_issue_1097() {
         } // namespace a
         } // namespace rust
     "};
-    run_generate_all_test(hdr);
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(Box::new(NoBindingsForStr)),
+        None,
+    );
+}
+
+/// The name a type shares with one of the types we substitute decides nothing
+/// on its own: `mine::string` is the user's, `std::string` is [`cxx::CxxString`],
+/// and both have to work in the same header (google/autocxx#1097).
+///
+/// A user type named `String` is a different matter - cxx reserves that name
+/// whatever namespace it's in - see `test_class_named_string` and
+/// google/autocxx#1371.
+#[test]
+fn test_user_type_named_like_known_type_in_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        namespace mine {
+        struct string {
+            uint32_t len;
+        };
+        struct holder {
+            string s;
+        };
+        inline uint32_t take_string(string s) { return s.len; }
+        inline string make_string() { string s; s.len = 7; return s; }
+        } // namespace mine
+        inline std::string real_string() { return std::string(\"hi\"); }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::mine::take_string(ffi::mine::string { len: 3 }), 3);
+        assert_eq!(ffi::mine::make_string().len, 7);
+        let h = ffi::mine::holder { s: ffi::mine::string { len: 1 } };
+        assert_eq!(h.s.len, 1);
+        assert_eq!(ffi::real_string().to_str().unwrap(), "hi");
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["mine::take_string", "mine::make_string", "real_string"],
+        &["mine::string", "mine::holder"],
+    );
+}
+
+/// A type of the user's in the global namespace named after one of the types
+/// we substitute is a genuine collision: `bindgen` puts its replacement for
+/// `std::string` in the root mod under that same name, so there is nothing
+/// left to tell the two apart by. All we can do is say so rather than
+/// generating bindings for the wrong one.
+#[test]
+fn test_global_type_named_like_known_type_is_rejected() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct string {
+            uint32_t len;
+        };
+        inline uint32_t take_string(string s) { return s.len; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_string"],
+        &["string"],
+        "DidNotGenerateAnything(\"string\")",
+    );
 }
 
 #[test]

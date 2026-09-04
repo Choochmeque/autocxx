@@ -1170,6 +1170,16 @@ impl<'a> FnAnalyzer<'a> {
             set_ignore_reason(ConvertErrorFromCpp::Deleted)
         } else {
             match kind {
+                // A method whose receiver is one of the types we substitute
+                // for something of our own - `std::string` for
+                // [`cxx::CxxString`], `rust::Str` for `&str` and so on. The
+                // substitute is cxx's to define, so anything we attached to
+                // it would be a method on a Rust type we don't own, or worse
+                // a `Drop`/`CopyNew`/`MoveNew` impl fighting with the one cxx
+                // already provides (google/autocxx#1097). The receiver check
+                // has to cover the special member functions as well as the
+                // ordinary methods, since those are exactly the ones a C++
+                // class declares without the user asking for anything.
                 FnKind::Method {
                     ref impl_for,
                     method_kind:
@@ -1178,7 +1188,10 @@ impl<'a> FnAnalyzer<'a> {
                         | MethodKind::PureVirtual(..)
                         | MethodKind::Virtual(..),
                     ..
-                } if !known_types().is_cxx_acceptable_receiver(impl_for) => {
+                }
+                | FnKind::TraitMethod { ref impl_for, .. }
+                    if !known_types().is_cxx_acceptable_receiver(impl_for) =>
+                {
                     set_ignore_reason(ConvertErrorFromCpp::UnsupportedReceiver);
                 }
                 FnKind::Method { ref impl_for, .. } if !self.is_on_allowlist(impl_for) => {
