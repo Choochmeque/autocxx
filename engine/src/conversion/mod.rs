@@ -311,25 +311,6 @@ impl CppEffectiveName {
     }
 }
 
-/// The names by which an API might satisfy a `generate!` directive.
-/// An API may be known by its own name, or - for things which belong to a
-/// type, such as methods and constructors - by the name of that type.
-/// Names which bindgen renamed to disambiguate overloads additionally
-/// answer to the form users write in allowlists (`daft1` for
-/// `daft_autocxx_dedup_1`).
-fn allowlist_forms_of_name(api: &Api<FnPhase>) -> impl Iterator<Item = String> {
-    [
-        api.name().to_cpp_name(),
-        api.name_for_allowlist().to_cpp_name(),
-    ]
-    .into_iter()
-    .flat_map(|name| {
-        let dedup_form = crate::types::dedup_name_to_allowlist_form(&name);
-        let dedup_form = (dedup_form != name).then_some(dedup_form);
-        std::iter::once(name).chain(dedup_form)
-    })
-}
-
 /// Confirm that each item which the user explicitly asked us to generate
 /// still exists after all the analysis phases have run.
 ///
@@ -353,11 +334,11 @@ fn confirm_all_generate_directives_still_obeyed(
     for api in apis.iter() {
         match api {
             Api::IgnoredItem { err, .. } => {
-                for name in allowlist_forms_of_name(api) {
+                for name in api.allowlist_names() {
                     discarded.entry(name).or_insert(err);
                 }
             }
-            _ => generated.extend(allowlist_forms_of_name(api)),
+            _ => generated.extend(api.allowlist_names()),
         }
     }
     for generate_directive in config.must_generate_list() {

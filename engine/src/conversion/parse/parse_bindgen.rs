@@ -409,37 +409,83 @@ impl<'a> ParseBindgen<'a> {
     }
 
     fn confirm_all_generate_directives_obeyed(&self) -> Result<(), ConvertErrorFromCpp> {
-        let api_names: HashSet<_> = self
-            .apis
-            .iter()
-            .flat_map(|api| {
-                let name = api.name().to_cpp_name();
-                // Internal dedup names (from bindgen overload suffix
-                // reconstruction) also match the legacy user-visible
-                // form, e.g. generate!("daft1") -- but only for
-                // functions genuinely renamed by bindgen (original
-                // C++ name differs), so a real function literally
-                // named x_autocxx_dedup_2 is left alone.
-                let allowlist_form = match api {
-                    Api::Function { fun, .. }
-                        if fun.original_name.as_ref().is_some_and(|original| {
-                            fun.ident != original.to_string_for_rust_name()
-                        }) =>
-                    {
-                        Some(crate::types::dedup_name_to_allowlist_form(&name))
-                    }
-                    _ => None,
-                };
-                std::iter::once(name).chain(allowlist_form)
-            })
-            .collect();
+        let mut api_names: HashSet<String> = HashSet::new();
+        // Names shared by the overloads which bindgen had to rename apart.
+        // An overload's user-visible name is `{stem}{N}`, but which `N` it
+        // gets is not decided until function analysis runs the overload
+        // tracker - which numbers within a scope and skips the names of
+        // real functions, so it need not match bindgen's numbering at all.
+        // We therefore can't check a directive naming an overload here;
+        // note the stems and defer those directives to
+        // `confirm_all_generate_directives_still_obeyed`, which runs once
+        // the real names are known.
+        let mut overloaded_stems: HashSet<String> = HashSet::new();
+        for api in self.apis.iter() {
+            let name = api.name().to_cpp_name();
+            if let Some(stem) = crate::types::dedup_name_stem(&name) {
+                overloaded_stems.insert(stem.to_string());
+            }
+            api_names.insert(name);
+        }
         for generate_directive in self.config.must_generate_list() {
-            if !api_names.contains(&generate_directive) {
+            if !api_names.contains(&generate_directive)
+                && !names_an_overload(&generate_directive, &overloaded_stems)
+            {
                 return Err(ConvertErrorFromCpp::DidNotGenerateAnything(
                     generate_directive,
                 ));
             }
         }
         Ok(())
+    }
+}
+
+/// Whether `directive` could name one of the overloads of a function whose
+/// name is in `overloaded_stems` - that is, whether it's such a name plus a
+/// numeric suffix.
+///
+/// Matched by growing each known stem rather than by trimming digits off
+/// the directive, because the stem may itself end in a digit: the
+/// overloads of a C++ `foo1` are named `foo11`, `foo12` and so on, and
+/// trimming would look for a `foo` which needn't exist.
+fn names_an_overload(directive: &str, overloaded_stems: &HashSet<String>) -> bool {
+    overloaded_stems.iter().any(|stem| {
+        directive
+            .strip_prefix(stem.as_str())
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_an_overload;
+    use indexmap::set::IndexSet as HashSet;
+
+    #[test]
+    fn test_names_an_overload() {
+        let stems: HashSet<String> = ["daft", "N::kk"].iter().map(|s| s.to_string()).collect();
+        assert!(names_an_overload("daft3", &stems));
+        assert!(names_an_overload("daft42", &stems));
+        assert!(names_an_overload("N::kk2", &stems));
+        // The bare name of an overloaded function is a real API name, so
+        // it never needs deferring.
+        assert!(!names_an_overload("daft", &stems));
+        // Nor does anything belonging to a function with no overloads.
+        assert!(!names_an_overload("norma1", &stems));
+        assert!(!names_an_overload("kk2", &stems));
+        assert!(!names_an_overload("daft3x", &stems));
+    }
+
+    #[test]
+    fn test_names_an_overload_of_a_name_ending_in_a_digit() {
+        // The overloads of a C++ foo1 are called foo11, foo12... There is
+        // no function called foo, so the stem can't be found by trimming
+        // digits off the directive.
+        let stems: HashSet<String> = ["foo1"].iter().map(|s| s.to_string()).collect();
+        assert!(names_an_overload("foo11", &stems));
+        assert!(names_an_overload("foo12", &stems));
+        assert!(!names_an_overload("foo1", &stems));
+        assert!(!names_an_overload("foo1x", &stems));
+        assert!(!names_an_overload("foo2", &stems));
     }
 }
