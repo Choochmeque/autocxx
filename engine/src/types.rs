@@ -307,22 +307,18 @@ pub(crate) fn strip_bindgen_original_suffix(effective_fun_name: &str) -> String 
         .unwrap_or_else(|| effective_fun_name.to_string())
 }
 
-/// Convert an internal dedup name (`{stem}_autocxx_dedup_{N}`) back to
-/// the form users have historically written in allowlists for
-/// bindgen-renamed overloads (`{stem}{N}`), e.g. for `generate!("daft1")`.
-/// Names without the dedup marker are returned unchanged.
-pub(crate) fn dedup_name_to_allowlist_form(name: &str) -> String {
-    let dedup_re = regex_static::static_regex!(r"(.*)_autocxx_dedup_(\d+)$");
-    dedup_re
-        .captures(name)
-        .map(|m| {
-            format!(
-                "{}{}",
-                m.get(1).unwrap().as_str(),
-                m.get(2).unwrap().as_str()
-            )
-        })
-        .unwrap_or_else(|| name.to_string())
+/// If this is an internal dedup name (`{stem}_autocxx_dedup_{N}`),
+/// return `{stem}`: the name shared by every overload which bindgen had
+/// to disambiguate. Anything else returns `None`.
+///
+/// This is deliberately *not* a way to work out what such an overload
+/// will be called in the generated `ffi` mod. Bindgen's `{N}` counts
+/// overloads globally; the name users see is chosen much later by the
+/// overload tracker, which numbers within a scope and skips names
+/// belonging to real functions. The two agree only by coincidence.
+pub(crate) fn dedup_name_stem(name: &str) -> Option<&str> {
+    let dedup_re = regex_static::static_regex!(r"^(.*)_autocxx_dedup_\d+$");
+    dedup_re.captures(name).map(|m| m.get(1).unwrap().as_str())
 }
 
 /// When we're given a name like `some_function_bindgen_original1` returns
@@ -338,7 +334,7 @@ pub(crate) fn strip_bindgen_original_suffix_from_ident(
 
 #[cfg(test)]
 mod tests {
-    use crate::types::strip_bindgen_original_suffix;
+    use crate::types::{dedup_name_stem, strip_bindgen_original_suffix};
 
     use super::QualifiedName;
 
@@ -372,5 +368,19 @@ mod tests {
             strip_bindgen_original_suffix("foo_bindgen_original1"),
             strip_bindgen_original_suffix("foo1_bindgen_original")
         );
+    }
+
+    #[test]
+    fn test_dedup_name_stem() {
+        assert_eq!(dedup_name_stem("foo_autocxx_dedup_1"), Some("foo"));
+        assert_eq!(
+            dedup_name_stem("A::B::foo_autocxx_dedup_12"),
+            Some("A::B::foo")
+        );
+        assert_eq!(dedup_name_stem("foo"), None);
+        assert_eq!(dedup_name_stem("foo_autocxx_dedup_"), None);
+        // Only a trailing marker counts, so a name which merely mentions
+        // one isn't mistaken for an overload.
+        assert_eq!(dedup_name_stem("foo_autocxx_dedup_1_bar"), None);
     }
 }

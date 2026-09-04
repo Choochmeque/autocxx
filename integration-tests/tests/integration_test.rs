@@ -2333,15 +2333,12 @@ fn test_overload_functions() {
 }
 
 #[test]
-// Fails with DidNotGenerateAnything("daft3"). The overload deduplication
-// machinery does run over these functions -- this is no longer bindgen handing
-// us two indistinguishable 'daft1's -- but one of the renamed overloads is
-// dropped on the floor without a diagnostic. Adjacent to the scoped
-// overload-tracker fix, though not covered by it.
-#[ignore]
 fn test_overload_numeric_functions() {
     // Because bindgen deals with conflicting overloaded functions by
-    // appending a numeric suffix, let's see if we can cope.
+    // appending a numeric suffix, let's see if we can cope - here, where
+    // real daft1 and daft2 functions already own the suffixed names, so
+    // the daft overloads have to be numbered around them and end up as
+    // daft, daft3 and daft4.
     let cxx = indoc! {"
         void daft1(uint32_t) {}
         void daft2(uint8_t) {}
@@ -2366,9 +2363,11 @@ fn test_overload_numeric_functions() {
     "};
     let rs = quote! {
         use ffi::ToCppString;
-        ffi::daft(32);
-        ffi::daft1(8);
-        ffi::daft2("hello".into_cpp());
+        // daft1 and daft2 are real functions and keep their own names, so
+        // the daft overloads take daft, daft3 and daft4 in declaration order.
+        ffi::daft("hello".into_cpp());
+        ffi::daft1(32);
+        ffi::daft2(8);
         let b = ffi::Fred { a: 3 };
         ffi::daft3(b);
         let c = ffi::Norma::new().within_unique_ptr();
@@ -2380,6 +2379,171 @@ fn test_overload_numeric_functions() {
         rs,
         &["Norma", "daft", "daft1", "daft2", "daft3", "daft4"],
         &["Fred"],
+    );
+}
+
+#[test]
+fn test_overload_numeric_functions_real_declared_last() {
+    // As above, but the real numerically-suffixed function is declared
+    // after the overloads: which name each overload gets must not depend
+    // on declaration order.
+    let cxx = indoc! {"
+        uint64_t hh(uint64_t) { return 1; }
+        uint16_t hh(uint16_t) { return 2; }
+        uint32_t hh1(uint32_t) { return 3; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint64_t hh(uint64_t a);
+        uint16_t hh(uint16_t a);
+        uint32_t hh1(uint32_t a);
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::hh(0u64), 1);
+        assert_eq!(ffi::hh2(0u16), 2);
+        assert_eq!(ffi::hh1(0u32), 3);
+    };
+    run_test(cxx, hdr, rs, &["hh", "hh1", "hh2"], &[]);
+}
+
+#[test]
+fn test_overload_numeric_functions_in_namespace() {
+    // The same shape inside a namespace: a directive naming an overload
+    // has to be matched against its namespace-qualified name.
+    let cxx = indoc! {"
+        uint32_t N::kk(uint32_t) { return 1; }
+        uint16_t N::kk(uint16_t) { return 2; }
+        uint32_t N::kk1(uint32_t) { return 3; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace N {
+            uint32_t kk(uint32_t a);
+            uint16_t kk(uint16_t a);
+            uint32_t kk1(uint32_t a);
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::N::kk(0u32), 1);
+        assert_eq!(ffi::N::kk2(0u16), 2);
+        assert_eq!(ffi::N::kk1(0u32), 3);
+    };
+    run_test(cxx, hdr, rs, &["N::kk", "N::kk1", "N::kk2"], &[]);
+}
+
+#[test]
+fn test_overload_family_generated_by_cpp_name() {
+    // All the overloads of a function share one C++ name, so asking for
+    // that name must bring in the whole family - the user has no way to
+    // name the individual overloads in C++.
+    let cxx = indoc! {"
+        uint32_t mm(uint32_t) { return 1; }
+        uint16_t mm(uint16_t) { return 2; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint32_t mm(uint32_t a);
+        uint16_t mm(uint16_t a);
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::mm(0u32), 1);
+        assert_eq!(ffi::mm1(0u16), 2);
+    };
+    run_test(cxx, hdr, rs, &["mm"], &[]);
+}
+
+#[test]
+fn test_overload_numeric_functions_name_ending_in_digit() {
+    // The overloaded function's own name ends in a digit, so its overloads
+    // are qq11, qq12... There is no function called qq at all, which rules
+    // out finding the family by trimming digits off the directive.
+    let cxx = indoc! {"
+        uint32_t qq1(uint32_t) { return 1; }
+        uint16_t qq1(uint16_t) { return 2; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint32_t qq1(uint32_t a);
+        uint16_t qq1(uint16_t a);
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::qq1(0u32), 1);
+        assert_eq!(ffi::qq11(0u16), 2);
+    };
+    run_test(cxx, hdr, rs, &["qq1", "qq11"], &[]);
+}
+
+#[test]
+fn test_overload_numeric_functions_digit_ending_name_displaced() {
+    // Both diseases at once: the overloaded function's name ends in a
+    // digit, and a real function already owns the name its first overload
+    // would otherwise take, so that overload is pushed on to rr12.
+    let cxx = indoc! {"
+        uint32_t rr1(uint32_t) { return 1; }
+        uint16_t rr1(uint16_t) { return 2; }
+        uint64_t rr11(uint64_t) { return 3; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint32_t rr1(uint32_t a);
+        uint16_t rr1(uint16_t a);
+        uint64_t rr11(uint64_t a);
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::rr1(0u32), 1);
+        assert_eq!(ffi::rr12(0u16), 2);
+        assert_eq!(ffi::rr11(0u64), 3);
+    };
+    run_test(cxx, hdr, rs, &["rr1", "rr11", "rr12"], &[]);
+}
+
+#[test]
+fn test_overload_numeric_functions_bogus_suffix_still_errors() {
+    // A directive naming an overload can't be checked until the overload
+    // tracker has run, so it's deferred past the parse phase. It must
+    // still be an error if no overload ever claims that name.
+    let hdr = indoc! {"
+        #include <cstdint>
+        void nn(uint32_t a);
+        void nn(uint16_t a);
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["nn", "nn9"],
+        &[],
+        "DidNotGenerateAnything(\"nn9\")",
+    );
+}
+
+#[test]
+fn test_overload_numeric_functions_discarded_overload_still_errors() {
+    // pp2 is a name an overload really does get (the second pp, numbered
+    // around the real pp1), but that overload is discarded during analysis
+    // because we can't handle char16_t. Deferring the check on such a
+    // directive past the parse phase must not let that pass silently.
+    //
+    // The error doesn't say *why* it was discarded. That's a pre-existing
+    // limitation with nothing to do with overloads: a function needing a
+    // C++ wrapper carries the wrapper's name in its error context, so the
+    // item is garbage collected before the check can attribute a reason to
+    // it. Plain take_my_char in test_typedef_to_char16 loses the reason in
+    // exactly the same way.
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef char16_t my_char;
+        inline void pp(uint32_t) {}
+        inline void pp(my_char) {}
+        inline void pp1(uint32_t) {}
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["pp", "pp1", "pp2"],
+        &[],
+        "DidNotGenerateAnything(\"pp2\")",
     );
 }
 

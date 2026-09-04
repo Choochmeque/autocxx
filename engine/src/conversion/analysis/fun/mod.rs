@@ -2317,24 +2317,7 @@ impl Api<FnPhase> {
                 FnKind::Method { ref impl_for, .. } => impl_for.clone(),
                 FnKind::TraitMethod { ref impl_for, .. } => impl_for.clone(),
                 FnKind::Function => {
-                    // Internal dedup names must match the legacy
-                    // user-visible allowlist form (e.g. generate!("daft1")
-                    // for a bindgen-renamed overload of daft). Only
-                    // translate names which genuinely came from bindgen
-                    // overload renaming (the C++ original name differs)
-                    // so that a real C++ function literally named
-                    // x_autocxx_dedup_2 is left alone.
-                    let ident = fun.ident.to_string();
-                    let was_renamed_by_bindgen = fun
-                        .original_name
-                        .as_ref()
-                        .is_some_and(|original| ident != original.to_string_for_rust_name());
-                    let allowlist_ident = if was_renamed_by_bindgen {
-                        crate::types::dedup_name_to_allowlist_form(&ident)
-                    } else {
-                        ident
-                    };
-                    QualifiedName::new(self.name().get_namespace(), make_ident(allowlist_ident))
+                    QualifiedName::new(self.name().get_namespace(), fun.ident.clone())
                 }
             },
             Api::RustSubclassFn { subclass, .. } => subclass.0.name.clone(),
@@ -2353,6 +2336,48 @@ impl Api<FnPhase> {
             },
             _ => self.name().clone(),
         }
+    }
+
+    /// Every name by which one of the user's allowlist directives
+    /// (`generate!` and friends) might refer to this API.
+    ///
+    /// Most APIs answer to a single name, but a free function answers to
+    /// two more:
+    /// * the name it actually gets in the generated `ffi` mod. For an
+    ///   overload that name is invented here, by the overload tracker, and
+    ///   need not resemble anything bindgen produced: the third `daft`
+    ///   overload becomes `daft3` if real `daft1` and `daft2` functions
+    ///   are in the way. This is the name the user writes.
+    /// * its C++ name, which all its overloads share, so that
+    ///   `generate!("daft")` pulls in the whole family without the user
+    ///   having to name each overload.
+    pub(crate) fn allowlist_names(&self) -> impl Iterator<Item = String> {
+        let mut names = vec![
+            self.name().to_cpp_name(),
+            self.name_for_allowlist().to_cpp_name(),
+        ];
+        if let Api::Function {
+            fun,
+            analysis:
+                FnAnalysis {
+                    kind: FnKind::Function,
+                    rust_name,
+                    ..
+                },
+            ..
+        } = self
+        {
+            let ns = self.name().get_namespace();
+            // Assembled by hand rather than via QualifiedName because a
+            // C++ name need not be a legal Rust identifier (`operator==`).
+            // Such a name simply never matches a directive, which is fine.
+            let qualify = |name: &str| ns.iter().chain(std::iter::once(name)).join("::");
+            names.push(qualify(rust_name));
+            if let Some(original_name) = fun.original_name.as_ref() {
+                names.push(qualify(original_name.for_original_name_map()));
+            }
+        }
+        names.into_iter()
     }
 
     /// Whether this API requires generation of additional C++.
