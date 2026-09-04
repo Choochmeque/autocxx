@@ -12,7 +12,7 @@ use super::deps::HasDependencies;
 use super::fun::{FnAnalysis, FnKind, FnPhase};
 use crate::conversion::apivec::ApiVec;
 use crate::conversion::{convert_error::ErrorContext, ConvertErrorFromCpp};
-use crate::{conversion::api::Api, known_types};
+use crate::{conversion::api::Api, known_types, types::make_ident};
 
 /// Remove any APIs which depend on other items which have been ignored.
 /// We also eliminate any APIs that depend on some type that we just don't
@@ -75,26 +75,26 @@ fn create_ignore_item(api: Api<FnPhase>, err: ConvertErrorFromCpp) -> Api<FnPhas
     Api::IgnoredItem {
         name: api.name_info().clone(),
         err,
+        // A function which needed a C++ wrapper is named after that wrapper,
+        // an internal name the user has never seen. The error context is
+        // both the name of the documentation stub we emit and the name by
+        // which the user's `generate!` directives find this item afterwards
+        // (see `Api::name_for_allowlist`), so it has to be the name the user
+        // knows the function by - its Rust name.
         ctx: match api {
             Api::Function {
-                analysis:
-                    FnAnalysis {
-                        kind: FnKind::TraitMethod { .. },
-                        ..
-                    },
+                analysis: FnAnalysis {
+                    kind, rust_name, ..
+                },
                 ..
-            } => None,
-            Api::Function {
-                analysis:
-                    FnAnalysis {
-                        kind:
-                            FnKind::Method {
-                                impl_for: self_ty, ..
-                            },
-                        ..
-                    },
-                ..
-            } => Some(ErrorContext::new_for_method(self_ty.get_final_ident(), id)),
+            } => match kind {
+                FnKind::TraitMethod { .. } => None,
+                FnKind::Method { impl_for, .. } => Some(ErrorContext::new_for_method(
+                    impl_for.get_final_ident(),
+                    make_ident(rust_name),
+                )),
+                FnKind::Function => Some(ErrorContext::new_for_item(make_ident(rust_name))),
+            },
             _ => Some(ErrorContext::new_for_item(id)),
         },
     }

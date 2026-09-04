@@ -2329,10 +2329,12 @@ impl Api<FnPhase> {
                 ErrorContextType::Method { self_ty, .. } => {
                     QualifiedName::new(name.name.get_namespace(), self_ty.clone())
                 }
-                ErrorContextType::Item(id) => {
+                // `lookup`, not the sanitized name we generate code under:
+                // the user's directive names the item as they know it, and
+                // has never heard of our scrubbed spelling.
+                ErrorContextType::Item(id) | ErrorContextType::SanitizedItem { lookup: id, .. } => {
                     QualifiedName::new(name.name.get_namespace(), id.clone())
                 }
-                _ => name.name.clone(),
             },
             _ => self.name().clone(),
         }
@@ -2356,26 +2358,41 @@ impl Api<FnPhase> {
             self.name().to_cpp_name(),
             self.name_for_allowlist().to_cpp_name(),
         ];
-        if let Api::Function {
-            fun,
-            analysis:
-                FnAnalysis {
-                    kind: FnKind::Function,
-                    rust_name,
-                    ..
-                },
-            ..
-        } = self
-        {
-            let ns = self.name().get_namespace();
-            // Assembled by hand rather than via QualifiedName because a
-            // C++ name need not be a legal Rust identifier (`operator==`).
-            // Such a name simply never matches a directive, which is fine.
-            let qualify = |name: &str| ns.iter().chain(std::iter::once(name)).join("::");
-            names.push(qualify(rust_name));
-            if let Some(original_name) = fun.original_name.as_ref() {
-                names.push(qualify(original_name.for_original_name_map()));
+        let ns = self.name().get_namespace();
+        // Assembled by hand rather than via QualifiedName because a
+        // C++ name need not be a legal Rust identifier (`operator==`).
+        // Such a name simply never matches a directive, which is fine.
+        let qualify = |name: &str| ns.iter().chain(std::iter::once(name)).join("::");
+        match self {
+            Api::Function {
+                fun,
+                analysis:
+                    FnAnalysis {
+                        kind: FnKind::Function,
+                        rust_name,
+                        ..
+                    },
+                ..
+            } => {
+                names.push(qualify(rust_name));
+                if let Some(original_name) = fun.original_name.as_ref() {
+                    names.push(qualify(original_name.for_original_name_map()));
+                }
             }
+            // `name_for_allowlist` above went through `to_cpp_name`, which
+            // rewrites anything sharing a name with a built-in type back to
+            // its C++ spelling - the overload named `i8` would only answer
+            // to `int8_t`. The user wrote the Rust name, so offer that too.
+            Api::IgnoredItem { ctx: Some(ctx), .. } => match ctx.get_type() {
+                ErrorContextType::Item(id) | ErrorContextType::SanitizedItem { lookup: id, .. } => {
+                    names.push(qualify(&id.to_string()))
+                }
+                // A method answers to its type, and a type whose name
+                // collided would have been sanitized into the arm above,
+                // so `to_cpp_name` left this one alone.
+                ErrorContextType::Method { .. } => {}
+            },
+            _ => {}
         }
         names.into_iter()
     }

@@ -222,16 +222,32 @@ pub(crate) struct ErrorContext(Box<ErrorContextType>, PhantomSanitized);
 #[derive(Clone, Debug)]
 pub(crate) enum ErrorContextType {
     Item(Ident),
-    SanitizedItem(Ident),
-    Method { self_ty: Ident, method: Ident },
+    /// An item whose name we had to change because generating code under
+    /// its real name wouldn't be safe - it collides with a type autocxx
+    /// builds in, such as a C++ function called `Pin`.
+    SanitizedItem {
+        /// The name the user knows this item by, which is what their
+        /// `generate!` directives have to be matched against. Never
+        /// appears in generated code.
+        lookup: Ident,
+        /// The safe name, used for the documentation stub we generate.
+        display: Ident,
+    },
+    Method {
+        self_ty: Ident,
+        method: Ident,
+    },
 }
 
 impl ErrorContext {
     pub(crate) fn new_for_item(id: Ident) -> Self {
         match Self::sanitize_error_ident(&id) {
             None => Self(Box::new(ErrorContextType::Item(id)), PhantomSanitized),
-            Some(sanitized) => Self(
-                Box::new(ErrorContextType::SanitizedItem(sanitized)),
+            Some(display) => Self(
+                Box::new(ErrorContextType::SanitizedItem {
+                    lookup: id,
+                    display,
+                }),
                 PhantomSanitized,
             ),
         }
@@ -249,10 +265,14 @@ impl ErrorContext {
                 }),
                 PhantomSanitized,
             ),
+            // The stub becomes a free item rather than a method, but the
+            // thing the user asked us to generate is still the type, so
+            // that remains how we look this error up.
             Some(_) => Self(
-                Box::new(ErrorContextType::SanitizedItem(make_ident(format!(
-                    "{self_ty}_{method}"
-                )))),
+                Box::new(ErrorContextType::SanitizedItem {
+                    display: make_ident(format!("{self_ty}_{method}")),
+                    lookup: self_ty,
+                }),
                 PhantomSanitized,
             ),
         }
@@ -281,7 +301,9 @@ impl ErrorContext {
 impl std::fmt::Display for ErrorContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &*self.0 {
-            ErrorContextType::Item(id) | ErrorContextType::SanitizedItem(id) => write!(f, "{id}"),
+            ErrorContextType::Item(id) | ErrorContextType::SanitizedItem { display: id, .. } => {
+                write!(f, "{id}")
+            }
             ErrorContextType::Method { self_ty, method } => write!(f, "{self_ty}::{method}"),
         }
     }

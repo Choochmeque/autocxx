@@ -989,7 +989,7 @@ impl<'a> RsCodeGenerator<'a> {
     fn generate_error_entry(err: ConvertErrorFromCpp, ctx: ErrorContext) -> RsCodegenResult {
         let err = format!(" autocxx bindings couldn't be generated: {err}");
         let (impl_entry, output_mod_items) = match ctx.into_type() {
-            ErrorContextType::Item(id) | ErrorContextType::SanitizedItem(id) => (
+            ErrorContextType::Item(id) | ErrorContextType::SanitizedItem { display: id, .. } => (
                 None,
                 vec![parse_quote! {
                     #[doc = #err]
