@@ -158,6 +158,12 @@ jobs:
         with:
           rust-version: nightly
           components: rust-src
+      # rustfmt: not used by the tests themselves, but bindgen's
+      # which-rustfmt probe prints hundreds of spurious "rustfmt is not
+      # installed" errors into this job's log without it. Added as a
+      # separate step because the setup action cannot install two
+      # components at once.
+      - run: rustup component add rustfmt
       - uses: Swatinem/rust-cache@v1
       - name: Tests with asan
         env:
