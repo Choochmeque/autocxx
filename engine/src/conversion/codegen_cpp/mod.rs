@@ -18,6 +18,7 @@ use crate::{
 use autocxx_parser::IncludeCppConfig;
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
+use indoc::indoc;
 use itertools::Itertools;
 use std::borrow::Cow;
 use type_to_cpp::CppNameMap;
@@ -120,19 +121,78 @@ impl<'a> CppCodeGenerator<'a> {
         config: &'a IncludeCppConfig,
         cpp_codegen_options: &CppCodegenOptions,
         cxxgen_header_name: &str,
+        shadowed_by_variables: &HashSet<QualifiedName>,
     ) -> Result<Option<CppFilePair>, ConvertErrorFromCpp> {
         let mut gen = CppCodeGenerator {
             additional_functions: Vec::new(),
             inclusions,
-            original_name_map: CppNameMap::new_from_apis(apis),
+            original_name_map: CppNameMap::new_from_apis(apis, shadowed_by_variables),
             config,
             cpp_codegen_options,
             cxxgen_header_name,
         };
+        // These have to come first: everything else may refer to them, and the
+        // type definitions are emitted in the order they're pushed.
+        gen.generate_unshadowing_aliases();
         // The 'filter' on the following line is designed to ensure we don't accidentally
         // end up out of sync with needs_cpp_codegen
         gen.add_needs(apis.iter().filter(|api| api.needs_cpp_codegen()))?;
         Ok(gen.generate())
+    }
+
+    /// Emit the typedefs which let us name types whose own names are hidden by
+    /// a variable of the same name. See
+    /// [`crate::conversion::codegen_cpp::type_to_cpp::UnshadowingAlias`].
+    fn generate_unshadowing_aliases(&mut self) {
+        let typedefs = self
+            .original_name_map
+            .unshadowing_aliases()
+            .map(|(name, alias)| {
+                // Name the target from the global namespace, so that the
+                // typedef can't pick up a different type of the same name
+                // nested inside the namespace we're about to reopen.
+                let typedef = format!(
+                    "typedef {} ::{} {};",
+                    alias.tag, alias.original_cpp_name, alias.alias
+                );
+                // Emit the typedef in the type's own namespace, so that only
+                // the final segment of its C++ name changes. Wrap innermost
+                // segment first, or a::b would come out as
+                // `namespace b { namespace a { ... } }`.
+                let segments: Vec<_> = name.ns_segment_iter().collect();
+                segments.into_iter().rev().fold(typedef, |inner, segment| {
+                    format!("namespace {segment} {{ {inner} }}")
+                })
+            })
+            .join("\n");
+        if typedefs.is_empty() {
+            return;
+        }
+        // We always say `struct`, which is interchangeable with `class` in an
+        // elaborated type specifier, but bindgen doesn't tell us which of the
+        // two the type was declared with. Saying the wrong one is valid C++ but
+        // draws a warning, so silence it rather than make callers' `-Werror`
+        // builds depend on a distinction we can't see.
+        self.additional_functions.push(ExtraCpp {
+            type_definition: Some(format!(
+                indoc! {"
+                    #if defined(_MSC_VER)
+                    #pragma warning(push)
+                    #pragma warning(disable : 4099)
+                    #elif defined(__clang__)
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored \"-Wmismatched-tags\"
+                    #endif
+                    {}
+                    #if defined(_MSC_VER)
+                    #pragma warning(pop)
+                    #elif defined(__clang__)
+                    #pragma clang diagnostic pop
+                    #endif"},
+                typedefs
+            )),
+            ..Default::default()
+        });
     }
 
     // It's important to keep this in sync with Api::needs_cpp_codegen.
@@ -205,7 +265,7 @@ impl<'a> CppCodeGenerator<'a> {
                         },
                     ..
                 } => {
-                    self.generate_pod_assertion(name.qualified_cpp_name());
+                    self.generate_pod_assertion(self.original_name_map.map(&name.name));
                 }
                 _ => panic!("Should have filtered on needs_cpp_codegen"),
             }

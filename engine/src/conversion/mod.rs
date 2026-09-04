@@ -55,7 +55,7 @@ use self::{
     api::{AnalysisPhase, Api},
     apivec::ApiVec,
     codegen_rs::RsCodeGenerator,
-    parse::ParseBindgen,
+    parse::{find_types_shadowed_by_variables, ParseBindgen},
 };
 
 const LOG_APIS: bool = true;
@@ -123,6 +123,10 @@ impl<'a> BridgeConverter<'a> {
         match &bindgen_mod.content {
             None => Err(ConvertError::NoContent),
             Some((_, items)) => {
+                // Note which type names C++ won't look up unqualified because a
+                // variable of the same name hides them. This has to happen
+                // before parsing, which discards the variables.
+                let shadowed_by_variables = find_types_shadowed_by_variables(items);
                 // Parse the bindgen mod.
                 let parser = ParseBindgen::new(self.config, &parse_callback_results);
                 let apis = parser.parse_items(items, source_file_contents)?;
@@ -220,6 +224,7 @@ impl<'a> BridgeConverter<'a> {
                     self.config,
                     &codegen_options.cpp_codegen_options,
                     &cxxgen_header_name,
+                    &shadowed_by_variables,
                 )
                 .map_err(ConvertError::Cpp)?;
                 let rs = RsCodeGenerator::generate_rs_code(
@@ -229,6 +234,7 @@ impl<'a> BridgeConverter<'a> {
                     bindgen_mod,
                     self.config,
                     cpp.as_ref().map(|file_pair| file_pair.header_name.clone()),
+                    &shadowed_by_variables,
                 );
                 Ok(CodegenResults {
                     rs,

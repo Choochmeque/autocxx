@@ -11,6 +11,8 @@ mod linkage;
 mod parse_bindgen;
 mod parse_foreign_mod;
 mod ref_qualifier;
+mod shadowed_types;
 
 pub(crate) use parse_bindgen::ParseBindgen;
 pub(crate) use ref_qualifier::CppRefQualifier;
+pub(crate) use shadowed_types::find_types_shadowed_by_variables;

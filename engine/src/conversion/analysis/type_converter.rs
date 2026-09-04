@@ -131,7 +131,7 @@ impl<'a> TypeConverter<'a> {
             forward_declarations: Self::find_incomplete_types(apis),
             ignored_types: Self::find_ignored_types(apis),
             config,
-            original_name_map: CppNameMap::new_from_apis(apis),
+            original_name_map: CppNameMap::new_for_analysis(apis),
         }
     }
 
