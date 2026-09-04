@@ -21,6 +21,7 @@ mod name_check;
 pub(crate) mod pod; // hey, that rhymes
 pub(crate) mod remove_ignored;
 mod replace_hopeless_typedef_targets;
+pub(crate) mod statics;
 pub(crate) mod tdef;
 mod type_converter;
 

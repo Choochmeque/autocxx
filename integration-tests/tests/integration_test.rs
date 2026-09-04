@@ -18,8 +18,8 @@ use crate::{
 };
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
-    run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, BuilderModifier, CodeCheckerFns,
-    TestError,
+    run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
+    BuilderModifier, CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -3222,9 +3222,42 @@ fn test_pod_constant_harmless_inside_type() {
     run_test("", hdr, rs, &[], &["Anna"]);
 }
 
+/// google/autocxx#93: a C++ variable of POD type can be used from Rust.
+///
+/// The header spells the variable `extern` deliberately. The issue's original
+/// test case wrote `const Bob BOB = Bob { 10 };` instead, which C++ gives
+/// *internal* linkage: that's a separate object in every translation unit
+/// which includes the header, and a translation unit which doesn't use it
+/// emits no symbol at all, so there is nothing for Rust to link against no
+/// matter what we generate. See `test_pod_constant_internal_linkage` for what
+/// we say about the original spelling.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/93
 fn test_pod_constant() {
+    let cxx = indoc! {"
+        const Bob BOB = Bob { 10 };
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+        };
+        extern const Bob BOB;
+    "};
+    let rs = quote! {
+        let a = unsafe { &ffi::BOB };
+        assert_eq!(a.a, 10);
+    };
+    run_test(cxx, hdr, rs, &["BOB"], &["Bob"]);
+}
+
+/// A namespace-scope variable with internal linkage has no symbol to link
+/// against, so we must say so rather than emitting Rust which fails to link.
+///
+/// We can only say it where the ABI tells us: MSVC decorates internal and
+/// external linkage identically, so there the failure is the link error we
+/// were trying to spare the user.
+#[test]
+fn test_pod_constant_internal_linkage() {
     let hdr = indoc! {"
         #include <cstdint>
         struct Bob {
@@ -3232,17 +3265,33 @@ fn test_pod_constant() {
         };
         const Bob BOB = Bob { 10 };
     "};
-    let rs = quote! {
-        let a = &ffi::BOB;
-        assert_eq!(a.a, 10);
-    };
-    run_test("", hdr, rs, &["BOB"], &["Bob"]);
+    let rs = quote! {};
+    if cfg!(target_env = "msvc") {
+        // MSVC mangling can't distinguish internal from external linkage,
+        // so autocxx is permissive there — and the build then SUCCEEDS,
+        // because the generated C++ TU includes this header and so owns
+        // its very own internal-linkage copy of the variable, which
+        // satisfies the link. That copy is a distinct object from any
+        // other TU's (the address-identity caveat documented in the
+        // book); with everything in one TU here, it simply works.
+        run_test("", hdr, rs, &["BOB"], &["Bob"]);
+    } else {
+        run_test_expect_fail_with_error(
+            "",
+            hdr,
+            rs,
+            &["BOB"],
+            &["Bob"],
+            "StaticDataWithInternalLinkage",
+        );
+    }
 }
 
 #[test]
 fn test_pod_static_harmless_inside_type() {
-    // Check that the presence of this constant doesn't break anything.
-    // Remove this test when the following one is enabled.
+    // Check that the presence of this constant doesn't break anything, even
+    // though nothing asks for it. (`test_pod_class_static_data_member` covers
+    // asking for it.)
     let hdr = indoc! {"
         #include <cstdint>
         struct Bob {
@@ -3258,9 +3307,31 @@ fn test_pod_static_harmless_inside_type() {
     run_test("", hdr, rs, &[], &["Anna"]);
 }
 
+/// The mutable counterpart of `test_pod_constant`; `bindgen` declares this one
+/// as a `static mut`, so reaching it goes via a raw pointer.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/93
 fn test_pod_static() {
+    let cxx = indoc! {"
+        Bob BOB = Bob { 10 };
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+        };
+        extern Bob BOB;
+    "};
+    let rs = quote! {
+        let a = unsafe { &*core::ptr::addr_of!(ffi::BOB) };
+        assert_eq!(a.a, 10);
+    };
+    run_test(cxx, hdr, rs, &["BOB"], &["Bob"]);
+}
+
+/// As `test_pod_constant_internal_linkage`, but for a variable which is
+/// `static` rather than merely `const`.
+#[test]
+fn test_pod_static_internal_linkage() {
     let hdr = indoc! {"
         #include <cstdint>
         struct Bob {
@@ -3268,16 +3339,153 @@ fn test_pod_static() {
         };
         static Bob BOB = Bob { 10 };
     "};
-    let rs = quote! {
-        let a = &ffi::BOB;
-        assert_eq!(a.a, 10);
-    };
-    run_test("", hdr, rs, &["BOB"], &["Bob"]);
+    let rs = quote! {};
+    if cfg!(target_env = "msvc") {
+        // MSVC mangling can't distinguish internal from external linkage,
+        // so autocxx is permissive there — and the build then SUCCEEDS,
+        // because the generated C++ TU includes this header and so owns
+        // its very own internal-linkage copy of the variable, which
+        // satisfies the link. That copy is a distinct object from any
+        // other TU's (the address-identity caveat documented in the
+        // book); with everything in one TU here, it simply works.
+        run_test("", hdr, rs, &["BOB"], &["Bob"]);
+    } else {
+        run_test_expect_fail_with_error(
+            "",
+            hdr,
+            rs,
+            &["BOB"],
+            &["Bob"],
+            "StaticDataWithInternalLinkage",
+        );
+    }
 }
 
 #[test]
-#[ignore] // this probably requires code generation on the C++
-          // side. It's not at all clear how best to handle this.
+fn test_namespaced_pod_constant() {
+    let cxx = indoc! {"
+        namespace A {
+            const Bob BOB = Bob { 10 };
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+        };
+        namespace A {
+            extern const Bob BOB;
+        }
+    "};
+    let rs = quote! {
+        let a = unsafe { &ffi::A::BOB };
+        assert_eq!(a.a, 10);
+    };
+    run_test(cxx, hdr, rs, &["A::BOB"], &["Bob"]);
+}
+
+/// A static data member has external linkage as soon as it's defined, so it
+/// needs no `extern`. `bindgen` flattens its name into the enclosing
+/// namespace, which is why this asks for `Anna_BOB` rather than `Anna::BOB`.
+#[test]
+fn test_pod_class_static_data_member() {
+    let cxx = indoc! {"
+        Bob Anna::BOB = Bob { 10 };
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+        };
+        struct Anna {
+            uint32_t a;
+            static Bob BOB;
+        };
+    "};
+    let rs = quote! {
+        let a = unsafe { &*core::ptr::addr_of!(ffi::Anna_BOB) };
+        assert_eq!(a.a, 10);
+    };
+    run_test(cxx, hdr, rs, &["Anna_BOB"], &["Bob", "Anna"]);
+}
+
+#[test]
+fn test_constexpr_double_constant() {
+    let hdr = indoc! {"
+        constexpr double kPi = 3.5;
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::kPi, 3.5);
+    };
+    run_test("", hdr, rs, &["kPi"], &[]);
+}
+
+/// We re-export a variable by re-exporting `bindgen`'s declaration of it, so
+/// the type must be one which our output mod exposes exactly as `bindgen`
+/// wrote it. A non-POD type is instead exposed as an opaque wrapper, so we
+/// must decline rather than hand out `bindgen`'s raw view of it.
+#[test]
+fn test_non_pod_typed_static() {
+    let cxx = indoc! {"
+        const Fred FRED = Fred { \"hello\" };
+    "};
+    let hdr = indoc! {"
+        #include <string>
+        struct Fred {
+            std::string a;
+        };
+        extern const Fred FRED;
+    "};
+    let rs = quote! {};
+    run_test_expect_fail(cxx, hdr, rs, &["FRED"], &[]);
+}
+
+/// A variable of a type which `bindgen` writes directly in Rust needs no help
+/// from us beyond the re-export.
+#[test]
+fn test_extern_primitive_constant() {
+    let cxx = indoc! {"
+        const int COUNT = 4;
+        const uint32_t UCOUNT = 5;
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        extern const int COUNT;
+        extern const uint32_t UCOUNT;
+    "};
+    let rs = quote! {
+        assert_eq!(unsafe { ffi::COUNT }, 4);
+        assert_eq!(unsafe { ffi::UCOUNT }, 5);
+    };
+    run_test(cxx, hdr, rs, &["COUNT", "UCOUNT"], &[]);
+}
+
+#[test]
+fn test_class_static_const_int() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Anna {
+            uint32_t a;
+            static const int SIZE = 4;
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Anna_SIZE, 4);
+    };
+    run_test("", hdr, rs, &["Anna_SIZE"], &["Anna"]);
+}
+
+/// A variable of non-POD type is a genuinely open question, unlike the POD
+/// case which `test_pod_constant` now covers. Our output mod exposes a non-POD
+/// type only as an opaque object reached through a pointer, so there is no
+/// `static` we could re-export which would give safe Rust anything usable;
+/// handing out a reference would need us to generate C++ which yields one, and
+/// it isn't clear what that should look like. (`test_non_pod_typed_static`
+/// pins the error we give in the meantime; note that this header's variable
+/// also has internal linkage, so it would need `extern` before any of this
+/// mattered.)
+#[test]
+#[ignore]
 fn test_non_pod_constant() {
     let hdr = indoc! {"
         #include <cstdint>

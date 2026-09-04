@@ -766,6 +766,7 @@ pub(crate) fn find_types<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashSet<Qualifie
             Api::StringConstructor { .. }
             | Api::Function { .. }
             | Api::Const { .. }
+            | Api::Static { .. }
             | Api::CType { .. }
             | Api::RustSubclassFn { .. }
             | Api::IgnoredItem { .. }

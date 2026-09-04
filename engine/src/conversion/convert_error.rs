@@ -65,8 +65,12 @@ pub enum ConvertErrorFromCpp {
     UnsupportedType(String),
     #[error("Encountered type not yet known by autocxx: {0}")]
     UnknownType(String),
-    #[error("Encountered mutable static data, not yet supported: {0}")]
-    StaticData(String),
+    #[error("Encountered static data whose type autocxx can't represent - only variables of POD type, or of a type which bindgen expresses directly in Rust, are supported")]
+    StaticDataOfUnsupportedType,
+    #[error("The C++ variable {0} has internal linkage, so there is no symbol for Rust to link against. (A namespace-scope variable declared `static`, or declared `const` without `extern`, or declared in an anonymous namespace, exists separately in each translation unit which includes the header.) Declare it `extern` and define it in exactly one C++ file if you want to use it from Rust.")]
+    StaticDataWithInternalLinkage(String),
+    #[error("Encountered static data of type {}, which autocxx does not expose as something Rust can hold by value. A C++ variable can only be re-exported if its type is POD; try generate_pod! if that type really is trivial.", .0.to_cpp_name())]
+    StaticDataOfNonPodType(QualifiedName),
     #[error("Encountered typedef to itself - this is a known bindgen bug: {0}")]
     InfinitelyRecursiveTypedef(QualifiedName),
     #[error("Unexpected 'use' statement encountered: {}", .0.as_ref().map(|s| s.as_str()).unwrap_or("<unknown>"))]

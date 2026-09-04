@@ -42,7 +42,11 @@ pub(crate) struct ParseBindgen<'a> {
     parse_callback_results: &'a ParseCallbackResults,
 }
 
-fn api_name(ns: &Namespace, id: Ident, callback_results: &ParseCallbackResults) -> ApiName {
+pub(super) fn api_name(
+    ns: &Namespace,
+    id: Ident,
+    callback_results: &ParseCallbackResults,
+) -> ApiName {
     let qn = QualifiedName::new(ns, minisyn::Ident(id.clone()));
     // TODO FIXME squash reduncancy
     ApiName::new_with_cpp_name(ns, id.into(), callback_results.get_original_name(&qn))

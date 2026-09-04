@@ -7,6 +7,7 @@
 // except according to those terms.
 
 mod extern_fun_signatures;
+mod linkage;
 mod parse_bindgen;
 mod parse_foreign_mod;
 mod ref_qualifier;

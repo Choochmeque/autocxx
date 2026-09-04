@@ -405,6 +405,20 @@ pub(crate) enum Api<T: AnalysisPhase> {
         name: ApiName,
         const_item: ItemConst,
     },
+    /// A variable with static storage duration: either a C++ variable at
+    /// namespace scope, or a static data member of a class. `bindgen`
+    /// declares these as `extern "C"` statics inside the mod we emit
+    /// verbatim, so all we have to do is re-export them - see
+    /// google/autocxx#93.
+    Static {
+        name: ApiName,
+        /// The C++ type of the variable, if it is a type which `autocxx`
+        /// itself generates (as opposed to a plain Rust type such as
+        /// `std::os::raw::c_int`, which `bindgen` emits directly). We record
+        /// it so that the garbage collector keeps that type alive, and so
+        /// that we can insist it is POD before re-exporting the variable.
+        cpp_ty: Option<QualifiedName>,
+    },
     /// A typedef found in the bindgen output which we wish
     /// to pass on in our output
     Typedef {
@@ -500,6 +514,7 @@ impl<T: AnalysisPhase> Api<T> {
             Api::StringConstructor { name } => name,
             Api::Function { name, .. } => name,
             Api::Const { name, .. } => name,
+            Api::Static { name, .. } => name,
             Api::Typedef { name, .. } => name,
             Api::Enum { name, .. } => name,
             Api::Struct { name, .. } => name,
@@ -538,8 +553,28 @@ impl<T: AnalysisPhase> Api<T> {
 
     /// If this API turns out to have the same QualifiedName as another,
     /// whether it's OK to just discard it?
+    ///
+    /// A variable can clash with a type of the same name - C++ allows
+    /// `struct stat {...}; extern struct stat stat;` and `bindgen` calls both
+    /// of them `stat` - and in that case we would much rather keep the type,
+    /// since other APIs may depend on it.
+    ///
+    /// [`ApiVec::push`] only asks this of the API being added, so the answer
+    /// keeps the type only if the type was added first. It always is:
+    /// `ParseBindgen::parse_mod_items` pushes each struct as it walks the mod,
+    /// and hands over the mod's variables afterwards, in
+    /// `ParseForeignMod::finished`.
+    ///
+    /// The tests for this live in `apivec`, not the integration suite, because
+    /// such a header can't get as far as Rust: our generated C++ names a type
+    /// without the `struct` tag which would rescue it, so `new_appropriately
+    /// <stat>` and cxx's `is_complete<::stat>` both resolve to the variable
+    /// and fail to compile. That is true whether or not we make an [`Api`] for
+    /// the variable at all, so it's a separate limitation of our C++ codegen.
+    ///
+    /// [`ApiVec::push`]: crate::conversion::apivec::ApiVec::push
     pub(crate) fn discard_duplicates(&self) -> bool {
-        matches!(self, Api::IgnoredItem { .. })
+        matches!(self, Api::IgnoredItem { .. } | Api::Static { .. })
     }
 
     pub(crate) fn valid_types(&self) -> Box<dyn Iterator<Item = QualifiedName>> {

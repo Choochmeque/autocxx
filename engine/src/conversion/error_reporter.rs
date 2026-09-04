@@ -118,6 +118,9 @@ pub(crate) fn convert_apis<FF, SF, EF, TF, A, B>(
             Api::Const { name, const_item } => {
                 Ok(Box::new(std::iter::once(Api::Const { name, const_item })))
             }
+            Api::Static { name, cpp_ty } => {
+                Ok(Box::new(std::iter::once(Api::Static { name, cpp_ty })))
+            }
             Api::CType { name, typename } => {
                 Ok(Box::new(std::iter::once(Api::CType { name, typename })))
             }

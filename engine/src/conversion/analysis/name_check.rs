@@ -37,6 +37,7 @@ pub(crate) fn check_names(apis: ApiVec<FnPhase>) -> ApiVec<FnPhase> {
         | Api::ForwardDeclaration { ref name, .. }
         | Api::OpaqueTypedef { ref name, .. }
         | Api::Const { ref name, .. }
+        | Api::Static { ref name, .. }
         | Api::Enum { ref name, .. }
         | Api::Struct { ref name, .. } => {
             validate_all_segments_ok_for_cxx(name.name.segment_iter())?;
