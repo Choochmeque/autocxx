@@ -1071,11 +1071,24 @@ fn test_make_up_with_args() {
     run_test(cxx, hdr, rs, &["take_bob", "Bob"], &[]);
 }
 
+/// google/autocxx#53: we generate no field accessors for a non-POD type, so
+/// this fails to compile with E0609 "no field `b` on type `&ffi::Bob`". `Bob`
+/// is only `generate!`d, and our output mod gives such a type one private
+/// `_hidden_contents` field, deliberately - Rust must not be told the offsets.
+/// The book puts it plainly: "There is no access to fields (yet)". The
+/// established workaround is to write the getter in C++ by hand.
+///
+/// Closing that gap is a feature rather than a fix. #53 sketches generated
+/// accessors - getters, then setters, then sugar to hide the call - and #21
+/// sketches a rival design computing offsets with `offsetof`. Neither is
+/// settled, and the choice is user-visible API.
+///
+/// This test's own intent, that a constructor argument reaches the object, is
+/// already covered by `test_make_up_with_args` directly above, which reads the
+/// field back through C++. `test_make_up` was converted to that idiom in
+/// September 2020 after hitting exactly this wall; `test_make_up_int` was left
+/// behind, and survives as the standing request to read the field from Rust.
 #[test]
-// Fails with E0609 "no field `b` on type `&ffi::Bob`". Bob is only
-// generate!()d, not generate_pod!()d, so it is opaque to Rust and its fields
-// are not exposed -- nothing to do with unique_ptrs to primitives, which is
-// what this comment used to claim.
 #[ignore]
 fn test_make_up_int() {
     let cxx = indoc! {"
@@ -3634,34 +3647,51 @@ fn test_class_static_const_int() {
     run_test("", hdr, rs, &["Anna_SIZE"], &["Anna"]);
 }
 
-/// A variable of non-POD type is a genuinely open question, unlike the POD
-/// case which `test_pod_constant` now covers. Our output mod exposes a non-POD
-/// type only as an opaque object reached through a pointer, so there is no
-/// `static` we could re-export which would give safe Rust anything usable;
-/// handing out a reference would need us to generate C++ which yields one, and
-/// it isn't clear what that should look like. (`test_non_pod_typed_static`
-/// pins the error we give in the meantime; note that this header's variable
-/// also has internal linkage, so it would need `extern` before any of this
-/// mattered.)
+/// google/autocxx#94, the "much harder" follow-up to #93, which names this
+/// very test. `test_pod_constant` covers the POD case; a variable of non-POD
+/// type still fails the type gate with `StaticDataOfNonPodType`, because we
+/// expose a variable by re-exporting `bindgen`'s declaration of it, and our
+/// output mod shows a non-POD type as an opaque wrapper rather than as
+/// `bindgen` wrote it. (`test_non_pod_typed_static` pins that error.)
+///
+/// Lifting the gate means synthesising a C++ getter, and each shape it could
+/// return is blocked on a decision we should not take by accident:
+///
+/// * `&'static Bob` is not expressible. `cxx` rejects the lifetime outright -
+///   "'static is a reserved lifetime name" - and, separately, we refuse to
+///   return a reference from a function with no reference argument for it to
+///   borrow from (`ConvertErrorFromCpp::NoInputReference`).
+/// * `CppRef<Bob>` sidesteps lifetimes, but it exists only under
+///   `unsafe_references_wrapped`. Emitting it regardless would make a crate's
+///   API shape depend on something its author never opted into.
+/// * `UniquePtr<Bob>`, which is what #94 proposes, we could emit today - but
+///   it hands back a *copy*, so it demands the type be copy-constructible and
+///   it quietly stops being the constant that was asked for.
+///
+/// The header spells the variable `extern` so that linkage is not what stops
+/// us (see `test_pod_constant_internal_linkage`): the question here is the
+/// type. `get()` is `const` so that it could be called on `BOB` at all.
 #[test]
 #[ignore]
 fn test_non_pod_constant() {
+    let cxx = indoc! {"
+        const Bob BOB = Bob { \"hello\" };
+    "};
     let hdr = indoc! {"
         #include <cstdint>
         #include <string>
         struct Bob {
             std::string a;
-            std::string get() { return a };
+            std::string get() const { return a; }
         };
-        const Bob BOB = Bob { \"hello\" };
+        extern const Bob BOB;
     "};
     let rs = quote! {
-        let a = ffi::BOB;
-        // following line assumes that 'a' is a &Bob
-        // but who knows how we'll really do this.
-        assert_eq!(a.get().as_ref().unwrap().to_str().unwrap(), "hello");
+        // Assumes `BOB` arrives as something we can call `get()` on; which of
+        // the shapes above wins decides what this line really looks like.
+        assert_eq!(ffi::BOB.get().as_ref().unwrap().to_str().unwrap(), "hello");
     };
-    run_test("", hdr, rs, &["BOB"], &[]);
+    run_test(cxx, hdr, rs, &["BOB"], &[]);
 }
 
 #[test]
