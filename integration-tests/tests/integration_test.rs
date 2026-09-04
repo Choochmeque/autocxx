@@ -13381,7 +13381,9 @@ fn test_issue_1229() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/1265
+// Upstream #1265. Previously ignored ("Passes locally but not on CI");
+// re-enabled to root-cause the Linux-only generated-Rust build failure
+// now that the harness captures rustc diagnostics for RsBuild errors.
 fn test_issue_1265() {
     let hdr = indoc! {"
         #include <string>
