@@ -246,18 +246,39 @@ fn ref_qualifier_from_attrs(attrs: &[Attribute]) -> CppRefQualifier {
         .unwrap_or_default()
 }
 
-/// bindgen sometimes generates an impl fn called a which calls
-/// a function called a1(), if it's dealing with conflicting names.
-/// We actually care about the name a1, so we have to parse the
-/// name of the actual function call inside the block's body.
+/// Find the function which the body of a method in one of bindgen's `impl`
+/// blocks calls, so that we can attribute that function to the type the
+/// `impl` block is for. The name of the `impl` fn won't do: bindgen sometimes
+/// generates an `impl` fn called `a` which calls a function called `a1()`, if
+/// it's dealing with conflicting names, and it's `a1` we care about.
+///
+/// Most of these bodies are a single call, but the ones bindgen writes for
+/// constructors first have to make somewhere to construct into:
+///
+/// ```ignore
+/// let mut __bindgen_tmp = ::std::mem::MaybeUninit::uninit();
+/// Type_Type_bindgen_original(__bindgen_tmp.as_mut_ptr());
+/// __bindgen_tmp.assume_init()
+/// ```
+///
+/// so we consider every statement, not just the first. Only an unqualified
+/// call can be one of these functions, since they live in the same mod, and
+/// insisting on that is what stops us mistaking `MaybeUninit::uninit()` for
+/// one of them.
 fn get_called_function(block: &Block) -> Option<&Ident> {
-    match block.stmts.first() {
-        Some(Stmt::Expr(Expr::Call(ExprCall { func, .. }), _)) => match **func {
-            Expr::Path(ref exp) => exp.path.segments.first().map(|ps| &ps.ident),
+    block.stmts.iter().find_map(|stmt| match stmt {
+        Stmt::Expr(Expr::Call(ExprCall { func, .. }), _) => match **func {
+            Expr::Path(ref exp)
+                if exp.qself.is_none()
+                    && exp.path.leading_colon.is_none()
+                    && exp.path.segments.len() == 1 =>
+            {
+                exp.path.segments.first().map(|ps| &ps.ident)
+            }
             _ => None,
         },
         _ => None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -274,5 +295,34 @@ mod test {
             }
         };
         assert_eq!(get_called_function(&b).unwrap().to_string(), "call_foo");
+    }
+
+    /// The shape `bindgen` gives the body of a constructor, where the call
+    /// we're after is neither the first statement nor the last expression.
+    #[test]
+    fn test_get_called_function_in_constructor() {
+        let b: Block = parse_quote! {
+            {
+                let mut __bindgen_tmp = ::std::mem::MaybeUninit::uninit();
+                Type_Type_bindgen_original(__bindgen_tmp.as_mut_ptr());
+                __bindgen_tmp.assume_init()
+            }
+        };
+        assert_eq!(
+            get_called_function(&b).unwrap().to_string(),
+            "Type_Type_bindgen_original"
+        );
+    }
+
+    /// A qualified call is never one of `bindgen`'s thunks, which all live in
+    /// the mod the `impl` block is in.
+    #[test]
+    fn test_get_called_function_ignores_qualified_calls() {
+        let b: Block = parse_quote! {
+            {
+                ::std::mem::drop(());
+            }
+        };
+        assert!(get_called_function(&b).is_none());
     }
 }

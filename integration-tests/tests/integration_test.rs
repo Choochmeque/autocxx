@@ -5840,7 +5840,14 @@ fn test_type_aliased_anonymous_nested_struct_ignored() {
     run_test("", hdr, rs, &["test::Outer_Struct"], &[]);
 }
 
-#[ignore] // https://github.com/google/autocxx/issues/1251
+/// Types whose names C++ reserves can't be given bindings, but their presence
+/// mustn't stop us generating anything else - and each one they do stop us
+/// generating must get its own explanatory stub (google/autocxx#1251).
+///
+/// `generate_all!` rather than naming these types in `generate!`, because
+/// asking explicitly for a type we can't generate is an error in its own
+/// right, and we want this test to be about the types we sweep up alongside
+/// the ones we can generate.
 #[test]
 fn test_double_underscores_ignored() {
     let hdr = indoc! {"
@@ -5869,21 +5876,7 @@ fn test_double_underscores_ignored() {
         let b = ffi::B::new().within_unique_ptr();
         assert_eq!(b.get_a(), 2);
     };
-    run_test(
-        "",
-        hdr,
-        rs,
-        &[
-            "B",
-            "__default",
-            "__destructor",
-            "__copy",
-            "__copy_operator",
-            "__move",
-            "__move_operator",
-        ],
-        &[],
-    );
+    run_test_ex("", hdr, rs, quote! { generate_all!() }, None, None, None);
 }
 
 // This test fails on Windows gnu but not on Windows msvc
