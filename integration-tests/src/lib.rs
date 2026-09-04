@@ -540,6 +540,36 @@ pub fn run_test_expect_fail(
     .expect_err("Unexpected success");
 }
 
+/// As [`run_test_expect_fail`], but also insists on *why* it failed, so that a
+/// test can pin the diagnostic a user will actually see rather than settling
+/// for any failure at all.
+pub fn run_test_expect_fail_with_error(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    generate: &[&str],
+    generate_pods: &[&str],
+    expected: &str,
+) {
+    let err = do_run_test(
+        cxx_code,
+        header_code,
+        rust_code,
+        directives_from_lists(generate, generate_pods, None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("Unexpected success");
+    let reported = format!("{err:?}");
+    assert!(
+        reported.contains(expected),
+        "expected the failure to mention {expected:?}, but it was: {reported}"
+    );
+}
+
 pub fn run_test_expect_fail_ex(
     cxx_code: &str,
     header_code: &str,

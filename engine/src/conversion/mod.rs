@@ -49,6 +49,7 @@ use self::{
         pod::analyze_pod_apis,
         remove_ignored::filter_apis_by_ignored_dependents,
         replace_hopeless_typedef_targets,
+        statics::discard_statics_of_non_pod_type,
         tdef::convert_typedef_targets,
     },
     api::{AnalysisPhase, Api},
@@ -142,6 +143,11 @@ impl<'a> BridgeConverter<'a> {
                 let analyzed_apis = analyze_pod_apis(apis, self.config, &parse_callback_results)
                     .map_err(ConvertError::Cpp)?;
                 Self::dump_apis("pod analysis", &analyzed_apis);
+                // Static data can only be re-exported if its type is one which
+                // we expose exactly as bindgen declared it, which we only know
+                // once POD analysis is complete.
+                let analyzed_apis = discard_statics_of_non_pod_type(analyzed_apis);
+                Self::dump_apis("static data", &analyzed_apis);
                 let analyzed_apis = replace_hopeless_typedef_targets(self.config, analyzed_apis);
                 let analyzed_apis = add_casts(analyzed_apis);
                 let analyzed_apis = create_alloc_and_frees(analyzed_apis);

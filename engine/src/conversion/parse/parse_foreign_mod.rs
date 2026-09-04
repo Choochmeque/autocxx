@@ -28,6 +28,8 @@ use syn::{
     MetaNameValue, Stmt, Type,
 };
 
+use super::linkage::{linkage_from_link_name, CppLinkage};
+use super::parse_bindgen::api_name;
 use super::ref_qualifier::{ref_qualifier_from_mangled_name, CppRefQualifier};
 
 /// Parses a given bindgen-generated 'mod' into suitable
@@ -45,6 +47,8 @@ pub(crate) struct ParseForeignMod<'a> {
     // may actually be methods (static or otherwise). Mapping from
     // function name to type name.
     method_receivers: HashMap<Ident, QualifiedName>,
+    // Variables with static storage duration which we'll re-export.
+    statics: ApiVec<NullPhase>,
     ignored_apis: ApiVec<NullPhase>,
     parse_callback_results: &'a ParseCallbackResults,
 }
@@ -55,6 +59,7 @@ impl<'a> ParseForeignMod<'a> {
             ns,
             funcs_to_convert: Vec::new(),
             method_receivers: HashMap::new(),
+            statics: ApiVec::new(),
             ignored_apis: ApiVec::new(),
             parse_callback_results,
         }
@@ -99,10 +104,23 @@ impl<'a> ParseForeignMod<'a> {
                 });
                 Ok(())
             }
-            ForeignItem::Static(item) => Err(ConvertErrorWithContext(
-                ConvertErrorFromCpp::StaticData(item.ident.to_string()),
-                Some(ErrorContext::new_for_item(item.ident.clone().into())),
-            )),
+            ForeignItem::Static(item) => {
+                // A C++ variable with static storage duration. `bindgen` has
+                // already declared it for us within the mod which we emit
+                // verbatim, so all we need to do is note it as an API so that
+                // we re-export it - see google/autocxx#93.
+                let cpp_ty = analyze_static(&item.attrs, &item.ty, &item.ident).map_err(|e| {
+                    ConvertErrorWithContext(
+                        e,
+                        Some(ErrorContext::new_for_item(item.ident.clone().into())),
+                    )
+                })?;
+                self.statics.push(UnanalyzedApi::Static {
+                    name: api_name(&self.ns, item.ident.clone(), self.parse_callback_results),
+                    cpp_ty,
+                });
+                Ok(())
+            }
             _ => Err(ConvertErrorWithContext(
                 ConvertErrorFromCpp::UnexpectedForeignItem,
                 None,
@@ -138,6 +156,7 @@ impl<'a> ParseForeignMod<'a> {
     /// the resulting APIs.
     pub(crate) fn finished(mut self, apis: &mut ApiVec<NullPhase>) {
         apis.append(&mut self.ignored_apis);
+        apis.append(&mut self.statics);
         while !self.funcs_to_convert.is_empty() {
             let mut fun = self.funcs_to_convert.remove(0);
             fun.self_ty = self.method_receivers.get(&fun.ident).cloned();
@@ -154,6 +173,65 @@ impl<'a> ParseForeignMod<'a> {
     }
 }
 
+/// Decide whether we can re-export a variable with static storage duration,
+/// and if so what its C++ type is.
+///
+/// We can only do it if there will be a symbol to link against, and if
+/// `bindgen`'s declaration of the variable names a type which our own output
+/// mod exposes unchanged. The type is a path either rooted at `root` (a C++
+/// type, for which `autocxx` generates its own representation) or a plain Rust
+/// type such as `::std::os::raw::c_int`. In the former case we return its
+/// [`QualifiedName`], so that we can later check it is POD and record a
+/// dependency upon it; in the latter we return `None`, because `bindgen`'s
+/// declaration is directly usable.
+///
+/// Any other sort of type - a pointer, a reference, an array, a function
+/// pointer - is rejected, because re-exporting it would expose `bindgen`'s raw
+/// view of the world rather than the types `autocxx` generates.
+fn analyze_static(
+    attrs: &[Attribute],
+    ty: &Type,
+    ident: &Ident,
+) -> Result<Option<QualifiedName>, ConvertErrorFromCpp> {
+    if linkage_from_link_name(link_name_from_attrs(attrs).as_deref()) == CppLinkage::Internal {
+        return Err(ConvertErrorFromCpp::StaticDataWithInternalLinkage(
+            ident.to_string(),
+        ));
+    }
+    match ty {
+        Type::Path(typ) => {
+            let is_cpp_type = typ
+                .path
+                .segments
+                .first()
+                .is_some_and(|seg| seg.ident == "root");
+            Ok(if is_cpp_type {
+                Some(QualifiedName::from_type_path(typ))
+            } else {
+                None
+            })
+        }
+        _ => Err(ConvertErrorFromCpp::StaticDataOfUnsupportedType),
+    }
+}
+
+/// The mangled symbol name which bindgen recorded for an item, if it differed
+/// from the item's Rust name.
+fn link_name_from_attrs(attrs: &[Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attr| match &attr.meta {
+        Meta::NameValue(MetaNameValue {
+            path,
+            value:
+                Expr::Lit(ExprLit {
+                    lit: Lit::Str(link_name),
+                    ..
+                }),
+            ..
+        }) if path.is_ident("link_name") => Some(link_name.value()),
+        _ => None,
+    })
+}
+
 /// Work out whether a function is ref-qualified (`void foo() &` /
 /// `void foo() &&`).
 ///
@@ -163,20 +241,7 @@ impl<'a> ParseForeignMod<'a> {
 /// information survives, so that's where we look. See
 /// [`super::ref_qualifier`] for the gory details.
 fn ref_qualifier_from_attrs(attrs: &[Attribute]) -> CppRefQualifier {
-    attrs
-        .iter()
-        .find_map(|attr| match &attr.meta {
-            Meta::NameValue(MetaNameValue {
-                path,
-                value:
-                    Expr::Lit(ExprLit {
-                        lit: Lit::Str(link_name),
-                        ..
-                    }),
-                ..
-            }) if path.is_ident("link_name") => Some(link_name.value()),
-            _ => None,
-        })
+    link_name_from_attrs(attrs)
         .map(|link_name| ref_qualifier_from_mangled_name(&link_name))
         .unwrap_or_default()
 }

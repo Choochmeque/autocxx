@@ -423,6 +423,10 @@ impl<'a> RsCodeGenerator<'a> {
                 output_mod_items: vec![Self::generate_bindgen_use_stmt(&name)],
                 ..Default::default()
             },
+            Api::Static { .. } => RsCodegenResult {
+                output_mod_items: vec![Self::generate_static_use_stmt(&name)],
+                ..Default::default()
+            },
             Api::Struct {
                 details,
                 analysis:
@@ -1004,6 +1008,19 @@ impl<'a> RsCodeGenerator<'a> {
     fn generate_bindgen_use_stmt(name: &QualifiedName) -> Item {
         let segs = find_output_mod_root(name.get_namespace()).chain(name.get_bindgen_path_idents());
         Item::Use(parse_quote! {
+            #[allow(unused_imports)]
+            pub use #(#segs)::*;
+        })
+    }
+
+    /// Re-export a C++ variable, spelling out the assumption Rust makes about
+    /// anything it can take a reference to.
+    fn generate_static_use_stmt(name: &QualifiedName) -> Item {
+        let segs = find_output_mod_root(name.get_namespace()).chain(name.get_bindgen_path_idents());
+        Item::Use(parse_quote! {
+            #[doc = "A variable defined in C++."]
+            #[doc = ""]
+            #[doc = "Reading it is `unsafe`. Rust further requires that the object does not change while Rust holds a reference to it, which autocxx cannot enforce: C++ mutating it behind Rust's back - through a `mutable` member of an otherwise `const` object, say - is undefined behaviour and is not supported."]
             #[allow(unused_imports)]
             pub use #(#segs)::*;
         })

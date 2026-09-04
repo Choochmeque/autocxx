@@ -2394,6 +2394,7 @@ impl Api<FnPhase> {
             Api::Function { ref analysis, .. } => Some(analysis.cxxbridge_name.clone()),
             Api::StringConstructor { .. }
             | Api::Const { .. }
+            | Api::Static { .. }
             | Api::IgnoredItem { .. }
             | Api::RustSubclassFn { .. } => None,
             _ => Some(self.name().get_final_ident()),

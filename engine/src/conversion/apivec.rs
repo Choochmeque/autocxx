@@ -136,3 +136,69 @@ impl<P: AnalysisPhase> FromIterator<Api<P>> for ApiVec<P> {
         this
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ApiVec;
+    use crate::conversion::api::{Api, ApiName, NullPhase, StructDetails};
+    use crate::types::QualifiedName;
+    use syn::parse_quote;
+
+    fn name(id: &str) -> ApiName {
+        ApiName::new_from_qualified_name(QualifiedName::new_from_cpp_name(id))
+    }
+
+    fn struct_api(id: &str) -> Api<NullPhase> {
+        let ident = quote::format_ident!("{}", id);
+        Api::Struct {
+            name: name(id),
+            details: Box::new(StructDetails {
+                item: parse_quote! { pub struct #ident { pub a: u32 } },
+                has_rvalue_reference_fields: false,
+            }),
+            analysis: (),
+        }
+    }
+
+    fn static_api(id: &str) -> Api<NullPhase> {
+        Api::Static {
+            name: name(id),
+            cpp_ty: None,
+        }
+    }
+
+    /// C++ lets a variable share a name with a type - `struct stat {...};
+    /// extern struct stat stat;` - and bindgen calls both of them `stat`. Only
+    /// one of them can keep the name, and it has to be the type, since
+    /// anything else we generate may depend on it.
+    ///
+    /// This is why [`Api::discard_duplicates`] answers `true` for
+    /// [`Api::Static`]; see the note there about why the type is always the
+    /// one already in the vec.
+    #[test]
+    fn variable_clashing_with_type_yields_to_it() {
+        let mut apis = ApiVec::new();
+        apis.push(struct_api("stat"));
+        apis.push(static_api("stat"));
+        let survivors: Vec<_> = apis.iter().collect();
+        assert_eq!(survivors.len(), 1);
+        assert!(
+            matches!(survivors[0], Api::Struct { .. }),
+            "the type should have survived, but we kept {:?}",
+            survivors[0]
+        );
+    }
+
+    /// Two APIs which genuinely can't be told apart still lose out to an
+    /// `IgnoredItem`, so that we document the problem rather than picking one
+    /// arbitrarily.
+    #[test]
+    fn indistinguishable_duplicates_become_ignored() {
+        let mut apis = ApiVec::new();
+        apis.push(struct_api("Bob"));
+        apis.push(struct_api("Bob"));
+        let survivors: Vec<_> = apis.iter().collect();
+        assert_eq!(survivors.len(), 1);
+        assert!(matches!(survivors[0], Api::IgnoredItem { .. }));
+    }
+}
