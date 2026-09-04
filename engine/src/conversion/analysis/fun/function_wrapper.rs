@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use crate::conversion::parse::CppRefQualifier;
 use crate::conversion::CppEffectiveName;
 use crate::minisyn::Ident;
 use crate::{
@@ -265,4 +266,13 @@ pub(crate) struct CppFunction {
     pub(crate) kind: CppFunctionKind,
     pub(crate) pass_obs_field: bool,
     pub(crate) qualification: Option<QualifiedName>,
+    /// If this C++ function is overriding a ref-qualified virtual method, it
+    /// must repeat the ref-qualifier, or it doesn't override anything and
+    /// doesn't even compile alongside the method it's meant to override. That
+    /// applies to `&&` just as much as to `&`: an override of a pure virtual
+    /// `&&` method is generated and dispatches to Rust as usual, even though
+    /// we generate no Rust binding for calling the superclass method.
+    /// [`CppRefQualifier::None`] in every other case; autocxx never introduces
+    /// a ref-qualifier which wasn't in the original C++.
+    pub(crate) ref_qualifier: CppRefQualifier,
 }

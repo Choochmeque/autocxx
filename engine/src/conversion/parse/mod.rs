@@ -9,5 +9,7 @@
 mod extern_fun_signatures;
 mod parse_bindgen;
 mod parse_foreign_mod;
+mod ref_qualifier;
 
 pub(crate) use parse_bindgen::ParseBindgen;
+pub(crate) use ref_qualifier::CppRefQualifier;

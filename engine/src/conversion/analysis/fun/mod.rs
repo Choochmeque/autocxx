@@ -25,6 +25,7 @@ use crate::{
         apivec::ApiVec,
         convert_error::{ConvertErrorWithContext, ErrorContext, ErrorContextType},
         error_reporter::{convert_apis, report_any_error},
+        parse::CppRefQualifier,
         type_helpers::{type_is_reference, unwrap_has_opaque},
         CppEffectiveName, CppOriginalName,
     },
@@ -665,6 +666,7 @@ impl<'a> FnAnalyzer<'a> {
                     sup,
                     subclass_fn_deps,
                     self.unsafe_policy,
+                    fun.ref_qualifier,
                 ));
 
                 // Create the trait item for the <superclass>_methods and <superclass>_supers
@@ -1157,6 +1159,13 @@ impl<'a> FnAnalyzer<'a> {
             set_ignore_reason(ConvertErrorFromCpp::AssignmentOperator)
         } else if return_type_is_reference(&fun.output) {
             set_ignore_reason(ConvertErrorFromCpp::RValueReturn)
+        } else if matches!(fun.ref_qualifier, CppRefQualifier::RValue) {
+            // `void foo() &&` can only be called on an rvalue. autocxx only
+            // ever has a reference or a smart pointer to a C++ object, and
+            // moving out of one of those isn't something we can express, so
+            // there's nothing useful we could generate. `&`-qualified methods
+            // are fine, and are handled by forcing a C++ wrapper below.
+            set_ignore_reason(ConvertErrorFromCpp::RValueRefQualifiedMethod)
         } else if matches!(fun.is_deleted, Some(Explicitness::Deleted)) {
             set_ignore_reason(ConvertErrorFromCpp::Deleted)
         } else {
@@ -1335,6 +1344,12 @@ impl<'a> FnAnalyzer<'a> {
                 ..
             } => true,
             FnKind::Method { .. } if cxxbridge_name != rust_name => true,
+            // cxx calls a method through a pointer-to-member-function, and a
+            // pointer-to-member type can't carry a ref-qualifier, so the C++
+            // it generates for `void foo() &` doesn't compile. Our own wrapper
+            // calls the method directly on an lvalue, which is fine.
+            // google/autocxx#837.
+            _ if matches!(fun.ref_qualifier, CppRefQualifier::LValue) => true,
             _ if param_conversion_needed => true,
             _ if ret_type_conversion_needed => true,
             _ if cpp_name_incompatible_with_cxx => true,
@@ -1439,6 +1454,9 @@ impl<'a> FnAnalyzer<'a> {
                 kind: cpp_function_kind,
                 pass_obs_field: false,
                 qualification: None,
+                // Our wrapper is a free function which calls the method on an
+                // lvalue, so it never needs a ref-qualifier of its own.
+                ref_qualifier: CppRefQualifier::None,
             })
         } else {
             None
@@ -2263,6 +2281,7 @@ impl<'a> FnAnalyzer<'a> {
                         synthetic_cpp: None,
                         provenance: Provenance::SynthesizedOther,
                         variadic: false,
+                        ref_qualifier: CppRefQualifier::None,
                     }),
                 )
             })

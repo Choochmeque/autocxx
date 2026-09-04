@@ -32,6 +32,7 @@ use super::{
     },
     api::{Api, Provenance, SubclassName, TypeKind},
     apivec::ApiVec,
+    parse::CppRefQualifier,
     ConvertErrorFromCpp, CppEffectiveName,
 };
 
@@ -422,13 +423,22 @@ impl<'a> CppCodeGenerator<'a> {
             CppFunctionKind::ConstMethod => " const",
             _ => "",
         };
-        let declaration = format!("{ret_type} {name}({args}){constness}");
+        // Only ever non-empty when we're overriding a ref-qualified virtual
+        // method in a subclass, where the override has to repeat the
+        // qualifier - google/autocxx#837.
+        let ref_qualifier = match details.ref_qualifier {
+            CppRefQualifier::None => "",
+            CppRefQualifier::LValue => " &",
+            CppRefQualifier::RValue => " &&",
+        };
+        let declaration = format!("{ret_type} {name}({args}){constness}{ref_qualifier}");
         let qualification = if let Some(qualification) = &details.qualification {
             format!("{}::", qualification.to_cpp_name())
         } else {
             "".to_string()
         };
-        let qualified_declaration = format!("{ret_type} {qualification}{name}({args}){constness}");
+        let qualified_declaration =
+            format!("{ret_type} {qualification}{name}({args}){constness}{ref_qualifier}");
         // Whether there's a placement param in which to put the return value
         let placement_param = details
             .argument_conversion
@@ -695,6 +705,10 @@ impl<'a> CppCodeGenerator<'a> {
             if !method.is_pure_virtual {
                 let mut super_method = method.fun.clone();
                 super_method.pass_obs_field = false;
+                // `super_foo` is a new method on the subclass which we call
+                // from Rust on an ordinary lvalue, so it doesn't inherit the
+                // superclass method's ref-qualifier.
+                super_method.ref_qualifier = CppRefQualifier::None;
                 super_method.wrapper_function_name = SubclassName::get_super_fn_name(
                     superclass.get_namespace(),
                     &method.fun.wrapper_function_name.to_string(),

@@ -113,6 +113,8 @@ pub enum ConvertErrorFromCpp {
     NonPublicNestedType,
     #[error("This function returns an rvalue reference (&&) which is not yet supported.")]
     RValueReturn,
+    #[error("This method is rvalue-reference-qualified (`&&`), so it can only be called on an object which is about to be discarded. autocxx always holds C++ objects behind a reference or a smart pointer, so it has no way to express that; the method is therefore not generated. See https://github.com/google/autocxx/issues/837.")]
+    RValueRefQualifiedMethod,
     #[error("This method is private")]
     PrivateMethod,
     #[error("This type's C++ destructor is inaccessible (private, protected or deleted), so Rust could never destroy one of these. autocxx therefore does not generate constructors, copy/move support or smart pointer support for it; you can still call its methods on a reference or pointer obtained from C++. See https://github.com/google/autocxx/issues/829.")]

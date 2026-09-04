@@ -19,6 +19,7 @@ use crate::conversion::api::{
     SubclassName, SuperclassMethod, UnsafetyNeeded,
 };
 use crate::conversion::apivec::ApiVec;
+use crate::conversion::parse::CppRefQualifier;
 use crate::conversion::CppEffectiveName;
 use crate::minisyn::minisynize_punctuated;
 use crate::parse_callbacks::CppOriginalName;
@@ -73,6 +74,15 @@ pub(super) fn create_subclass_fn_wrapper(
         synthetic_cpp: None,
         provenance: Provenance::SynthesizedOther,
         variadic: fun.variadic,
+        // We're wrapping `Sub::foo_super`, a method autocxx generates itself
+        // and never ref-qualifies. We carry the superclass method's qualifier
+        // across regardless, because `Sub::foo_super`'s body calls the
+        // superclass method on an lvalue and so inherits its restrictions: if
+        // that method is `&&`-qualified, this wrapper has to go, and the
+        // subclass override goes with it as a dependent. Only non-pure virtual
+        // methods reach here; a pure virtual one has no `_super` helper, and
+        // its override survives (and has to, or the subclass stays abstract).
+        ref_qualifier: fun.ref_qualifier,
     })
 }
 
@@ -109,6 +119,7 @@ pub(super) fn create_subclass_trait_item(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_subclass_function(
     sub: &SubclassName,
     analysis: &super::FnAnalysis,
@@ -117,6 +128,7 @@ pub(super) fn create_subclass_function(
     superclass: &QualifiedName,
     dependencies: Vec<QualifiedName>,
     unsafe_policy: &UnsafePolicy,
+    ref_qualifier: CppRefQualifier,
 ) -> Api<FnPrePhase1> {
     let cpp = sub.cpp();
     let holder_name = sub.holder();
@@ -165,6 +177,9 @@ pub(super) fn create_subclass_function(
                 kind,
                 pass_obs_field: true,
                 qualification: Some(cpp),
+                // This method overrides the superclass's, so if that one is
+                // ref-qualified then this one must be too.
+                ref_qualifier,
             },
             superclass: superclass.clone(),
             receiver_mutability: *receiver_mutability,
@@ -211,6 +226,7 @@ pub(super) fn create_subclass_constructor(
         original_cpp_name: CppEffectiveName::from_fully_qualified_name_for_subclass(
             &cpp.to_cpp_name(),
         ),
+        ref_qualifier: CppRefQualifier::None,
     };
     let subclass_constructor_details = Box::new(SubclassConstructorDetails {
         subclass: sub.clone(),
@@ -259,6 +275,7 @@ pub(super) fn create_subclass_constructor(
         synthetic_cpp: None,
         provenance: Provenance::SynthesizedSubclassConstructor(subclass_constructor_details),
         variadic: fun.variadic,
+        ref_qualifier: CppRefQualifier::None,
     });
     let subclass_constructor_name = ApiName::new_with_cpp_name(
         &Namespace::new(),

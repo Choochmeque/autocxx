@@ -33,6 +33,7 @@ use super::{
         ReceiverMutability,
     },
     convert_error::{ConvertErrorWithContext, ErrorContext},
+    parse::CppRefQualifier,
     ConvertErrorFromCpp, CppEffectiveName,
 };
 
@@ -185,6 +186,11 @@ pub(crate) struct FuncToConvert {
     pub(crate) synthetic_cpp: Option<(CppFunctionBody, CppFunctionKind)>,
     /// =delete or =default
     pub(crate) is_deleted: Option<Explicitness>,
+    /// Whether this is a `void foo() &` or `void foo() &&` method. Recovered
+    /// from the mangled name, because bindgen doesn't tell us; see
+    /// [`crate::conversion::parse::CppRefQualifier`]. Always
+    /// [`CppRefQualifier::None`] for functions we synthesize ourselves.
+    pub(crate) ref_qualifier: CppRefQualifier,
 }
 
 /// Layers of analysis which may be applied to decorate each API.
