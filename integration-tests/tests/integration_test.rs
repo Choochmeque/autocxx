@@ -2915,9 +2915,15 @@ fn test_give_pod_typedef_by_value() {
     run_test(cxx, hdr, rs, &["give_bob"], &["Bob"]);
 }
 
-#[ignore] // because we need to put some aliases in the output ffi mod.
 #[test]
 fn test_use_pod_typedef() {
+    // The alias needs a directive of its own. bindgen only emits items whose
+    // names match the allowlist we hand it, and its allowlist follows
+    // references outwards from the items named - from `Horace` to `Bob`, never
+    // from `Bob` back to the aliases pointing at it. So `generate_pod!("Bob")`
+    // alone leaves nothing named `Horace` anywhere in bindgen's output for us
+    // to re-export. `generate_all!` does pick such aliases up; see
+    // `test_use_pod_typedef_generate_all`.
     let cxx = indoc! {"
     "};
     let hdr = indoc! {"
@@ -2929,10 +2935,64 @@ fn test_use_pod_typedef() {
         using Horace = Bob;
     "};
     let rs = quote! {
-        let h = Horace { a: 3, b: 4 };
+        let h = ffi::Horace { a: 3, b: 4 };
         assert_eq!(h.b, 4);
     };
-    run_test(cxx, hdr, rs, &[], &["Bob"]);
+    run_test(cxx, hdr, rs, &["Horace"], &["Bob"]);
+}
+
+#[test]
+fn test_use_pod_typedef_generate_all() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+            uint32_t b;
+        };
+        using Horace = Bob;
+    "};
+    let rs = quote! {
+        let h = ffi::Horace { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test_ex("", hdr, rs, quote! { generate_all!() }, None, None, None);
+}
+
+#[test]
+fn test_use_pod_typedef_in_ns() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace ns {
+            struct Bob {
+                uint32_t a;
+                uint32_t b;
+            };
+            using Horace = Bob;
+        }
+    "};
+    let rs = quote! {
+        let h = ffi::ns::Horace { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test("", hdr, rs, &["ns::Horace"], &["ns::Bob"]);
+}
+
+#[test]
+fn test_use_pod_typedef_chain() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+            uint32_t b;
+        };
+        using Horace = Bob;
+        using Herbert = Horace;
+    "};
+    let rs = quote! {
+        let h = ffi::Herbert { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test("", hdr, rs, &["Herbert"], &["Bob"]);
 }
 
 #[test]
