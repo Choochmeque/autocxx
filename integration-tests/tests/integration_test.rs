@@ -13380,10 +13380,10 @@ fn test_issue_1229() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
-#[test]
-#[ignore] // https://github.com/google/autocxx/issues/1265
-fn test_issue_1265() {
-    let hdr = indoc! {"
+/// The C++ side of upstream #1265: a class whose only member is a
+/// `std::string`, i.e. a type that is emphatically not trivially relocatable.
+fn issue_1265_header() -> &'static str {
+    indoc! {"
         #include <string>
 
         class Test
@@ -13401,10 +13401,39 @@ fn test_issue_1265() {
         private:
           std::string string;
         };
-    "};
-    run_test_ex(
+    "}
+}
+
+/// Upstream #1265: safe Rust must not be able to bitwise-move a non-POD C++
+/// object.
+///
+/// `Test` owns a `std::string`. In libstdc++ a short string stores a pointer to
+/// the object's *own* inline SSO buffer, so relocating a `Test` bytewise leaves
+/// it pointing into whatever object used to live at that address. The reporter's
+/// program did exactly that, via `core::mem::swap` on two `&mut Test` obtained
+/// from `moveit!(let mut r = &move *ptr)`, and it corrupted both strings and
+/// then aborted in the allocator - with no `unsafe` anywhere in user code.
+///
+/// The issue asked for precisely one outcome: "Program should not be allowed to
+/// compile." That is what this test now asserts. It holds because autocxx emits
+/// opaque (non-POD) types as `!Unpin` - see the `_pinned` field in
+/// `codegen_rs::non_pod_struct::generate_opaque_type`. `!Unpin` removes the
+/// `UniquePtr<Test>: DerefMove` impl (moveit provides it only for `T: Unpin`),
+/// which removes the `MoveRef<Test>`, which removes the `&mut Test` that
+/// `core::mem::swap` needs. Safe code can still reach the object through
+/// `Pin<&mut Test>`, which cannot be swapped.
+///
+/// Note on why this is a compile-failure assertion rather than a runtime one:
+/// the swap is undefined behaviour, so observing it "work" proves nothing. It
+/// happens to leave objects intact under libc++ (whose SSO layout has no
+/// self-pointer) and to corrupt them under libstdc++, which is why the original
+/// version of this test passed on macOS and failed on Linux. Asserting on a
+/// build failure is deterministic on every standard library.
+#[test]
+fn test_issue_1265() {
+    let err = do_run_test(
         "",
-        hdr,
+        issue_1265_header(),
         quote! {
             run();
         },
@@ -13427,6 +13456,47 @@ fn test_issue_1265() {
                 core::mem::swap(&mut *ref0, &mut *ref1);
                 println!("0: {}", ref0.get_string());
                 println!("1: {}", ref1.get_string());
+            }
+        }),
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("safe code was able to bitwise-move a non-relocatable C++ type");
+    match err {
+        TestError::RsBuild(diagnostics) => assert!(
+            diagnostics.contains("Unpin"),
+            "expected the generated Rust to be rejected because `Test` is not `Unpin`, \
+             but rustc complained about something else:\n{diagnostics}"
+        ),
+        other => panic!("expected a generated-Rust build failure, got {other:?}"),
+    }
+}
+
+/// The sound counterpart to [`test_issue_1265`]: making `Test` `!Unpin` must not
+/// cost users the ability to build, read, or exchange the objects - only the
+/// ability to relocate one behind C++'s back. Swapping the owning `UniquePtr`s
+/// moves the pointers rather than the pointees, so the C++ objects never move
+/// and their internal self-references stay valid on every standard library.
+#[test]
+fn test_issue_1265_sound_swap() {
+    run_test_ex(
+        "",
+        issue_1265_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["Test"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            fn run() {
+                let mut ptr0 = UniquePtr::emplace(ffi::Test::new("string"));
+                let mut ptr1 = UniquePtr::emplace(ffi::Test::new("another string"));
+                assert_eq!(ptr0.get_string().to_str().unwrap(), "string");
+                assert_eq!(ptr1.get_string().to_str().unwrap(), "another string");
+                core::mem::swap(&mut ptr0, &mut ptr1);
+                assert_eq!(ptr0.get_string().to_str().unwrap(), "another string");
+                assert_eq!(ptr1.get_string().to_str().unwrap(), "string");
             }
         }),
     )
