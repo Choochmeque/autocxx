@@ -7,10 +7,10 @@
 // except according to those terms.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::File,
     io::{Read, Write},
-    panic::RefUnwindSafe,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -51,15 +51,27 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
         .flag_if_supported("-Werror")
 }
 
+/// Environment variables telling generated code where to find its bindings, as
+/// name/value pairs. Applied to the process that builds the code, on top of a
+/// cleared set of `RS_FIND_KEYS` (the `AUTOCXX_RS*` variables).
+pub type RsFindEnv = Vec<(String, OsString)>;
+
+/// Works out the [`RsFindEnv`] for a build, given the temporary directory the
+/// bindings were staged into. See [`RsFindMode::Custom`].
+pub type RsFindEnvFn = Box<dyn FnOnce(&Path) -> RsFindEnv>;
+
 /// What environment variables we should set in order to tell rustc how to find
 /// the Rust code.
 pub enum RsFindMode {
     AutocxxRs,
     AutocxxRsArchive,
     AutocxxRsFile,
-    /// This just calls the callback instead of setting any environment variables. The callback
-    /// receives the path to the temporary directory.
-    Custom(Box<dyn FnOnce(&Path)>),
+    /// Work out the variables with a callback rather than using one of the
+    /// fixed layouts above. It receives the path to the temporary directory and
+    /// returns the variables to set, which are applied to the process that
+    /// builds the code rather than to this one - so two tests using this at the
+    /// same time cannot interfere with each other.
+    Custom(RsFindEnvFn),
 }
 
 /// API to test building pre-generated files.
@@ -83,19 +95,19 @@ pub fn build_from_folder(
         .try_compile("autocxx-demo")
         .map_err(TestError::CppBuild)?;
     // use the trybuild crate to build the Rust file.
-    let r = get_builder().lock().unwrap().build(
-        &target_dir,
-        "autocxx-demo",
-        &folder,
-        &["input.h", "cxx.h"],
-        &main_rs_file,
-        generated_rs_files,
-        rs_find_mode,
-    );
-    if r.is_err() {
-        return Err(TestError::RsBuild); // details of Rust panic are a bit messy to include, and
-                                        // not important at the moment.
-    }
+    get_builder()
+        .lock()
+        .unwrap()
+        .build(
+            &target_dir,
+            "autocxx-demo",
+            &folder,
+            &["input.h", "cxx.h"],
+            main_rs_file,
+            generated_rs_files,
+            rs_find_mode,
+        )
+        .map_err(TestError::RsBuild)?;
     Ok(())
 }
 
@@ -138,17 +150,21 @@ impl LinkableTryBuilder {
         }
     }
 
+    /// Builds `rs_path` using trybuild. On failure, the `Err` carries the report
+    /// trybuild printed - i.e. rustc's diagnostics - because that is the only
+    /// place they exist, and without them a build failure (particularly one that
+    /// only reproduces on one platform's CI) is impossible to diagnose.
     #[allow(clippy::too_many_arguments)]
-    fn build<P1: AsRef<Path>, P2: AsRef<Path>, P3: AsRef<Path> + RefUnwindSafe>(
+    fn build<P1: AsRef<Path>, P2: AsRef<Path>>(
         &self,
         library_path: &P1,
         library_name: &str,
         header_path: &P2,
         header_names: &[&str],
-        rs_path: &P3,
+        rs_path: &Path,
         generated_rs_files: Vec<PathBuf>,
         rs_find_mode: RsFindMode,
-    ) -> std::thread::Result<()> {
+    ) -> Result<(), String> {
         // Copy all items from the source dir into our temporary dir if their name matches
         // the pattern given in `library_name`.
         self.move_items_into_temp_dir(library_path, library_name);
@@ -166,23 +182,242 @@ impl LinkableTryBuilder {
         if std::env::var_os("AUTOCXX_ASAN").is_some() {
             rustflags.push_str(" -Z sanitizer=address -Clinker=clang++ -Clink-arg=-fuse-ld=lld");
         }
-        std::env::set_var("RUSTFLAGS", rustflags);
-        match rs_find_mode {
-            RsFindMode::AutocxxRs => std::env::set_var("AUTOCXX_RS", temp_path),
-            RsFindMode::AutocxxRsArchive => std::env::set_var(
-                "AUTOCXX_RS_JSON_ARCHIVE",
-                self.temp_dir.path().join("gen.rs.json"),
+        run_trybuild(
+            rs_path,
+            &rustflags,
+            &rs_find_env(rs_find_mode, self.temp_dir.path()),
+        )
+    }
+}
+
+/// Every variable that can tell generated code where to find its bindings.
+/// Whichever of these a build does not want is removed rather than left alone,
+/// so a value meant for a different test cannot change what gets built.
+const RS_FIND_KEYS: [&str; 3] = ["AUTOCXX_RS", "AUTOCXX_RS_JSON_ARCHIVE", "AUTOCXX_RS_FILE"];
+
+/// The environment variables that tell the generated code where to find the
+/// Rust bindings, resolved for a given [`RsFindMode`].
+///
+/// These used to be applied to this process with `set_var` and left there, where
+/// concurrent tests could race over them and stale values could survive into
+/// later tests. They are now values handed to the child that does the build.
+fn rs_find_env(rs_find_mode: RsFindMode, temp_dir: &Path) -> RsFindEnv {
+    let one = |key: &str, value: OsString| vec![(key.to_owned(), value)];
+    match rs_find_mode {
+        RsFindMode::AutocxxRs => one("AUTOCXX_RS", temp_dir.into()),
+        RsFindMode::AutocxxRsArchive => one(
+            "AUTOCXX_RS_JSON_ARCHIVE",
+            temp_dir.join("gen.rs.json").into(),
+        ),
+        RsFindMode::AutocxxRsFile => {
+            one("AUTOCXX_RS_FILE", temp_dir.join("gen0.include.rs").into())
+        }
+        RsFindMode::Custom(f) => f(temp_dir),
+    }
+}
+
+/// Name of the test that a test binary must expose so that this harness can
+/// re-enter it as a child process. See [`run_trybuild_child_if_requested`].
+pub const TRYBUILD_CHILD_TEST_NAME: &str = "autocxx_trybuild_child";
+
+/// Carries the path of the Rust file to build. Its presence is what puts a
+/// re-entered process into child mode.
+const TRYBUILD_CHILD_RS_PATH: &str = "AUTOCXX_TRYBUILD_CHILD_RS_PATH";
+
+/// Printed by the child the moment it enters child mode, so that the parent can
+/// tell "the build ran and succeeded" apart from "this executable has no
+/// re-entry hook, so the child did nothing at all". Without it a missing hook
+/// would look exactly like a passing test.
+const TRYBUILD_CHILD_SENTINEL: &str = "@@ autocxx trybuild child running @@";
+
+/// Re-entry point for the child process that actually builds the generated Rust
+/// code. Returns `true` if it ran, in which case the caller must return
+/// immediately and do nothing else.
+///
+/// Every executable that can reach [`build_from_folder`], [`do_run_test`] and
+/// friends should give this a chance to run before doing anything else: a test
+/// binary by exposing an `#[ignore]`d test named [`TRYBUILD_CHILD_TEST_NAME`]
+/// that calls it, any other binary by calling it at the top of `main`. An
+/// executable that does not is still correct - the harness spots that the child
+/// did nothing and builds in-process instead - but its build failures come
+/// without diagnostics.
+pub fn run_trybuild_child_if_requested() -> bool {
+    let rs_path = match std::env::var_os(TRYBUILD_CHILD_RS_PATH) {
+        Some(rs_path) => PathBuf::from(rs_path),
+        None => return false,
+    };
+    // Before anything is allowed to spawn a process. trybuild's cargo, and every
+    // rustc and build script under it, inherit this environment; if one of them
+    // happened to be an executable with this same hook - the mdbook preprocessor
+    // is exactly that - it would enter child mode and start building instead of
+    // doing its job.
+    std::env::remove_var(TRYBUILD_CHILD_RS_PATH);
+    println!("{TRYBUILD_CHILD_SENTINEL}");
+    let test_cases = trybuild::TestCases::new();
+    test_cases.pass(rs_path);
+    // `TestCases` runs the build - and panics if it fails - when it drops. The
+    // panic is deliberately not caught: it is what gives this process the
+    // non-zero exit status that tells the parent the build failed.
+    drop(test_cases);
+    true
+}
+
+/// Builds `rs_path` with trybuild in a child process, and on failure returns the
+/// child's output - i.e. rustc's diagnostics as trybuild rendered them.
+///
+/// The build has to happen in a separate process because of where trybuild's
+/// report goes. trybuild prints it through its *own* `println!` macro
+/// (`trybuild::term`), which writes to a `termcolor::StandardStream::stderr` and
+/// therefore straight to file descriptor 2. libtest's per-test output capture is
+/// a thread-local that only `std::io::_print`/`_eprint` - the *std* `print!` and
+/// `eprint!` macros - consult, so trybuild's diagnostics bypass it entirely:
+/// they land in the raw process stderr, unattributed to any test and nowhere
+/// near the `failures:` block that names the test which produced them. On a
+/// suite this size that makes a build failure effectively undiagnosable, which
+/// is exactly the position a platform-specific CI failure leaves you in.
+///
+/// Giving the build its own process is what makes capturing it safe. Redirecting
+/// this process's own fd 2 would be much less code, but fd 2 is process-global
+/// and these tests run in parallel while spawning compiler children constantly,
+/// so it would swallow output belonging to unrelated tests. A child's pipe
+/// belongs to that child alone.
+///
+/// The child is this same executable, re-entered via
+/// [`run_trybuild_child_if_requested`]; the arguments below select just the
+/// re-entry test when it is a test binary, and are ignored by anything else,
+/// which checks the hook before it looks at its arguments.
+fn run_trybuild(
+    rs_path: &Path,
+    rustflags: &str,
+    rs_find_env: &[(String, OsString)],
+) -> Result<(), String> {
+    let current_exe = match std::env::current_exe() {
+        Ok(current_exe) => current_exe,
+        Err(err) => {
+            return build_in_process(
+                rs_path,
+                rustflags,
+                rs_find_env,
+                &format!("this executable's own path could not be determined ({err})"),
+            )
+        }
+    };
+    let mut cmd = std::process::Command::new(current_exe);
+    cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
+        .env("RUSTFLAGS", rustflags)
+        .args([
+            "--exact",
+            TRYBUILD_CHILD_TEST_NAME,
+            "--ignored",
+            // So that trybuild's report reaches the child's real stderr, and
+            // hence our pipe, rather than libtest's own capture buffer.
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Clear the lot before setting what this build wants, so that a variable
+    // inherited from our own environment cannot redirect the child.
+    for key in RS_FIND_KEYS {
+        cmd.env_remove(key);
+    }
+    for (key, value) in rs_find_env {
+        cmd.env(key, value);
+    }
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(err) => {
+            return build_in_process(
+                rs_path,
+                rustflags,
+                rs_find_env,
+                &format!("this executable could not be re-run ({err})"),
+            )
+        }
+    };
+    let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
+    report.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !report.contains(TRYBUILD_CHILD_SENTINEL) {
+        // The child never reached the re-entry hook, so its exit status says
+        // nothing about the build and must not be trusted.
+        return build_in_process(
+            rs_path,
+            rustflags,
+            rs_find_env,
+            &format!(
+                "this executable has no `{TRYBUILD_CHILD_TEST_NAME}` re-entry hook \
+                 (see `autocxx_integration_tests::run_trybuild_child_if_requested`)"
             ),
-            RsFindMode::AutocxxRsFile => std::env::set_var(
-                "AUTOCXX_RS_FILE",
-                self.temp_dir.path().join("gen0.include.rs"),
-            ),
-            RsFindMode::Custom(f) => f(self.temp_dir.path()),
-        };
-        std::panic::catch_unwind(|| {
-            let test_cases = trybuild::TestCases::new();
-            test_cases.pass(rs_path)
-        })
+        );
+    }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(summarize_rs_build_failure(&report))
+    }
+}
+
+/// Last resort for an executable this harness cannot re-enter: build here, the
+/// way this harness always used to. The diagnostics go wherever trybuild puts
+/// them and cannot be recovered, so the error says why.
+fn build_in_process(
+    rs_path: &Path,
+    rustflags: &str,
+    rs_find_env: &[(String, OsString)],
+    reason: &str,
+) -> Result<(), String> {
+    // Unlike the child, this has to go through the process environment, so it
+    // is racy if other tests are building at the same time. That is the price of
+    // an executable that cannot be re-entered.
+    std::env::set_var("RUSTFLAGS", rustflags);
+    for key in RS_FIND_KEYS {
+        std::env::remove_var(key);
+    }
+    for (key, value) in rs_find_env {
+        std::env::set_var(key, value);
+    }
+    // `TestCases` runs the build, and panics if it fails, when it drops - so the
+    // drop has to happen inside the `catch_unwind`.
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let test_cases = trybuild::TestCases::new();
+        test_cases.pass(rs_path);
+    }));
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(_) => Err(format!(
+            "the generated Rust failed to build. The compiler's diagnostics could \
+             not be captured because {reason}, so trybuild printed them to this \
+             process's stderr - look for them there."
+        )),
+    }
+}
+
+/// Rust build failures can run to thousands of lines once every warning in the
+/// generated code is included. Keep the tail, which is where the errors and
+/// trybuild's own summary are.
+const MAX_DIAGNOSTIC_LINES: usize = 200;
+
+fn summarize_rs_build_failure(child_output: &str) -> String {
+    let mut lines: &[&str] = &child_output
+        .lines()
+        // Our own handshake with the child, of no interest to whoever is reading
+        // the failure.
+        .filter(|line| line.trim() != TRYBUILD_CHILD_SENTINEL)
+        .skip_while(|line| line.trim().is_empty())
+        .collect::<Vec<_>>()[..];
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines = &lines[..lines.len() - 1];
+    }
+    if lines.is_empty() {
+        return "the build failed, but the child process printed nothing.".to_string();
+    }
+    match lines.len().checked_sub(MAX_DIAGNOSTIC_LINES) {
+        None | Some(0) => lines.join("\n"),
+        Some(omitted) => format!(
+            "[...{omitted} earlier lines omitted...]\n{}",
+            lines[omitted..].join("\n")
+        ),
     }
 }
 
@@ -329,17 +564,44 @@ pub fn run_test_expect_fail_ex(
 }
 
 /// In the future maybe the tests will distinguish the exact type of failure expected.
-#[derive(Debug)]
 pub enum TestError {
     AutoCxx(BuilderError),
     CppBuild(cc::Error),
-    RsBuild,
+    /// The generated Rust code failed to build. Carries rustc's diagnostics as
+    /// trybuild rendered them, truncated to the last `MAX_DIAGNOSTIC_LINES`
+    /// lines.
+    RsBuild(String),
     NoRs,
     RsFileOpen(std::io::Error),
     RsFileRead(std::io::Error),
     RsFileParse(syn::Error),
     RsCodeExaminationFail(String),
     CppCodeExaminationFail,
+}
+
+/// Hand-written rather than derived so that `RsBuild`'s diagnostics come out
+/// verbatim. The derived `Debug` would escape every newline, turning rustc's
+/// output into one unreadable line in the panic message from `.unwrap()` - which
+/// is precisely where a human needs to read it.
+impl std::fmt::Debug for TestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TestError::AutoCxx(err) => write!(f, "AutoCxx({err:?})"),
+            TestError::CppBuild(err) => write!(f, "CppBuild({err:?})"),
+            TestError::RsBuild(diagnostics) => {
+                write!(
+                    f,
+                    "RsBuild: the generated Rust failed to build:\n{diagnostics}"
+                )
+            }
+            TestError::NoRs => write!(f, "NoRs"),
+            TestError::RsFileOpen(err) => write!(f, "RsFileOpen({err:?})"),
+            TestError::RsFileRead(err) => write!(f, "RsFileRead({err:?})"),
+            TestError::RsFileParse(err) => write!(f, "RsFileParse({err:?})"),
+            TestError::RsCodeExaminationFail(msg) => write!(f, "RsCodeExaminationFail({msg:?})"),
+            TestError::CppCodeExaminationFail => write!(f, "CppCodeExaminationFail"),
+        }
+    }
 }
 
 pub fn directives_from_lists(
@@ -506,10 +768,7 @@ pub fn do_run_test_manual(
     if KEEP_TEMPDIRS {
         println!("Tempdir: {:?}", tdir.into_path().to_str());
     }
-    if r.is_err() {
-        return Err(TestError::RsBuild); // details of Rust panic are a bit messy to include, and
-                                        // not important at the moment.
-    }
+    r.map_err(TestError::RsBuild)?;
     Ok(())
 }
 
