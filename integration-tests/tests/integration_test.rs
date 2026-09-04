@@ -14577,3 +14577,231 @@ fn test_rs_build_error_reports_rustc_diagnostics() {
         "the error should name the item rustc complained about, but was:\n{diagnostics}"
     );
 }
+
+// --- types hidden by a same-named variable ---
+//
+// These reproduce the POSIX `struct stat` / `extern struct stat stat` shape,
+// but deliberately do not use the name `stat` itself. Windows' UCRT declares
+// both `struct stat` (sys/stat.h:87) and `int stat(...)` (sys/stat.h:238), and
+// those are visible in the translation units cxx generates, so a fixture using
+// that name collides with the platform rather than testing anything of ours.
+// The shadowing shape is what's under test, and any name reproduces it.
+
+#[test]
+fn test_elab_struct_shadowed_by_variable_pod() {
+    let hdr = indoc! {"
+        struct filedata { int x; };
+        extern struct filedata filedata;
+        inline int take_filedata(const struct filedata& s) { return s.x; }
+    "};
+    let cxx = "struct filedata filedata;";
+    let rs = quote! {
+        let s = ffi::filedata { x: 42 };
+        assert_eq!(ffi::take_filedata(&s), autocxx::c_int(42));
+    };
+    run_test(cxx, hdr, rs, &["take_filedata"], &["filedata"]);
+}
+
+#[test]
+fn test_elab_struct_shadowed_by_variable_nonpod() {
+    let hdr = indoc! {"
+        #include <string>
+        struct filedata { std::string x; filedata() : x(\"hi\") {} };
+        extern struct filedata filedata;
+        inline int take_filedata(const struct filedata& s) { return s.x.length(); }
+    "};
+    let cxx = "struct filedata filedata;";
+    let rs = quote! {
+        moveit! { let s = ffi::filedata::new(); }
+        assert_eq!(ffi::take_filedata(&s), autocxx::c_int(2));
+    };
+    run_test(cxx, hdr, rs, &["take_filedata", "filedata"], &[]);
+}
+
+#[test]
+#[ignore] // a function hiding a type is a Rust naming collision, not just a C++ one
+fn test_elab_struct_shadowed_by_function() {
+    // A function hides a type of the same name in C++ exactly as a variable
+    // does, so this header needs the same unshadowing treatment. But it never
+    // gets as far as C++ codegen: `struct foo` and `void foo()` are separate
+    // entities in C++ and both want to be called `foo` in the generated Rust,
+    // so `ApiVec` throws both away as duplicates and the type is lost before
+    // we could rename it. Fixing that means giving one of them a different
+    // Rust name, which is a different job from spelling C++ types correctly.
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    let rs = quote! {
+        let f = ffi::foo { y: 7 };
+        assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["take_foo"], &["foo"]);
+}
+
+#[test]
+fn test_elab_enum_shadowed_by_variable() {
+    let hdr = indoc! {"
+        enum kind { A, B };
+        extern enum kind kind;
+        inline int take_kind(enum kind k) { return (int)k; }
+    "};
+    let cxx = "enum kind kind;";
+    let rs = quote! {
+        assert_eq!(ffi::take_kind(ffi::kind::B), autocxx::c_int(1));
+    };
+    run_test(cxx, hdr, rs, &["take_kind", "kind"], &[]);
+}
+
+#[test]
+fn test_elab_struct_shadowed_in_namespace() {
+    let hdr = indoc! {"
+        namespace ns {
+            struct bar { int z; };
+            extern struct bar bar;
+            inline int take_bar(const struct bar& b) { return b.z; }
+        }
+    "};
+    let cxx = "namespace ns { struct bar bar; }";
+    let rs = quote! {
+        let b = ffi::ns::bar { z: 3 };
+        assert_eq!(ffi::ns::take_bar(&b), autocxx::c_int(3));
+    };
+    run_test(cxx, hdr, rs, &["ns::take_bar"], &["ns::bar"]);
+}
+
+#[test]
+fn test_elab_struct_shadowed_in_nested_namespace() {
+    // Two namespace levels, so that the typedef has to be nested the same way
+    // round as the name we tell cxx about. `get_z` is defined out of line so
+    // that this links as well as compiles.
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace outer { namespace inner {
+            struct bar {
+                uint32_t z;
+                uint32_t get_z() const;
+            };
+            extern struct bar bar;
+            inline uint32_t take_bar(const struct bar& b) { return b.z; }
+        }}
+    "};
+    let cxx = indoc! {"
+        namespace outer { namespace inner {
+            struct bar bar;
+            uint32_t bar::get_z() const { return z; }
+        }}
+    "};
+    let rs = quote! {
+        let b = ffi::outer::inner::bar { z: 5 };
+        assert_eq!(b.get_z(), 5);
+        assert_eq!(ffi::outer::inner::take_bar(&b), 5);
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &["outer::inner::take_bar"],
+        &["outer::inner::bar"],
+    );
+}
+
+#[test]
+fn test_elab_shadowed_nonpod_in_namespace_runs_destructor() {
+    // The destructor call has to name the type too, and for a namespaced type
+    // it goes through a different branch which introduces a local alias. Run
+    // the destructor rather than merely compiling it, so that we'd notice if it
+    // named the wrong type.
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace ns {
+            struct bar {
+                bar() : x(1) {}
+                ~bar();
+                uint32_t x;
+            };
+            extern struct bar bar;
+            inline uint32_t read_bar(const struct bar& b) { return b.x; }
+            uint32_t destructions();
+        }
+    "};
+    let cxx = indoc! {"
+        namespace ns {
+            struct bar bar;
+            static uint32_t destruction_count = 0;
+            bar::~bar() { destruction_count++; }
+            uint32_t destructions() { return destruction_count; }
+        }
+    "};
+    let rs = quote! {
+        {
+            moveit! { let b = ffi::ns::bar::new(); }
+            assert_eq!(ffi::ns::read_bar(&b), 1);
+        }
+        assert_eq!(ffi::ns::destructions(), 1);
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &["ns::bar", "ns::read_bar", "ns::destructions"],
+        &[],
+    );
+}
+
+#[test]
+fn test_elab_unshadowed_control() {
+    // Nothing hides `Plain`, so the generated C++ must name it exactly as it
+    // always did: no unshadowing typedef and no warning pragmas around one.
+    let hdr = indoc! {"
+        struct Plain { int x; };
+        inline int take_plain(const Plain& p) { return p.x; }
+    "};
+    let rs = quote! {
+        let p = ffi::Plain { x: 9 };
+        assert_eq!(ffi::take_plain(&p), autocxx::c_int(9));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["take_plain"], &["Plain"], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["Plain"],
+            &["_autocxx_unshadowed", "Wmismatched-tags"],
+        ))),
+        None,
+    );
+}
+
+#[test]
+fn test_elab_shadowed_type_via_unique_ptr() {
+    // The unshadowing alias has to hold up in cxx's own generated C++ too,
+    // which spells the type inside `std::unique_ptr<...>`, `std::vector<...>`
+    // and a pile of static_asserts.
+    let hdr = indoc! {"
+        #include <memory>
+        struct filedata { int x; };
+        extern struct filedata filedata;
+        inline std::unique_ptr<struct filedata> make_filedata(int x) {
+            std::unique_ptr<struct filedata> s(new struct filedata);
+            s->x = x;
+            return s;
+        }
+        inline int read_filedata(const struct filedata& s) { return s.x; }
+    "};
+    let cxx = "struct filedata filedata;";
+    let rs = quote! {
+        let s = ffi::make_filedata(autocxx::c_int(11));
+        assert_eq!(ffi::read_filedata(s.as_ref().unwrap()), autocxx::c_int(11));
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &["make_filedata", "read_filedata", "filedata"],
+        &[],
+    );
+}

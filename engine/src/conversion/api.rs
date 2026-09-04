@@ -22,7 +22,6 @@ use crate::{
     parse_callbacks::CppOriginalName,
 };
 use autocxx_parser::{ExternCppType, RustFun, RustPath};
-use itertools::Itertools;
 use quote::ToTokens;
 
 pub(crate) use autocxx_bindgen::callbacks::Visibility as CppVisibility;
@@ -256,18 +255,6 @@ impl ApiName {
     /// name unless it's been overridden by a C++ name.
     pub(crate) fn cpp_name(&self) -> CppEffectiveName {
         CppEffectiveName::from_api_details(&self.cpp_name, &self.name)
-    }
-
-    pub(crate) fn qualified_cpp_name(&self) -> String {
-        self.name
-            .ns_segment_iter()
-            .chain(std::iter::once(
-                self.cpp_name()
-                    .to_string_for_cpp_generation()
-                    .to_string()
-                    .as_str(),
-            ))
-            .join("::")
     }
 
     pub(crate) fn cpp_name_if_present(&self) -> Option<&CppOriginalName> {

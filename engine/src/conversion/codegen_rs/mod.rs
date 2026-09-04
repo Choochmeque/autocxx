@@ -140,12 +140,13 @@ impl<'a> RsCodeGenerator<'a> {
         bindgen_mod: ItemMod,
         config: &'a IncludeCppConfig,
         header_name: Option<String>,
+        shadowed_by_variables: &HashSet<QualifiedName>,
     ) -> Vec<Item> {
         let c = Self {
             unsafe_policy,
             include_list,
             bindgen_mod,
-            original_name_map: CppNameMap::new_from_apis(&all_apis),
+            original_name_map: CppNameMap::new_from_apis(&all_apis, shadowed_by_variables),
             config,
             header_name,
         };
@@ -1073,7 +1074,14 @@ impl<'a> RsCodeGenerator<'a> {
         // within namespace A.
         let mut ns_components: Vec<_> = ns.iter().map(|s| s.to_string()).collect();
         let mut cxx_name = None;
-        if let Some(cpp_name) = self.original_name_map.get(name) {
+        // If the type's own name is hidden by a variable of the same name, we
+        // generate a typedef for it in its own namespace, and that's the name
+        // cxx has to use - see `UnshadowingAlias`. It lives at namespace scope
+        // even for a type nested in a class, so the lie told below doesn't
+        // apply and the namespace is left as it is.
+        if let Some(alias) = self.original_name_map.unshadowing_alias(name) {
+            cxx_name = Some(alias.to_string());
+        } else if let Some(cpp_name) = self.original_name_map.get(name) {
             let cpp_name = cpp_name.to_qualified_name();
             cxx_name = Some(cpp_name.get_final_item().to_string());
             ns_components.extend(cpp_name.ns_segment_iter().map(|s| s.to_string()));
