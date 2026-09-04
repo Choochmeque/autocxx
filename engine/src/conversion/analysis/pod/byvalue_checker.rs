@@ -16,7 +16,7 @@ use crate::{
     types::{Namespace, QualifiedName},
 };
 use autocxx_parser::IncludeCppConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use syn::{ItemStruct, Type};
 
 #[derive(Clone)]
@@ -89,26 +89,41 @@ impl ByValueChecker {
         // but that's awkward given that our ApiPhase does not yet have a fixed
         // list of field/base types. Instead, we'll iterate first over non-struct
         // types and then over structs.
+        // TODO: the second pass is still order-dependent. `ingest_struct` looks
+        // each field type up in `results` as it goes, so a struct holding one
+        // that bindgen emitted after it is reported as "isn't known" and can't
+        // be POD. C++ forces a struct to be complete before it's held by value,
+        // so this only bites for a nested class - `struct A { struct B {..}; B
+        // b; };` with `generate_pod!("A")` fails today. Ingesting structs to a
+        // fixed point, or sorting them by dependency, would fix it.
         for api in apis.iter() {
             match api {
                 Api::Typedef { analysis, .. } => {
                     let name = api.name();
-                    let typedef_type = match analysis.kind {
+                    // Whatever this typedef names: the substitute for a type we
+                    // know about (`uint32_t` -> `u32`), or else the name as
+                    // written, which may be another typedef or a struct we're
+                    // also processing. Either way the typedef is POD exactly
+                    // when its target is, so we record the link and let
+                    // `satisfy_requests` walk the chain. See google/autocxx#264.
+                    let typedef_target = match analysis.kind {
                         TypedefKind::Type(ref type_item) => match type_item.ty.as_ref() {
-                            Type::Path(typ) => {
-                                let target_tn = QualifiedName::from_type_path(typ);
-                                known_types().consider_substitution(&target_tn)
-                            }
+                            Type::Path(typ) => Some(QualifiedName::from_type_path(typ)),
                             _ => None,
                         },
                         TypedefKind::Use(ref ty) => match **ty {
                             crate::minisyn::Type(Type::Path(ref typ)) => {
-                                let target_tn = QualifiedName::from_type_path(typ);
-                                known_types().consider_substitution(&target_tn)
+                                Some(QualifiedName::from_type_path(typ))
                             }
                             _ => None,
                         },
-                    };
+                    }
+                    .map(|target_tn| {
+                        match known_types().consider_substitution(&target_tn) {
+                            Some(typ) => QualifiedName::from_type_path(&typ),
+                            None => target_tn,
+                        }
+                    });
                     // A typedef to a raw pointer is trivially
                     // copyable regardless of pointee, exactly like a
                     // directly written pointer field; previously it
@@ -122,13 +137,11 @@ impl ByValueChecker {
                             matches!(**ty, crate::minisyn::Type(Type::Ptr(_)))
                         }
                     };
-                    match &typedef_type {
-                        Some(typ) => {
+                    match typedef_target {
+                        Some(target) => {
                             byvalue_checker.results.insert(
                                 name.clone(),
-                                StructDetails::new(PodState::IsAlias(
-                                    QualifiedName::from_type_path(typ),
-                                )),
+                                StructDetails::new(PodState::IsAlias(target)),
                             );
                         }
                         None if target_is_pointer => {
@@ -216,8 +229,13 @@ impl ByValueChecker {
     }
 
     fn satisfy_requests(&mut self, mut requests: Vec<QualifiedName>) -> Result<(), String> {
-        while !requests.is_empty() {
-            let ty_id = requests.remove(requests.len() - 1);
+        // Typedefs whose target hasn't settled yet, and which we've therefore
+        // put back on the queue behind that target. Meeting the same typedef
+        // here twice means its target still isn't settled after we asked for
+        // it, i.e. the chain of typedefs is circular and never will settle, so
+        // we must complain rather than spin round for ever.
+        let mut aliases_awaiting_target: HashSet<QualifiedName> = HashSet::new();
+        while let Some(ty_id) = requests.pop() {
             let deets = self.results.get_mut(&ty_id);
             let mut alias_to_consider = None;
             match deets {
@@ -240,11 +258,44 @@ impl ByValueChecker {
             }
             // Do the following outside the match to avoid borrow checker violation.
             if let Some(alias) = alias_to_consider {
-                match self.results.get(&alias) {
-                    None => requests.extend_from_slice(&[alias, ty_id]), // try again after resolving alias target
-                    Some(alias_target_deets) => {
-                        self.results.get_mut(&ty_id).unwrap().state =
-                            alias_target_deets.state.clone();
+                match self.results.get(&alias).map(|deets| &deets.state) {
+                    // The target's state is final, so this typedef is POD
+                    // exactly when its target is. Adopt that state and go
+                    // round again, which reports any error against the
+                    // typedef in the normal way.
+                    Some(state @ (PodState::IsPod | PodState::UnsafeToBePod(_))) => {
+                        let state = match state {
+                            PodState::UnsafeToBePod(reason) => PodState::UnsafeToBePod(format!(
+                                "Type {ty_id} could not be POD because it is a typedef to {alias}. Because: {reason}"
+                            )),
+                            state => state.clone(),
+                        };
+                        self.results
+                            .get_mut(&ty_id)
+                            .expect("we matched on this entry a moment ago")
+                            .state = state;
+                        requests.push(ty_id);
+                    }
+                    // The target is a struct nobody has asked about yet, or
+                    // another typedef: settle it first, then come back to
+                    // this one. We pop from the back, so the target has to go
+                    // on last.
+                    Some(PodState::SafeToBePod | PodState::IsAlias(_)) => {
+                        if !aliases_awaiting_target.insert(ty_id.clone()) {
+                            return Err(format!(
+                                "Unable to make {ty_id} POD because it is part of a circular chain of typedefs"
+                            ));
+                        }
+                        requests.push(ty_id);
+                        requests.push(alias);
+                    }
+                    // Every struct, enum and typedef we know of is already in
+                    // `results` by now, so a target we can't find is one we
+                    // never generated - blocklisted, or ignored earlier on.
+                    None => {
+                        return Err(format!(
+                            "Unable to make {ty_id} POD because it is a typedef to {alias}, which we know nothing about"
+                        ))
                     }
                 }
             }
@@ -295,13 +346,24 @@ impl ByValueChecker {
 
 #[cfg(test)]
 mod tests {
-    use super::ByValueChecker;
+    use super::{ByValueChecker, PodState, StructDetails};
     use crate::minisyn::ItemStruct;
     use crate::types::{Namespace, QualifiedName};
     use syn::parse_quote;
 
     fn ty_from_ident(id: &syn::Ident) -> QualifiedName {
         QualifiedName::new_from_cpp_name(&id.to_string())
+    }
+
+    /// Record `name` as a typedef to `target`, as `new_from_apis` does for an
+    /// `Api::Typedef`.
+    fn add_alias(bvc: &mut ByValueChecker, name: &str, target: &str) -> QualifiedName {
+        let name = QualifiedName::new_from_cpp_name(name);
+        bvc.results.insert(
+            name.clone(),
+            StructDetails::new(PodState::IsAlias(QualifiedName::new_from_cpp_name(target))),
+        );
+        name
     }
 
     #[test]
@@ -375,5 +437,84 @@ mod tests {
         let t_id = ty_from_ident(&t.ident);
         bvc.ingest_struct(&t, &Namespace::new());
         assert!(bvc.satisfy_requests(vec![t_id]).is_err());
+    }
+
+    #[test]
+    fn test_typedef_chain_to_primitive() {
+        let mut bvc = ByValueChecker::new();
+        let first = add_alias(&mut bvc, "first", "u32");
+        let second = add_alias(&mut bvc, "second", "first");
+        let third = add_alias(&mut bvc, "third", "second");
+        bvc.satisfy_requests(vec![third.clone()]).unwrap();
+        assert!(bvc.is_pod(&third));
+        assert!(bvc.is_pod(&second));
+        assert!(bvc.is_pod(&first));
+    }
+
+    #[test]
+    fn test_typedef_to_struct_makes_both_pod() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bob {
+                a: u32,
+            }
+        };
+        let bob = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let horace = add_alias(&mut bvc, "Horace", "Bob");
+        bvc.satisfy_requests(vec![horace.clone()]).unwrap();
+        assert!(bvc.is_pod(&horace));
+        // The struct behind the alias has to be POD as well, or we'd emit an
+        // alias to an opaque type.
+        assert!(bvc.is_pod(&bob));
+    }
+
+    #[test]
+    fn test_typedef_to_non_pod_struct_is_rejected() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bob {
+                a: CxxString,
+            }
+        };
+        bvc.ingest_struct(&t, &Namespace::new());
+        let horace = add_alias(&mut bvc, "Horace", "Bob");
+        assert!(bvc.satisfy_requests(vec![horace]).is_err());
+    }
+
+    #[test]
+    fn test_circular_typedefs_are_rejected() {
+        // Such a cycle can't be written in C++, but we must terminate rather
+        // than chase it round for ever if bindgen ever hands us one.
+        let mut bvc = ByValueChecker::new();
+        let a = add_alias(&mut bvc, "A", "B");
+        add_alias(&mut bvc, "B", "A");
+        let err = bvc.satisfy_requests(vec![a]).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("circular"),
+            "error should name the cycle, was: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_self_referential_typedef_is_rejected() {
+        let mut bvc = ByValueChecker::new();
+        let a = add_alias(&mut bvc, "A", "A");
+        let err = bvc.satisfy_requests(vec![a]).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("circular"),
+            "error should name the cycle, was: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_typedef_to_unknown_type_is_rejected() {
+        let mut bvc = ByValueChecker::new();
+        let a = add_alias(&mut bvc, "A", "SomethingWeNeverSaw");
+        let err = bvc.satisfy_requests(vec![a]).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("SomethingWeNeverSaw"),
+            "error should name the missing target, was: {err:?}"
+        );
     }
 }

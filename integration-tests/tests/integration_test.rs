@@ -2910,9 +2910,15 @@ fn test_give_pod_typedef_by_value() {
     run_test(cxx, hdr, rs, &["give_bob"], &["Bob"]);
 }
 
-#[ignore] // because we need to put some aliases in the output ffi mod.
 #[test]
 fn test_use_pod_typedef() {
+    // The alias needs a directive of its own. bindgen only emits items whose
+    // names match the allowlist we hand it, and its allowlist follows
+    // references outwards from the items named - from `Horace` to `Bob`, never
+    // from `Bob` back to the aliases pointing at it. So `generate_pod!("Bob")`
+    // alone leaves nothing named `Horace` anywhere in bindgen's output for us
+    // to re-export. `generate_all!` does pick such aliases up; see
+    // `test_use_pod_typedef_generate_all`.
     let cxx = indoc! {"
     "};
     let hdr = indoc! {"
@@ -2924,10 +2930,64 @@ fn test_use_pod_typedef() {
         using Horace = Bob;
     "};
     let rs = quote! {
-        let h = Horace { a: 3, b: 4 };
+        let h = ffi::Horace { a: 3, b: 4 };
         assert_eq!(h.b, 4);
     };
-    run_test(cxx, hdr, rs, &[], &["Bob"]);
+    run_test(cxx, hdr, rs, &["Horace"], &["Bob"]);
+}
+
+#[test]
+fn test_use_pod_typedef_generate_all() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+            uint32_t b;
+        };
+        using Horace = Bob;
+    "};
+    let rs = quote! {
+        let h = ffi::Horace { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test_ex("", hdr, rs, quote! { generate_all!() }, None, None, None);
+}
+
+#[test]
+fn test_use_pod_typedef_in_ns() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace ns {
+            struct Bob {
+                uint32_t a;
+                uint32_t b;
+            };
+            using Horace = Bob;
+        }
+    "};
+    let rs = quote! {
+        let h = ffi::ns::Horace { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test("", hdr, rs, &["ns::Horace"], &["ns::Bob"]);
+}
+
+#[test]
+fn test_use_pod_typedef_chain() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+            uint32_t b;
+        };
+        using Horace = Bob;
+        using Herbert = Horace;
+    "};
+    let rs = quote! {
+        let h = ffi::Herbert { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test("", hdr, rs, &["Herbert"], &["Bob"]);
 }
 
 #[test]
@@ -3014,7 +3074,6 @@ fn test_typedef_to_ns() {
     run_test("", hdr, rs, &["A::B"], &[]);
 }
 
-#[ignore] // we don't yet allow typedefs to be listed in allow_pod
 #[test]
 fn test_use_pod_typedef_with_allowpod() {
     let cxx = indoc! {"
@@ -3028,10 +3087,82 @@ fn test_use_pod_typedef_with_allowpod() {
         using Horace = Bob;
     "};
     let rs = quote! {
-        let h = Horace { a: 3, b: 4 };
+        let h = ffi::Horace { a: 3, b: 4 };
         assert_eq!(h.b, 4);
     };
     run_test(cxx, hdr, rs, &[], &["Horace"]);
+}
+
+#[test]
+fn test_use_pod_typedef_chain_with_allowpod() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+            uint32_t b;
+        };
+        using Horace = Bob;
+        using Herbert = Horace;
+    "};
+    let rs = quote! {
+        let h = ffi::Herbert { a: 3, b: 4 };
+        assert_eq!(h.b, 4);
+    };
+    run_test("", hdr, rs, &[], &["Herbert"]);
+}
+
+#[test]
+fn test_typedef_chain_field_in_pod_struct() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t first;
+        typedef first second;
+        struct A {
+            second a;
+        };
+    "};
+    let rs = quote! {
+        let a = ffi::A { a: 4 };
+        assert_eq!(a.a, 4);
+    };
+    run_test("", hdr, rs, &[], &["A"]);
+}
+
+#[test]
+fn test_typedef_to_pod_struct_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner {
+            uint32_t a;
+        };
+        typedef Inner InnerAlias;
+        struct Outer {
+            InnerAlias a;
+        };
+    "};
+    let rs = quote! {
+        let o = ffi::Outer { a: ffi::Inner { a: 4 } };
+        assert_eq!(o.a.a, 4);
+    };
+    run_test("", hdr, rs, &[], &["Outer", "Inner"]);
+}
+
+#[test]
+fn test_typedef_to_nonpod_struct_field_rejected() {
+    // The typedef must not launder the fact that `Inner` can't be held by
+    // value in Rust.
+    let hdr = indoc! {"
+        #include <string>
+        struct Inner {
+            std::string a;
+        };
+        typedef Inner InnerAlias;
+        struct Outer {
+            InnerAlias a;
+        };
+    "};
+    let rs = quote! {};
+    run_test_expect_fail("", hdr, rs, &[], &["Outer"]);
 }
 
 #[test]
@@ -3731,25 +3862,63 @@ fn test_enum_typedef() {
 }
 
 #[test]
-// No longer the google/autocxx#264 stack overflow. It now fails in the POD
-// safety analysis with UnsafePodType: "Type B could not be POD because its
-// dependent type B_diff isn't safe to be POD. Because: Type B_diff is a
-// typedef to a complex type". The nested `using diff = diff;` shadows the
-// outer typedef with its own name, and we never resolve that chain through to
-// size_t, so the alias looks like an unknown complex type rather than an
-// integer.
-#[ignore]
+// google/autocxx#264.
 fn test_conflicting_usings() {
     let hdr = indoc! {"
         #include <cstdint>
         #include <cstddef>
         typedef size_t diff;
         struct A {
-            using diff = diff;
+            using diff = ::diff;  // qualified: unqualified self-reference is ill-formed (changes meaning of diff mid-class-scope; gcc -Werror=changes-meaning rejects it, clang tolerates it)
             diff a;
         };
         struct B {
-            using diff = diff;
+            using diff = ::diff;  // qualified: unqualified self-reference is ill-formed (changes meaning of diff mid-class-scope; gcc -Werror=changes-meaning rejects it, clang tolerates it)
+            diff a;
+        };
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &[], &["A", "B"]);
+}
+
+#[test]
+fn test_conflicting_usings_to_struct() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Contents {
+            uint32_t a;
+        };
+        typedef Contents diff;
+        struct A {
+            using diff = ::diff;  // qualified: unqualified self-reference is ill-formed (changes meaning of diff mid-class-scope; gcc -Werror=changes-meaning rejects it, clang tolerates it)
+            diff a;
+        };
+        struct B {
+            using diff = ::diff;  // qualified: unqualified self-reference is ill-formed (changes meaning of diff mid-class-scope; gcc -Werror=changes-meaning rejects it, clang tolerates it)
+            diff a;
+        };
+    "};
+    let rs = quote! {
+        let a = ffi::A { a: ffi::Contents { a: 4 } };
+        assert_eq!(a.a.a, 4);
+    };
+    run_test("", hdr, rs, &[], &["A", "B", "Contents"]);
+}
+
+#[test]
+fn test_conflicting_usings_chained() {
+    // B::diff -> A::diff -> diff -> size_t: three links, each of the first two
+    // named after the thing it aliases.
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cstddef>
+        typedef size_t diff;
+        struct A {
+            using diff = ::diff;  // qualified: unqualified self-reference is ill-formed (changes meaning of diff mid-class-scope; gcc -Werror=changes-meaning rejects it, clang tolerates it)
+            diff a;
+        };
+        struct B {
+            using diff = A::diff;
             diff a;
         };
     "};
