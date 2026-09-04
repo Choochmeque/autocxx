@@ -56,7 +56,7 @@ use super::{
     apivec::ApiVec,
     codegen_cpp::type_to_cpp::CppNameMap,
 };
-use super::{convert_error::ErrorContext, ConvertErrorFromCpp};
+use super::{convert_error::ErrorContext, ConvertErrorFromCpp, ParseObservations};
 use quote::quote;
 
 /// An entry which needs to go into an `impl` block for a given type.
@@ -129,6 +129,7 @@ pub(crate) struct RsCodeGenerator<'a> {
     original_name_map: CppNameMap,
     config: &'a IncludeCppConfig,
     header_name: Option<String>,
+    names_duplicated_by_bindgen: &'a HashSet<QualifiedName>,
 }
 
 impl<'a> RsCodeGenerator<'a> {
@@ -140,15 +141,19 @@ impl<'a> RsCodeGenerator<'a> {
         bindgen_mod: ItemMod,
         config: &'a IncludeCppConfig,
         header_name: Option<String>,
-        shadowed_by_variables: &HashSet<QualifiedName>,
+        parse_observations: &'a ParseObservations,
     ) -> Vec<Item> {
         let c = Self {
             unsafe_policy,
             include_list,
             bindgen_mod,
-            original_name_map: CppNameMap::new_from_apis(&all_apis, shadowed_by_variables),
+            original_name_map: CppNameMap::new_from_apis(
+                &all_apis,
+                &parse_observations.shadowed_by_variables,
+            ),
             config,
             header_name,
+            names_duplicated_by_bindgen: &parse_observations.names_duplicated_by_bindgen,
         };
         c.rs_codegen(all_apis)
     }
@@ -231,6 +236,10 @@ impl<'a> RsCodeGenerator<'a> {
         // being a performance bottleneck. If so, we might want
         // to set the 'contents' field of the ItemMod
         // structures directly.
+        bindgen_sanitizer::collapse_colliding_type_names(
+            &mut self.bindgen_mod,
+            self.names_duplicated_by_bindgen,
+        );
         bindgen_sanitizer::remove_unbound_type_aliases(&mut self.bindgen_mod);
         self.bindgen_mod.vis = parse_quote! {};
         self.bindgen_mod.attrs.push(parse_quote! {

@@ -52,7 +52,7 @@ use self::{
         statics::discard_statics_of_non_pod_type,
         tdef::convert_typedef_targets,
     },
-    api::{AnalysisPhase, Api},
+    api::{AnalysisPhase, Api, NullPhase},
     apivec::ApiVec,
     codegen_rs::RsCodeGenerator,
     parse::{find_types_shadowed_by_variables, ParseBindgen},
@@ -131,6 +131,15 @@ impl<'a> BridgeConverter<'a> {
                 let parser = ParseBindgen::new(self.config, &parse_callback_results);
                 let apis = parser.parse_items(items, source_file_contents)?;
                 Self::dump_apis("parsing", &apis);
+                // Note which names bindgen defined more than once, while the
+                // parse phase still records why each item was discarded. Later
+                // analysis and garbage collection drop that context, but the
+                // Rust codegen needs it to repair the bindgen mod.
+                let names_duplicated_by_bindgen = find_names_duplicated_by_bindgen(&apis);
+                let parse_observations = ParseObservations {
+                    shadowed_by_variables,
+                    names_duplicated_by_bindgen,
+                };
                 // Inside parse_results, we now have a list of APIs.
                 // We now enter various analysis phases.
                 // First, convert any typedefs.
@@ -224,7 +233,7 @@ impl<'a> BridgeConverter<'a> {
                     self.config,
                     &codegen_options.cpp_codegen_options,
                     &cxxgen_header_name,
-                    &shadowed_by_variables,
+                    &parse_observations.shadowed_by_variables,
                 )
                 .map_err(ConvertError::Cpp)?;
                 let rs = RsCodeGenerator::generate_rs_code(
@@ -234,7 +243,7 @@ impl<'a> BridgeConverter<'a> {
                     bindgen_mod,
                     self.config,
                     cpp.as_ref().map(|file_pair| file_pair.header_name.clone()),
-                    &shadowed_by_variables,
+                    &parse_observations,
                 );
                 Ok(CodegenResults {
                     rs,
@@ -244,6 +253,42 @@ impl<'a> BridgeConverter<'a> {
             }
         }
     }
+}
+
+/// Things which can only be observed around the time bindgen's output is
+/// parsed, but which the code generators still need. The later analysis phases
+/// and the garbage collector discard the items these are derived from, so they
+/// have to be gathered up front and carried along.
+pub(crate) struct ParseObservations {
+    /// The type names C++ won't look up unqualified because a variable of the
+    /// same name hides them, per [`find_types_shadowed_by_variables`].
+    pub(crate) shadowed_by_variables: HashSet<QualifiedName>,
+    /// The names bindgen defined more than once, per
+    /// [`find_names_duplicated_by_bindgen`].
+    pub(crate) names_duplicated_by_bindgen: HashSet<QualifiedName>,
+}
+
+/// The names which bindgen defined more than once, and which `ApiVec` therefore
+/// reduced to a single [`Api::IgnoredItem`].
+///
+/// Such a name is unusable by construction: nothing depending on it can be
+/// generated, so any reference to it left in the bindgen mod is debris. That is
+/// what lets Rust codegen repair the (uncompilable) mod by collapsing the
+/// definitions together. A name which merely *looks* duplicated in the emitted
+/// mod does not qualify - one of the definitions may be a live item that the
+/// parse phase simply skipped - which is why this set is gathered here rather
+/// than inferred from the bindgen output later on.
+fn find_names_duplicated_by_bindgen(apis: &ApiVec<NullPhase>) -> HashSet<QualifiedName> {
+    apis.iter()
+        .filter_map(|api| match api {
+            Api::IgnoredItem {
+                name,
+                err: ConvertErrorFromCpp::DuplicateItemsFoundInParsing,
+                ..
+            } => Some(name.name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Newtype wrapper for a C++ "effective name", i.e. the name we'll use
