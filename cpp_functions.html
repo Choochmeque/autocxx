@@ -396,6 +396,39 @@ fn main() {
     sloth.pin_mut().unpeel_from_tree();
 }
 </code></pre>
+<h2 id="ref-qualified-methods"><a class="header" href="#ref-qualified-methods">Ref-qualified methods</a></h2>
+<p>A method qualified with <code>&amp;</code> is called just like any other method - autocxx
+always has an lvalue to call it on, so the qualifier makes no difference to
+how you use it.</p>
+<h4 id="c-header-6"><a class="header" href="#c-header-6">C++ header:</a></h4>
+<pre><code class="language-cpp">
+#include &lt;cstdint&gt;
+class Sloth {
+public:
+    uint32_t claws() const &amp; { return 3; }
+};
+
+</code></pre>
+<h4 id="rust-6"><a class="header" href="#rust-6">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("Sloth")
+}
+
+fn main() {
+    let sloth = ffi::Sloth::new().within_unique_ptr();
+    assert_eq!(sloth.claws(), 3);
+}
+</code></pre>
+<p>A method qualified with <code>&amp;&amp;</code> is a different matter: it can only be called on an
+object which is about to be discarded, and autocxx only ever holds a C++ object
+behind a reference or a smart pointer. There's no way to express that, so no
+bindings are generated for such methods. The rest of the type is unaffected,
+and the generated code carries an explanation where the method would have been.</p>
 <hr>
 <ol class="footnote-definition"><li id="footnote-default">
 <p>the work is <a href="https://github.com/google/autocxx/issues/563">planned here</a>. <a href="#fr-default-1">↩</a></p>
