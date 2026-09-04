@@ -185,6 +185,63 @@ implement the Observer pattern, they're documented under <a href="rust_calls.htm
 <p><code>#define</code> and other preprocessor symbols will appear as constants.
 At present there is no way to do compile-time disablement of code
 (equivalent of <code>#ifdef</code>)<sup class="footnote-reference" id="fr-ifdef-1"><a href="#footnote-ifdef">1</a></sup>.</p>
+<h2 id="variables-and-constants"><a class="header" href="#variables-and-constants">Variables and constants</a></h2>
+<p>A C++ variable whose value the compiler knows - <code>const int kMax = 4;</code>,
+<code>constexpr double kPi = 3.14;</code>, or a <code>static const int</code> member of a class -
+appears as a Rust <code>const</code>, so you can use it anywhere.</p>
+<p>A variable which instead lives at some address, such as one of
+<a href="cpp_types.html">POD</a> struct type, appears as a Rust <code>static</code>. Reading it is
+<code>unsafe</code>, because C++ may be changing it at the same time:</p>
+<h4 id="c-header"><a class="header" href="#c-header">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;cstdint&gt;
+
+struct Point {
+    uint32_t x;
+    uint32_t y;
+};
+
+extern const Point ORIGIN;
+
+</code></pre>
+<h4 id="rust"><a class="header" href="#rust">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate_pod!("Point")
+    generate!("ORIGIN")
+}
+
+fn main() {
+    assert_eq!(unsafe { ffi::ORIGIN.x }, 0);
+}
+</code></pre>
+<p>Two restrictions apply.</p>
+<p>The variable must have external linkage, which is why the header above says
+<code>extern</code> and the definition lives in a <code>.cc</code> file. A namespace-scope variable
+which is <code>static</code>, or which is <code>const</code> without <code>extern</code>, or which sits in an
+anonymous namespace, is a <em>different object in every translation unit</em> that
+includes the header - and in a translation unit which never uses it, the
+compiler emits nothing at all. There is no single symbol for Rust to link
+against, so <code>autocxx</code> reports the problem instead of generating code which
+fails to link. (On MSVC, where the decorated name is the same either way,
+<code>autocxx</code> can't tell, and you get the link error.)</p>
+<p>Its type must also be POD, or one which <code>bindgen</code> writes directly in Rust such
+as <code>int</code>. <code>autocxx</code> exposes a non-POD type as an opaque object which is only
+usable behind a pointer, so there is nothing useful it could hand you for a
+variable of such a type.</p>
+<p>A static data member of a class works too, and needs no <code>extern</code> because
+defining it gives it external linkage anyway. Its name is flattened into the
+enclosing namespace, so <code>struct Anna { static Point ORIGIN; };</code> asks for
+<code>generate!("Anna_ORIGIN")</code> and appears as <code>ffi::Anna_ORIGIN</code>.</p>
+<p>One assumption comes with the <code>unsafe</code>. Rust requires that an object does not
+change while Rust holds a reference to it, and <code>autocxx</code> has no way to enforce
+that on the C++ side. Reading a variable which C++ mutates concurrently is
+undefined behaviour, and so is reading one whose value C++ changes through a
+<code>mutable</code> member of an otherwise <code>const</code> object - legal C++, but not something
+you can expose this way. Use a getter function for anything C++ writes to.</p>
 <h2 id="string-constants"><a class="header" href="#string-constants">String constants</a></h2>
 <p>Whether from a preprocessor symbol or from a C++ <code>char*</code> constant,
 strings appear as <code>[u8]</code> with a null terminator. To get a Rust string,
