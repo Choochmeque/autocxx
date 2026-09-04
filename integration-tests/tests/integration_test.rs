@@ -6213,42 +6213,56 @@ fn test_string_transparent_static_method() {
 }
 
 #[test]
-// The bindgen stack overflow of google/autocxx#490 is fixed, but this reduced
-// repro still cannot run, for two independent reasons.
+// The creduce-minimized repro for the bindgen stack overflow of
+// google/autocxx#490. It was ignored for two independent reasons, both now
+// dealt with.
 //
-// 1. The fixture declares its own placement `void *operator new(size_t, void *)`,
-//    which cannot be reconciled with libc++'s <new>: as written it fails the
+// 1. The fixture declared its own placement `void *operator new(size_t, void *)`,
+//    which cannot be reconciled with libc++'s <new>: as written it failed the
 //    final C++ compile with "exception specification in declaration does not
 //    match previous declaration", and adding the standard `noexcept` merely
-//    moves it on to "cannot add 'abi_tag' attribute in a redeclaration",
-//    because the SDK's declaration carries _LIBCPP_HIDE_FROM_ABI.
-// 2. Underneath that sits a real codegen bug. Dropping the operator new
-//    declaration gets as far as rustc, which then rejects the generated
-//    bindings with E0428 "the name `iterator` is defined multiple times":
-//    `absl::cj<l>::iterator` and `absl::j::ct<...>::iterator` are distinct C++
-//    types that both land as `root::iterator`.
+//    moved it on to "cannot add 'abi_tag' attribute in a redeclaration",
+//    because the SDK's declaration carries _LIBCPP_HIDE_FROM_ABI. creduce left
+//    that declaration behind; it has nothing to do with what the test covers,
+//    so it is simply gone.
+// 2. Underneath that sat a real codegen bug: rustc rejected the generated
+//    bindings with E0428 "the name `iterator` is defined multiple times",
+//    because `absl::cj<l>::iterator` and `absl::j::ct<...>::iterator` are
+//    distinct C++ types which bindgen both emits as `root::iterator`. See
+//    `test_colliding_names_from_template_members` for the isolated shape.
 //
-// So fixing the fixture alone is not enough; (2) needs an engine fix.
-#[ignore]
+// creduce also left the fixture's stand-in standard library declared inside
+// `namespace std` and wrapped in anonymous namespaces. clang tolerates both;
+// gcc does not, and each is a hard error there:
+//
+// * reopening `std` puts the stand-in `allocator` and `true_type` alongside
+//   libstdc++'s real ones, so `<bits/memoryfwd.h>` fails with "'allocator' is
+//   not a class template" and `<type_traits>` with "reference to 'true_type'
+//   is ambiguous";
+// * the anonymous namespaces give those types internal linkage, which makes
+//   the union member of `spanner::dd` - whose type mentions them through
+//   `absl::cy<bv>` - a -Werror=subobject-linkage error.
+//
+// Neither placement is semantic to what is being reproduced, so the stand-ins
+// now live in a plain `namespace fakestd`. Everything the test exercises is
+// untouched: the instantiation graph still runs from `spanner::dd` through
+// `absl::cy<bv>` into `absl::j::ct<...>`, and `absl::cj<l>::iterator` and
+// `absl::j::ct<...>::iterator` still collide on `root::iterator`.
 fn test_issue_490() {
     let hdr = indoc! {"
         typedef int a;
-        typedef long unsigned size_t;
-        namespace std {
-        namespace {
-        using ::size_t;
+        typedef long unsigned fx_size;  // was fx_size: MSVC-mode clang predeclares fx_size as unsigned long long, so redefining it is a hard error (LLP64 vs LP64) - creduce artifact, not semantic
+        namespace fakestd {
+        using ::fx_size;
         template <class b, b c> struct g { static const b value = c; };
         template <bool d> using e = g<bool, d>;
         typedef e<true> true_type;
-        template <size_t, size_t> struct ag {};
+        template <fx_size, fx_size> struct ag {};
         template <class b> typename b ::h move();
         template <class> class allocator;
         template <class> class vector;
-        } // namespace
-        } // namespace std
-        void *operator new(size_t, void *);
-        namespace std {
-        namespace {
+        } // namespace fakestd
+        namespace fakestd {
         template <class> struct iterator;
         template <class b, class> struct ay { using h = b *; };
         template <class b> struct bj { b bk; };
@@ -6265,8 +6279,7 @@ fn test_issue_490() {
         bh release();
         };
         template <class = void> struct bt;
-        } // namespace
-        } // namespace std
+        } // namespace fakestd
         typedef a bv;
         namespace absl {
         template <typename ce> class cj {
@@ -6277,7 +6290,7 @@ fn test_issue_490() {
         namespace j {
         template <class ce> struct cp {
         using k = ce;
-        using cq = std::bt<>;
+        using cq = fakestd::bt<>;
         };
         template <class ce> using cr = typename cp<ce>::k;
         template <class ce> using cs = typename cp<ce>::cq;
@@ -6292,11 +6305,11 @@ fn test_issue_490() {
         template <typename> struct cw;
         } // namespace j
         template <class ce, class k = j::cr<ce>, class cq = j::cs<ce>,
-                class cx = std::allocator<ce>>
+                class cx = fakestd::allocator<ce>>
         class cy : public j::ct<j::cw<ce>, k, cq, cx> {};
         } // namespace absl
         namespace cz {
-        template <typename da> class db { std::ag<sizeof(a), alignof(da)> c; };
+        template <typename da> class db { fakestd::ag<sizeof(a), alignof(da)> c; };
         } // namespace cz
         namespace spanner {
         class l;
@@ -6318,6 +6331,132 @@ fn test_issue_490() {
     "};
     let rs = quote! {};
     run_test("", hdr, rs, &["spanner::Row", "spanner::ColumnList"], &[]);
+}
+
+#[test]
+fn test_colliding_names_from_template_members() {
+    // The shape isolated from google/autocxx#490.
+    // `Alpha<Elem>::iterator` and `Beta<int>::iterator` are unrelated C++
+    // types, but because both are members of a class template specialization
+    // bindgen emits each into the root module under the bare name `iterator`,
+    // which is E0428. (This is within one module, so it is not the flat
+    // cxx::bridge namespace collision of google/autocxx#486, which is
+    // reported cleanly as a duplicate cxx bridge name.) Neither type is
+    // usable, so all that is asked here is that the bindings still compile.
+    let hdr = indoc! {"
+        namespace outer {
+        template <typename T> class Alpha {
+        public:
+          using pointer_type = T *;
+          using iterator = pointer_type;
+        };
+        template <typename T> class Beta {
+        public:
+          class iterator {};
+          class Cursor {
+          public:
+            Cursor(iterator);
+            iterator it;
+          };
+        };
+        class Elem;
+        class Columns {
+        public:
+          typedef Alpha<Elem>::iterator iterator;
+          iterator begin();
+        };
+        } // namespace outer
+        class CursorUser {
+        public:
+          outer::Beta<int>::Cursor c;
+        };
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["outer::Columns", "CursorUser"], &[]);
+}
+
+#[test]
+fn test_nested_class_of_single_template_member() {
+    // Control for `test_colliding_names_from_template_members`: one class
+    // template specialization with a member class called `iterator` is fine,
+    // because there is nothing for its bare name to collide with.
+    let hdr = indoc! {"
+        namespace outer {
+        template <typename T> class Beta {
+        public:
+          class iterator {};
+          class Cursor {
+          public:
+            Cursor(iterator);
+            iterator it;
+          };
+        };
+        } // namespace outer
+        class CursorUser {
+        public:
+          outer::Beta<int>::Cursor c;
+        };
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["CursorUser"], &[]);
+}
+
+#[test]
+fn test_nested_typedef_of_single_template_member() {
+    // The other half of the collision on its own: a member *typedef* of a
+    // class template specialization, again with nothing to collide with.
+    let hdr = indoc! {"
+        namespace outer {
+        template <typename T> class Alpha {
+        public:
+          using pointer_type = T *;
+          using iterator = pointer_type;
+        };
+        class Elem;
+        class Columns {
+        public:
+          typedef Alpha<Elem>::iterator iterator;
+          iterator begin();
+        };
+        } // namespace outer
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["outer::Columns"], &[]);
+}
+
+#[test]
+fn test_same_named_members_of_plain_classes() {
+    // Members of ordinary (non-template) classes are disambiguated by
+    // bindgen with the enclosing class name, so these two must keep working
+    // and must keep their distinct identities.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Alpha {
+            struct Inner {
+                uint32_t a;
+            };
+            Inner get() const { return Inner { 1 }; }
+        };
+        struct Beta {
+            struct Inner {
+                uint64_t b;
+            };
+            Inner get() const { return Inner { 2 }; }
+        };
+    "};
+    let rs = quote! {
+        let a = ffi::Alpha::new().within_unique_ptr();
+        let b = ffi::Beta::new().within_unique_ptr();
+        assert_eq!(a.get().a, 1);
+        assert_eq!(b.get().b, 2);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["Alpha", "Beta"],
+        &["Alpha_Inner", "Beta_Inner"],
+    );
 }
 
 #[test]
