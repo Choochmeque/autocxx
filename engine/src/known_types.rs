@@ -270,6 +270,19 @@ impl TypeDatabase {
     }
 
     /// Whether this is the substitute type we made for some known type.
+    ///
+    /// This matches on the final name alone, because `bindgen` puts the
+    /// substitute in the root mod under the name of the type it replaces
+    /// (`std::string` becomes `root::string`) and nothing else about it says
+    /// where it came from. A type of the user's own in the global namespace
+    /// with such a name therefore collides with the substitute and is
+    /// discarded along with it: `generate!` then reports that it generated
+    /// nothing, which is at least honest, but the type can't be bound. Only
+    /// the doc comment `bindgen` copies across (`<div rustbindgen="true"
+    /// replaces="std::string">`) distinguishes the two, and relying on a doc
+    /// comment surviving would be a good deal more fragile than this.
+    /// Namespaced types are unaffected - `mine::string` is nobody's
+    /// substitute. See `test_global_type_named_like_known_type_is_rejected`.
     pub(crate) fn is_known_subtitute_type(&self, ty: &QualifiedName) -> bool {
         if ty.get_namespace().is_empty() {
             self.all_names()
