@@ -16398,19 +16398,13 @@ fn test_impl_new_returns_are_must_use() {
                             walk(items, out);
                         }
                     }
-                    syn::Item::Fn(f) => out.push((
-                        f.sig.ident.to_string(),
-                        f.sig.clone(),
-                        f.attrs.clone(),
-                    )),
+                    syn::Item::Fn(f) => {
+                        out.push((f.sig.ident.to_string(), f.sig.clone(), f.attrs.clone()))
+                    }
                     syn::Item::Impl(i) if i.trait_.is_none() => {
                         for item in &i.items {
                             if let syn::ImplItem::Method(f) = item {
-                                out.push((
-                                    f.sig.ident.to_string(),
-                                    f.sig.clone(),
-                                    f.attrs.clone(),
-                                ));
+                                out.push((f.sig.ident.to_string(), f.sig.clone(), f.attrs.clone()));
                             }
                         }
                     }
@@ -16517,7 +16511,7 @@ fn test_std_function_method_costs_only_that_method() {
         directives_from_lists(&["Requester"], &[], None),
         None,
         Some(make_string_finder(vec![
-            "std::function is the usual cause".to_string(),
+            "std::function is the usual cause".to_string()
         ])),
         None,
     );
