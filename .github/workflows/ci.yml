@@ -20,7 +20,6 @@ jobs:
   test:
     name: Test ${{matrix.name || format('Rust {0}', matrix.rust)}}
     runs-on: ${{matrix.os || 'ubuntu'}}-latest
-    continue-on-error: ${{matrix.allow-fail || false}}
 
     strategy:
       fail-fast: false
@@ -33,21 +32,18 @@ jobs:
           - name: macOS
             rust: nightly
             os: macos
-          # Advisory only (continue-on-error below). Disabled upstream in 2022
-          # for never-diagnosed failures (google/autocxx#1134); turned back on
-          # to see what it was reporting. Its first run pointed at a likely
-          # single cause for eight of its ten failures: nothing told clang to
-          # parse headers for a GNU target, so it used Microsoft's standard
-          # library and ABI while g++ compiled the generated C++ against
-          # libstdc++. This branch carries a candidate fix, on the strength of
-          # which the skip_windows_gnu_failing_tests list is down from twelve
-          # entries to two. Stays advisory until a run with the fix in it is
-          # green - there has not been one, and the fix is for an arrangement
-          # that cannot be reproduced off Windows.
+          # Disabled upstream in 2022 for never-diagnosed failures
+          # (google/autocxx#1134). Turned back on advisorily in 2026, which
+          # revealed the cause of eight of its ten failures: nothing told
+          # clang to parse headers for a GNU target, so it used Microsoft's
+          # standard library and ABI while g++ compiled the generated C++
+          # against libstdc++. With that fixed (engine/src/clang_target.rs)
+          # the leg ran fully green, the skip_windows_gnu_failing_tests list
+          # is down from twelve entries to two, and the job is blocking like
+          # its msvc sibling.
           - name: Windows (gnu)
             rust: nightly-x86_64-pc-windows-gnu
             os: windows
-            allow-fail: true
           - name: Windows (msvc)
             rust: nightly-x86_64-pc-windows-msvc
             os: windows
