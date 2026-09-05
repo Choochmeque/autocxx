@@ -1,0 +1,5 @@
+// C++ headers we want to include.
+#include "cpp.h"
+safety!(unsafe)
+// A non-trivial C++ type
+generate!("MessageBuffer")

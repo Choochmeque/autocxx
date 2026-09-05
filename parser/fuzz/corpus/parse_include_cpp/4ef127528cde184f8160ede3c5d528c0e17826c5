@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("N::kk")
+generate!("N::kk1")
+generate!("N::kk2")

@@ -1,0 +1,11 @@
+// C++ headers we want to include.
+#include "s2/r2rect.h"
+#include "extras.h"
+// Safety policy. We are marking that this whole C++ inclusion is unsafe
+// which means the functions themselves do not need to be marked
+// as unsafe. Other policies are possible.
+safety!(unsafe)
+// What types and functions we want to generate
+generate!("R1Interval")
+generate!("R2Rect")
+generate!("describe_point")

@@ -1,0 +1,62 @@
+# libFuzzer dictionary for the `include_cpp!` directive grammar.
+#
+# Every directive registered in `get_directives()` in
+# `parser/src/directives.rs`, spelled the way the parser expects to see it,
+# plus the safety policies and the punctuation that holds a directive
+# together. The grammar is keyword-driven, so without this the mutator has
+# to rediscover `extern_cpp_opaque_type` one byte at a time; with it, any
+# directive is a single edit away from any input.
+#
+# Keep in sync with `get_directives()`.
+
+# The one directive introduced by a hexathorpe rather than a bang.
+include="#include \""
+
+# Directives taking a string literal.
+generate="generate!(\""
+generate_pod="generate_pod!(\""
+generate_ns="generate_ns!(\""
+pod="pod!(\""
+block="block!(\""
+opaque="opaque!(\""
+block_constructors="block_constructors!(\""
+instantiable="instantiable!(\""
+throws="throws!(\""
+
+# Directives taking a string literal, a comma, and then an identifier or a
+# type path.
+concrete="concrete!(\""
+subclass="subclass!(\""
+extern_cpp_type="extern_cpp_type!(\""
+extern_cpp_opaque_type="extern_cpp_opaque_type!(\""
+
+# Directives taking an identifier or a Rust path.
+name="name!("
+rust_type="rust_type!("
+extern_rust_type="extern_rust_type!("
+extern_rust_function="extern_rust_function!("
+
+# Directives taking nothing at all.
+generate_all="generate_all!()"
+parse_only="parse_only!()"
+exclude_impls="exclude_impls!()"
+exclude_utilities="exclude_utilities!()"
+
+# The safety directive, and every policy `UnsafePolicy::parse` accepts.
+safety="safety!("
+safety_unsafe="safety!(unsafe)"
+safety_ffi="safety!(unsafe_ffi)"
+safety_wrapped="safety!(unsafe_references_wrapped)"
+
+# Fragments: the punctuation a directive is built out of.
+bang_open="!("
+open_quote="(\""
+close_quote="\")"
+comma_quote="\", "
+close_paren=")"
+path_sep="::"
+quote="\""
+hexathorpe="#"
+
+# A signature, which is what `extern_rust_function!` wants after its comma.
+fn_sig="fn f()"

@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("return_b_ref")
+generate!("return_b_ptr")
+generate_pod!("A")
+generate_pod!("B")

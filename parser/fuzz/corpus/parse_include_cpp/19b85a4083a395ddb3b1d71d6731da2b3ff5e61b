@@ -1,0 +1,7 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("give_u32")
+generate!("give_u64")
+generate!("give_i32")
+generate!("give_i64")
+generate!("give_i128")

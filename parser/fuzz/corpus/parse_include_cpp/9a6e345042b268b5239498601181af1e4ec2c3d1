@@ -1,0 +1,2 @@
+#include "input.h"
+safety!(unsafe_ffi)

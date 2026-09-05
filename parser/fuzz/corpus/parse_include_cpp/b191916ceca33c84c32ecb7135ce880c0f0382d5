@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("take_box")
+extern_rust_type!(Foo)
+generate!("Ret")

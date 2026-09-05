@@ -1,0 +1,9 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("Norma")
+generate!("daft")
+generate!("daft1")
+generate!("daft2")
+generate!("daft3")
+generate!("daft4")
+generate_pod!("Fred")

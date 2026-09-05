@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("submarines::hey_boomer")
+generate!("generations::hey_boomer")

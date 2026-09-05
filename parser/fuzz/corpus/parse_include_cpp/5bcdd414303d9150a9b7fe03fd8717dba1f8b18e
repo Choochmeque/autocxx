@@ -1,0 +1,7 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate_pod!("Turkey_Duck_Hen")
+generate_pod!("Turkey_Duck_HenWithDefault")
+generate_pod!("Turkey_Duck_HenWithDestructor")
+generate_pod!("Turkey_Duck_HenWithCopy")
+generate_pod!("Turkey_Duck_HenWithMove")

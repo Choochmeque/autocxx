@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("my_namespace::do_something")
+throws!("my_namespace::do_something")

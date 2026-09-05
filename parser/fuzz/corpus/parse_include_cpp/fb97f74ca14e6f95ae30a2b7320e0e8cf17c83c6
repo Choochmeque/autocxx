@@ -1,0 +1,6 @@
+#include "input.h"
+// This next line enables C++ reference wrappers
+// This is what requires the 'arbitrary_self_types' feature.
+safety!(unsafe_references_wrapped)
+generate!("Goat")
+generate!("Field")

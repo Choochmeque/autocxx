@@ -1,0 +1,10 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("make_trivial_struct")
+generate!("make_trivial_class")
+generate!("make_opaque_struct")
+generate!("make_opaque_class")
+generate!("OpaqueStruct")
+generate!("OpaqueClass")
+generate_pod!("TrivialStruct")
+generate_pod!("TrivialClass")

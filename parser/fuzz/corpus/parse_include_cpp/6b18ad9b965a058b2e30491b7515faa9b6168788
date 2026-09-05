@@ -1,0 +1,7 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("mine::take_string")
+generate!("mine::make_string")
+generate!("real_string")
+generate_pod!("mine::string")
+generate_pod!("mine::holder")

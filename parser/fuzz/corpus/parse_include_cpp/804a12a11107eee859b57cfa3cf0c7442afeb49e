@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("take_string_piece")
+generate!("give_string_piece")
+instantiable!("StringPiece")

@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("ns::bar")
+generate!("ns::read_bar")
+generate!("ns::destructions")

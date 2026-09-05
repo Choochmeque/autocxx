@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("handle_a")
+generate!("create_a")
+extern_cpp_opaque_type!("A", ffi2::A)

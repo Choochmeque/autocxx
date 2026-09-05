@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("Alpha")
+generate!("Beta")
+generate_pod!("Alpha_Inner")
+generate_pod!("Beta_Inner")

@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("Anna")
+generate!("give_anna")
+generate_pod!("Bob")

@@ -1,4 +1,10 @@
 target
-corpus
 artifacts
 coverage
+
+# `corpus/` is deliberately *not* ignored: the seed corpus under
+# `corpus/parse_include_cpp` is committed so that CI and every developer
+# start from the same inputs. `cargo fuzz run` writes the inputs it
+# discovers into whichever corpus directory it was pointed at; those show
+# up as untracked files and are only worth committing if they reach
+# something new.

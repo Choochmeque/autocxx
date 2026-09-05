@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+name!(ffi_a)
+generate_pod!("A")
+extern_cpp_type!("b::B", crate::b::B)

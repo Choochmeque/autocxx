@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("pp")
+generate!("pp1")
+generate!("pp2")

@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("make_filedata")
+generate!("read_filedata")
+generate!("filedata")

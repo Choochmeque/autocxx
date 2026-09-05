@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("spanner::Key")
+generate!("a::spanner::Key")
+generate!("b::spanner::Key")

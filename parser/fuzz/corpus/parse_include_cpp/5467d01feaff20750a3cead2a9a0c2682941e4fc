@@ -1,0 +1,4 @@
+parse_only!()
+#include "input.h"
+generate!("do_math")
+safety!(unsafe)

@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("Value")
+generate!("make_vec_uint32_t")
+generate!("make_vec_float")
+generate!("make_vec_size_t")

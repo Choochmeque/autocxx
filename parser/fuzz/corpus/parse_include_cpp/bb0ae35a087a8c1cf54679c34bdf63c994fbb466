@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("register_observer")
+generate!("deregister_observer")
+generate!("feed_goat")
+subclass!("GoatObserver", MyGoatObserver)

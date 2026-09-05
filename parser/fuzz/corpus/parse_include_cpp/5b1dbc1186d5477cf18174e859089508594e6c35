@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("MyClass")
+throws!("MyClass::do_something")

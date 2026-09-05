@@ -1,0 +1,3 @@
+#include "llvm/Support/MemoryBuffer.h"
+safety!(unsafe)
+generate!("llvm::MemoryBuffer")

@@ -1,0 +1,7 @@
+#include "fake-chromium-header.h"
+safety!(unsafe) // unsafety policy; see docs
+generate!("content::WebContents")
+generate!("content::RenderFrameHost")
+generate!("content::CreateParams")
+generate!("SimulateRendererShutdown")
+subclass!("content::WebContentsObserver",RenderFrameHostForWebContents)

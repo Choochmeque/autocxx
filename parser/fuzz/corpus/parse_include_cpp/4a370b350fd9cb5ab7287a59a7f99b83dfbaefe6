@@ -1,0 +1,3 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate_pod!("A::Bob")

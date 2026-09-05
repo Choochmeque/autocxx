@@ -1,0 +1,8 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("FullyDefined")
+generate!("Partial1")
+generate!("Partial2")
+generate!("Partial3")
+generate!("Partial4")
+generate!("Partial5")

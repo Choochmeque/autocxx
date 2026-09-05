@@ -1,0 +1,4 @@
+#include "input.h"
+name!(thing)
+safety!(unsafe)
+generate!("Thing")

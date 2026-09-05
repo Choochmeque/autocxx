@@ -1,0 +1,3 @@
+#include "cxx_vocabulary.h"
+safety!(unsafe_ffi)
+generate!("a::String")
