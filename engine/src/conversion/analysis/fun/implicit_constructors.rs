@@ -705,6 +705,24 @@ pub(super) fn find_constructors_present(
                         // we synthesize a `new()` which C++ refuses to
                         // compile. Same missing information as the member
                         // initializers of google/autocxx#816.
+                        //
+                        // Recording it in `FieldInfo` is the easy half. The
+                        // information does not reach us: a field's type
+                        // arrives as the `syn::Type` bindgen printed, and Rust
+                        // struct fields have no `const`, so `const int m` and
+                        // `int m` are both `c_int` by the time we look. There
+                        // is no field-level parse callback either, and
+                        // `DiscoveredItem` has no variant for one. bindgen
+                        // itself does know - `ir::ty::Type::is_const` - so the
+                        // fix starts there, with a `__bindgen_marker_Const<T>`
+                        // wrapper alongside the `Reference` and
+                        // `RValueReference` ones autocxx already asks for in
+                        // `engine/src/lib.rs` and unwraps in
+                        // `type_helpers.rs`. Once a field can be seen to be
+                        // const, this becomes another `blocker` arm below and
+                        // a `WhyNoSpecialMember` variant naming the field.
+                        // `test_const_field_deletes_default_constructor` is
+                        // written and `#[ignore]`d against that day.
                         let blocker = if has_rvalue_reference_fields {
                             Some(WhyNoSpecialMember::RvalueReferenceField)
                         } else if let Some(reference_field) = reference_field.clone() {

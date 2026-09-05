@@ -279,6 +279,26 @@ fn get_struct_field_types(
 }
 
 /// Map to whether the bases are public.
+///
+/// A base class is only ever seen here as a field bindgen named `_base`,
+/// `_base_1` and so on; there is no other channel for one.
+///
+/// TODO: which means a base that takes up no space is invisible. bindgen emits
+/// a field for a base only when `Base::requires_storage` says so, and that is
+/// false for an empty base - which C++ lays out at zero size inside its
+/// derived class - and for a virtual base. So for `struct D : Empty { int x;
+/// };` we are handed `struct D { pub x: c_int }` and conclude that `D` has no
+/// bases at all: `Empty`'s deleted or inaccessible default constructor,
+/// destructor, copy and move constructors never reach
+/// `find_constructors_present`, which then synthesizes members C++ refuses to
+/// compile; no upcast to `Empty` is generated; and `D` is not marked abstract
+/// for pure virtuals inherited from it. Nothing on this side can recover the
+/// relationship - the empty base's own type is generated, but nothing says
+/// anything derives from it, and `DiscoveredItem::Struct` carries only names.
+/// Fixing it needs bindgen either to emit a zero-sized `_base` field for such
+/// a base, or to report base classes through a parse callback.
+/// `test_empty_base_deletes_default_constructor` is written and `#[ignore]`d
+/// against that.
 fn get_bases(item: &ItemStruct) -> HashMap<QualifiedName, bool> {
     item.fields
         .iter()

@@ -18559,3 +18559,36 @@ fn test_pod_holding_nested_struct() {
     };
     run_test("", hdr, rs, &[], &["fx_Outer", "fx_Outer_fx_Inner"]);
 }
+
+/// C++ deletes the default constructor of a class with a const data member
+/// and no initializer for it, so nothing may synthesize a `new()` for one.
+#[test]
+#[ignore] // needs bindgen to say a field is const - see the note in implicit_constructors
+fn test_const_field_deletes_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_HasConstField {
+            const int m;
+        };
+        inline int read_it(const fx_HasConstField& h) { return h.m; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_HasConstField", "read_it"], &[]);
+}
+
+/// An empty base class is laid out at zero size inside the class deriving
+/// from it, so bindgen emits no field for it and the derived class looks like
+/// it has no bases - and its constructors are then synthesized as if the base
+/// had none of its own requirements.
+#[test]
+#[ignore] // needs bindgen to report empty bases - see the note on get_bases
+fn test_empty_base_deletes_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_EmptyBase {
+            fx_EmptyBase() = delete;
+        };
+        struct fx_DerivedFromEmpty : public fx_EmptyBase {
+            int x;
+        };
+        inline int read_x(const fx_DerivedFromEmpty& d) { return d.x; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_DerivedFromEmpty", "read_x"], &[]);
+}
