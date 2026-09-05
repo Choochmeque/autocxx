@@ -16579,6 +16579,39 @@ fn test_opaque_directive() {
 }
 
 #[test]
+/// A class member typedef to a template instantiation, used as a
+/// const-reference parameter. The typedef becomes `B_F` in the bridge with a
+/// `#[namespace = "B"]` attribute, where `B` names a class rather than a
+/// namespace; the generated C++ used to declare `namespace B` alongside
+/// `class B` and fail to compile. See google/autocxx#1479.
+fn test_nested_typedef_to_template_instantiation() {
+    let hdr = indoc! {"
+        template <class T>
+        class X;
+
+        class B {
+        public:
+            typedef X<void> F;
+            void foo(const F&) {}
+        };
+    "};
+    let rs = quote! {
+        let _b = ffi::B::new().within_unique_ptr();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("B")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
 /// Asking bindgen to derive `Default` must never turn into a zero-filled
 /// `Default` for a type whose all-bits-zero form isn't a valid value.
 ///
