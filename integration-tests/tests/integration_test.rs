@@ -12,8 +12,8 @@ use crate::{
         SetSuppressSystemHeaders,
     },
     code_checkers::{
-        make_error_finder, make_rust_code_finder, make_string_finder, CppMatcher,
-        NoSystemHeadersChecker,
+        make_checks_without_building, make_error_finder, make_rust_code_finder, make_string_finder,
+        CppMatcher, NoSystemHeadersChecker,
     },
 };
 use autocxx_integration_tests::{
@@ -12625,9 +12625,10 @@ fn test_virtual_methods_additional() {
 ///   * Implicitly defaulted
 ///   * User declared
 ///   * Explicitly defaulted
-///     Not handled yet: https://github.com/google/autocxx/issues/815.
-///     Once this is handled, add equivalents of all the implicitly defaulted cases, at all
-///     visibility levels.
+///     Put through the same deletion rules as the implicit version, so it can
+///     come out deleted (https://github.com/google/autocxx/issues/815). The
+///     cases here cover it at public visibility only; the `test_defaulted_*`
+///     tests cover deletion, and non-public visibility.
 /// applied to each of these:
 ///   * Default constructor
 ///   * Copy constructor
@@ -16116,4 +16117,189 @@ fn test_two_superclasses_with_same_method_name() {
             }
         }),
     );
+}
+
+/// C++ diagnoses writing `= default` on a member it then deletes
+/// (-Wdefaulted-function-deleted), and it is right to: the declaration says
+/// nothing the class doesn't already say. That's exactly the shape
+/// google/autocxx#815 is about, though, so these fixtures check what autocxx
+/// generates for it and stop before the harness compiles them, rather than
+/// telling the compiler to keep quiet about an accurate warning.
+#[test]
+fn test_defaulted_copy_constructor_which_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NonCopyable {
+            NonCopyable() = default;
+            NonCopyable(const NonCopyable&) = delete;
+            uint32_t a;
+        };
+        struct DefaultedButDeletedCopy {
+            DefaultedButDeletedCopy() = default;
+            DefaultedButDeletedCopy(const DefaultedButDeletedCopy&) = default;
+            NonCopyable m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["NonCopyable", "DefaultedButDeletedCopy"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(
+                // The default constructor is fine and stays...
+                &["::new (autocxx_gen_this) DefaultedButDeletedCopy()"],
+                // ...whereas the copy constructor C++ deleted must not be called.
+                &["::new (autocxx_gen_this) DefaultedButDeletedCopy(arg1)"],
+            ),
+        )])),
+        None,
+    );
+}
+
+#[test]
+fn test_defaulted_default_constructor_which_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NoDefaultConstructor {
+            NoDefaultConstructor(uint32_t x) : a(x) {}
+            uint32_t a;
+        };
+        struct DefaultedButDeletedDefault {
+            DefaultedButDeletedDefault() = default;
+            NoDefaultConstructor m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(
+            &["NoDefaultConstructor", "DefaultedButDeletedDefault"],
+            &[],
+            None,
+        ),
+        None,
+        Some(make_checks_without_building(vec![
+            Box::new(CppMatcher::new(
+                &[],
+                &["::new (autocxx_gen_this) DefaultedButDeletedDefault()"],
+            )),
+            // `new()` is a name the user would have reached for, so it leaves
+            // a documented stub rather than vanishing.
+            make_string_finder(vec![
+                "This special member function was declared =default".to_string()
+            ]),
+        ])),
+        None,
+    );
+}
+
+#[test]
+fn test_defaulted_destructor_which_is_deleted() {
+    // A destructor C++ deletes takes the whole ownership surface with it, by
+    // the route google/autocxx#829 established: the member's destructor is
+    // inaccessible, so this class's `= default`ed one is deleted, so nothing
+    // may allocate, construct or drop one of these.
+    let hdr = indoc! {"
+        class PrivateDtor {
+        public:
+            PrivateDtor() {}
+        private:
+            ~PrivateDtor() {}
+        };
+        struct DefaultedButDeletedDtor {
+            ~DefaultedButDeletedDtor() = default;
+            PrivateDtor m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["PrivateDtor", "DefaultedButDeletedDtor"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            Box::new(CppMatcher::new(
+                &[],
+                &[
+                    "arg0->DefaultedButDeletedDtor::~DefaultedButDeletedDtor()",
+                    "new_appropriately<DefaultedButDeletedDtor>()",
+                ],
+            )),
+            make_string_finder(vec![
+                "autocxx has not generated any way for Rust to own one of these".to_string(),
+            ]),
+        ])),
+        None,
+    );
+}
+
+#[test]
+fn test_defaulted_special_members_which_survive() {
+    // The other half of the rule: `= default` on members C++ keeps must go on
+    // meaning exactly what it did before.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct AllDefaulted {
+            AllDefaulted() = default;
+            AllDefaulted(const AllDefaulted&) = default;
+            AllDefaulted(AllDefaulted&&) = default;
+            ~AllDefaulted() = default;
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::AllDefaulted: moveit::CopyNew);
+        static_assertions::assert_impl_all!(ffi::AllDefaulted: moveit::MoveNew);
+        let obj = ffi::AllDefaulted::new().within_unique_ptr();
+        let copy = autocxx::moveit::new::copy(obj.as_ref().unwrap()).within_unique_ptr();
+        assert_eq!(copy.a, obj.a);
+    };
+    run_test("", hdr, rs, &[], &["AllDefaulted"]);
+}
+
+#[test]
+fn test_defaulted_copy_constructor_survives_user_move_constructor() {
+    // A user-declared move constructor deletes the implicitly declared copy
+    // constructor, but not one the user asked for with `= default`.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct MoveAndDefaultedCopy {
+            MoveAndDefaultedCopy() : a(1) {}
+            MoveAndDefaultedCopy(MoveAndDefaultedCopy&& other) : a(other.a) {}
+            MoveAndDefaultedCopy(const MoveAndDefaultedCopy&) = default;
+            uint32_t get() const { return a; }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::MoveAndDefaultedCopy: moveit::CopyNew);
+        let obj = ffi::MoveAndDefaultedCopy::new().within_unique_ptr();
+        let copy = autocxx::moveit::new::copy(obj.as_ref().unwrap()).within_unique_ptr();
+        assert_eq!(copy.get(), 1);
+    };
+    run_test("", hdr, rs, &["MoveAndDefaultedCopy"], &[]);
+}
+
+#[test]
+fn test_defaulted_special_members_keep_their_visibility() {
+    // `= default` says which members exist; it doesn't say who may call them.
+    let hdr = indoc! {"
+        #include <cstdint>
+        class PrivateDefaultedCopy {
+        public:
+            PrivateDefaultedCopy() = default;
+            uint32_t get() const { return 1; }
+        private:
+            PrivateDefaultedCopy(const PrivateDefaultedCopy&) = default;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::PrivateDefaultedCopy: moveit::CopyNew);
+        let obj = ffi::PrivateDefaultedCopy::new().within_unique_ptr();
+        assert_eq!(obj.get(), 1);
+    };
+    run_test("", hdr, rs, &["PrivateDefaultedCopy"], &[]);
 }

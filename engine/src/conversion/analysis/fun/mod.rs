@@ -59,7 +59,9 @@ use crate::{
 use self::{
     bridge_name_tracker::BridgeNameTracker,
     function_wrapper::RustConversionType,
-    implicit_constructors::{find_constructors_present, ItemsFound},
+    implicit_constructors::{
+        discard_deleted_defaulted_members, find_constructors_present, ItemsFound,
+    },
     overload_tracker::OverloadTracker,
     subclass::{
         create_subclass_constructor, create_subclass_fn_wrapper, create_subclass_function,
@@ -531,6 +533,10 @@ impl<'a> FnAnalyzer<'a> {
                     analysis:
                         FnAnalysis {
                             kind: FnKind::TraitMethod { impl_for, .. },
+                            // A `= default`ed destructor may have been
+                            // withdrawn by `add_constructors_present` as one
+                            // C++ actually deletes; it's no use to us then.
+                            ignore_reason: Ok(()),
                             ..
                         },
                     ..
@@ -2174,13 +2180,16 @@ impl<'a> FnAnalyzer<'a> {
     ///
     /// Also fills out the [`PodAndConstructorAnalysis::constructors`] fields with information useful
     /// for further analysis phases.
-    fn add_constructors_present(&mut self, mut apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase2> {
+    fn add_constructors_present(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase2> {
         let all_items_found = find_constructors_present(&apis);
+        // C++ may have deleted some of the special members it declared for
+        // `= default`. Withdraw those before we consider what to synthesize.
+        let mut apis = discard_deleted_defaulted_members(apis, &all_items_found);
         for (self_ty, items_found) in all_items_found.iter() {
             if self.config.exclude_impls {
-                // Remember that `find_constructors_present` mutates `apis`, so we always have to
-                // call that, even if we don't do anything with the return value. This is kind of
-                // messy, see the comment on this function for why.
+                // Only the synthesis below is skipped. The analysis above runs
+                // either way, because withdrawing the special members C++
+                // deletes is right whether or not we go on to add any.
                 continue;
             }
             if self

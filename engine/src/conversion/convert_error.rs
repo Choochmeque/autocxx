@@ -127,6 +127,8 @@ pub enum ConvertErrorFromCpp {
     AssignmentOperator,
     #[error("This function was marked =delete")]
     Deleted,
+    #[error("This special member function was declared =default, but the C++ rules define it as deleted - a member or base has no accessible version of it, or the class has a const or reference member with no initializer. See https://github.com/google/autocxx/issues/815.")]
+    DefaultedButDeleted,
     #[error("This structure has an rvalue reference field (&&) which is not yet supported.")]
     RValueReferenceField,
     #[error("This type was not on the allowlist, so we are not generating methods for it.")]
