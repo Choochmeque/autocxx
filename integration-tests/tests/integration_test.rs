@@ -5336,6 +5336,7 @@ fn test_typedef_to_up_in_fn_call() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         typedef std::unique_ptr<std::string> my_string;
         inline uint32_t take_str(my_string a) {
             return a->size();
@@ -5396,6 +5397,7 @@ fn test_string_in_struct() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         struct A {
             std::string a;
         };
@@ -5421,6 +5423,7 @@ fn test_up_in_struct() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         struct A {
             std::unique_ptr<std::string> a;
         };
@@ -5472,6 +5475,7 @@ fn test_typedef_to_up_in_struct() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         typedef std::unique_ptr<std::string> my_string;
         struct A {
             my_string a;
