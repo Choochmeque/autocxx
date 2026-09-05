@@ -587,5 +587,40 @@ fn create_type_database() -> TypeDatabase {
     // that name is known here too, every function which mentions a `char16_t`
     // is discarded for depending on a type we've never heard of.
     db.insert_alias("bindgen_cchar16_t", "autocxx::c_char16_t");
+    // TODO: `char16_t`'s three siblings - `char8_t`, `char32_t` and `wchar_t`
+    // - and `long double` have no entry here and cannot be given one from this
+    // side. They are distinct types in C++, but nothing distinguishing reaches
+    // us, so a `char32_t` and a `uint32_t` are the same token by the time we
+    // see them and we cannot even refuse the function cleanly. Each is blocked
+    // in autocxx-bindgen, but by a different thing:
+    //
+    // - `char32_t` is collapsed on purpose: `CXType_Char32 =>
+    //   TypeKind::Int(IntKind::U32)` in `build_builtin_ty`. `wchar_t` keeps an
+    //   `IntKind::WChar` but codegen renders it through
+    //   `Layout::known_type_for_size`, so it arrives as a bare `u16`/`u32`.
+    //   Both need exactly the edit `char16_t` already had: an option like
+    //   `use_distinct_char16_t` and a marker rendering that survives codegen.
+    //
+    // - `char8_t` is not collapsed but unrecognised: libclang has no
+    //   `CXType_Char8` (the kinds go `CXType_UChar`, `CXType_Char16`,
+    //   `CXType_Char32`), so `build_builtin_ty` returns `None` and bindgen
+    //   falls back to an opaque type of the right layout - we receive
+    //   `__bindgen_marker_Opaque<u8>` and unwrap it to `u8`. bindgen cannot
+    //   add a `Char8` arm until libclang exposes the kind; it would have to
+    //   recognise the type another way first.
+    //
+    // - `long double` renders by layout size, so where it is 8 bytes (MSVC,
+    //   64-bit Arm) it behaves like the collapses above, and where it is 16
+    //   (x86-64 System V) `FloatKind::LongDouble` becomes
+    //   `integer_type(layout)`, i.e. `u128` - which is not registered here at
+    //   all, so on those targets the function is rejected during our own
+    //   analysis rather than by the C++ compiler.
+    //
+    // Once a `bindgen_c*_t` name arrives for one of them, it needs what
+    // `char16_t` has: a `TypeDetails` entry above, an `insert_alias` here, the
+    // injected `use` in `engine/src/lib.rs`, the guard in `parse_bindgen.rs`,
+    // and a `#[repr(transparent)]` newtype in the `autocxx` crate - whose
+    // payload, for `wchar_t` and `long double`, has to be chosen per target.
+    // The integration tests for all four are written and `#[ignore]`d.
     db
 }

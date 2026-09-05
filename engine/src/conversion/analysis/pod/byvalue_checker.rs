@@ -89,14 +89,7 @@ impl ByValueChecker {
         // may depend on other types. Ideally we'd use the depth first iterator
         // but that's awkward given that our ApiPhase does not yet have a fixed
         // list of field/base types. Instead, we'll iterate first over non-struct
-        // types and then over structs.
-        // TODO: the second pass is still order-dependent. `ingest_struct` looks
-        // each field type up in `results` as it goes, so a struct holding one
-        // that bindgen emitted after it is reported as "isn't known" and can't
-        // be POD. C++ forces a struct to be complete before it's held by value,
-        // so this only bites for a nested class - `struct A { struct B {..}; B
-        // b; };` with `generate_pod!("A")` fails today. Ingesting structs to a
-        // fixed point, or sorting them by dependency, would fix it.
+        // types and then over structs, in an order we work out for ourselves.
         for api in apis.iter() {
             match api {
                 Api::Typedef { analysis, .. } => {
@@ -161,10 +154,8 @@ impl ByValueChecker {
                 _ => {}
             }
         }
-        for api in apis.iter() {
-            if let Api::Struct { details, .. } = api {
-                byvalue_checker.ingest_struct(&details.item, api.name().get_namespace())
-            }
+        for (def, ns) in Self::structs_in_dependency_order(apis) {
+            byvalue_checker.ingest_struct(def, ns)
         }
         let pod_requests = config
             .get_pod_requests()
@@ -175,6 +166,86 @@ impl ByValueChecker {
             .satisfy_requests(pod_requests)
             .map_err(ConvertErrorFromCpp::UnsafePodType)?;
         Ok(byvalue_checker)
+    }
+
+    /// The structs among `apis`, ordered so that a struct comes after every
+    /// struct it holds a field of.
+    ///
+    /// [`Self::ingest_struct`] decides a struct's POD-ness once and for all,
+    /// looking each field type up in `results` as it goes, so a field type it
+    /// has not reached yet counts as "isn't known" and poisons the struct
+    /// permanently. Bindgen's own order is nearly always right, because C++
+    /// requires a type to be complete before anything holds it by value and so
+    /// the definition comes first - but not for a nested class, which bindgen
+    /// hoists out to the same module as the class enclosing it and may emit
+    /// afterwards. Sorting first is what makes the verdict independent of
+    /// where the definition happened to land.
+    ///
+    /// Only fields naming another struct in this same list are followed:
+    /// enums, typedefs and known types are settled by the pass before this
+    /// one, and a pointer field is not a dependency at all. Held-by-value
+    /// fields cannot form a cycle - a struct cannot contain itself - but if
+    /// one ever appeared it would simply be emitted where it was reached
+    /// rather than followed round for ever.
+    fn structs_in_dependency_order(apis: &ApiVec<TypedefPhase>) -> Vec<(&ItemStruct, &Namespace)> {
+        let structs: Vec<(&QualifiedName, &ItemStruct)> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct { details, .. } => Some((api.name(), &*details.item)),
+                _ => None,
+            })
+            .collect();
+        let positions: HashMap<&QualifiedName, usize> = structs
+            .iter()
+            .enumerate()
+            .map(|(position, (name, _))| (*name, position))
+            .collect();
+        #[derive(Clone, Copy, PartialEq)]
+        enum Progress {
+            Unseen,
+            /// Reached, and somewhere below us on the stack, so anything
+            /// naming it again is naming a cycle.
+            UnderWay,
+            Ordered,
+        }
+        let mut order = Vec::with_capacity(structs.len());
+        let mut progress = vec![Progress::Unseen; structs.len()];
+        // An explicit stack rather than recursion: the depth is the depth of
+        // the user's own type nesting, which nothing here bounds. The flag
+        // says which of the two visits this is - on the way down, or back up
+        // with every dependency already ordered.
+        let mut stack = Vec::new();
+        for root in 0..structs.len() {
+            if progress[root] != Progress::Unseen {
+                continue;
+            }
+            stack.push((root, false));
+            while let Some((position, coming_back_up)) = stack.pop() {
+                if coming_back_up {
+                    progress[position] = Progress::Ordered;
+                    let (name, def) = structs[position];
+                    order.push((def, name.get_namespace()));
+                    continue;
+                }
+                if progress[position] != Progress::Unseen {
+                    // Ordered already, or reached again by a second route
+                    // before we got to it.
+                    continue;
+                }
+                progress[position] = Progress::UnderWay;
+                // Back on the stack beneath everything it depends on, to be
+                // ordered once they are all out of the way.
+                stack.push((position, true));
+                for field_type in Self::get_field_types(structs[position].1) {
+                    if let Some(&dependency) = positions.get(&field_type) {
+                        if progress[dependency] == Progress::Unseen {
+                            stack.push((dependency, false));
+                        }
+                    }
+                }
+            }
+        }
+        order
     }
 
     fn ingest_struct(&mut self, def: &ItemStruct, ns: &Namespace) {
@@ -358,12 +429,36 @@ impl ByValueChecker {
 #[cfg(test)]
 mod tests {
     use super::{ByValueChecker, PodState, StructDetails};
+    use crate::conversion::analysis::tdef::TypedefPhase;
+    use crate::conversion::api::{Api, ApiName, StructDetails as ApiStructDetails};
+    use crate::conversion::apivec::ApiVec;
     use crate::minisyn::ItemStruct;
     use crate::types::{Namespace, QualifiedName};
     use syn::parse_quote;
 
     fn ty_from_ident(id: &syn::Ident) -> QualifiedName {
         QualifiedName::new_from_cpp_name(&id.to_string())
+    }
+
+    /// An `Api::Struct` for `item`, in the global namespace, as the parse
+    /// phase would have produced it.
+    fn struct_api(item: ItemStruct) -> Api<TypedefPhase> {
+        Api::Struct {
+            name: ApiName::new(&Namespace::new(), item.ident.clone().into()),
+            details: Box::new(ApiStructDetails {
+                item,
+                has_rvalue_reference_fields: false,
+            }),
+            analysis: (),
+        }
+    }
+
+    /// The names of the structs of `apis`, in the order they'd be ingested.
+    fn ingest_order(apis: &ApiVec<TypedefPhase>) -> Vec<String> {
+        ByValueChecker::structs_in_dependency_order(apis)
+            .into_iter()
+            .map(|(def, _)| def.ident.to_string())
+            .collect()
     }
 
     /// Record `name` as a typedef to `target`, as `new_from_apis` does for an
@@ -527,6 +622,71 @@ mod tests {
             format!("{err:?}").contains("SomethingWeNeverSaw"),
             "error should name the missing target, was: {err:?}"
         );
+    }
+
+    /// bindgen hoists a nested class out into the module its enclosing class
+    /// is in, and may emit it after that class. Ingesting in that order would
+    /// look the nested type up before anything had recorded it and rule the
+    /// enclosing struct out of being POD for good, so the structs are sorted
+    /// by what they hold before any of them is ingested.
+    #[test]
+    fn test_struct_holding_one_defined_after_it() {
+        let mut apis = ApiVec::<TypedefPhase>::new();
+        apis.push(struct_api(parse_quote! {
+            struct Outer {
+                inner: Inner,
+            }
+        }));
+        apis.push(struct_api(parse_quote! {
+            struct Inner {
+                a: u32,
+            }
+        }));
+        assert_eq!(ingest_order(&apis), vec!["Inner", "Outer"]);
+    }
+
+    /// A struct held by a struct held by the first one. The middle one has to
+    /// be settled between them, whichever order they arrive in.
+    #[test]
+    fn test_chain_of_structs_defined_in_reverse() {
+        let mut apis = ApiVec::<TypedefPhase>::new();
+        apis.push(struct_api(parse_quote! {
+            struct A {
+                b: B,
+            }
+        }));
+        apis.push(struct_api(parse_quote! {
+            struct B {
+                c: C,
+            }
+        }));
+        apis.push(struct_api(parse_quote! {
+            struct C {
+                a: u32,
+            }
+        }));
+        assert_eq!(ingest_order(&apis), vec!["C", "B", "A"]);
+    }
+
+    /// Two structs each holding the other cannot be written in C++, but we
+    /// must still terminate, and still offer every struct for ingestion, if
+    /// bindgen ever hands us one.
+    #[test]
+    fn test_structs_holding_each_other() {
+        let mut apis = ApiVec::<TypedefPhase>::new();
+        apis.push(struct_api(parse_quote! {
+            struct A {
+                b: B,
+            }
+        }));
+        apis.push(struct_api(parse_quote! {
+            struct B {
+                a: A,
+            }
+        }));
+        let mut order = ingest_order(&apis);
+        order.sort();
+        assert_eq!(order, vec!["A", "B"]);
     }
 
     /// A bitfield allocation unit is a byte array with accessors, so it

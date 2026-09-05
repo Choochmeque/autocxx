@@ -14,6 +14,32 @@ pub(crate) fn make_cpp17_adder() -> Option<BuilderModifier> {
     make_clang_arg_adder(&["-std=c++17"])
 }
 
+/// C++20 for both halves of the build.
+///
+/// Not `make_clang_arg_adder`: that passes its flags to the C++ compiler
+/// verbatim, and `-std=c++20` is not how cl.exe spells it. bindgen is always
+/// clang and takes the flag as written; the C++ compiler is told through
+/// `cc`'s `std`, which picks the spelling for the tool family - and, being set
+/// after `configure_builder`'s `c++14`, replaces it.
+pub(crate) fn make_cpp20_adder() -> Option<BuilderModifier> {
+    Some(Box::new(Cpp20Adder))
+}
+
+struct Cpp20Adder;
+
+impl BuilderModifierFns for Cpp20Adder {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        builder.extra_clang_args(&["-std=c++20"])
+    }
+
+    fn modify_cc_builder<'a>(&self, builder: &'a mut cc::Build) -> &'a mut cc::Build {
+        builder.std("c++20")
+    }
+}
+
 struct ClangArgAdder(Vec<String>, Vec<String>);
 
 pub(crate) fn make_clang_arg_adder(args: &[&str]) -> Option<BuilderModifier> {

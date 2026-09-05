@@ -8,8 +8,8 @@
 
 use crate::{
     builder_modifiers::{
-        make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder, EnableAutodiscover,
-        SetSuppressSystemHeaders,
+        make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
+        EnableAutodiscover, SetSuppressSystemHeaders,
     },
     code_checkers::{
         make_checks_without_building, make_error_finder, make_rust_code_finder,
@@ -19,7 +19,8 @@ use crate::{
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
     run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
-    run_test_expect_fail_with_error_ex, BuilderModifier, CodeCheckerFns, TestError,
+    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_errors, BuilderModifier,
+    CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -12746,12 +12747,12 @@ fn test_pass_by_value_helper_name_shadowed_in_namespace() {
 /// refusal where it was - in the C++ compiler - rather than swallowing it or
 /// turning it into an error inside the helper's own template.
 ///
-/// Manually observed: the compiler's message names the user's own deleted
-/// constructor at the `take_it` call. This test can only assert that the C++
-/// build fails, though: `TestError::CppBuild` wraps `cc::Error`, which
-/// carries "command failed" and not the compiler's diagnostics - the same
-/// swallowed-diagnostics gap `RsBuild` had before the harness captured the
-/// child's output. Fixing that for the C++ side would let this pin the text.
+/// The message has to be the compiler's own, about the user's own type, and
+/// not something the helper template says about itself. Every compiler words
+/// this differently - gcc "use of deleted function", clang "call to deleted
+/// constructor", cl.exe "attempting to reference a deleted function" - so what
+/// is pinned here is the part they agree on: the type's name, and that
+/// something about it was deleted.
 /// See <https://github.com/google/autocxx/issues/873>.
 #[test]
 fn test_pass_by_value_no_copy_or_move() {
@@ -12769,7 +12770,14 @@ fn test_pass_by_value_no_copy_or_move() {
         let obj = ffi::Neither::new().within_unique_ptr();
         ffi::take_it(obj);
     };
-    run_test_expect_fail_with_error("", hdr, rs, &["Neither", "take_it"], &[], "CppBuild");
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["Neither", "take_it"],
+        &[],
+        &["CppBuild", "Neither", "delete"],
+    );
 }
 
 fn destruction_test(ident: proc_macro2::Ident, extra_bit: Option<TokenStream>) {
@@ -15781,8 +15789,57 @@ fn test_issue_1125() {
     );
 }
 
+// Four C++ built-in types which are distinct types in C++ and which autocxx
+// cannot bind: `wchar_t`, `char32_t`, `char8_t` and `long double`. All four
+// are blocked in autocxx-bindgen rather than here, but by three different
+// things, and they do not all fail in the same place - so each test below says
+// which applies to it.
+//
+// `char16_t` was in this list and no longer is, which is what the others are
+// measured against. autocxx-bindgen's `use_distinct_char16_t` option makes
+// `IntKind::Char16` render as a `bindgen_cchar16_t` marker instead of `u16`;
+// `known_types` binds that name to the `autocxx::c_char16_t` newtype and emits
+// `typedef char16_t c_char16_t;` for the C++ side. Every one of these needs
+// that same first step - a rendering that survives bindgen - but reaching it
+// is a different job for each.
+//
+// 1. A deliberate collapse to a same-width primitive. `char32_t` is
+//    `CXType_Char32 => TypeKind::Int(IntKind::U32)` in `build_builtin_ty`;
+//    `wchar_t` keeps an `IntKind::WChar` of its own but codegen renders it
+//    through `Layout::known_type_for_size`, so it too comes out as a bare
+//    `u16`/`u32`. Adding the marker is the same edit `char16_t` already had.
+//
+// 2. A type libclang does not expose. There is no `CXType_Char8` at all - the
+//    kinds run `CXType_UChar = 5`, `CXType_Char16 = 6`, `CXType_Char32 = 7` -
+//    so `build_builtin_ty` returns `None` for `char8_t` and bindgen falls back
+//    to an opaque type of the right layout: the bindings say
+//    `__bindgen_marker_Opaque<u8>`, which autocxx unwraps to `u8`. bindgen
+//    cannot gain a `Char8` arm the way it gained `Char16`; it would first have
+//    to recognise the type some other way.
+//
+// 3. A width that varies by target, taking the failure to a different layer.
+//    `FloatKind::LongDouble` renders by layout size: 8 bytes gives `f64`, so
+//    on MSVC and 64-bit Arm `long double` behaves like the collapses above.
+//    16 bytes - x86-64 with the System V ABI, where 80 bits are stored in 16 -
+//    gives `integer_type(layout)`, i.e. `u128`, which `known_types` does not
+//    register at all. So the same header fails in different ways on different
+//    targets, and on x86-64 Linux it fails during autocxx's own analysis,
+//    before any C++ is generated.
+//
+// Cases 1 and 2 fail the same way as each other: autocxx declares the
+// primitive to cxx, cxx emits its check that the C++ function really has the
+// signature it was told about - `::std::uint32_t (*f$)(::std::uint32_t) =
+// ::f;` - and the C++ compiler rejects it, because function pointer types are
+// exact. Nothing is silently mis-generated. Nor can autocxx refuse any of
+// these cleanly instead: by the time the bindings arrive a `char32_t` and a
+// `uint32_t` are the same token.
+//
+// Each test below asks only that the type work, so each goes green as it is
+// once its own gate lifts. See https://github.com/google/autocxx/issues/1141
+// for the wchar_t half.
+
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/1141
+#[ignore] // case 1 above: codegen renders IntKind::WChar by layout size
 fn test_wchar_issue_1141() {
     let cxx = indoc! {"
         wchar_t next_wchar(wchar_t c) {
@@ -15795,6 +15852,49 @@ fn test_wchar_issue_1141() {
     "};
     let rs = quote! {};
     run_test(cxx, hdr, rs, &["next_wchar"], &[]);
+}
+
+#[test]
+#[ignore] // case 1 above: CXType_Char32 => IntKind::U32 in build_builtin_ty
+fn test_char32_t() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char32_t next_char32(char32_t c) { return c + 1; }
+    "};
+    run_test("", hdr, quote! {}, &["next_char32"], &[]);
+}
+
+#[test]
+#[ignore] // case 2 above: libclang has no CXType_Char8, so this arrives opaque
+fn test_char8_t() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char8_t next_char8(char8_t c) { return c + 1; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["next_char8"], &[], None),
+        make_cpp20_adder(),
+        None,
+        None,
+    );
+}
+
+#[test]
+#[ignore] // case 3 above: f64 where it is 8 bytes, unregistered u128 where it is 16
+fn test_long_double() {
+    // Note that this test fails in two different ways depending on the target,
+    // as case 3 above describes: a C++ build failure where `long double` is 8
+    // bytes, and an autocxx analysis failure - before any C++ exists - where it
+    // is 16. Whatever eventually represents it on the Rust side therefore
+    // cannot be one fixed type, which is a reason to keep it distinct rather
+    // than to collapse it to whichever primitive happens to match the width.
+    let hdr = indoc! {"
+        inline long double ld_double_it(long double x) { return x * 2; }
+    "};
+    run_test("", hdr, quote! {}, &["ld_double_it"], &[]);
 }
 
 #[test]
@@ -18438,4 +18538,57 @@ fn test_std_function_method_costs_only_that_method() {
             None,
         );
     }
+}
+
+/// A class nested inside the class which holds it by value. bindgen hoists
+/// the nested definition out into the module its enclosing class is in, and
+/// can emit it after that class - at which point the POD check, which used to
+/// take the structs in the order they arrived, had no record of the nested
+/// type yet and ruled the enclosing one out of being POD for good.
+#[test]
+fn test_pod_holding_nested_struct() {
+    let hdr = indoc! {"
+        struct fx_Outer {
+            struct fx_Inner { int a; };
+            fx_Inner inner;
+        };
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_Outer { inner: ffi::fx_Outer_fx_Inner { a: 42 } };
+        assert_eq!(outer.inner.a, 42);
+    };
+    run_test("", hdr, rs, &[], &["fx_Outer", "fx_Outer_fx_Inner"]);
+}
+
+/// C++ deletes the default constructor of a class with a const data member
+/// and no initializer for it, so nothing may synthesize a `new()` for one.
+#[test]
+#[ignore] // needs bindgen to say a field is const - see the note in implicit_constructors
+fn test_const_field_deletes_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_HasConstField {
+            const int m;
+        };
+        inline int read_it(const fx_HasConstField& h) { return h.m; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_HasConstField", "read_it"], &[]);
+}
+
+/// An empty base class is laid out at zero size inside the class deriving
+/// from it, so bindgen emits no field for it and the derived class looks like
+/// it has no bases - and its constructors are then synthesized as if the base
+/// had none of its own requirements.
+#[test]
+#[ignore] // needs bindgen to report empty bases - see the note on get_bases
+fn test_empty_base_deletes_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_EmptyBase {
+            fx_EmptyBase() = delete;
+        };
+        struct fx_DerivedFromEmpty : public fx_EmptyBase {
+            int x;
+        };
+        inline int read_x(const fx_DerivedFromEmpty& d) { return d.x; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_DerivedFromEmpty", "read_x"], &[]);
 }
