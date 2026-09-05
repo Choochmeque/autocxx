@@ -4,9 +4,17 @@ Fuzz target for `autocxx-parser`, tracking [issue #1244](https://github.com/goog
 `autocxx_parser::IncludeCpp`'s `syn::parse::Parse` implementation - the code
 that parses the directives inside `include_cpp! { ... }` (`generate!`,
 `safety!`, `include!`, and so on). That's the first thing arbitrary macro
-input reaches, it's pure in-process token-tree parsing (no clang/bindgen), and
-`autocxx-parser` is `#![forbid(unsafe_code)]`, so any crash found here is a
-plain logic bug, not memory unsafety.
+input reaches, and it's pure in-process token-tree parsing (no clang/bindgen).
+
+What it primarily looks for is parser panics and resource exhaustion - a proc
+macro that panics gives the user an opaque "proc macro panicked" instead of
+this crate's normal, specific diagnostics, and one that hangs or allocates
+without bound is just as much a bug. `autocxx-parser` itself forbids unsafe
+code, so AddressSanitizer adds little inside that crate; it can still catch
+memory errors in `syn`, `proc_macro2`, the allocator and the rest of the
+dependency graph, which is why the CI job leaves cargo-fuzz's default ASan
+on. Safe Rust is no guarantee of no crash either way: OOM, stack overflow
+and hangs are all still reachable from here.
 
 ## Running it
 
@@ -17,6 +25,13 @@ requirements. From `parser/fuzz`:
 ```
 cargo fuzz run parse_include_cpp
 ```
+
+`.github/workflows/fuzz.yml` does exactly that: weekly, and on demand via
+`workflow_dispatch`, where the `duration` input takes the number of seconds to
+fuzz for (set it to something like 60 for a smoke test). Before fuzzing it
+replays the committed corpus with `-runs=0`, so a seed that stops parsing
+fails as itself rather than as a crash mid-campaign. A crashing input is
+uploaded as a build artifact so it can be turned into a regression test.
 
 `fuzz` deliberately isn't a member of the main workspace (see the `Cargo.toml`
 here), so it's untouched by `cargo build --workspace`/`cargo test
