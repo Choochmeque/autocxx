@@ -644,6 +644,14 @@ impl<'a> FnAnalyzer<'a> {
                         ..
                     }
                 );
+                // Whether the peer class can offer a `foo_super` helper which
+                // calls the superclass's own implementation. A pure virtual
+                // method has no such implementation; a `private` one has one
+                // the peer isn't allowed to call, even though C++ does let it
+                // override the method. `protected` is fine - access from a
+                // derived class is precisely what it permits.
+                let has_super_helper =
+                    !is_pure_virtual && !matches!(fun.cpp_vis, CppVisibility::Private);
 
                 // The peer class's method keeps its plain `foo_super` name in
                 // Rust - that's what subclass authors write - but in C++ it
@@ -662,7 +670,7 @@ impl<'a> FnAnalyzer<'a> {
                 let trait_api_name = SubclassName::get_trait_api_name(sup, &analysis.rust_name);
 
                 let mut subclass_fn_deps = vec![trait_api_name.clone()];
-                if !is_pure_virtual {
+                if has_super_helper {
                     // Create a C++ API representing the superclass implementation (allowing
                     // calls from Rust->C++)
                     let maybe_wrap = create_subclass_fn_wrapper(&sub, &super_fn_cpp_name, &fun);
@@ -694,6 +702,7 @@ impl<'a> FnAnalyzer<'a> {
                     subclass_fn_deps,
                     self.unsafe_policy,
                     fun.ref_qualifier,
+                    has_super_helper,
                 ));
 
                 // Create the trait item for the <superclass>_methods and <superclass>_supers
@@ -711,7 +720,7 @@ impl<'a> FnAnalyzer<'a> {
                         &analysis,
                         receiver_mutability,
                         sup.clone(),
-                        is_pure_virtual,
+                        has_super_helper,
                         self.unsafe_policy,
                     ));
                 }

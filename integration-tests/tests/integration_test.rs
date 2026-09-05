@@ -16806,6 +16806,196 @@ fn test_subclass_method_named_like_super_helper_reverse_order() {
     "});
 }
 
+/// A `private` virtual method can be overridden by a derived class, but not
+/// called by one, so the peer class must not get a `_super` helper for it.
+/// The Rust subclass overrides it, and C++ dispatches to that override from
+/// the public method which uses it.
+#[test]
+fn test_subclass_of_class_with_private_virtual_method() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual uint32_t call_hidden() const { return hidden(); }
+    private:
+        virtual uint32_t hidden() const { return 1; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().call_hidden(), 7);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                // There is no `hidden_super` to fall back on, so the trait
+                // requires this.
+                fn hidden(&self) -> u32 {
+                    7
+                }
+            }
+        }),
+    );
+}
+
+/// A `protected` virtual method, by contrast, *is* callable from a derived
+/// class, so the peer's `_super` helper for it is legal C++ and a Rust
+/// subclass can both override it and call the superclass implementation.
+#[test]
+fn test_subclass_of_class_with_protected_virtual_method() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual uint32_t call_prot() const { return prot(); }
+    protected:
+        virtual uint32_t prot() const { return 2; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().call_prot(), 12);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn prot(&self) -> u32 {
+                    self.peer().prot_super() + 10
+                }
+            }
+        }),
+    );
+}
+
+/// The non-virtual interface idiom: every virtual method is private, so the
+/// superclass contributes nothing at all to a `_supers` trait, and there
+/// shouldn't be one.
+#[test]
+fn test_subclass_of_class_with_only_private_virtual_methods() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        uint32_t interface() const { return step_one() + step_two(); }
+    private:
+        virtual uint32_t step_one() const { return 1; }
+        virtual uint32_t step_two() const { return 2; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().peer().As_Observer().interface(), 30);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+            generate!("Observer")
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn step_one(&self) -> u32 {
+                    10
+                }
+                fn step_two(&self) -> u32 {
+                    20
+                }
+            }
+        }),
+    );
+}
+
+/// The three visibilities on one class: the public and protected virtuals
+/// keep their `_super` helpers, the private one doesn't, and the peer still
+/// compiles.
+#[test]
+fn test_subclass_of_class_with_mixed_visibility_virtual_methods() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual uint32_t call_all() const { return pub_v() + prot_v() + priv_v(); }
+        virtual uint32_t pub_v() const { return 1; }
+    protected:
+        virtual uint32_t prot_v() const { return 2; }
+    private:
+        virtual uint32_t priv_v() const { return 4; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            // 11 + 22 + 40
+            assert_eq!(obs.borrow().call_all(), 73);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn pub_v(&self) -> u32 {
+                    self.peer().pub_v_super() + 10
+                }
+                fn prot_v(&self) -> u32 {
+                    self.peer().prot_v_super() + 20
+                }
+                fn priv_v(&self) -> u32 {
+                    40
+                }
+            }
+        }),
+    );
+}
+
 #[test]
 fn test_two_superclasses_with_same_method_name() {
     let hdr = indoc! {"

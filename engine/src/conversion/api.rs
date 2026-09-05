@@ -99,7 +99,13 @@ pub(crate) struct SuperclassMethod {
     pub(crate) ret_type: ReturnType,
     pub(crate) receiver_mutability: ReceiverMutability,
     pub(crate) requires_unsafe: UnsafetyNeeded,
-    pub(crate) is_pure_virtual: bool,
+    /// Whether the peer class offers a `foo_super` helper by which a Rust
+    /// subclass can call the superclass's own implementation of this method.
+    /// It doesn't if the method is pure virtual (there is no implementation)
+    /// or `private` (C++ lets a derived class override such a method but not
+    /// call it), and then the `_methods` trait item has no default body and
+    /// every Rust subclass has to implement it.
+    pub(crate) has_super_helper: bool,
     /// How to call the superclass's own binding for this method, so that the
     /// superclass can implement its own `_methods` trait alongside its
     /// subclasses. Whether such a binding exists at all is not settled until
@@ -530,7 +536,8 @@ pub(crate) struct RustSubclassFnDetails {
     pub(crate) receiver_mutability: ReceiverMutability,
     pub(crate) dependencies: Vec<QualifiedName>,
     pub(crate) requires_unsafe: UnsafetyNeeded,
-    pub(crate) is_pure_virtual: bool,
+    /// See [`SuperclassMethod::has_super_helper`].
+    pub(crate) has_super_helper: bool,
 }
 
 #[derive(Clone, Debug)]
