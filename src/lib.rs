@@ -531,7 +531,10 @@ unsafe impl cxx::ExternType for c_void {
     type Kind = cxx::kind::Trivial;
 }
 
-/// A C++ `char16_t`
+/// A C++ `char16_t`. Like the other C type wrappers here, this is a
+/// transparent newtype over the Rust integer of the same width, so a value
+/// crosses between the two with `.0` or [`From`].
+#[derive(Debug, Eq, Copy, Clone, PartialEq, Hash)]
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
 pub struct c_char16_t(pub u16);
@@ -543,6 +546,18 @@ pub struct c_char16_t(pub u16);
 unsafe impl cxx::ExternType for c_char16_t {
     type Id = cxx::type_id!(c_char16_t);
     type Kind = cxx::kind::Trivial;
+}
+
+impl From<u16> for c_char16_t {
+    fn from(val: u16) -> Self {
+        Self(val)
+    }
+}
+
+impl From<c_char16_t> for u16 {
+    fn from(val: c_char16_t) -> Self {
+        val.0
+    }
 }
 
 /// autocxx couldn't generate these bindings.

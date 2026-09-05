@@ -296,17 +296,23 @@ impl TypeDatabase {
         self.get(ty).map(|td| td.to_type_path())
     }
 
-    /// Whether this is one of the ctypes (mostly variable length integers)
-    /// which we need to wrap.
-    pub(crate) fn is_ctype(&self, ty: &QualifiedName) -> bool {
+    /// The canonical name of this type if it is one of the ctypes (mostly
+    /// variable length integers, plus `char16_t`) which we need to wrap, and
+    /// `None` if it isn't one of them.
+    ///
+    /// The answer is the canonical name rather than the name asked about
+    /// because these types reach us under aliases - `char16_t` arrives as
+    /// bindgen's `bindgen_cchar16_t` - and the wrapper has to be declared
+    /// under the name the generated code then uses.
+    pub(crate) fn as_ctype(&self, ty: &QualifiedName) -> Option<QualifiedName> {
         self.get(ty)
-            .map(|td| {
+            .filter(|td| {
                 matches!(
                     td.behavior,
                     Behavior::CVariableLengthByValue | Behavior::CVoid | Behavior::CChar16
                 )
             })
-            .unwrap_or(false)
+            .map(|td| td.to_typename())
     }
 
     /// Whether this is a generic type acceptable to cxx. Otherwise,
@@ -348,6 +354,16 @@ impl TypeDatabase {
         self.get(ty)
             .map(|x| matches!(x.behavior, Behavior::CxxString))
             .unwrap_or(false)
+    }
+
+    /// Records one more name by which a type already in the database may be
+    /// known, for the cases `TypeDetails::extra_non_canonical_name` can't
+    /// express.
+    fn insert_alias(&mut self, alias: &str, canonical_rs_name: &str) {
+        self.canonical_names.insert(
+            QualifiedName::new_from_cpp_name(alias),
+            QualifiedName::new_from_cpp_name(canonical_rs_name),
+        );
     }
 
     fn insert(&mut self, td: TypeDetails) {
@@ -565,5 +581,11 @@ fn create_type_database() -> TypeDatabase {
         false,
         false,
     ));
+    // `char16_t` never reaches us under any of the names above. bindgen emits
+    // it as a bare `bindgen_cchar16_t`, which `engine/src/lib.rs` binds to
+    // `autocxx::c_char16_t` with a `use` injected into every module. Unless
+    // that name is known here too, every function which mentions a `char16_t`
+    // is discarded for depending on a type we've never heard of.
+    db.insert_alias("bindgen_cchar16_t", "autocxx::c_char16_t");
     db
 }

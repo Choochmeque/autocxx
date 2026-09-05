@@ -647,12 +647,40 @@ pub fn run_test_expect_fail_with_error(
         None,
     )
     .expect_err("Unexpected success");
+    assert_error_mentions(&err, expected);
+}
+
+/// As [`run_test_expect_fail_with_error`], but takes the directives verbatim,
+/// for a test which needs one the `generate` lists can't express.
+pub fn run_test_expect_fail_with_error_ex(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    directives: TokenStream,
+    expected: &str,
+) {
+    let err = do_run_test(
+        cxx_code,
+        header_code,
+        rust_code,
+        directives,
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("Unexpected success");
+    assert_error_mentions(&err, expected);
+}
+
+fn assert_error_mentions(err: &TestError, expected: &str) {
     // Both renderings, because a test may want to pin either: the `Debug` form
     // names the error variants, which is what a test about *classification*
     // cares about, while the `Display` form is the prose a user actually reads,
     // which is what a test about the *wording* has to look at. `Debug` alone
     // shows only variant names, so the wording would be untestable.
-    let reported = match &err {
+    let reported = match err {
         TestError::AutoCxx(err) => format!("{err:?}\n{err}"),
         err => format!("{err:?}"),
     };

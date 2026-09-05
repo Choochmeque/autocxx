@@ -24,8 +24,13 @@ pub(crate) fn append_ctype_information(apis: &mut ApiVec<FnPhase>) {
     let ctypes: HashMap<Ident, QualifiedName> = apis
         .iter()
         .flat_map(|api| api.deps())
-        .filter(|ty| known_types().is_ctype(ty))
-        .map(|ty| (ty.get_final_ident(), ty.clone()))
+        // A dependency may name one of these types by an alias - `char16_t`
+        // reaches us as bindgen's `bindgen_cchar16_t` - whereas the generated
+        // code always calls it by the canonical name, which is what this
+        // returns. Emit the typedef under that name, or nothing declares the
+        // type the bridge goes on to use.
+        .filter_map(|ty| known_types().as_ctype(ty))
+        .map(|ty| (ty.get_final_ident(), ty))
         .collect();
     for (id, typename) in ctypes {
         apis.push(Api::CType {
