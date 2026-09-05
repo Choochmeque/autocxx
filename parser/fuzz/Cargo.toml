@@ -1,0 +1,40 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+# https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+# <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+# option. This file may not be copied, modified, or distributed
+# except according to those terms.
+#
+# This crate is intentionally detached from the main workspace (see the
+# empty `[workspace]` table below) - that's the standard `cargo fuzz init`
+# layout, so this directory isn't touched by an ordinary `cargo build
+# --workspace`/`cargo test --workspace`/CI run, and only comes into play for
+# someone who explicitly runs `cargo fuzz` from within `parser/fuzz`. See
+# `parser/fuzz/README.md`.
+
+[package]
+name = "autocxx-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+autocxx-parser = { path = ".." }
+
+[dependencies.syn]
+version = "2"
+features = ["full", "extra-traits"]
+
+[[bin]]
+name = "parse_include_cpp"
+path = "fuzz_targets/parse_include_cpp.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

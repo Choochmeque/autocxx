@@ -16,6 +16,10 @@ repository = "https://github.com/google/autocxx"
 edition = "2021"
 keywords = ["ffi"]
 categories = ["development-tools::ffi", "api-bindings"]
+# `fuzz` is its own detached workspace (see parser/fuzz/Cargo.toml) purely
+# for `cargo fuzz`; it has nothing a downstream consumer of this crate
+# needs.
+exclude = ["fuzz"]
 
 [dependencies]
 log = "0.4"
