@@ -46,6 +46,16 @@ std::unique_ptr<WebContents> WebContents::Create(const CreateParams &params) {
   return wc;
 }
 
+// In this daft demo there is only ever one WebContents, whatever id is asked
+// for. Real Chromium looks the node up. This was long declared but never
+// defined: the generated wrapper referencing it is unused by the demo, and
+// the existing ELF and Mach-O link configurations discarded that unused
+// wrapper section, while the Windows MSVC and GNU CI links exposed the
+// unresolved reference.
+WebContents *WebContents::FromFrameTreeNodeId(int) {
+  return the_only_web_contents;
+}
+
 WebContentsImpl::WebContentsImpl(const CreateParams &params)
     : title_(params.main_frame_name_) {
   int id = latest_rfh_id++;
