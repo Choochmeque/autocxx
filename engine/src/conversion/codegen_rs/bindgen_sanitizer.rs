@@ -128,14 +128,102 @@
 //! `__BindgenOpaqueArray` helpers, regardless of `derive_default`, and
 //! those construct a value properly rather than zeroing bytes. They
 //! are none of our business and are left alone.
+//!
+//! # Bitfield accessors which transmute
+//!
+//! A bitfield lives in an allocation unit bindgen represents as a byte
+//! array, and its accessors move the bits between that array and the
+//! field's own Rust type with `mem::transmute`: the getter reads a
+//! `u64` out of the unit, casts it to the unsigned integer of the
+//! field's width, and transmutes that to the field's type; the setter
+//! and the `new_bitfield_N` constructor go the other way.
+//!
+//! Where such a transmute is between two scalars that `as` could
+//! convert just as well - `u32` to `i32`, `bool` to `u8` - rustc's
+//! `unnecessary_transmutes` lint says so. It warns by default, so
+//! anyone building the generated code with `-D warnings` cannot
+//! compile a struct containing a bitfield at all; that is how it
+//! reached us, through `llvm::ErrorOr` in `examples/llvm`.
+//!
+//! So this pass writes those conversions the way the lint asks for:
+//!
+//! | field type | getter | setter |
+//! |---|---|---|
+//! | the unit's own integer | the unit's value unchanged | the value unchanged |
+//! | another integer of that width | `as` the field's type | `as` the unit's integer |
+//! | `bool` | `!= 0` | `as` the unit's integer |
+//!
+//! Each is exactly what the transmute did. Two same-width integers
+//! differing only in signedness have the same object representation,
+//! so an `as` cast between them reinterprets the bits and changes
+//! nothing else - and the width is bindgen's own, since it picks the
+//! unit's integer from the layout of the field's type. A `bool` is
+//! `0` or `1` and nothing else, so `as` produces the byte the
+//! transmute would have; back the other way `!= 0` agrees with the
+//! transmute on those two values and, unlike it, is not undefined
+//! behaviour on any other.
+//!
+//! The first row covers more than it looks: `unsigned` reaches Rust as
+//! `::std::os::raw::c_uint` while the allocation unit deals in `u32`,
+//! and those are one type under two names. Casting between them would
+//! be `clippy::unnecessary_cast` - this same problem in another lint's
+//! clothing - so the pass writes no cast whenever both sides are
+//! fixed-width unsigned types, and lets rustc confirm they agree.
+//!
+//! Which row a field lands in is a question about the type it finally
+//! names rather than the name it was declared with, since that is what
+//! rustc lints, so the pass follows the mod's own `typedef`s: a field
+//! declared `Handle h : 4` is seen for the `int` it is.
+//!
+//! Anything else keeps its transmute. In particular a bitfield of C++
+//! `enum` type transmutes an integer into a Rust enum, which no cast
+//! can express - and rustc knows that, which is why the lint leaves it
+//! alone too.
+//!
+//! Dropping the transmute from a getter or setter empties the `unsafe`
+//! block around it, and an `unsafe` block with nothing unsafe left in
+//! it is `unused_unsafe`: the same problem again, wearing a different
+//! lint. So the pass has to decide about that block too, and only does
+//! so for accessors it recognizes in full - it has to be able to see
+//! what is left:
+//!
+//! * a bitfield of a struct reads its allocation unit as
+//!   `self._bitfield_1.get(..)`, an inherent method of bindgen's
+//!   `__BindgenBitfieldUnit` and safe, so the block goes;
+//! * a bitfield of a `union` reaches the unit through
+//!   `self._bitfield_1.as_ref().get(..)`, and
+//!   `__BindgenUnionField::as_ref` is an `unsafe fn`, so the block
+//!   stays;
+//! * the `_raw` accessors, which are `unsafe fn`s that dereference the
+//!   pointer they are handed, keep theirs whatever else they do.
+//!
+//! An accessor of some other shape is emitted exactly as bindgen wrote
+//! it, transmute and all. The `new_bitfield_N` constructor needs none of
+//! this reasoning - each field there is converted inside an `unsafe`
+//! block holding that transmute and nothing else, so the block goes with
+//! the transmute it wrapped - but it is matched just as narrowly, so
+//! that the pass only ever reaches the statements documented below.
+//!
+//! What makes it safe to do all this by matching on syntax, without
+//! knowing any of the types involved, is that rustc checks every
+//! assumption afterwards. A cast between types of different widths is
+//! not a silent truncation here: it is written where bindgen wrote its
+//! own type annotation or return type, so a disagreement about the
+//! width is a type error. A cast we write for two names of one type is
+//! merely redundant. And an `unsafe` block removed from a body that
+//! still needed one is E0133, a hard error, not a quiet loss of
+//! checking. If a future bindgen writes some different shape, the
+//! worst it can do is stop matching, which brings the lint back and
+//! fails the test that brought us here.
 
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::{
-    parse_quote, Attribute, GenericArgument, GenericParam, Ident, ImplItem, Item, ItemMod, Path,
-    PathArguments, ReturnType, Type, TypeParamBound, UseTree,
+    parse_quote, Attribute, Block, Expr, FnArg, GenericArgument, GenericParam, Ident, ImplItem,
+    ImplItemFn, Item, ItemMod, Local, Pat, Path, PathArguments, ReturnType, Signature, Stmt, Type,
+    TypeParamBound, UseTree,
 };
 
 use crate::types::{make_ident, Namespace, QualifiedName};
@@ -267,6 +355,531 @@ fn mentions_ident(tokens: TokenStream, wanted: &str) -> bool {
         TokenTree::Group(g) => mentions_ident(g.stream(), wanted),
         _ => false,
     })
+}
+
+/// Replace the `mem::transmute` in each of bindgen's bitfield accessors with
+/// the cast which does the same thing, so that the generated code does not
+/// trip `unnecessary_transmutes`.
+///
+/// Only the exact shapes bindgen writes are matched, and only for the scalar
+/// types a cast can convert; anything else is left as bindgen wrote it. See
+/// the module documentation.
+pub(super) fn simplify_bitfield_transmutes(bindgen_mod: &mut ItemMod) {
+    let mut aliases = TypeAliases::default();
+    aliases.collect_from(bindgen_mod, &[]);
+    simplify_bitfield_transmutes_in_mod(bindgen_mod, &aliases);
+}
+
+fn simplify_bitfield_transmutes_in_mod(item_mod: &mut ItemMod, aliases: &TypeAliases) {
+    if let Some((_, items)) = &mut item_mod.content {
+        for item in items {
+            match item {
+                // Inherent impls only: the bitfield accessors are inherent
+                // methods, and no trait impl bindgen writes has one.
+                Item::Impl(imp) if imp.trait_.is_none() => {
+                    for impl_item in &mut imp.items {
+                        if let ImplItem::Fn(f) = impl_item {
+                            simplify_bitfield_accessor(f, aliases);
+                        }
+                    }
+                }
+                Item::Mod(m) => simplify_bitfield_transmutes_in_mod(m, aliases),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Rewrite whichever of bindgen's three bitfield shapes `f` is, if any.
+fn simplify_bitfield_accessor(f: &mut ImplItemFn, aliases: &TypeAliases) {
+    if rewrite_bitfield_getter(f, aliases) || rewrite_bitfield_setter(f, aliases) {
+        return;
+    }
+    rewrite_bitfield_unit_constructor(f, aliases);
+}
+
+/// The type aliases the bindgen mod declares, so that a bitfield of a
+/// `typedef`'d type - `typedef int Handle; struct S { Handle h : 4; };` - can
+/// be seen for the integer it is. Without this the pass would decline to touch
+/// it and the lint would still fire on the alias's underlying type, which is
+/// what rustc sees.
+///
+/// Keyed by the path a reference to the alias is written with. bindgen writes
+/// those from the mod root - `root::Handle`, `root::ns::Handle` - which is
+/// exactly the path from the bindgen mod down to where the alias is declared.
+#[derive(Default)]
+struct TypeAliases(HashMap<Vec<String>, Type>);
+
+impl TypeAliases {
+    fn collect_from(&mut self, item_mod: &ItemMod, prefix: &[String]) {
+        if let Some((_, items)) = &item_mod.content {
+            for item in items {
+                match item {
+                    // A generic alias needs its arguments substituting to mean
+                    // anything, which is more than this is for.
+                    Item::Type(t) if t.generics.params.is_empty() => {
+                        let mut path = prefix.to_vec();
+                        path.push(t.ident.to_string());
+                        self.0.insert(path, (*t.ty).clone());
+                    }
+                    Item::Mod(m) => {
+                        let mut path = prefix.to_vec();
+                        path.push(m.ident.to_string());
+                        self.collect_from(m, &path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// The type `ty` finally names, following it through however many aliases
+    /// it takes. A type which is not an alias is returned as it stands.
+    ///
+    /// The chain is followed to its end rather than to any fixed depth: a
+    /// header is free to define as many aliases as it likes, and stopping
+    /// early would silently leave the transmute in place and the lint firing.
+    /// The only thing that stops the walk short is an alias which leads back
+    /// to one already followed - a cycle, which no mod containing it could
+    /// compile, so there is nothing there to get right.
+    fn resolve<'a>(&'a self, ty: &'a Type) -> &'a Type {
+        let mut current = ty;
+        let mut followed: HashSet<Vec<String>> = HashSet::new();
+        loop {
+            let Some(key) = alias_key(current) else {
+                return current;
+            };
+            let Some(next) = self.0.get(&key) else {
+                return current;
+            };
+            if !followed.insert(key) {
+                return current;
+            }
+            current = next;
+        }
+    }
+}
+
+/// The path by which an alias declared in the bindgen mod would be named, if
+/// `ty` is written as such a path at all. A leading `::` means an absolute
+/// path to somewhere outside the mod - `::std::os::raw::c_int` - and never
+/// names one of these.
+fn alias_key(ty: &Type) -> Option<Vec<String>> {
+    let Type::Path(tp) = ty else {
+        return None;
+    };
+    if tp.qself.is_some() || tp.path.leading_colon.is_some() {
+        return None;
+    }
+    tp.path
+        .segments
+        .iter()
+        .map(|seg| seg.arguments.is_none().then(|| seg.ident.to_string()))
+        .collect()
+}
+
+/// ```text
+/// fn field(&self) -> Ty {
+///     unsafe { ::std::mem::transmute(self._bitfield_1.get(0usize, 3u8) as u8) }
+/// }
+/// ```
+fn rewrite_bitfield_getter(f: &mut ImplItemFn, aliases: &TypeAliases) -> bool {
+    let ReturnType::Type(_, dest) = &f.sig.output else {
+        return false;
+    };
+    let Some(inner) = sole_unsafe_block(&f.block) else {
+        return false;
+    };
+    let [Stmt::Expr(expr, None)] = &inner.stmts[..] else {
+        return false;
+    };
+    let Some(arg) = transmute_argument(expr) else {
+        return false;
+    };
+    // The `as` to the allocation unit's integer type, which is what tells us
+    // what the transmute is converting from.
+    let Expr::Cast(cast) = arg else {
+        return false;
+    };
+    let Some(needs_unsafe) = remaining_unsafety(&f.sig, &cast.expr, "get") else {
+        return false;
+    };
+    let Some(converted) = safe_conversion(arg.clone(), &cast.ty, dest, aliases) else {
+        return false;
+    };
+    f.block = accessor_body(needs_unsafe, vec![Stmt::Expr(converted, None)]);
+    true
+}
+
+/// Whether the accessor's `unsafe` block must stay once the transmute has gone
+/// from it, or `None` if this is not an accessor we recognize well enough to
+/// say.
+///
+/// An `unsafe fn` here is one of bindgen's `_raw` accessors, which dereferences
+/// the raw pointer it is handed and calls the allocation unit's own `unsafe`
+/// `raw_get`/`raw_set`. There is no shape to check: it needs the block whatever
+/// else it does.
+fn remaining_unsafety(sig: &Signature, unit_access: &Expr, method: &str) -> Option<StillUnsafe> {
+    if sig.unsafety.is_some() {
+        return Some(StillUnsafe::Yes);
+    }
+    allocation_unit_access(unit_access, method)
+}
+
+/// ```text
+/// fn set_field(&mut self, val: Ty) {
+///     unsafe {
+///         let val: u8 = ::std::mem::transmute(val);
+///         self._bitfield_1.set(0usize, 3u8, val as u64)
+///     }
+/// }
+/// ```
+fn rewrite_bitfield_setter(f: &mut ImplItemFn, aliases: &TypeAliases) -> bool {
+    let Some(inner) = sole_unsafe_block(&f.block) else {
+        return false;
+    };
+    let [Stmt::Local(local), tail @ Stmt::Expr(tail_expr, None)] = &inner.stmts[..] else {
+        return false;
+    };
+    let Some(needs_unsafe) = remaining_unsafety(&f.sig, tail_expr, "set") else {
+        return false;
+    };
+    let Some(rewritten) = rewrite_transmuted_parameter(local, &f.sig, aliases) else {
+        return false;
+    };
+    let stmts = vec![Stmt::Local(rewritten), tail.clone()];
+    f.block = accessor_body(needs_unsafe, stmts);
+    true
+}
+
+/// ```text
+/// fn new_bitfield_1(field: Ty) -> __BindgenBitfieldUnit<[u8; 1usize]> {
+///     let mut __bindgen_bitfield_unit: ... = Default::default();
+///     __bindgen_bitfield_unit.set(0usize, 3u8, {
+///         let field: u8 = unsafe { ::std::mem::transmute(field) };
+///         field as u64
+///     });
+///     __bindgen_bitfield_unit
+/// }
+/// ```
+///
+/// Each field gets its own `unsafe` block wrapping its own transmute and
+/// nothing else, so unlike the accessors above there is no shared block to
+/// reason about: rewriting one field's conversion takes that field's `unsafe`
+/// with it and leaves the others alone. That is what lets an `enum` field
+/// keep its transmute while the integers beside it lose theirs.
+///
+/// The statement is matched as tightly as the accessors are - a three-argument
+/// `set` on the local bindgen declares by name, with a block for its value -
+/// so that the pass reaches only the shape documented above.
+fn rewrite_bitfield_unit_constructor(f: &mut ImplItemFn, aliases: &TypeAliases) {
+    // Destructured so that the signature can be read while the body is being
+    // rewritten.
+    let ImplItemFn { sig, block, .. } = f;
+    for stmt in &mut block.stmts {
+        let Stmt::Expr(Expr::MethodCall(call), Some(_)) = stmt else {
+            continue;
+        };
+        if call.method != "set"
+            || call.args.len() != 3
+            || !is_path_ident(&call.receiver, "__bindgen_bitfield_unit")
+        {
+            continue;
+        }
+        let Some(Expr::Block(field)) = call.args.iter_mut().nth(2) else {
+            continue;
+        };
+        for stmt in &mut field.block.stmts {
+            let Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if let Some(rewritten) = rewrite_transmuted_parameter(local, sig, aliases) {
+                *local = rewritten;
+            }
+        }
+    }
+}
+
+/// Given `let val: u8 = ::std::mem::transmute(val);` - optionally with the
+/// transmute in an `unsafe` block of its own, as the bitfield unit
+/// constructor writes it - the same `let` with the transmute replaced by a
+/// cast, and the `unsafe` block gone with it.
+///
+/// `None` if this is some other `let`, or if the parameter's type is not one
+/// a cast can convert.
+fn rewrite_transmuted_parameter(
+    local: &Local,
+    sig: &Signature,
+    aliases: &TypeAliases,
+) -> Option<Local> {
+    let Pat::Type(annotated) = &local.pat else {
+        return None;
+    };
+    let dest = &*annotated.ty;
+    let init = local.init.as_ref()?;
+    if init.diverge.is_some() {
+        return None;
+    }
+    let transmute = match &*init.expr {
+        Expr::Unsafe(block) => match &block.block.stmts[..] {
+            [Stmt::Expr(expr, None)] => expr,
+            _ => return None,
+        },
+        expr => expr,
+    };
+    let arg = transmute_argument(transmute)?;
+    // The value being transmuted is a parameter, whose declared type is what
+    // the transmute is converting from.
+    let source = parameter_type(sig, arg)?;
+    let converted = safe_conversion(arg.clone(), source, dest, aliases)?;
+    let mut rewritten = local.clone();
+    if let Some(init) = &mut rewritten.init {
+        *init.expr = converted;
+    }
+    Some(rewritten)
+}
+
+/// The expression which produces exactly what `transmute::<Source, Dest>(expr)`
+/// produces, for the scalar pairs a bitfield accessor converts between.
+///
+/// `None` for any other pair, which leaves bindgen's transmute in place: a
+/// bitfield of `enum` type is the case that matters, and there is no cast from
+/// an integer to a Rust enum.
+///
+/// `expr` is always a cast or a bare identifier here, both of which bind more
+/// tightly than the operators below, so the result needs no parentheses. The
+/// cast is written to `dest` as bindgen spelled it, alias and all, which reads
+/// better and means the same thing.
+fn safe_conversion(expr: Expr, source: &Type, dest: &Type, aliases: &TypeAliases) -> Option<Expr> {
+    // What the types are is a question about what they finally name, not about
+    // how the field was declared: rustc lints the underlying type, so a
+    // `typedef` of `int` has to be treated as the `int` it is.
+    let source = aliases.resolve(source);
+    let resolved_dest = aliases.resolve(dest);
+    if is_bool_type(resolved_dest) {
+        // The transmute reads the allocation unit's byte as a `bool`, which
+        // has no meaning for any value but 0 and 1. `!= 0` agrees with it on
+        // those and is defined on the rest.
+        return integer_kind(source)
+            .is_some()
+            .then(|| parse_quote! { #expr != 0 });
+    }
+    let dest_kind = integer_kind(resolved_dest)?;
+    if is_bool_type(source) {
+        // `as` on a `bool` produces 1 or 0, which is its object
+        // representation, which is what the transmute produced.
+        return Some(parse_quote! { #expr as #dest });
+    }
+    let source_kind = integer_kind(source)?;
+    // Two integers of the same width have the same object representation
+    // whatever their signedness, so an `as` cast between them is exactly the
+    // transmute. bindgen guarantees the widths match: it picks the allocation
+    // unit's integer type from the layout of the field's own type.
+    //
+    // Except that half the time no conversion is called for at all, because
+    // the two names are the same type - `unsigned` reaches Rust as
+    // `::std::os::raw::c_uint` and the allocation unit deals in `u32`. Writing
+    // a cast there would be `clippy::unnecessary_cast`, which is the problem
+    // we are fixing wearing yet another hat. Since the unit's integer is
+    // always one of `u8` to `u128`, any other fixed-width unsigned type of the
+    // same width *is* that type; leaving the cast out asks rustc to confirm
+    // it, and rustc says so loudly if bindgen ever disagrees with itself about
+    // the width.
+    let identical = same_type(source, resolved_dest)
+        || (source_kind == IntegerKind::FixedUnsigned && dest_kind == IntegerKind::FixedUnsigned);
+    if identical {
+        return Some(expr);
+    }
+    Some(parse_quote! { #expr as #dest })
+}
+
+/// Whether two types are spelled identically.
+fn same_type(a: &Type, b: &Type) -> bool {
+    a.to_token_stream().to_string() == b.to_token_stream().to_string()
+}
+
+fn is_bool_type(ty: &Type) -> bool {
+    match ty {
+        Type::Path(tp) => tp.qself.is_none() && tp.path.is_ident("bool"),
+        _ => false,
+    }
+}
+
+/// What we know about an integer type without knowing the target platform.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum IntegerKind {
+    /// One of `u8` to `u128`, or an alias for one of them.
+    FixedUnsigned,
+    /// One of `i8` to `i128`, or an alias for one of them.
+    FixedSigned,
+    /// An integer which is neither: `usize` and `isize`, which are their own
+    /// types however wide they turn out to be, and `c_char`, whose signedness
+    /// is the platform's business (`u8` on ARM Linux, `i8` on x86-64). Both
+    /// need writing out as a cast rather than assuming which fixed-width type
+    /// they coincide with.
+    ///
+    /// For `c_char` that costs a cast which is redundant on the platforms
+    /// where `char` is unsigned - `clippy::unnecessary_cast` would say so
+    /// about a `char` bitfield built for ARM Linux. Since which platforms
+    /// those are is not something this pass can see, the alternative is to
+    /// write no cast and fail to compile on the other half of them.
+    Other,
+}
+
+/// What kind of integer `ty` is: one of Rust's own primitives, or one of the
+/// aliases bindgen writes for a plain C type. `None` for anything else,
+/// including a C++ `enum` and any type we don't recognize.
+///
+/// The C aliases are matched against the whole path, absolute leading `::`
+/// and all, because that is how bindgen writes them and nothing else can
+/// produce one: `codegen::helpers::ast_ty::raw_type` emits
+/// `::std::os::raw::c_int`, or `::core::ffi::c_int` for a `use_core` build,
+/// and autocxx sets no `ctypes_prefix` which would change that. Anything
+/// bindgen derives from the C++ in front of it is a *relative* path under
+/// `root`, so a C++ `namespace raw { enum c_int ... }` arrives as
+/// `root::raw::c_int` and is none of our business. Recognizing it as an
+/// integer would have us emit `x as root::raw::c_int`, which is E0605.
+fn integer_kind(ty: &Type) -> Option<IntegerKind> {
+    let Type::Path(tp) = ty else {
+        return None;
+    };
+    if tp.qself.is_some() {
+        return None;
+    }
+    // A generic argument anywhere means this is not one of the plain names
+    // below, whatever the idents say.
+    if tp.path.segments.iter().any(|seg| !seg.arguments.is_none()) {
+        return None;
+    }
+    let idents: Vec<String> = tp
+        .path
+        .segments
+        .iter()
+        .map(|seg| seg.ident.to_string())
+        .collect();
+    let segments: Vec<&str> = idents.iter().map(String::as_str).collect();
+    let name = match (tp.path.leading_colon.is_some(), segments.as_slice()) {
+        // A Rust primitive is a bare name and nothing else.
+        (false, [name]) => *name,
+        (true, ["std", "os", "raw", name]) | (true, ["core", "ffi", name]) => *name,
+        _ => return None,
+    };
+    match name {
+        "u8" | "u16" | "u32" | "u64" | "u128" | "c_uchar" | "c_ushort" | "c_uint" | "c_ulong"
+        | "c_ulonglong" => Some(IntegerKind::FixedUnsigned),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "c_schar" | "c_short" | "c_int" | "c_long"
+        | "c_longlong" => Some(IntegerKind::FixedSigned),
+        "usize" | "isize" | "c_char" => Some(IntegerKind::Other),
+        _ => None,
+    }
+}
+
+/// The block of `{ unsafe { ... } }`, which is how bindgen writes the body of
+/// every bitfield getter and setter.
+fn sole_unsafe_block(block: &Block) -> Option<&Block> {
+    match &block.stmts[..] {
+        [Stmt::Expr(Expr::Unsafe(unsafe_block), None)] => Some(&unsafe_block.block),
+        _ => None,
+    }
+}
+
+/// The single argument of a call to `mem::transmute`, however the path to it
+/// is spelled.
+fn transmute_argument(expr: &Expr) -> Option<&Expr> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Path(path) = &*call.func else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let mut segments = path.path.segments.iter().rev();
+    if segments.next()?.ident != "transmute" || segments.next()?.ident != "mem" {
+        return None;
+    }
+    match call.args.iter().collect::<Vec<_>>()[..] {
+        [arg] => Some(arg),
+        _ => None,
+    }
+}
+
+/// The declared type of the parameter `expr` names, if it names one.
+fn parameter_type<'a>(sig: &'a Signature, expr: &Expr) -> Option<&'a Type> {
+    let Expr::Path(path) = expr else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let name = path.path.get_ident()?;
+    sig.inputs.iter().find_map(|arg| match arg {
+        FnArg::Typed(typed) => match &*typed.pat {
+            Pat::Ident(ident) if ident.ident == *name => Some(&*typed.ty),
+            _ => None,
+        },
+        FnArg::Receiver(_) => None,
+    })
+}
+
+/// Whether an accessor which has lost its transmute still needs the `unsafe`
+/// block that transmute was in.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum StillUnsafe {
+    Yes,
+    No,
+}
+
+/// How a getter or setter reaches the bitfield allocation unit stored in the
+/// struct, and whether reaching it that way needs `unsafe`. `None` for
+/// anything else, which stops the accessor being rewritten at all: knowing
+/// what is left in the body is the whole basis for deciding what to do with
+/// the `unsafe` block around it.
+///
+/// `method` is `get` for a getter and `set` for a setter; the two shapes are
+/// otherwise identical.
+fn allocation_unit_access(expr: &Expr, method: &str) -> Option<StillUnsafe> {
+    let Expr::MethodCall(call) = expr else {
+        return None;
+    };
+    if call.method != method {
+        return None;
+    }
+    match &*call.receiver {
+        // `self._bitfield_1.get(..)`, for a bitfield in a struct.
+        // `__BindgenBitfieldUnit::get` and `set` are safe.
+        Expr::Field(field) if is_self(&field.base) => Some(StillUnsafe::No),
+        // `self._bitfield_1.as_ref().get(..)`, for a bitfield in a union
+        // bindgen could not make a Rust `union`. `__BindgenUnionField::as_ref`
+        // and `as_mut` are `unsafe fn`s, so the block has to stay.
+        Expr::MethodCall(unwrap)
+            if matches!(unwrap.method.to_string().as_str(), "as_ref" | "as_mut")
+                && unwrap.args.is_empty()
+                && matches!(&*unwrap.receiver, Expr::Field(field) if is_self(&field.base)) =>
+        {
+            Some(StillUnsafe::Yes)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `expr` is the bare name `name` and nothing more.
+fn is_path_ident(expr: &Expr, name: &str) -> bool {
+    matches!(expr, Expr::Path(path)
+        if path.qself.is_none() && path.path.is_ident(name))
+}
+
+fn is_self(expr: &Expr) -> bool {
+    is_path_ident(expr, "self")
+}
+
+/// An accessor body holding `stmts`, inside an `unsafe` block or not.
+fn accessor_body(needs_unsafe: StillUnsafe, stmts: Vec<Stmt>) -> Block {
+    match needs_unsafe {
+        StillUnsafe::Yes => parse_quote! { { unsafe { #(#stmts)* } } },
+        StillUnsafe::No => parse_quote! { { #(#stmts)* } },
+    }
 }
 
 /// Collapse type-namespace items which share a name within the same
@@ -1147,5 +1760,618 @@ mod tests {
         let mut out = String::new();
         walk(item_mod, name, &mut out);
         out
+    }
+
+    /// The named method of the first `impl` block in the mod, as tokens with
+    /// the whitespace normalized away, so that a test can say what it expects
+    /// without minding how `quote` spaces it.
+    fn method_tokens(item_mod: &ItemMod, name: &str) -> String {
+        let mut found = None;
+        fn walk(item_mod: &ItemMod, name: &str, found: &mut Option<String>) {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    match item {
+                        Item::Impl(imp) => {
+                            for impl_item in &imp.items {
+                                if let ImplItem::Fn(f) = impl_item {
+                                    if f.sig.ident == name {
+                                        *found = Some(f.to_token_stream().to_string());
+                                    }
+                                }
+                            }
+                        }
+                        Item::Mod(m) => walk(m, name, found),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        walk(item_mod, name, &mut found);
+        found.unwrap_or_else(|| panic!("no method called {name}"))
+    }
+
+    fn tokens_of(item: impl ToTokens) -> String {
+        item.to_token_stream().to_string()
+    }
+
+    /// The accessors bindgen writes for a struct of bitfields, one field per
+    /// interesting field type: an unsigned C type spelled as an alias of the
+    /// allocation unit's own integer, a signed one, `bool`, and an `enum`
+    /// which no cast can produce.
+    fn mod_with_bitfield_accessors() -> ItemMod {
+        parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    impl Lots {
+                        #[inline]
+                        pub fn plain_unsigned(&self) -> ::std::os::raw::c_uint {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 4u8) as u32)
+                            }
+                        }
+                        #[inline]
+                        pub fn set_plain_unsigned(&mut self, val: ::std::os::raw::c_uint) {
+                            unsafe {
+                                let val: u32 = ::std::mem::transmute(val);
+                                self._bitfield_1.set(0usize, 4u8, val as u64)
+                            }
+                        }
+                        #[inline]
+                        pub fn plain_int(&self) -> ::std::os::raw::c_int {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(4usize, 4u8) as u32)
+                            }
+                        }
+                        #[inline]
+                        pub fn set_plain_int(&mut self, val: ::std::os::raw::c_int) {
+                            unsafe {
+                                let val: u32 = ::std::mem::transmute(val);
+                                self._bitfield_1.set(4usize, 4u8, val as u64)
+                            }
+                        }
+                        #[inline]
+                        pub fn flag(&self) -> bool {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(8usize, 1u8) as u8)
+                            }
+                        }
+                        #[inline]
+                        pub fn set_flag(&mut self, val: bool) {
+                            unsafe {
+                                let val: u8 = ::std::mem::transmute(val);
+                                self._bitfield_1.set(8usize, 1u8, val as u64)
+                            }
+                        }
+                        #[inline]
+                        pub unsafe fn flag_raw(this: *const Self) -> bool {
+                            unsafe {
+                                ::std::mem::transmute(<root::__BindgenBitfieldUnit<[u8; 2usize]>>::raw_get(
+                                    ::std::ptr::addr_of!((*this)._bitfield_1),
+                                    8usize,
+                                    1u8,
+                                ) as u8)
+                            }
+                        }
+                        #[inline]
+                        pub unsafe fn set_flag_raw(this: *mut Self, val: bool) {
+                            unsafe {
+                                let val: u8 = ::std::mem::transmute(val);
+                                <root::__BindgenBitfieldUnit<[u8; 2usize]>>::raw_set(
+                                    ::std::ptr::addr_of_mut!((*this)._bitfield_1),
+                                    8usize,
+                                    1u8,
+                                    val as u64,
+                                )
+                            }
+                        }
+                        #[inline]
+                        pub fn shade(&self) -> root::Shade {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(9usize, 2u8) as u32)
+                            }
+                        }
+                        #[inline]
+                        pub fn set_shade(&mut self, val: root::Shade) {
+                            unsafe {
+                                let val: u32 = ::std::mem::transmute(val);
+                                self._bitfield_1.set(9usize, 2u8, val as u64)
+                            }
+                        }
+                        #[inline]
+                        pub fn new_bitfield_1(
+                            plain_int: ::std::os::raw::c_int,
+                            flag: bool,
+                            shade: root::Shade,
+                        ) -> root::__BindgenBitfieldUnit<[u8; 2usize]> {
+                            let mut __bindgen_bitfield_unit: root::__BindgenBitfieldUnit<[u8; 2usize]> =
+                                Default::default();
+                            __bindgen_bitfield_unit.set(4usize, 4u8, {
+                                let plain_int: u32 = unsafe { ::std::mem::transmute(plain_int) };
+                                plain_int as u64
+                            });
+                            __bindgen_bitfield_unit.set(8usize, 1u8, {
+                                let flag: u8 = unsafe { ::std::mem::transmute(flag) };
+                                flag as u64
+                            });
+                            __bindgen_bitfield_unit.set(9usize, 2u8, {
+                                let shade: u32 = unsafe { ::std::mem::transmute(shade) };
+                                shade as u64
+                            });
+                            __bindgen_bitfield_unit
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A signed field's accessors cast, in both directions, and lose the
+    /// `unsafe` block they no longer need.
+    #[test]
+    fn casts_between_integers_of_differing_signedness() {
+        let mut m = mod_with_bitfield_accessors();
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "plain_int"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn plain_int(&self) -> ::std::os::raw::c_int {
+                    self._bitfield_1.get(4usize, 4u8) as u32 as ::std::os::raw::c_int
+                }
+            })
+        );
+        assert_eq!(
+            method_tokens(&m, "set_plain_int"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn set_plain_int(&mut self, val: ::std::os::raw::c_int) {
+                    let val: u32 = val as u32;
+                    self._bitfield_1.set(4usize, 4u8, val as u64)
+                }
+            })
+        );
+    }
+
+    /// `unsigned` and the `u32` its allocation unit deals in are one type
+    /// under two names, so neither direction needs a cast at all - writing one
+    /// would be `clippy::unnecessary_cast`.
+    #[test]
+    fn writes_no_cast_between_two_names_for_one_unsigned_type() {
+        let mut m = mod_with_bitfield_accessors();
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "plain_unsigned"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn plain_unsigned(&self) -> ::std::os::raw::c_uint {
+                    self._bitfield_1.get(0usize, 4u8) as u32
+                }
+            })
+        );
+        assert_eq!(
+            method_tokens(&m, "set_plain_unsigned"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn set_plain_unsigned(&mut self, val: ::std::os::raw::c_uint) {
+                    let val: u32 = val;
+                    self._bitfield_1.set(0usize, 4u8, val as u64)
+                }
+            })
+        );
+    }
+
+    /// A `bool` reads back as a comparison and writes as a cast.
+    #[test]
+    fn compares_against_zero_for_a_bool_field() {
+        let mut m = mod_with_bitfield_accessors();
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "flag"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn flag(&self) -> bool {
+                    self._bitfield_1.get(8usize, 1u8) as u8 != 0
+                }
+            })
+        );
+        assert_eq!(
+            method_tokens(&m, "set_flag"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn set_flag(&mut self, val: bool) {
+                    let val: u8 = val as u8;
+                    self._bitfield_1.set(8usize, 1u8, val as u64)
+                }
+            })
+        );
+    }
+
+    /// The `_raw` accessors dereference a raw pointer, so their `unsafe` block
+    /// stays even once the transmute inside it is gone.
+    #[test]
+    fn keeps_the_unsafe_block_of_a_raw_accessor() {
+        let mut m = mod_with_bitfield_accessors();
+        simplify_bitfield_transmutes(&mut m);
+        for name in ["flag_raw", "set_flag_raw"] {
+            let rendered = method_tokens(&m, name);
+            assert!(
+                !rendered.contains("transmute"),
+                "{name} kept its transmute: {rendered}"
+            );
+            assert!(
+                rendered.contains("unsafe {"),
+                "{name} lost the unsafe block it still needs: {rendered}"
+            );
+        }
+    }
+
+    /// Each field of the allocation unit constructor is converted on its own,
+    /// so the `enum` among them keeps its transmute while its neighbours lose
+    /// theirs.
+    #[test]
+    fn converts_the_bitfield_unit_constructor_field_by_field() {
+        let mut m = mod_with_bitfield_accessors();
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "new_bitfield_1"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn new_bitfield_1(
+                    plain_int: ::std::os::raw::c_int,
+                    flag: bool,
+                    shade: root::Shade,
+                ) -> root::__BindgenBitfieldUnit<[u8; 2usize]> {
+                    let mut __bindgen_bitfield_unit: root::__BindgenBitfieldUnit<[u8; 2usize]> =
+                        Default::default();
+                    __bindgen_bitfield_unit.set(4usize, 4u8, {
+                        let plain_int: u32 = plain_int as u32;
+                        plain_int as u64
+                    });
+                    __bindgen_bitfield_unit.set(8usize, 1u8, {
+                        let flag: u8 = flag as u8;
+                        flag as u64
+                    });
+                    __bindgen_bitfield_unit.set(9usize, 2u8, {
+                        let shade: u32 = unsafe { ::std::mem::transmute(shade) };
+                        shade as u64
+                    });
+                    __bindgen_bitfield_unit
+                }
+            })
+        );
+    }
+
+    /// No cast turns an integer into a Rust `enum`, so a bitfield of C++
+    /// `enum` type is left exactly as bindgen wrote it - `unsafe` block and
+    /// all. rustc agrees: `unnecessary_transmutes` does not fire on it either.
+    #[test]
+    fn leaves_an_enum_bitfield_alone() {
+        let before = mod_with_bitfield_accessors();
+        let mut after = before.clone();
+        simplify_bitfield_transmutes(&mut after);
+        for name in ["shade", "set_shade"] {
+            assert_eq!(
+                method_tokens(&after, name),
+                method_tokens(&before, name),
+                "{name} was rewritten"
+            );
+        }
+    }
+
+    /// A bitfield of a `union` reaches its allocation unit through
+    /// `__BindgenUnionField::as_ref`, which is an `unsafe fn`: the transmute
+    /// goes but the block around it stays, or the accessor stops compiling.
+    #[test]
+    fn keeps_the_unsafe_block_of_a_union_field_accessor() {
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    impl Unioned {
+                        #[inline]
+                        pub fn flag(&self) -> bool {
+                            unsafe {
+                                ::std::mem::transmute(
+                                    self._bitfield_1.as_ref().get(0usize, 1u8) as u8
+                                )
+                            }
+                        }
+                        #[inline]
+                        pub fn set_flag(&mut self, val: bool) {
+                            unsafe {
+                                let val: u8 = ::std::mem::transmute(val);
+                                self._bitfield_1.as_mut().set(0usize, 1u8, val as u64)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "flag"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn flag(&self) -> bool {
+                    unsafe { self._bitfield_1.as_ref().get(0usize, 1u8) as u8 != 0 }
+                }
+            })
+        );
+        assert_eq!(
+            method_tokens(&m, "set_flag"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn set_flag(&mut self, val: bool) {
+                    unsafe {
+                        let val: u8 = val as u8;
+                        self._bitfield_1.as_mut().set(0usize, 1u8, val as u64)
+                    }
+                }
+            })
+        );
+    }
+
+    /// `usize` is its own type however wide it turns out to be, so it gets a
+    /// written-out cast rather than being taken for the `u64` beside it.
+    #[test]
+    fn casts_rather_than_assuming_usize_is_a_fixed_width_type() {
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    impl Sizes {
+                        #[inline]
+                        pub fn sz(&self) -> usize {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 8u8) as u64)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "sz"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn sz(&self) -> usize {
+                    self._bitfield_1.get(0usize, 8u8) as u64 as usize
+                }
+            })
+        );
+    }
+
+    /// rustc lints the type a `typedef` finally names, not the name the field
+    /// was declared with, so the pass has to follow the mod's aliases to reach
+    /// the same answer - through as many of them as it takes, and across the
+    /// namespace the alias is declared in.
+    #[test]
+    fn follows_type_aliases_to_the_integer_underneath() {
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    pub mod detail {
+                        pub type Handle = ::std::os::raw::c_int;
+                    }
+                    pub type Alias = root::detail::Handle;
+                    pub type Flag = bool;
+                    impl Aliased {
+                        #[inline]
+                        pub fn handle(&self) -> root::Alias {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 4u8) as u32)
+                            }
+                        }
+                        #[inline]
+                        pub fn set_flag(&mut self, val: root::Flag) {
+                            unsafe {
+                                let val: u8 = ::std::mem::transmute(val);
+                                self._bitfield_1.set(4usize, 1u8, val as u64)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "handle"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn handle(&self) -> root::Alias {
+                    self._bitfield_1.get(0usize, 4u8) as u32 as root::Alias
+                }
+            })
+        );
+        assert_eq!(
+            method_tokens(&m, "set_flag"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn set_flag(&mut self, val: root::Flag) {
+                    let val: u8 = val as u8;
+                    self._bitfield_1.set(4usize, 1u8, val as u64)
+                }
+            })
+        );
+    }
+
+    /// A C++ `namespace raw` (or `ffi`) holding a type named like one of the
+    /// C aliases is the user's own, and no integer: bindgen writes it as a
+    /// relative path under `root`, where the real `c_int` is absolute. Taking
+    /// it for an integer would emit `x as root::raw::c_int`, which is E0605 -
+    /// a hard error on input that was perfectly valid.
+    #[test]
+    fn leaves_a_user_type_named_like_a_c_alias_alone() {
+        let before: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    pub mod raw {
+                        #[repr(u32)]
+                        pub enum c_int {
+                            ZERO = 0,
+                        }
+                    }
+                    pub mod ffi {
+                        #[repr(u32)]
+                        pub enum c_uint {
+                            ZERO = 0,
+                        }
+                    }
+                    impl Confusing {
+                        #[inline]
+                        pub fn theirs(&self) -> root::raw::c_int {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 2u8) as u32)
+                            }
+                        }
+                        #[inline]
+                        pub fn set_theirs(&mut self, val: root::ffi::c_uint) {
+                            unsafe {
+                                let val: u32 = ::std::mem::transmute(val);
+                                self._bitfield_1.set(0usize, 2u8, val as u64)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let mut after = before.clone();
+        simplify_bitfield_transmutes(&mut after);
+        assert_eq!(tokens_of(&after), tokens_of(&before));
+    }
+
+    /// A header may define as many aliases as it likes, and following the
+    /// chain only part of the way would leave the transmute - and the lint -
+    /// exactly where they were. This chain is deliberately longer than any
+    /// depth limit would plausibly have been.
+    #[test]
+    fn follows_an_alias_chain_of_any_length() {
+        const LINKS: usize = 40;
+        let mut aliases = TokenStream::new();
+        aliases.extend(quote_alias("Alias0", "::std::os::raw::c_int"));
+        for link in 1..LINKS {
+            aliases.extend(quote_alias(
+                &format!("Alias{link}"),
+                &format!("root::Alias{}", link - 1),
+            ));
+        }
+        let last = format!("root::Alias{}", LINKS - 1);
+        let last: Type = syn::parse_str(&last).unwrap();
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    #aliases
+                    impl Chained {
+                        #[inline]
+                        pub fn deep(&self) -> #last {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 4u8) as u32)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        simplify_bitfield_transmutes(&mut m);
+        assert_eq!(
+            method_tokens(&m, "deep"),
+            expected_method(parse_quote! {
+                #[inline]
+                pub fn deep(&self) -> #last {
+                    self._bitfield_1.get(0usize, 4u8) as u32 as #last
+                }
+            })
+        );
+    }
+
+    fn quote_alias(name: &str, target: &str) -> TokenStream {
+        let name: Ident = syn::parse_str(name).unwrap();
+        let target: Type = syn::parse_str(target).unwrap();
+        let alias: Item = parse_quote! { pub type #name = #target; };
+        alias.to_token_stream()
+    }
+
+    /// A cycle of aliases names no type at all and could never compile, so
+    /// resolution stops rather than spinning, and the accessor is left as
+    /// bindgen wrote it.
+    #[test]
+    fn stops_at_a_cycle_of_aliases() {
+        let before: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    pub type Ouroboros = root::Tail;
+                    pub type Tail = root::Ouroboros;
+                    impl Cyclic {
+                        #[inline]
+                        pub fn round(&self) -> root::Ouroboros {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 4u8) as u32)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let mut after = before.clone();
+        simplify_bitfield_transmutes(&mut after);
+        assert_eq!(tokens_of(&after), tokens_of(&before));
+    }
+
+    /// An alias to something no cast can produce is still left alone, however
+    /// many aliases it took to find that out.
+    #[test]
+    fn leaves_an_alias_to_a_non_scalar_alone() {
+        let before: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    pub type Shade = root::Colour;
+                    impl Aliased {
+                        #[inline]
+                        pub fn shade(&self) -> root::Shade {
+                            unsafe {
+                                ::std::mem::transmute(self._bitfield_1.get(0usize, 2u8) as u32)
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let mut after = before.clone();
+        simplify_bitfield_transmutes(&mut after);
+        assert_eq!(tokens_of(&after), tokens_of(&before));
+    }
+
+    /// Nothing outside the shapes above is touched, however much it looks like
+    /// a transmute we could simplify.
+    #[test]
+    fn leaves_transmutes_which_are_not_bitfield_accessors_alone() {
+        let before: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    impl<T> __BindgenUnionField<T> {
+                        #[inline]
+                        pub unsafe fn as_ref(&self) -> &T {
+                            unsafe { ::std::mem::transmute(self) }
+                        }
+                    }
+                    impl Whatever {
+                        // A getter shape, but the value comes from somewhere
+                        // we know nothing about.
+                        #[inline]
+                        pub fn thing(&self) -> u8 {
+                            unsafe { ::std::mem::transmute(elsewhere() as u8) }
+                        }
+                    }
+                }
+            }
+        };
+        let mut after = before.clone();
+        simplify_bitfield_transmutes(&mut after);
+        assert_eq!(tokens_of(&after), tokens_of(&before));
+    }
+
+    /// An expected method, rendered the same way `method_tokens` renders the
+    /// real one so that the two are comparable.
+    fn expected_method(f: syn::ImplItemFn) -> String {
+        f.to_token_stream().to_string()
     }
 }

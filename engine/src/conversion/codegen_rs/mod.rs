@@ -318,6 +318,7 @@ impl<'a> RsCodeGenerator<'a> {
         );
         bindgen_sanitizer::remove_unbound_type_aliases(&mut self.bindgen_mod);
         bindgen_sanitizer::remove_unwanted_defaults(&mut self.bindgen_mod);
+        bindgen_sanitizer::simplify_bitfield_transmutes(&mut self.bindgen_mod);
         self.bindgen_mod.vis = parse_quote! {};
         // bindgen writes bare unsafe calls into the bodies of the `unsafe fn`s
         // it generates, which RFC 2585 forbids. `bindgen::Builder::

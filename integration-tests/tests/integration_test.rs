@@ -16936,6 +16936,319 @@ fn test_bitfield_non_pod() {
     );
 }
 
+#[test]
+/// bindgen reaches a bitfield's bits through `mem::transmute`, converting
+/// between the field's declared Rust type and the same-sized unsigned integer
+/// its allocation unit deals in. Where that conversion has a safe equivalent -
+/// `bool` to `u8`, `i32` to `u32` - rustc's `unnecessary_transmutes` lint says
+/// so, and it warns by default, so any caller building with `-D warnings`
+/// cannot compile a struct with bitfields at all. That is how it reached us:
+/// the `examples/llvm` build broke on `llvm::ErrorOr`.
+///
+/// The field types here are chosen to cover each shape autocxx's sanitizer
+/// distinguishes: a plain C type (which arrives as `::std::os::raw::c_int`,
+/// not as `i32`), signed and unsigned, fixed-width, `bool`, `size_t` (which
+/// arrives as `usize`, a type of its own however wide it turns out to be), a
+/// `typedef` which has to be followed to the type rustc will lint, and an
+/// `enum`, whose transmute has no cast equivalent and must survive untouched.
+/// Every field is read back and written through, so that the conversion in
+/// each direction is checked against what C++ makes of the same bits, and not
+/// only against the lint.
+///
+/// They are spread over three structs, grouped so that every bitfield within
+/// one has a declared type of the same size. That grouping is load-bearing on
+/// both Windows targets and free everywhere else - see
+/// `test_bitfield_mixing_declared_type_sizes` for the layout divergence it
+/// avoids - and it costs this test nothing, because what is under test is the
+/// code an accessor is made of, which is the same wherever the bits sit.
+///
+/// `Packed` is here because a bitfield of a `union` reaches its allocation
+/// unit through `__BindgenUnionField::as_ref`, an `unsafe fn`, so its accessors
+/// are the ones which must keep the `unsafe` block the others lose. It is
+/// opaque to Rust, so nothing calls those; they only have to compile.
+///
+/// `unused_unsafe` is denied alongside, because taking a transmute out of a
+/// getter empties the `unsafe` block around it: that block has to go too, or
+/// we have swapped one warning for another.
+///
+/// `Shade` names its underlying type because a bitfield of an enum which does
+/// not is signed on one compiler and unsigned on another: MSVC gives an
+/// unscoped enum the underlying type `int`, gcc and clang give this one
+/// `unsigned int`, and `Shade shade : 2` is then a two-bit field which holds
+/// -2 to 1 on the one and 0 to 3 on the other. `LIGHT` is 2, and fits only in
+/// the second.
+fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cstddef>
+        enum Shade : unsigned { DARK = 0, MID = 1, LIGHT = 2 };
+        typedef int Handle;
+        struct Words {
+            unsigned plain_unsigned : 4;
+            int plain_int : 4;
+            uint32_t fixed_unsigned : 3;
+            int32_t fixed_signed : 3;
+            Shade shade : 2;
+            Handle handle : 4;
+        };
+        struct Bytes {
+            bool flag : 1;
+            uint8_t byte_unsigned : 3;
+            int8_t byte_signed : 3;
+        };
+        struct Wide {
+            size_t counted : 5;
+        };
+        union Packed {
+            int part : 3;
+            bool set : 1;
+            uint32_t whole;
+        };
+        Words make_words();
+        uint32_t check_words(Words);
+        Bytes make_bytes();
+        uint32_t check_bytes(Bytes);
+        Wide make_wide();
+        uint32_t check_wide(Wide);
+    "};
+    // Each checker returns a bit per field it disagrees with, rather than one
+    // bool for the lot, so that a failure names the field. A bitfield read
+    // from the wrong place is a platform's business and not this test's, and
+    // the difference is only visible if the test says which field went wrong.
+    let cxx = indoc! {"
+        Words make_words() {
+            Words result{};
+            result.plain_unsigned = 5;
+            result.plain_int = 6;
+            result.fixed_unsigned = 6;
+            result.fixed_signed = 2;
+            result.shade = MID;
+            result.handle = 5;
+            return result;
+        }
+        uint32_t check_words(Words x) {
+            uint32_t wrong = 0;
+            if (x.plain_unsigned != 9) wrong |= 1u << 0;
+            if (x.plain_int != -7) wrong |= 1u << 1;
+            if (x.fixed_unsigned != 3) wrong |= 1u << 2;
+            if (x.fixed_signed != -2) wrong |= 1u << 3;
+            if (x.shade != LIGHT) wrong |= 1u << 4;
+            if (x.handle != 3) wrong |= 1u << 5;
+            return wrong;
+        }
+        Bytes make_bytes() {
+            Bytes result{};
+            result.flag = true;
+            result.byte_unsigned = 6;
+            result.byte_signed = 2;
+            return result;
+        }
+        uint32_t check_bytes(Bytes x) {
+            uint32_t wrong = 0;
+            if (x.flag) wrong |= 1u << 0;
+            if (x.byte_unsigned != 3) wrong |= 1u << 1;
+            if (x.byte_signed != -2) wrong |= 1u << 2;
+            return wrong;
+        }
+        Wide make_wide() {
+            Wide result{};
+            result.counted = 17;
+            return result;
+        }
+        uint32_t check_wide(Wide x) { return x.counted == 20 ? 0 : 1; }
+    "};
+    let rs = quote! {
+        let mut words = ffi::make_words();
+        // Every getter reads back what C++ wrote. The signed fields hold
+        // positive values on the way out on purpose: bindgen's getter does
+        // not sign-extend, which `test_give_bitfield_signed_fields` pins,
+        // and a negative value here would be testing that bug rather than
+        // this conversion.
+        assert_eq!(words.plain_unsigned(), 5, "{}", object_bytes(&words));
+        assert_eq!(words.plain_int(), 6, "{}", object_bytes(&words));
+        assert_eq!(words.fixed_unsigned(), 6, "{}", object_bytes(&words));
+        assert_eq!(words.fixed_signed(), 2, "{}", object_bytes(&words));
+        assert!(matches!(words.shade(), ffi::Shade::MID), "{}", object_bytes(&words));
+        assert_eq!(words.handle(), 5, "{}", object_bytes(&words));
+        // ...and every setter puts back something C++ agrees with, negative
+        // values included: nothing about the way in is short of sign bits.
+        words.set_plain_unsigned(9);
+        words.set_plain_int(-7);
+        words.set_fixed_unsigned(3);
+        words.set_fixed_signed(-2);
+        words.set_shade(ffi::Shade::LIGHT);
+        words.set_handle(3);
+        let written = object_bytes(&words);
+        let wrong = ffi::check_words(words);
+        assert_eq!(wrong, 0, "C++ disagrees about fields {wrong:#08b}; {written}");
+
+        let mut bytes = ffi::make_bytes();
+        assert_eq!(bytes.flag(), true, "{}", object_bytes(&bytes));
+        assert_eq!(bytes.byte_unsigned(), 6, "{}", object_bytes(&bytes));
+        assert_eq!(bytes.byte_signed(), 2, "{}", object_bytes(&bytes));
+        bytes.set_flag(false);
+        bytes.set_byte_unsigned(3);
+        bytes.set_byte_signed(-2);
+        let written = object_bytes(&bytes);
+        let wrong = ffi::check_bytes(bytes);
+        assert_eq!(wrong, 0, "C++ disagrees about fields {wrong:#05b}; {written}");
+
+        let mut wide = ffi::make_wide();
+        assert_eq!(wide.counted(), 17, "{}", object_bytes(&wide));
+        wide.set_counted(20);
+        let written = object_bytes(&wide);
+        let wrong = ffi::check_wide(wide);
+        assert_eq!(wrong, 0, "C++ disagrees about counted; {written}");
+    };
+    let extra = quote! {
+        /// The bytes of a POD struct, for the assertion messages above. If one
+        /// of them ever fails on one platform and passes on the rest, the
+        /// question is whether C++ wrote the bits somewhere else, and these
+        /// are the bytes that answer it.
+        fn object_bytes<T>(value: &T) -> String {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (value as *const T).cast::<u8>(),
+                    std::mem::size_of::<T>(),
+                )
+            };
+            format!("object representation: {bytes:02x?}")
+        }
+    };
+    do_run_test(
+        cxx,
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "make_words",
+                "check_words",
+                "make_bytes",
+                "check_bytes",
+                "make_wide",
+                "check_wide",
+                "Shade",
+                "Packed",
+            ],
+            &["Words", "Bytes", "Wide"],
+            None,
+        ),
+        None,
+        None,
+        Some(extra),
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(unnecessary_transmutes)]
+            #![deny(unused_unsafe)]
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "libclang and the C++ compiler lay this struct out differently on \
+              both Windows targets, and neither of them is autocxx. libclang, \
+              which computes the offsets bindgen writes into the accessors, \
+              packs by Itanium rules whichever Windows target it is asked for - \
+              `unsigned:4, int:4, uint8_t:3, int8_t:3, bool:1, Shade:2, \
+              Handle:4, size_t:5` all into one allocation unit at bits 0, 4, 8, \
+              11, 14, 15, 17 and 21 - and passing `--target=` for the right \
+              triple (see engine/src/clang_target.rs) does not change that. \
+              Both cl.exe and the mingw g++ instead follow Microsoft's rule, \
+              starting a fresh allocation unit at every change of declared type \
+              size: units at byte 0 (plain_unsigned, plain_int), byte 4 \
+              (fixed_unsigned, fixed_signed, flag), byte 8 (shade, handle) and \
+              byte 16 (counted). Both make the struct 24 bytes, so nothing \
+              fails to compile, and the fields up to the first change of type \
+              size agree; `fixed_unsigned`, the first one after it, is read \
+              from a byte Microsoft layout never writes and comes back 0. None \
+              of this is bindgen's transmute or its replacement - the offsets \
+              are the same either way - and it is why the test above groups \
+              its bitfields by declared type size, which both rules lay out \
+              alike. Fixing it means making libclang agree with the C++ \
+              compiler about Microsoft bitfield layout, which changes every \
+              Windows binding and wants its own change and its own testing."
+)]
+/// A bitfield struct which mixes declared type sizes, pinning the layout the
+/// C++ compiler and libclang have to agree about. This is the shape
+/// `test_bitfield_accessors_do_not_transmute_unnecessarily` deliberately
+/// avoids: the conversions it exercises are the same ones, so nothing about
+/// the lint fix rests on this test, and it is here to keep the platform
+/// divergence visible rather than forgotten. Whoever makes libclang agree
+/// with the Windows compilers should be able to delete the `cfg_attr` above
+/// and find this passing.
+fn test_bitfield_mixing_declared_type_sizes() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cstddef>
+        enum Shade : unsigned { DARK = 0, MID = 1, LIGHT = 2 };
+        typedef int Handle;
+        struct Lots {
+            unsigned plain_unsigned : 4;
+            int plain_int : 4;
+            uint8_t fixed_unsigned : 3;
+            int8_t fixed_signed : 3;
+            bool flag : 1;
+            Shade shade : 2;
+            Handle handle : 4;
+            size_t counted : 5;
+        };
+        Lots make_lots();
+        bool check_lots(Lots);
+    "};
+    let cxx = indoc! {"
+        Lots make_lots() {
+            Lots result{};
+            result.plain_unsigned = 5;
+            result.plain_int = 6;
+            result.fixed_unsigned = 6;
+            result.fixed_signed = 2;
+            result.flag = true;
+            result.shade = MID;
+            result.handle = 5;
+            result.counted = 17;
+            return result;
+        }
+        bool check_lots(Lots x) {
+            return x.plain_unsigned == 9 && x.plain_int == -7 &&
+                x.fixed_unsigned == 3 && x.fixed_signed == -2 &&
+                !x.flag && x.shade == LIGHT && x.handle == 3 &&
+                x.counted == 20;
+        }
+    "};
+    let rs = quote! {
+        let mut lots = ffi::make_lots();
+        assert_eq!(lots.plain_unsigned(), 5);
+        assert_eq!(lots.plain_int(), 6);
+        assert_eq!(lots.fixed_unsigned(), 6);
+        assert_eq!(lots.fixed_signed(), 2);
+        assert_eq!(lots.flag(), true);
+        assert!(matches!(lots.shade(), ffi::Shade::MID));
+        assert_eq!(lots.handle(), 5);
+        assert_eq!(lots.counted(), 17);
+        lots.set_plain_unsigned(9);
+        lots.set_plain_int(-7);
+        lots.set_fixed_unsigned(3);
+        lots.set_fixed_signed(-2);
+        lots.set_flag(false);
+        lots.set_shade(ffi::Shade::LIGHT);
+        lots.set_handle(3);
+        lots.set_counted(20);
+        assert_eq!(ffi::check_lots(lots), true);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        directives_from_lists(&["make_lots", "check_lots", "Shade"], &["Lots"], None),
+        None,
+        None,
+        None,
+    );
+}
+
 // Yet to test:
 // - Ifdef
 // - Out param pointers
