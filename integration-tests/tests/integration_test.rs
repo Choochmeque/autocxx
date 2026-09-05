@@ -2120,6 +2120,51 @@ fn test_pass_rust_str() {
     run_test(cxx, hdr, rs, &["measure_string"], &[]);
 }
 
+/// `rust::Str` is a value type in C++ which manifests as `&str` in Rust, so a
+/// C++ `const rust::Str&` parameter comes out as `&&str`. That double
+/// reference is right, not a bug: cxx spells `&str` as a `rust::Str` value and
+/// `&T` as `const T&`, and `rust::Str` has `&str`'s (pointer, length) layout.
+#[test]
+fn test_pass_rust_str_by_ref() {
+    let cxx = indoc! {"
+        uint32_t measure_string(const rust::Str& z) {
+            return std::string(z).length();
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        uint32_t measure_string(const rust::Str& z);
+    "};
+    let rs = quote! {
+        let s = "hello";
+        assert_eq!(ffi::measure_string(&s), 5);
+    };
+    run_test(cxx, hdr, rs, &["measure_string"], &[]);
+}
+
+/// As [`test_pass_rust_str_by_ref`], for a mutable `rust::Str&`, which becomes
+/// `Pin<&mut &str>`. See the note in `type_converter.rs`: this works, but
+/// nothing stops C++ writing a fat pointer of its own into the slot.
+#[test]
+fn test_pass_rust_str_by_mut_ref() {
+    let cxx = indoc! {"
+        uint32_t measure_string(rust::Str& z) {
+            return std::string(z).length();
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        uint32_t measure_string(rust::Str& z);
+    "};
+    let rs = quote! {
+        let mut s = "hello";
+        assert_eq!(ffi::measure_string(std::pin::Pin::new(&mut s)), 5);
+    };
+    run_test(cxx, hdr, rs, &["measure_string"], &[]);
+}
+
 #[test]
 fn test_multiple_classes_with_methods() {
     let hdr = indoc! {"

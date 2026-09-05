@@ -207,10 +207,22 @@ impl<'a> TypeConverter<'a> {
                 ns,
                 &TypeConversionContext::WithinReference,
             )?;
-            // TODO - in the future, we should check if this is a rust::Str and throw
-            // a wobbler if not. rust::Str should only be seen _by value_ in C++
-            // headers; it manifests as &str in Rust but on the C++ side it must
-            // be a plain value. We should detect and abort.
+            // A `rust::Str` referent has already been turned into `&str` by the
+            // `should_dereference_in_cpp` branch below, so a C++ `rust::Str&`
+            // gets wrapped again here into `&&str`. That is deliberate and
+            // correct: cxx spells `&str` as a `rust::Str` value and `&T` as
+            // `const T&`, so `&&str` *is* `const rust::Str&`, and `rust::Str`
+            // has the same (pointer, length) layout as Rust's `&str`.
+            // `test_pass_rust_str_by_ref` and `test_pass_rust_str_by_mut_ref`
+            // run both shapes end to end.
+            //
+            // TODO: the mutable case is the one worth revisiting. `rust::Str&`
+            // becomes `Pin<&mut &str>`, which lets C++ overwrite the fat
+            // pointer with one it owns; Rust then holds a `&str` whose lifetime
+            // nothing checked. That is a real hazard, but it is a lifetime
+            // problem rather than the layout problem an earlier comment here
+            // assumed, and rejecting `rust::Str&` outright would break the
+            // working const case too.
             let mut outer = elem.map(|elem| match mutability {
                 Some(_) => Type::Path(parse_quote! {
                     ::core::pin::Pin < & #mutability #elem >
