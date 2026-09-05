@@ -45,10 +45,24 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
     b.host(&target)
         .target(&target)
         .opt_level(1)
-        .flag("-std=c++14") // For clang
-        .flag_if_supported("/GX") // Enable C++ exceptions for msvc
-        .flag_if_supported("-Wall")
-        .flag_if_supported("-Werror")
+        // std(), not .flag("-std=c++14"): cc picks the right spelling per
+        // tool family (so cl.exe no longer prints D9002 "ignoring unknown
+        // option" once per fixture build), and emits it BEFORE per-test
+        // modifier flags, so tests appending -std=c++17 still win.
+        .std("c++14")
+        .flag_if_supported("/GX"); // Enable C++ exceptions for msvc
+    if !target.contains("msvc") {
+        // -Wall is the curated warning set on gcc/clang, but cl.exe maps it
+        // to its audit-mode /Wall, which Microsoft documents as not meant
+        // for routine builds — it floods the log with off-by-default
+        // diagnostics from system headers (tens of thousands of lines per
+        // CI run). MSVC keeps cc's default /W4, the strict curated
+        // equivalent. (-Werror has never applied on MSVC: cl rejects the
+        // spelling, so the probe fails; the /W4 output is not yet clean
+        // enough for /WX — see the C4267 narrowing note in the tracker.)
+        b.flag_if_supported("-Wall").flag_if_supported("-Werror");
+    }
+    b
 }
 
 /// Environment variables telling generated code where to find its bindings, as
