@@ -16,6 +16,7 @@ mod non_pod_struct;
 pub(crate) mod unqualify;
 mod utils;
 
+use autocxx_bindgen::callbacks::SpecialMemberKind;
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
@@ -554,6 +555,25 @@ impl<'a> RsCodeGenerator<'a> {
                          obtained from C++."
                             .to_string(),
                     ));
+                } else {
+                    // Otherwise, explain any constructor C++'s rules withheld,
+                    // because a type which turns up with no `new()` is
+                    // otherwise a mystery. See google/autocxx#1034. An
+                    // inaccessible destructor withholds all of them at once,
+                    // which is what the note above already says.
+                    let why = &constructors.why_no_constructors;
+                    for (member, why) in [
+                        (
+                            SpecialMemberKind::DefaultConstructor,
+                            &why.default_constructor,
+                        ),
+                        (SpecialMemberKind::CopyConstructor, &why.copy_constructor),
+                        (SpecialMemberKind::MoveConstructor, &why.move_constructor),
+                    ] {
+                        if let Some(why) = why {
+                            doc_attrs.extend(make_doc_attrs(why.describe(member)));
+                        }
+                    }
                 }
                 self.generate_type(
                     &name,

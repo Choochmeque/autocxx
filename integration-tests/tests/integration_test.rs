@@ -12015,9 +12015,15 @@ fn test_pass_by_value_helper_name_shadowed_in_namespace() {
 
 /// A type with neither a copy nor a move constructor can't be passed by value
 /// at all. The helper which hands value parameters over must leave that
-/// refusal where it was - in the C++ compiler, complaining about the deleted
-/// constructor the user wrote - rather than swallowing it or turning it into
-/// an error inside the helper's own template.
+/// refusal where it was - in the C++ compiler - rather than swallowing it or
+/// turning it into an error inside the helper's own template.
+///
+/// Manually observed: the compiler's message names the user's own deleted
+/// constructor at the `take_it` call. This test can only assert that the C++
+/// build fails, though: `TestError::CppBuild` wraps `cc::Error`, which
+/// carries "command failed" and not the compiler's diagnostics - the same
+/// swallowed-diagnostics gap `RsBuild` had before the harness captured the
+/// child's output. Fixing that for the C++ side would let this pin the text.
 /// See <https://github.com/google/autocxx/issues/873>.
 #[test]
 fn test_pass_by_value_no_copy_or_move() {
@@ -16710,6 +16716,125 @@ fn test_defaulted_destructor_which_is_deleted() {
             make_string_finder(vec![
                 "autocxx has not generated any way for Rust to own one of these".to_string(),
             ]),
+        ])),
+        None,
+    );
+}
+
+/// A type which turns up with no constructors is a mystery unless the
+/// bindings say which member or base took them away, so say it.
+/// See <https://github.com/google/autocxx/issues/1034>.
+#[test]
+fn test_absent_constructors_explain_themselves() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NoDefault {
+            NoDefault() = delete;
+            NoDefault(const NoDefault&) {}
+            uint32_t a;
+        };
+        struct HasUnconstructibleMember { NoDefault m; };
+        struct HasReferenceMember { uint32_t& r; };
+        class PrivateCopy {
+        public:
+            PrivateCopy() {}
+            uint32_t a;
+        private:
+            PrivateCopy(const PrivateCopy&) {}
+        };
+        struct DerivesPrivateCopy : public PrivateCopy { uint32_t b; };
+        struct DeclaresMove {
+            DeclaresMove() {}
+            DeclaresMove(DeclaresMove&&) {}
+            uint32_t a;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(
+            &[
+                "HasUnconstructibleMember",
+                "HasReferenceMember",
+                "DerivesPrivateCopy",
+                "DeclaresMove",
+            ],
+            &[],
+            None,
+        ),
+        None,
+        Some(make_string_finder(vec![
+            "C++ gives this type no default constructor, because its field `m` of type \
+             `NoDefault` has no accessible default constructor."
+                .to_string(),
+            "C++ gives this type no default constructor, because its field `r` is a reference \
+             with no default member initializer, leaving an implicitly declared constructor \
+             nothing to bind it to. A constructor written out in the C++ source can bind it in \
+             its member initializer list."
+                .to_string(),
+            "C++ gives this type no copy constructor, because its base class `PrivateCopy` has \
+             no accessible copy constructor."
+                .to_string(),
+            "C++ gives this type no copy constructor, because it declares a move constructor, \
+             which withdraws the copy constructor C++ would otherwise have declared implicitly."
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The case google/autocxx#1034 was reported for: autocxx doesn't understand
+/// one of the class's members, so it declines to work out any of the class's
+/// constructors, and until now said nothing about it outside the logs.
+#[test]
+fn test_absent_constructors_name_the_members_we_dont_understand() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> struct Tmpl { T t; };
+        struct HasTemplatedMember { Tmpl<uint32_t> t; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["HasTemplatedMember"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "autocxx has not given this type a default constructor: it does not understand"
+                .to_string(),
+            "which this class has as a base or a field, and so cannot tell which special member \
+             functions C++ declares for it."
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A type whose destructor Rust can't reach has no constructors either, but
+/// the note google/autocxx#829 added already says why - so don't say it again
+/// once per constructor.
+#[test]
+fn test_inaccessible_destructor_explains_itself_only_once() {
+    let hdr = indoc! {"
+        class PrivateDtor {
+        public:
+            PrivateDtor() {}
+        private:
+            ~PrivateDtor() {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["PrivateDtor"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(vec![
+                "autocxx has not generated any way for Rust to own one of these".to_string(),
+            ]),
+            make_string_absence_finder(vec!["C++ gives this type no".to_string()]),
         ])),
         None,
     );
