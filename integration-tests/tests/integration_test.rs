@@ -18539,3 +18539,23 @@ fn test_std_function_method_costs_only_that_method() {
         );
     }
 }
+
+/// A class nested inside the class which holds it by value. bindgen hoists
+/// the nested definition out into the module its enclosing class is in, and
+/// can emit it after that class - at which point the POD check, which used to
+/// take the structs in the order they arrived, had no record of the nested
+/// type yet and ruled the enclosing one out of being POD for good.
+#[test]
+fn test_pod_holding_nested_struct() {
+    let hdr = indoc! {"
+        struct fx_Outer {
+            struct fx_Inner { int a; };
+            fx_Inner inner;
+        };
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_Outer { inner: ffi::fx_Outer_fx_Inner { a: 42 } };
+        assert_eq!(outer.inner.a, 42);
+    };
+    run_test("", hdr, rs, &[], &["fx_Outer", "fx_Outer_fx_Inner"]);
+}
