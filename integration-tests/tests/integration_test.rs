@@ -11608,6 +11608,219 @@ fn test_nonconst_reference_method_parameter() {
     run_test("", hdr, rs, &["NOP", "A", "B"], &[]);
 }
 
+/// A type whose move constructor is deleted, but which can still be copied,
+/// must still be passable by value. C++ overload resolution prefers a deleted
+/// move constructor to a perfectly good copy constructor, so the `std::move`
+/// the generated wrapper used to apply to every value parameter refused to
+/// compile for these. See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_deleted_move_constructor() {
+    let hdr = indoc! {"
+    #include <string>
+    struct A {
+        A() {}
+        A(const A&) {}
+        A(A&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_a(A) {}
+    struct B {
+        void take_a(A) const {}
+        // Force autocxx to generate a wrapper for the method above.
+        void take_a(A, int) const {}
+    };
+    "};
+    let rs = quote! {
+        moveit! {
+            let stack_obj = ffi::A::new();
+        }
+        ffi::take_a(&*stack_obj);
+        ffi::take_a(as_copy(stack_obj.as_ref()));
+
+        let heap_obj = ffi::A::new().within_unique_ptr();
+        ffi::take_a(&heap_obj);
+        ffi::take_a(heap_obj); // consume
+
+        let b = ffi::B::new().within_unique_ptr();
+        b.take_a(&*stack_obj);
+        b.take_a1(as_copy(stack_obj.as_ref()), autocxx::c_int(3));
+    };
+    run_test("", hdr, rs, &["A", "B", "take_a"], &[]);
+}
+
+/// Handing a value parameter to C++ should move it where C++ allows that - the
+/// Rust side owns the storage it comes out of and destroys it straight
+/// afterwards - and should fall back to a copy only where the move constructor
+/// can't be called. See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_moves_where_it_can() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& copies() { static int32_t c = 0; return c; }
+    inline int32_t& moves() { static int32_t m = 0; return m; }
+    struct Movable {
+        Movable() {}
+        Movable(const Movable&) { copies()++; }
+        Movable(Movable&&) { moves()++; }
+        std::string so_we_are_non_trivial;
+    };
+    struct Unmovable {
+        Unmovable() {}
+        Unmovable(const Unmovable&) { copies()++; }
+        Unmovable(Unmovable&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_movable(Movable) {}
+    inline void take_unmovable(Unmovable) {}
+    inline int32_t copy_count() { return copies(); }
+    inline int32_t move_count() { return moves(); }
+    inline void reset_counts() { copies() = 0; moves() = 0; }
+    "};
+    let rs = quote! {
+        // Consuming a UniquePtr hands C++ the object Rust was about to
+        // destroy, so it should be moved, not copied.
+        let heap_obj = ffi::Movable::new().within_unique_ptr();
+        ffi::reset_counts();
+        ffi::take_movable(heap_obj);
+        assert_eq!(ffi::copy_count(), 0);
+        assert_eq!(ffi::move_count(), 1);
+
+        // Borrowing one costs a copy into Rust-side storage, and then a move
+        // out of that storage into the parameter.
+        let heap_obj = ffi::Movable::new().within_unique_ptr();
+        ffi::reset_counts();
+        ffi::take_movable(&heap_obj);
+        assert_eq!(ffi::copy_count(), 1);
+        assert_eq!(ffi::move_count(), 1);
+
+        // A type which can't be moved is copied instead of failing to build.
+        let heap_obj = ffi::Unmovable::new().within_unique_ptr();
+        ffi::reset_counts();
+        ffi::take_unmovable(heap_obj);
+        assert_eq!(ffi::copy_count(), 1);
+        assert_eq!(ffi::move_count(), 0);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "Movable",
+            "Unmovable",
+            "take_movable",
+            "take_unmovable",
+            "copy_count",
+            "move_count",
+            "reset_counts",
+        ],
+        &[],
+    );
+}
+
+/// A type whose only copy constructor takes `T&` rather than `const T&` can be
+/// passed by value from an lvalue, which is exactly what the generated wrapper
+/// has. Neither `std::move` nor a `const T&` will bind to that constructor, so
+/// the wrapper has to hand the parameter over as a plain mutable lvalue.
+/// See <https://github.com/google/autocxx/issues/873>.
+///
+/// The `= delete`d move constructor is not incidental: without it, autocxx
+/// mistakes this class for one which declares no copy constructor and
+/// synthesizes wrappers calling implicit members C++ never gave it. See the
+/// note on `TraitMethodKind::CopyConstructor` in `implicit_constructors.rs`.
+#[test]
+fn test_pass_by_value_non_const_copy_constructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& mutable_copies() { static int32_t c = 0; return c; }
+    struct MutableCopyOnly {
+        MutableCopyOnly() {}
+        MutableCopyOnly(MutableCopyOnly&) { mutable_copies()++; }
+        MutableCopyOnly(MutableCopyOnly&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_it(MutableCopyOnly) {}
+    inline int32_t mutable_copy_count() { return mutable_copies(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::MutableCopyOnly::new().within_unique_ptr();
+        ffi::take_it(obj);
+        assert_eq!(ffi::mutable_copy_count(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["MutableCopyOnly", "take_it", "mutable_copy_count"],
+        &[],
+    );
+}
+
+/// The helper which hands a value parameter over is called with an argument of
+/// the parameter's own type, so C++ looks for it in that type's namespaces too
+/// - where a function of the same name would be a better match than our
+/// template. The generated call has to name ours from the global namespace.
+/// See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_helper_name_shadowed_in_namespace() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& hijacks() { static int32_t h = 0; return h; }
+    namespace shady {
+        struct A {
+            A() {}
+            A(const A&) {}
+            A(A&&) {}
+            std::string so_we_are_non_trivial;
+        };
+        // Argument-dependent lookup offers this to any unqualified call whose
+        // argument is a `shady::A`, and being an exact match it wins.
+        inline A autocxx_move_or_copy(A&) { hijacks()++; return A(); }
+        inline void take_a(A) {}
+    }
+    inline int32_t hijack_count() { return hijacks(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::shady::A::new().within_unique_ptr();
+        ffi::shady::take_a(obj);
+        assert_eq!(ffi::hijack_count(), 0);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["shady::A", "shady::take_a", "hijack_count"],
+        &[],
+    );
+}
+
+/// A type with neither a copy nor a move constructor can't be passed by value
+/// at all. The helper which hands value parameters over must leave that
+/// refusal where it was - in the C++ compiler, complaining about the deleted
+/// constructor the user wrote - rather than swallowing it or turning it into
+/// an error inside the helper's own template.
+/// See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_no_copy_or_move() {
+    let hdr = indoc! {"
+    #include <string>
+    struct Neither {
+        Neither() {}
+        Neither(const Neither&) = delete;
+        Neither(Neither&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_it(Neither) {}
+    "};
+    let rs = quote! {
+        let obj = ffi::Neither::new().within_unique_ptr();
+        ffi::take_it(obj);
+    };
+    run_test_expect_fail_with_error("", hdr, rs, &["Neither", "take_it"], &[], "CppBuild");
+}
+
 fn destruction_test(ident: proc_macro2::Ident, extra_bit: Option<TokenStream>) {
     let hdr = indoc! {"
     #include <stdint.h>

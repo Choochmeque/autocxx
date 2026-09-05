@@ -7,6 +7,7 @@
 // except according to those terms.
 
 mod function_wrapper_cpp;
+mod move_or_copy_prelude;
 mod new_and_delete_prelude;
 pub(crate) mod type_to_cpp;
 
@@ -46,6 +47,7 @@ enum Header {
     CxxH,
     CxxgenH,
     NewDeletePrelude,
+    MoveOrCopyPrelude,
 }
 
 impl Header {
@@ -69,6 +71,7 @@ impl Header {
                 format!("#include \"{prefix}{cxxgen_header_name}\"")
             }
             Header::NewDeletePrelude => new_and_delete_prelude::NEW_AND_DELETE_PRELUDE.to_string(),
+            Header::MoveOrCopyPrelude => move_or_copy_prelude::MOVE_OR_COPY_PRELUDE.to_string(),
         }
     }
 
@@ -711,6 +714,19 @@ impl<'a> CppCodeGenerator<'a> {
         if need_allocators {
             headers.push(Header::System("stddef.h"));
             headers.push(Header::NewDeletePrelude);
+        }
+        let needs_move_or_copy = details
+            .argument_conversion
+            .iter()
+            .chain(details.return_conversion.iter())
+            .any(|conv| match conversion_direction {
+                ConversionDirection::RustCallsCpp => conv.may_use_move_or_copy_helper(),
+                ConversionDirection::CppCallsCpp => false,
+                ConversionDirection::CppCallsRust => conv.inverse().may_use_move_or_copy_helper(),
+            });
+        if needs_move_or_copy {
+            headers.push(Header::System("type_traits"));
+            headers.push(Header::MoveOrCopyPrelude);
         }
         Ok(ExtraCpp {
             declaration,

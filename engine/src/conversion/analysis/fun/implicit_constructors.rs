@@ -820,6 +820,17 @@ fn find_explicit_items(
                 TraitMethodKind::Destructor => Some(ExplicitKind::Destructor),
                 // In `analyze_foreign_fn` we mark non-const copy constructors as not being copy
                 // constructors for now, so we don't have to worry about them.
+                //
+                // TODO: which means `ExplicitKind::NonConstCopyConstructor` is
+                // never recorded here, and a class whose only copy constructor
+                // is `T(T&)` looks to the rules below like a class which
+                // declares no copy constructor at all. They then hand it an
+                // implicit `T(const T&)` and an implicit `T(T&&)`, neither of
+                // which C++ declares for such a class, and we synthesize
+                // wrappers calling both - so the generated C++ doesn't
+                // compile. `T(T&)` reaches here as an
+                // `ExplicitKind::OtherConstructor`, which is what would have
+                // to be told apart to fix it.
                 TraitMethodKind::CopyConstructor => Some(ExplicitKind::ConstCopyConstructor),
                 TraitMethodKind::MoveConstructor => Some(ExplicitKind::MoveConstructor),
                 _ => None,
