@@ -28,6 +28,7 @@ use super::{
 };
 use crate::{
     conversion::{
+        analysis::bridge_type_names::BridgeTypeNames,
         analysis::fun::{
             function_wrapper::TypeConversionPolicy, ArgumentAnalysis, FnAnalysis, FnKind,
             MethodKind, RustRenameStrategy, TraitMethodDetails,
@@ -90,6 +91,7 @@ pub(super) fn gen_function(
     fun: FuncToConvert,
     analysis: FnAnalysis,
     non_pod_types: &HashSet<QualifiedName>,
+    bridge_type_names: &BridgeTypeNames,
 ) -> RsCodegenResult {
     if analysis.ignore_reason.is_err() || !analysis.externally_callable {
         return RsCodegenResult::default();
@@ -191,8 +193,8 @@ pub(super) fn gen_function(
     // well-known types should be unqualified already (e.g. just UniquePtr)
     // and the following code will act to unqualify only those types
     // which the user has declared.
-    let params = unqualify_params_minisyn(params);
-    let ret_type = unqualify_ret_type(ret_type.into_owned());
+    let params = unqualify_params_minisyn(params, bridge_type_names);
+    let ret_type = unqualify_ret_type(ret_type.into_owned(), bridge_type_names);
 
     // For functions marked as throwing, wrap the return type in Result for the cxx bridge.
     // cxx will catch C++ exceptions and convert them to cxx::Exception.

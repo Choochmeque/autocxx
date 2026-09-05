@@ -3426,11 +3426,10 @@ fn test_conflicting_ns_funcs() {
     run_test(cxx, hdr, rs, &["A::get", "B::get"], &[]);
 }
 
-#[ignore]
-// because currently we feed a flat namespace to cxx
-// This would be relatively easy to enable now that we have the facility
-// to add aliases to the 'use' statements we generate, plus
-// bridge_name_tracker to pick a unique name. TODO.
+/// Two types which differ only in their namespace, which the `cxx::bridge`
+/// mod's flat namespace has to be talked out of confusing - google/autocxx#486.
+/// The two are given different field names so that mixing them up would be a
+/// compile error rather than a silent success.
 #[test]
 fn test_conflicting_ns_structs() {
     let hdr = indoc! {"
@@ -3442,15 +3441,57 @@ fn test_conflicting_ns_structs() {
         }
         namespace B {
             struct Bob {
-                uint32_t a;
+                uint32_t b;
             };
+        }
+        namespace A {
+            inline uint32_t take_bob(const Bob& bob) { return bob.a; }
+        }
+        namespace B {
+            inline uint32_t take_bob(const Bob& bob) { return bob.b; }
         }
     "};
     let rs = quote! {
-        ffi::A::Bob { a: 12 };
-        ffi::B::Bob { b: 12 };
+        let a = ffi::A::Bob { a: 12 };
+        let b = ffi::B::Bob { b: 13 };
+        assert_eq!(ffi::A::take_bob(&a), 12);
+        assert_eq!(ffi::B::take_bob(&b), 13);
     };
-    run_test("", hdr, rs, &[], &["A::Bob", "B::Bob"]);
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["A::take_bob", "B::take_bob"],
+        &["A::Bob", "B::Bob"],
+    );
+}
+
+/// As above, except that qualifying the second `Bob` with its namespace would
+/// spell it `a__Bob`, and cxx takes no identifier with two adjacent
+/// underscores in it. C++ is perfectly happy with this header, so both types
+/// still have to arrive. (Which name the second one ends up with inside the
+/// bridge is `bridge_type_names`' own business, and is pinned there.)
+#[test]
+fn test_conflicting_ns_structs_in_underscored_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+        };
+        namespace a_ {
+            struct Bob {
+                uint32_t b;
+            };
+            inline uint32_t take_bob(const Bob& bob) { return bob.b; }
+        }
+    "};
+    let rs = quote! {
+        let outer = ffi::Bob { a: 12 };
+        assert_eq!(outer.a, 12);
+        let inner = ffi::a_::Bob { b: 13 };
+        assert_eq!(ffi::a_::take_bob(&inner), 13);
+    };
+    run_test("", hdr, rs, &["a_::take_bob"], &["Bob", "a_::Bob"]);
 }
 
 #[test]
@@ -6527,9 +6568,9 @@ fn test_colliding_names_from_template_members() {
     // types, but because both are members of a class template specialization
     // bindgen emits each into the root module under the bare name `iterator`,
     // which is E0428. (This is within one module, so it is not the flat
-    // cxx::bridge namespace collision of google/autocxx#486, which is
-    // reported cleanly as a duplicate cxx bridge name.) Neither type is
-    // usable, so all that is asked here is that the bindings still compile.
+    // cxx::bridge namespace collision of google/autocxx#486, which is settled
+    // by renaming one of the two within the bridge.) Neither type is usable,
+    // so all that is asked here is that the bindings still compile.
     let hdr = indoc! {"
         namespace outer {
         template <typename T> class Alpha {
@@ -6755,10 +6796,14 @@ fn test_bridge_conflict_ty() {
             struct Key { int a; };
         }
     "};
-    let rs = quote! {};
-    // Neither type can be represented in the flat cxx::bridge namespace, and
-    // both were explicitly requested, so we say so - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["a::Key", "b::Key"], &[]);
+    // Only one of these can be called `Key` in the flat cxx::bridge namespace,
+    // so one of them is renamed there - google/autocxx#486. Both are still
+    // called `Key` in the Rust we hand back, which is what this asks for.
+    let rs = quote! {
+        let _: *const ffi::a::Key = std::ptr::null();
+        let _: *const ffi::b::Key = std::ptr::null();
+    };
+    run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
 }
 
 #[test]
@@ -6771,17 +6816,14 @@ fn test_bridge_conflict_ty_fn() {
             inline void Key() {}
         }
     "};
-    let rs = quote! {};
-    if std::env::var_os("AUTOCXX_FORCE_WRAPPER_GENERATION").is_some() {
-        // Forced wrapper generation renames the function, so the flat
-        // cxx::bridge namespace conflict never arises and generation
-        // legitimately succeeds.
-        run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
-    } else {
-        // As test_bridge_conflict_ty: explicitly requested, can't be
-        // generated, therefore reported - google/autocxx#1269.
-        run_test_expect_fail("", hdr, rs, &["a::Key", "b::Key"], &[]);
-    }
+    // As test_bridge_conflict_ty, except that the name is contested by a
+    // function, which was already being renamed by `bridge_name_tracker`; the
+    // type has to dodge whatever the function settled on.
+    let rs = quote! {
+        let _: *const ffi::a::Key = std::ptr::null();
+        ffi::b::Key();
+    };
+    run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
 }
 
 #[test]
@@ -8198,12 +8240,11 @@ fn test_issue486() {
             };
         } // namespace spanner
     "};
+    // The two Keys would land on the same name within the cxx::bridge, so one
+    // of them is renamed there - this is the repro google/autocxx#486 was
+    // filed with.
     let rs = quote! {};
-    // Both Keys would land on the same name within the cxx::bridge, so
-    // neither can be generated; spanner::Key was requested explicitly, so we
-    // report that instead of quietly generating nothing
-    // (google/autocxx#1269).
-    run_test_expect_fail("", hdr, rs, &["spanner::Key"], &[]);
+    run_test("", hdr, rs, &["spanner::Key"], &[]);
 }
 
 #[test]
@@ -8422,6 +8463,38 @@ fn test_extern_rust_fn_callback() {
         pub fn called_from_cpp(_a: Pin<&mut a>) {}
 
         fn main() {}
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+/// A Rust function and a C++ type wanting the same name in the one bridge mod.
+/// It works because Rust keeps types and values in separate namespaces, which
+/// is worth pinning, since the bridge name allocator of google/autocxx#486
+/// deliberately does not lean on it.
+#[test]
+fn test_extern_rust_fn_name_is_not_reused_for_a_type() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace a {
+            struct bob { uint32_t q; };
+        }
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            generate_pod!("a::bob")
+        }
+
+        #[autocxx::extern_rust::extern_rust_function]
+        pub fn bob() {}
+
+        fn main() {
+            let b = ffi::a::bob { q: 3 };
+            assert_eq!(b.q, 3);
+            bob();
+        }
     };
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
@@ -9283,22 +9356,20 @@ fn test_issue_1269_explicit_fn_discarded_due_to_param() {
     );
 }
 
-/// Explicitly requested types which are both discarded during analysis
-/// (here, because they'd collide within the flat cxx::bridge namespace)
-/// must be a hard error.
+/// An explicitly requested type which is discarded during analysis (here,
+/// because cxx can't cope with `__` in names) must be a hard error, just as
+/// for a function.
 #[test]
 fn test_issue_1269_explicit_type_discarded_by_name_check() {
     let hdr = indoc! {"
-        namespace a { struct Dupe { int q; }; }
-        namespace b { struct Dupe { int r; }; }
+        namespace a { struct __Dupe { int q; }; }
     "};
     run_test_expect_fail_ex(
         "",
         hdr,
         quote! {},
         quote! {
-            generate!("a::Dupe")
-            generate!("b::Dupe")
+            generate!("a::__Dupe")
         },
         None,
         None,
@@ -12349,10 +12420,10 @@ fn test_issue486_multi_types() {
             };
         } // namespace spanner
     "};
+    // As test_issue486, with four different kinds of thing - class, struct,
+    // typedef and enum - contesting the one bridge name.
     let rs = quote! {};
-    // As test_issue486: these all collide within the cxx::bridge, and they
-    // were requested by name, so this is reported - google/autocxx#1269.
-    run_test_expect_fail(
+    run_test(
         "",
         hdr,
         rs,

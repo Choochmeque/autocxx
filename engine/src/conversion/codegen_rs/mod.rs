@@ -27,7 +27,7 @@ use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, Attribute, Expr, FnArg, ForeignItem,
     ForeignItemFn, Ident, ImplItem, Item, ItemForeignMod, ItemMod, TraitItem, Type, TypePath,
 };
-use utils::{find_output_mod_root, generate_cxx_use_stmt};
+use utils::{find_output_mod_root, generate_cxx_use_stmt, generate_cxx_use_stmt_for_id};
 
 use crate::{
     conversion::codegen_rs::unqualify::{unqualify_params, unqualify_ret_type},
@@ -43,6 +43,7 @@ use self::{
 
 use super::{
     analysis::{
+        bridge_type_names::BridgeTypeNames,
         doc_label::make_doc_attrs,
         fun::{FnPhase, PodAndDepAnalysis, ReceiverMutability},
         pod::PodAnalysis,
@@ -56,7 +57,7 @@ use super::{
     apivec::ApiVec,
     codegen_cpp::type_to_cpp::CppNameMap,
 };
-use super::{convert_error::ErrorContext, ConvertErrorFromCpp, ParseObservations};
+use super::{convert_error::ErrorContext, ConvertErrorFromCpp, RsCodegenInputs};
 use quote::quote;
 
 /// An entry which needs to go into an `impl` block for a given type.
@@ -130,6 +131,7 @@ pub(crate) struct RsCodeGenerator<'a> {
     config: &'a IncludeCppConfig,
     header_name: Option<String>,
     names_duplicated_by_bindgen: &'a HashSet<QualifiedName>,
+    bridge_type_names: &'a BridgeTypeNames,
 }
 
 impl<'a> RsCodeGenerator<'a> {
@@ -141,7 +143,7 @@ impl<'a> RsCodeGenerator<'a> {
         bindgen_mod: ItemMod,
         config: &'a IncludeCppConfig,
         header_name: Option<String>,
-        parse_observations: &'a ParseObservations,
+        inputs: &'a RsCodegenInputs<'a>,
     ) -> Vec<Item> {
         let c = Self {
             unsafe_policy,
@@ -149,11 +151,12 @@ impl<'a> RsCodeGenerator<'a> {
             bindgen_mod,
             original_name_map: CppNameMap::new_from_apis(
                 &all_apis,
-                &parse_observations.shadowed_types,
+                &inputs.parse_observations.shadowed_types,
             ),
             config,
             header_name,
-            names_duplicated_by_bindgen: &parse_observations.names_duplicated_by_bindgen,
+            names_duplicated_by_bindgen: &inputs.parse_observations.names_duplicated_by_bindgen,
+            bridge_type_names: inputs.bridge_type_names,
         };
         c.rs_codegen(all_apis)
     }
@@ -409,6 +412,9 @@ impl<'a> RsCodeGenerator<'a> {
     ) -> RsCodegenResult {
         let name = api.name().clone();
         let id = name.get_final_ident();
+        // What this type is called inside the bridge mod, which may differ
+        // from its own name if another namespace holds a type of that name.
+        let bridge_id = self.bridge_type_names.get(&name);
         match api {
             Api::StringConstructor { .. } => {
                 let make_string_name = make_ident(self.config.get_makestring_name());
@@ -427,7 +433,7 @@ impl<'a> RsCodeGenerator<'a> {
                 }
             }
             Api::Function { fun, analysis, .. } => {
-                gen_function(&name, *fun, analysis, non_pod_types)
+                gen_function(&name, *fun, analysis, non_pod_types, self.bridge_type_names)
             }
             Api::Const { .. } | Api::Typedef { .. } => RsCodegenResult {
                 output_mod_items: vec![Self::generate_bindgen_use_stmt(&name)],
@@ -467,7 +473,7 @@ impl<'a> RsCodeGenerator<'a> {
                 }
                 self.generate_type(
                     &name,
-                    id,
+                    bridge_id,
                     kind,
                     constructors.move_constructor,
                     constructors.destructor,
@@ -480,7 +486,7 @@ impl<'a> RsCodeGenerator<'a> {
                 let doc_attrs = get_doc_attrs(&item.attrs);
                 self.generate_type(
                     &name,
-                    id,
+                    bridge_id,
                     TypeKind::Pod,
                     true,
                     true,
@@ -491,7 +497,7 @@ impl<'a> RsCodeGenerator<'a> {
             }
             Api::ConcreteType { .. } => self.generate_type(
                 &name,
-                id,
+                bridge_id,
                 TypeKind::Abstract,
                 false, // assume for now that these types can't be kept in a Vector
                 true,  // assume for now that these types can be put in a smart pointer
@@ -501,7 +507,7 @@ impl<'a> RsCodeGenerator<'a> {
             ),
             Api::ForwardDeclaration { .. } | Api::OpaqueTypedef { .. } => self.generate_type(
                 &name,
-                id,
+                bridge_id,
                 TypeKind::Abstract,
                 false, // these types can't be kept in a Vector
                 false, // these types can't be put in a smart pointer
@@ -537,8 +543,8 @@ impl<'a> RsCodeGenerator<'a> {
                     },
                 ..
             } => {
-                sig.inputs = unqualify_params(sig.inputs);
-                sig.output = unqualify_ret_type(sig.output);
+                sig.inputs = unqualify_params(sig.inputs, self.bridge_type_names);
+                sig.output = unqualify_ret_type(sig.output, self.bridge_type_names);
                 RsCodegenResult {
                     global_items: if !has_receiver {
                         vec![parse_quote! {
@@ -555,7 +561,7 @@ impl<'a> RsCodeGenerator<'a> {
             }
             Api::RustSubclassFn {
                 details, subclass, ..
-            } => Self::generate_subclass_fn(id.into(), *details, subclass),
+            } => self.generate_subclass_fn(id.into(), *details, subclass),
             Api::Subclass {
                 name, superclass, ..
             } => {
@@ -731,6 +737,7 @@ impl<'a> RsCodeGenerator<'a> {
     }
 
     fn generate_subclass_fn(
+        &self,
         api_name: Ident,
         details: RustSubclassFnDetails,
         subclass: SubclassName,
@@ -739,8 +746,8 @@ impl<'a> RsCodeGenerator<'a> {
         let ret = details.ret;
         let unsafe_token = details.requires_unsafe.wrapper_token();
         let global_def = quote! { #unsafe_token fn #api_name(#params) #ret };
-        let params = unqualify_params(minisynize_punctuated(params));
-        let ret = unqualify_ret_type(ret.into());
+        let params = unqualify_params(minisynize_punctuated(params), self.bridge_type_names);
+        let ret = unqualify_ret_type(ret.into(), self.bridge_type_names);
         let method_name = details.method_name;
         let cxxbridge_decl: ForeignItemFn =
             parse_quote! { #unsafe_token fn #api_name(#params) #ret; };
@@ -886,7 +893,12 @@ impl<'a> RsCodeGenerator<'a> {
                     // Feed cxx "type T;"
                     // We MUST do this because otherwise cxx assumes this can be
                     // instantiated using UniquePtr etc.
-                    output_mod_items.push(generate_cxx_use_stmt(name, None));
+                    let rust_id = name.get_final_ident();
+                    output_mod_items.push(generate_cxx_use_stmt_for_id(
+                        name,
+                        &id,
+                        (id != rust_id).then_some(&rust_id.0),
+                    ));
                     RsCodegenResult {
                         extern_c_mod_items: vec![
                             self.generate_cxxbridge_type(name, false, doc_attrs)
@@ -1076,7 +1088,8 @@ impl<'a> RsCodeGenerator<'a> {
         doc_attrs: Vec<Attribute>,
     ) -> ForeignItem {
         let ns = name.get_namespace();
-        let id = name.get_final_ident();
+        let rust_id = name.get_final_ident();
+        let id = self.bridge_type_names.get(name);
         // The following lines actually Tell A Lie.
         // If we have a nested class, B::C, within namespace A,
         // we actually have to tell cxx that we have nested class C
@@ -1094,6 +1107,10 @@ impl<'a> RsCodeGenerator<'a> {
             let cpp_name = cpp_name.to_qualified_name();
             cxx_name = Some(cpp_name.get_final_item().to_string());
             ns_components.extend(cpp_name.ns_segment_iter().map(|s| s.to_string()));
+        } else if id != rust_id {
+            // We had to rename the type to keep the bridge mod's flat
+            // namespace unambiguous, so tell cxx what it's really called.
+            cxx_name = Some(rust_id.to_string());
         };
 
         let mut for_extern_c_ts = if !ns_components.is_empty() {
@@ -1125,7 +1142,7 @@ impl<'a> RsCodeGenerator<'a> {
                 }
             }));
             for_extern_c_ts.extend(quote! {
-                #id;
+                #rust_id;
             });
         } else {
             for_extern_c_ts.extend(quote! {

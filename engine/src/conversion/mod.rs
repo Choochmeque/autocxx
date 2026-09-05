@@ -40,6 +40,7 @@ use self::{
     analysis::{
         abstract_types::{discard_ignored_functions, mark_types_abstract},
         allocators::create_alloc_and_frees,
+        bridge_type_names::BridgeTypeNames,
         casts::add_casts,
         check_names,
         constructor_deps::decorate_types_with_constructor_deps,
@@ -197,8 +198,9 @@ impl<'a> BridgeConverter<'a> {
                 Self::dump_apis("adding constructor deps", &analyzed_apis);
                 let analyzed_apis = discard_ignored_functions(analyzed_apis);
                 Self::dump_apis("ignoring ignorable fns", &analyzed_apis);
-                // Remove any APIs whose names are not compatible with cxx.
-                let analyzed_apis = check_names(analyzed_apis);
+                // Remove any APIs whose names are not compatible with cxx, and
+                // settle on the name each type goes by within the bridge mod.
+                let (analyzed_apis, bridge_type_names) = check_names(analyzed_apis);
                 // During parsing or subsequent processing we might have encountered
                 // items which we couldn't process due to as-yet-unsupported features.
                 // There might be other items depending on such things. Let's remove them
@@ -243,7 +245,10 @@ impl<'a> BridgeConverter<'a> {
                     bindgen_mod,
                     self.config,
                     cpp.as_ref().map(|file_pair| file_pair.header_name.clone()),
-                    &parse_observations,
+                    &RsCodegenInputs {
+                        parse_observations: &parse_observations,
+                        bridge_type_names: &bridge_type_names,
+                    },
                 );
                 Ok(CodegenResults {
                     rs,
@@ -266,6 +271,14 @@ pub(crate) struct ParseObservations {
     /// The names bindgen defined more than once, per
     /// [`find_names_duplicated_by_bindgen`].
     pub(crate) names_duplicated_by_bindgen: HashSet<QualifiedName>,
+}
+
+/// What the Rust code generator needs to know beyond the `Api`s themselves.
+pub(crate) struct RsCodegenInputs<'a> {
+    /// See [`ParseObservations`].
+    pub(crate) parse_observations: &'a ParseObservations,
+    /// See [`BridgeTypeNames`].
+    pub(crate) bridge_type_names: &'a BridgeTypeNames,
 }
 
 /// The names which bindgen defined more than once, and which `ApiVec` therefore
