@@ -2903,6 +2903,38 @@ fn test_destructor() {
 }
 
 #[test]
+fn test_nested_with_static_call() {
+    let hdr = indoc! {"
+        struct A {
+            struct B {
+                static void f() {}
+            };
+        };
+    "};
+    let rs = quote! {
+        ffi::A_B::f();
+    };
+    run_test("", hdr, rs, &["A", "A_B"], &[]);
+}
+
+#[test]
+fn test_nested_in_namespace_with_static_call() {
+    let hdr = indoc! {"
+        namespace outer {
+        struct A {
+            struct B {
+                static void f() {}
+            };
+        };
+        }
+    "};
+    let rs = quote! {
+        ffi::outer::A_B::f();
+    };
+    run_test("", hdr, rs, &["outer::A", "outer::A_B"], &[]);
+}
+
+#[test]
 fn test_nested_with_destructor() {
     // Regression test, naming the destructor in the generated C++ is a bit tricky.
     let hdr = indoc! {"
@@ -5336,6 +5368,7 @@ fn test_typedef_to_up_in_fn_call() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         typedef std::unique_ptr<std::string> my_string;
         inline uint32_t take_str(my_string a) {
             return a->size();
@@ -5396,6 +5429,7 @@ fn test_string_in_struct() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         struct A {
             std::string a;
         };
@@ -5421,6 +5455,7 @@ fn test_up_in_struct() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         struct A {
             std::unique_ptr<std::string> a;
         };
@@ -5472,6 +5507,7 @@ fn test_typedef_to_up_in_struct() {
     let hdr = indoc! {"
         #include <string>
         #include <memory>
+        #include <cstdint>
         typedef std::unique_ptr<std::string> my_string;
         struct A {
             my_string a;
@@ -6399,6 +6435,24 @@ fn test_pointer_to_pointer() {
     "};
     let rs = quote! {};
     run_test("", hdr, rs, &["operations_research::Solver"], &[]);
+}
+
+#[test]
+fn test_pod_with_pointer_to_pointer_field() {
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+            float** data;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob { a: 12, data: std::ptr::null_mut() };
+        assert_eq!(b.a, 12);
+        assert!(b.data.is_null());
+    };
+    run_test("", hdr, rs, &[], &["Bob"]);
 }
 
 #[test]
@@ -10509,6 +10563,55 @@ fn test_subclass_with_std() {
 }
 
 #[test]
+fn test_subclass_pod_with_pointer_to_pointer_field() {
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class MyPod {
+    public:
+        int32_t foo;
+        float** data;
+    };
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo(MyPod&) const {}
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            let mut pod = ffi::MyPod { foo: 42, data: std::ptr::null_mut() };
+            obs.borrow().foo(std::pin::Pin::new(&mut pod));
+        },
+        quote! {
+            generate_pod!("MyPod")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self, pod: std::pin::Pin<&mut ffi::MyPod>) {
+                    assert_eq!(pod.foo, 42);
+                }
+            }
+        }),
+    );
+}
+
+#[test]
 fn test_two_subclasses() {
     let hdr = indoc! {"
     #include <cstdint>
@@ -12785,6 +12888,84 @@ fn test_abstract_up_multiple_bridge() {
         }
     };
     do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+/// Nothing autocxx re-exports into the output mod should warn as an unused
+/// import. Those `pub use`s are the only names a caller has for the generated
+/// API, and a caller who uses part of an API but not all of it has done
+/// nothing wrong - most of the time the mod holding them is private to the
+/// caller's crate, which is what makes rustc consider an unused one dead.
+/// `deny(unused_imports)` on the generated crate turns the warning into a
+/// build failure this test can see.
+#[test]
+fn test_generated_reexports_do_not_warn_as_unused() {
+    let hdr = indoc! {"
+    class A {
+    public:
+        virtual void foo() const = 0;
+        virtual ~A() {}
+    };
+    inline void take_a(const A&) {}
+    "};
+    do_run_test(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["A", "take_a"], &[], None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(unused_imports)]
+        }),
+    )
+    .unwrap()
+}
+
+/// Generated code must satisfy RFC 2585: an unsafe operation inside an
+/// `unsafe fn` needs its own `unsafe` block, not the function's signature as
+/// blanket permission. The generated mod used to carry a blanket
+/// `#[allow(unsafe_op_in_unsafe_fn)]`; with that gone, denying the lint from
+/// the caller's crate makes any remaining bare unsafe operation a build
+/// failure. `unused_unsafe` is denied alongside it to catch the opposite
+/// mistake - an `unsafe` block wrapped around something already inside one.
+/// (bindgen's own output keeps the allow, so this only exercises the code
+/// autocxx writes.)
+#[test]
+fn test_generated_code_wraps_unsafe_ops_in_unsafe_fns() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    inline void take_ptr(uint32_t*) {}
+    inline uint32_t* give_ptr() { return nullptr; }
+    class A {
+    public:
+        A() {}
+        void take_ptr_method(uint32_t*) {}
+    };
+    "};
+    do_run_test(
+        "",
+        hdr,
+        quote! {
+            let mut val: u32 = 3;
+            unsafe { ffi::take_ptr(&mut val) };
+            let p = ffi::give_ptr();
+            assert!(p.is_null());
+            let mut a = ffi::A::new().within_unique_ptr();
+            unsafe { a.pin_mut().take_ptr_method(&mut val) };
+        },
+        directives_from_lists(&["take_ptr", "give_ptr", "A"], &[], None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(unsafe_op_in_unsafe_fn)]
+            #![deny(unused_unsafe)]
+        }),
+    )
+    .unwrap()
 }
 
 #[test]

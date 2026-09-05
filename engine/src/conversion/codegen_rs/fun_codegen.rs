@@ -112,16 +112,11 @@ pub(super) fn gen_function(
     let mut cpp_name_attr = Vec::new();
     let mut impl_entry = None;
     let mut trait_impl_entry = None;
-    let always_unsafe_due_to_trait_definition = match kind {
-        FnKind::TraitMethod { ref details, .. } => details.trait_call_is_unsafe,
-        _ => false,
-    };
     let fn_generator = FnGenerator {
         param_details: &param_details,
         cxxbridge_name: &cxxbridge_name,
         rust_name,
         unsafety: &analysis.requires_unsafe,
-        always_unsafe_due_to_trait_definition,
         doc_attrs: &doc_attrs,
         non_pod_types,
         ret_type: &ret_type,
@@ -325,7 +320,6 @@ struct FnGenerator<'a> {
     cxxbridge_name: &'a Ident,
     rust_name: &'a str,
     unsafety: &'a UnsafetyNeeded,
-    always_unsafe_due_to_trait_definition: bool,
     doc_attrs: &'a Vec<Attribute>,
     non_pod_types: &'a HashSet<QualifiedName>,
     may_throw: bool,
@@ -415,10 +409,17 @@ impl<'a> FnGenerator<'a> {
         };
         let call_body = MaybeUnsafeStmt::maybe_unsafe(
             bridge_call,
-            any_conversion_requires_unsafe || matches!(self.unsafety, UnsafetyNeeded::JustBridge),
+            any_conversion_requires_unsafe
+                || matches!(
+                    self.unsafety,
+                    UnsafetyNeeded::JustBridge | UnsafetyNeeded::Always
+                ),
         );
-        let context_is_unsafe = matches!(self.unsafety, UnsafetyNeeded::Always)
-            || self.always_unsafe_due_to_trait_definition;
+        // RFC 2585: an unsafe operation needs its own `unsafe` block even
+        // inside an `unsafe fn`, so the enclosing function's unsafety never
+        // counts as permission here and the surrounding context is always
+        // treated as safe.
+        let context_is_unsafe = false;
         let (call_body, ret_type) = match self.ret_conversion {
             Some(ret_conversion) if ret_conversion.rust_work_needed() => {
                 // There's a potential lurking bug below. If the return type conversion requires

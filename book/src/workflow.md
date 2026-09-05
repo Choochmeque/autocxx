@@ -34,6 +34,9 @@ Options:
 * Use an IDE. (Did we mention, you should use an IDE?)
 * Run `cargo doc --document-private-items`.
 * Use `cargo expand`.
+* Add [`pretty!()`](https://docs.rs/autocxx/latest/autocxx/macro.pretty.html)
+  to your `include_cpp!` and read the file `AUTOCXX_RS_FILE` names. Without it
+  that file is a single line of tokens.
 
 ## How to work around cases where `autocxx` can't generate bindings
 

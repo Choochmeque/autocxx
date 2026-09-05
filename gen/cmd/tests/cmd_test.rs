@@ -308,6 +308,63 @@ fn test_gen_rs_has_generated_marker() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// `pretty!()` exists so that a human can read the generated Rust, so the
+/// output has to actually be laid out over many lines - and it must not cost
+/// the `@generated` marker its place on the first line, nor the run-to-run
+/// reproducibility the marker's own test pins. That reproducibility holds
+/// for a given resolved prettyplease version; a formatter upgrade may
+/// legitimately move whitespace between releases.
+#[test]
+fn test_gen_rs_pretty() -> Result<(), Box<dyn std::error::Error>> {
+    let generate = |pretty: bool| -> Result<String, Box<dyn std::error::Error>> {
+        let tmp_dir = tempdir()?;
+        let main_rs = if pretty {
+            MAIN_RS.replace("safety!(unsafe_ffi)", "safety!(unsafe_ffi)\n    pretty!()")
+        } else {
+            MAIN_RS.to_string()
+        };
+        assert_eq!(
+            main_rs.contains("pretty!()"),
+            pretty,
+            "the demo's include_cpp! no longer contains the line this test \
+             rewrites, so it is not testing what it thinks it is"
+        );
+        let mut files = HashMap::new();
+        files.insert("input.h", INPUT_H.as_bytes());
+        files.insert("main.rs", main_rs.as_bytes());
+        base_test_ex(&tmp_dir, RsGenMode::Single, |_| {}, files, vec!["main.rs"])?;
+        Ok(std::fs::read_to_string(
+            tmp_dir.path().join("autocxx-ffi-default-gen.rs"),
+        )?)
+    };
+
+    let terse = generate(false)?;
+    let pretty = generate(true)?;
+
+    // Without it, the whole mod is one line, under the marker.
+    assert!(
+        terse.lines().count() <= 2,
+        "the bindings already span {} lines without pretty!(), so this test can \
+         no longer tell whether pretty!() did anything",
+        terse.lines().count()
+    );
+    assert!(
+        pretty.lines().count() > 50,
+        "pretty!() did not lay the bindings out over multiple lines; it produced {} lines",
+        pretty.lines().count()
+    );
+    let first_line = pretty.lines().next().unwrap_or_default();
+    assert!(
+        first_line.starts_with("// ") && first_line.contains("@generated"),
+        "pretty!() displaced the @generated marker; the file starts: {first_line}"
+    );
+    assert!(
+        pretty == generate(true)?,
+        "pretty!() output differs between two runs over the same input"
+    );
+    Ok(())
+}
+
 /// The marker must not smuggle a timestamp (or anything else which varies run
 /// to run) into the output: content-addressed build systems rebuild everything
 /// downstream of a generated file whose bytes changed, even if only a comment

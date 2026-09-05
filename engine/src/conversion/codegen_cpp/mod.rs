@@ -622,18 +622,17 @@ impl<'a> CppCodeGenerator<'a> {
                 }
             },
             CppFunctionBody::StaticMethodCall(ns, ty_id, fn_id) => {
-                let underlying_function_call = ns
-                    .into_iter()
-                    .cloned()
-                    .chain(
-                        [
-                            ty_id.to_string(),
-                            fn_id.to_string_for_cpp_generation().to_string(),
-                        ]
-                        .iter()
-                        .cloned(),
-                    )
-                    .join("::");
+                // The bindgen name flattens nesting - a `struct B` inside
+                // `struct A` is `A_B` - so joining the namespace to it would
+                // emit `A_B::f()`, which names nothing in C++. Ask the name
+                // map for the C++ spelling instead; it restores the nesting
+                // and already carries the namespace.
+                let ty_name = QualifiedName::new(ns, ty_id.clone());
+                let underlying_function_call = format!(
+                    "{}::{}",
+                    self.namespaced_name(&ty_name),
+                    fn_id.to_string_for_cpp_generation()
+                );
                 (
                     format!("{underlying_function_call}({arg_list})"),
                     "".to_string(),

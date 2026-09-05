@@ -443,8 +443,8 @@ impl IncludeCppEngine {
             config: &self.config,
             rs: match &self.state {
                 State::NotGenerated => panic!("Generate first"),
-                State::Generated(gen_results) => gen_results.item_mod.to_token_stream(),
-                State::ParseOnly => TokenStream2::new(),
+                State::Generated(gen_results) => Some(&gen_results.item_mod),
+                State::ParseOnly => None,
             },
         }
     }
@@ -543,7 +543,6 @@ impl IncludeCppEngine {
             #[allow(dead_code)]
             #[allow(non_upper_case_globals)]
             #[allow(non_camel_case_types)]
-            #[allow(unsafe_op_in_unsafe_fn)]
             #[doc = "Generated using autocxx - do not edit directly"]
             #[doc = "@generated"]
             mod #mod_name {
