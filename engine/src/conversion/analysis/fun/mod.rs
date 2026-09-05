@@ -702,6 +702,7 @@ impl<'a> FnAnalyzer<'a> {
                     results.push(create_subclass_trait_item(
                         ApiName::new_from_qualified_name(trait_api_name),
                         &simpler_analysis,
+                        &analysis,
                         receiver_mutability,
                         sup.clone(),
                         is_pure_virtual,

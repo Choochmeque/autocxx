@@ -45,7 +45,7 @@ use super::{
     analysis::{
         bridge_type_names::BridgeTypeNames,
         doc_label::make_doc_attrs,
-        fun::{FnPhase, PodAndDepAnalysis, ReceiverMutability},
+        fun::{FnKind, FnPhase, PodAndDepAnalysis, ReceiverMutability},
         pod::PodAnalysis,
     },
     api::{AnalysisPhase, Api, SubclassName, TypeKind, SUPER_FN_SUFFIX},
@@ -98,6 +98,48 @@ fn super_fn_names(methods: &[SuperclassMethod]) -> Vec<Ident> {
             make_ident(candidate).0
         })
         .collect()
+}
+
+/// What one C++ superclass contributes to the `_methods` and `_supers` traits
+/// named after it.
+#[derive(Default)]
+struct SuperclassTraitContents {
+    /// The virtual methods a Rust subclass may override, in the order the
+    /// traits list them.
+    methods: Vec<SuperclassMethod>,
+    /// Whether the superclass itself can implement those traits, which it can
+    /// only do by forwarding each method to its own binding for that method.
+    /// See <https://github.com/google/autocxx/issues/609>.
+    superclass_implements_traits: bool,
+}
+
+/// The Rust names of the methods which codegen will really emit, grouped by
+/// the type they're implemented on and limited to the types `wanted` asks
+/// about. Analysis records a good many methods it then declines to make
+/// callable - a protected one, say - so this is the only trustworthy answer to
+/// "can generated code call `Type::method`?".
+fn emitted_method_names(
+    apis: &ApiVec<FnPhase>,
+    wanted: impl Fn(&QualifiedName) -> bool,
+) -> HashMap<&QualifiedName, HashSet<&str>> {
+    let mut results: HashMap<&QualifiedName, HashSet<&str>> = HashMap::new();
+    for api in apis.iter() {
+        if let Api::Function { analysis, .. } = api {
+            // Keep in step with the same test at the top of `gen_function`.
+            if analysis.ignore_reason.is_err() || !analysis.externally_callable {
+                continue;
+            }
+            if let FnKind::Method { impl_for, .. } = &analysis.kind {
+                if wanted(impl_for) {
+                    results
+                        .entry(impl_for)
+                        .or_default()
+                        .insert(analysis.rust_name.as_str());
+                }
+            }
+        }
+    }
+    results
 }
 
 fn get_string_items() -> Vec<Item> {
@@ -302,20 +344,33 @@ impl<'a> RsCodeGenerator<'a> {
     fn accumulate_superclass_methods(
         &self,
         apis: &ApiVec<FnPhase>,
-    ) -> HashMap<QualifiedName, Vec<SuperclassMethod>> {
-        let mut results = HashMap::new();
+    ) -> HashMap<QualifiedName, SuperclassTraitContents> {
+        let mut results: HashMap<QualifiedName, SuperclassTraitContents> = HashMap::new();
         results.extend(
             self.config
                 .superclasses()
-                .map(|sc| (QualifiedName::new_from_cpp_name(sc), Vec::new())),
+                .map(|sc| (QualifiedName::new_from_cpp_name(sc), Default::default())),
         );
         for api in apis.iter() {
             if let Api::SubclassTraitItem { details, .. } = api {
-                let list = results.get_mut(&details.receiver);
-                if let Some(list) = list {
-                    list.push(details.clone());
+                if let Some(contents) = results.get_mut(&details.receiver) {
+                    contents.methods.push(details.clone());
                 }
             }
+        }
+        // The superclass can only implement its own traits by forwarding each
+        // method to the binding it got for that method - so it needs one for
+        // every method in the trait. Ask the functions which survived analysis
+        // rather than guessing from an earlier phase: a protected virtual
+        // method, for instance, is analyzed successfully and only then
+        // withheld from codegen, and an impl calling a binding which isn't
+        // there resolves back to the trait and recurses for ever.
+        let emitted = emitted_method_names(apis, |ty| results.contains_key(ty));
+        for (superclass, contents) in results.iter_mut() {
+            let emitted = emitted.get(superclass);
+            contents.superclass_implements_traits = contents.methods.iter().all(|method| {
+                emitted.is_some_and(|emitted| emitted.contains(method.name.to_string().as_str()))
+            });
         }
         results
     }
@@ -435,7 +490,7 @@ impl<'a> RsCodeGenerator<'a> {
     fn generate_rs_for_api(
         &self,
         api: Api<FnPhase>,
-        associated_methods: &HashMap<QualifiedName, Vec<SuperclassMethod>>,
+        associated_methods: &HashMap<QualifiedName, SuperclassTraitContents>,
         subclasses_with_a_single_trivial_constructor: &HashSet<QualifiedName>,
         non_pod_types: &HashSet<QualifiedName>,
     ) -> RsCodegenResult {
@@ -594,7 +649,7 @@ impl<'a> RsCodeGenerator<'a> {
             Api::Subclass {
                 name, superclass, ..
             } => {
-                let methods = associated_methods.get(&superclass);
+                let methods = associated_methods.get(&superclass).map(|c| &c.methods);
                 let generate_peer_constructor = subclasses_with_a_single_trivial_constructor.contains(&name.0.name) &&
                     // TODO: Create an UnsafeCppPeerConstructor trait for calling an unsafe
                     // constructor instead? Need to create unsafe versions of everything that uses
@@ -840,7 +895,7 @@ impl<'a> RsCodeGenerator<'a> {
         movable: bool,
         destroyable: bool,
         item_creator: F,
-        associated_methods: &HashMap<QualifiedName, Vec<SuperclassMethod>>,
+        associated_methods: &HashMap<QualifiedName, SuperclassTraitContents>,
         num_generics: usize,
     ) -> RsCodegenResult
     where
@@ -945,23 +1000,17 @@ impl<'a> RsCodeGenerator<'a> {
     fn add_superclass_stuff_to_type(
         name: &QualifiedName,
         output_mod_items: &mut Vec<Item>,
-        methods: Option<&Vec<SuperclassMethod>>,
+        contents: Option<&SuperclassTraitContents>,
     ) {
-        if let Some(methods) = methods {
+        if let Some(contents) = contents {
+            let methods = &contents.methods;
             let supers_name = SubclassName::get_supers_trait_name(name).get_final_ident();
             let (supers, mains): (Vec<_>, Vec<_>) = methods
                 .iter()
                 .zip(super_fn_names(methods))
                 .map(|(method, super_id)| {
                     let id = &method.name;
-                    let params = minisynize_punctuated(method.params.clone());
-                    let param_names: Punctuated<Expr, Comma> =
-                        Self::args_from_sig(&params).collect();
-                    let mut params = method.params.clone();
-                    *(params.iter_mut().next().unwrap()) = match method.receiver_mutability {
-                        ReceiverMutability::Const => parse_quote!(&self),
-                        ReceiverMutability::Mutable => parse_quote!(&mut self),
-                    };
+                    let (params, param_names) = Self::superclass_trait_method_signature(method);
                     let ret_type = &method.ret_type;
                     let unsafe_token = method.requires_unsafe.wrapper_token();
                     if method.is_pure_virtual {
@@ -1011,7 +1060,131 @@ impl<'a> RsCodeGenerator<'a> {
                     }
                 });
             }
+            if contents.superclass_implements_traits {
+                Self::implement_superclass_traits_for_superclass(
+                    name,
+                    output_mod_items,
+                    methods,
+                    !supers.is_empty(),
+                );
+            }
         }
+    }
+
+    /// The parameter list a `_methods`/`_supers` trait item gets for one
+    /// superclass method - the C++ receiver swapped for a plain `self`,
+    /// because implementers are Rust types - plus the names by which to pass
+    /// the rest of the parameters on to whoever really does the work.
+    fn superclass_trait_method_signature(
+        method: &SuperclassMethod,
+    ) -> (
+        Punctuated<crate::minisyn::FnArg, Comma>,
+        Punctuated<Expr, Comma>,
+    ) {
+        let param_names = Self::args_from_sig(&minisynize_punctuated(method.params.clone()))
+            .collect::<Punctuated<Expr, Comma>>();
+        let mut params = method.params.clone();
+        *(params
+            .iter_mut()
+            .next()
+            .expect("Superclass method had no receiver")) = match method.receiver_mutability {
+            ReceiverMutability::Const => parse_quote!(&self),
+            ReceiverMutability::Mutable => parse_quote!(&mut self),
+        };
+        (params, param_names)
+    }
+
+    /// Implements a superclass's own `_methods` (and `_supers`) trait for the
+    /// superclass itself, so that code generic over the trait accepts the C++
+    /// type as readily as any of its Rust subclasses.
+    /// See <https://github.com/google/autocxx/issues/609>.
+    ///
+    /// Each method simply calls the superclass's own binding for it, so only
+    /// call this once every one of them is known to have such a binding -
+    /// `SuperclassTraitContents::superclass_implements_traits` is that
+    /// question.
+    fn implement_superclass_traits_for_superclass(
+        name: &QualifiedName,
+        output_mod_items: &mut Vec<Item>,
+        methods: &[SuperclassMethod],
+        has_supers_trait: bool,
+    ) {
+        let ty = name.get_final_ident();
+        let (supers, mains): (Vec<_>, Vec<_>) = methods
+            .iter()
+            .zip(super_fn_names(methods))
+            .map(|(method, super_id)| {
+                let id = &method.name;
+                let (params, param_names) = Self::superclass_trait_method_signature(method);
+                let ret_type = &method.ret_type;
+                let unsafe_token = method.requires_unsafe.wrapper_token();
+                let receiver: Expr = match method.receiver_mutability {
+                    ReceiverMutability::Const => parse_quote!(self),
+                    // The trait's mutable methods take `&mut self` - that's
+                    // what a Rust subclass wants - whereas the superclass's own
+                    // binding takes the `Pin<&mut Self>` every C++ object is
+                    // held behind.
+                    //
+                    // SAFETY: the emitted `Pin::new_unchecked` asserts that
+                    // this object will not be moved. It won't: the C++ type is
+                    // `!Unpin` and has private fields, safe Rust can neither
+                    // construct one nor obtain a `&mut` to one (autocxx hands
+                    // out only `Pin<&mut T>`, and `Pin::get_mut` wants
+                    // `Unpin`), so the `&mut self` we were passed can only have
+                    // come from unsafe code which already took on exactly this
+                    // obligation - `Pin::into_inner_unchecked` and
+                    // `Pin::get_unchecked_mut` both demand it of their callers.
+                    ReceiverMutability::Mutable => {
+                        parse_quote!(unsafe { ::core::pin::Pin::new_unchecked(self) })
+                    }
+                };
+                let call: Expr = parse_quote!( #ty::#id(#receiver, #param_names) );
+                // A method returning a non-POD value by value hands the
+                // superclass's caller an `impl New`, whereas the trait
+                // promises a `UniquePtr`.
+                let body: Expr = if method.superclass_binding.returns_new {
+                    parse_quote!({
+                        use autocxx::moveit::Emplace;
+                        cxx::UniquePtr::emplace(#call)
+                    })
+                } else {
+                    call
+                };
+                if method.is_pure_virtual {
+                    // There's no `_super` item for a pure virtual method, so
+                    // this has to implement the `_methods` item itself; for
+                    // the others the trait's own default body forwards to
+                    // `_supers` for us.
+                    let item: ImplItem = parse_quote!(
+                        #unsafe_token fn #id(#params) #ret_type { #body }
+                    );
+                    (None, Some(item))
+                } else {
+                    let item: ImplItem = parse_quote!(
+                        #unsafe_token fn #super_id(#params) #ret_type { #body }
+                    );
+                    (Some(item), None)
+                }
+            })
+            .unzip();
+        let supers: Vec<_> = supers.into_iter().flatten().collect();
+        let mains: Vec<_> = mains.into_iter().flatten().collect();
+        if has_supers_trait {
+            let supers_name = SubclassName::get_supers_trait_name(name).get_final_ident();
+            output_mod_items.push(parse_quote! {
+                #[allow(non_snake_case)]
+                impl #supers_name for #ty {
+                    #(#supers)*
+                }
+            });
+        }
+        let methods_name = SubclassName::get_methods_trait_name(name).get_final_ident();
+        output_mod_items.push(parse_quote! {
+            #[allow(non_snake_case)]
+            impl #methods_name for #ty {
+                #(#mains)*
+            }
+        });
     }
 
     fn generate_extern_cpp_type(

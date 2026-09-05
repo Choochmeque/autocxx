@@ -12,8 +12,8 @@ use crate::{
         SetSuppressSystemHeaders,
     },
     code_checkers::{
-        make_checks_without_building, make_error_finder, make_rust_code_finder, make_string_finder,
-        CppMatcher, NoSystemHeadersChecker,
+        make_checks_without_building, make_error_finder, make_rust_code_finder,
+        make_string_absence_finder, make_string_finder, CppMatcher, NoSystemHeadersChecker,
     },
 };
 use autocxx_integration_tests::{
@@ -10115,6 +10115,223 @@ fn test_pv_subclass_derive_defaults() {
                 fn foo(&self) -> u32 {
                     4
                 }
+            }
+        }),
+    );
+}
+
+/// A C++ superclass should implement its own `_methods` trait, so that Rust
+/// code generic over that trait takes the C++ type as readily as any of its
+/// Rust subclasses. See <https://github.com/google/autocxx/issues/609>.
+#[test]
+fn test_superclass_implements_its_own_methods_trait() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct Thing {
+        Thing() : val(0) {}
+        uint32_t get() const { return val; }
+        uint32_t val;
+        std::string so_we_are_non_trivial;
+    };
+    class Observer {
+    public:
+        Observer() : a_(0) {}
+        virtual uint32_t foo() const { return 1; }
+        virtual void set(uint32_t a) { a_ = a; }
+        virtual uint32_t get() const { return a_; }
+        virtual Thing make() const { Thing t; t.val = a_; return t; }
+        virtual void take(std::string) {}
+        virtual ~Observer() {}
+    private:
+        uint32_t a_;
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut obs = ffi::Observer::new().within_unique_ptr();
+            assert_eq!(call_foo(obs.as_ref().unwrap()), 1);
+            // Safe Rust is never handed a `&mut` to a C++ object, so anyone
+            // wanting the `&mut self` methods has to promise not to move it.
+            let obs_mut = unsafe { core::pin::Pin::into_inner_unchecked(obs.pin_mut()) };
+            assert_eq!(set_and_get(obs_mut, 42), 42);
+            assert_eq!(call_make(obs.as_ref().unwrap()), 42);
+
+            let sub = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(call_foo(&*sub.borrow()), 4);
+            assert_eq!(call_make(&*sub.borrow()), 0);
+        },
+        quote! {
+            generate!("Thing")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            fn call_foo(o: &impl Observer_methods) -> u32 {
+                o.foo()
+            }
+            fn call_make(o: &impl Observer_methods) -> u32 {
+                o.make().as_ref().unwrap().get()
+            }
+            fn set_and_get(o: &mut impl Observer_methods, v: u32) -> u32 {
+                o.set(v);
+                o.get()
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+/// As [`test_superclass_implements_its_own_methods_trait`], but for a
+/// superclass which is abstract: it can't be instantiated, yet generic code
+/// should still be able to name one trait rather than two.
+#[test]
+fn test_abstract_superclass_implements_its_own_methods_trait() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const = 0;
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_implements::<ffi::Observer>();
+            let sub = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(call_foo(&*sub.borrow()), 4);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            fn assert_implements<T: Observer_methods + ?Sized>() {}
+            fn call_foo(o: &impl Observer_methods) -> u32 {
+                o.foo()
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+/// A protected virtual method gets an item in the `_methods` trait - a Rust
+/// subclass may well want to override it - but no binding of its own, since
+/// nothing outside the class may call it. The superclass therefore can't
+/// implement its own trait, and must not pretend to: an impl forwarding to
+/// the missing binding would resolve straight back to the trait and recurse
+/// for ever. See <https://github.com/google/autocxx/issues/609>.
+#[test]
+fn test_superclass_with_protected_virtual_method() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual ~Observer() {}
+    protected:
+        virtual uint32_t hidden() const { return 2; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let sub = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(call_foo(&*sub.borrow()), 4);
+            assert_eq!(sub.borrow().hidden(), 2);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        // An `impl Observer_supers for Observer` would compile - `Observer::hidden`
+        // resolves to the trait item it's meant to be implementing - and then
+        // recurse until the stack ran out, so pin down that we don't write one.
+        Some(make_string_absence_finder(vec![
+            "impl Observer_supers for Observer".to_string(),
+            "impl Observer_methods for Observer".to_string(),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            fn call_foo(o: &impl Observer_methods) -> u32 {
+                o.foo()
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+/// The superclass's own impl of its `_methods` trait has to reach the
+/// `Pin<&mut Self>` the C++ binding wants from the `&mut self` the trait
+/// gives it. Cover the shape where that happens inside an `unsafe fn`, which
+/// a method with a pointer parameter gets.
+#[test]
+fn test_superclass_implements_its_own_methods_trait_unsafely() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    struct A { uint8_t a; };
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo(const A*) {};
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+        },
+        quote! {
+            generate!("A")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        // Nothing here calls the impl, so insist it was written: without this
+        // the test would pass just as well if we'd stopped emitting it.
+        Some(make_string_finder(vec![
+            "impl Observer_supers for Observer".to_string(),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                unsafe fn foo(&mut self, _a: *const ffi::A) {}
             }
         }),
     );
