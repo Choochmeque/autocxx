@@ -24,6 +24,7 @@ use crate::config::AllowlistErr;
 use crate::config::Allowlist;
 
 use crate::directive_names::{EXTERN_RUST_FUN, EXTERN_RUST_TYPE, SUBCLASS};
+use crate::enum_style::{EnumStyle, EnumStyleError};
 use crate::{AllowlistEntry, IncludeCppConfig};
 use crate::{ParseResult, RustFun, RustPath};
 
@@ -128,6 +129,7 @@ pub(crate) fn get_directives() -> &'static DirectivesMap {
             "extern_cpp_opaque_type".into(),
             Box::new(ExternCppType { opaque: true }),
         );
+        need_exclamation.insert("enum_style".into(), Box::new(EnumStyleDirective));
 
         DirectivesMap {
             need_hexathorpe,
@@ -579,5 +581,67 @@ impl Directive for ExternCppType {
                     }
                 }),
         )
+    }
+}
+
+/// `enum_style!(BitfieldEnum, "Flags", "MoreFlags")` - ask `bindgen` to render
+/// the named C++ enums in something other than `autocxx`'s default style.
+struct EnumStyleDirective;
+
+impl Directive for EnumStyleDirective {
+    fn parse(
+        &self,
+        args: ParseStream,
+        config: &mut IncludeCppConfig,
+        _ident_span: &Span,
+    ) -> ParseResult<()> {
+        let style: EnumStyle = args.parse()?;
+        args.parse::<syn::token::Comma>()?;
+        let names: syn::punctuated::Punctuated<syn::LitStr, syn::token::Comma> =
+            syn::punctuated::Punctuated::parse_separated_nonempty(args)?;
+        for name in names {
+            // Asking for two different styles for one enum can only ever have
+            // been a mistake: `bindgen` would silently honour whichever call
+            // we happened to make last.
+            match config.enum_styles.insert(name.value(), style) {
+                Ok(()) => {}
+                Err(EnumStyleError::Conflict(previous)) => {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!(
+                            "enum {} was already given the style {}, so it can't also be {}",
+                            name.value(),
+                            previous.as_str(),
+                            style.as_str()
+                        ),
+                    ))
+                }
+                Err(EnumStyleError::NotAPlainName) => {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!(
+                            "{:?} is not a plain enum name; name the enum here \
+                             exactly as you would in generate!",
+                            name.value()
+                        ),
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "reproduction_case")]
+    fn output<'a>(
+        &self,
+        config: &'a IncludeCppConfig,
+    ) -> Box<dyn Iterator<Item = TokenStream> + 'a> {
+        // One directive per enum, which re-parses to the same map as whatever
+        // grouping the user originally wrote.
+        Box::new(config.enum_styles.iter().map(|(name, style)| {
+            quote! {
+                #style, #name
+            }
+        }))
     }
 }

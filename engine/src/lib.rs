@@ -30,7 +30,7 @@ mod builder;
 mod cxx_version_parity;
 
 use autocxx_bindgen::BindgenError;
-use autocxx_parser::{IncludeCppConfig, UnsafePolicy};
+use autocxx_parser::{EnumStyle, IncludeCppConfig, UnsafePolicy};
 use conversion::BridgeConverter;
 use miette::{SourceOffset, SourceSpan};
 use parse_callbacks::{AutocxxParseCallbacks, ParseCallbackResults, UnindexedParseCallbackResults};
@@ -382,6 +382,18 @@ impl IncludeCppEngine {
                     .allowlist_function(format!("{a}_bindgen_original"))
                     .allowlist_var(&a);
             }
+        }
+
+        // Per-enum overrides of `default_enum_style` above, from `enum_style!`.
+        for (name, style) in self.config.enum_styles() {
+            builder = match style {
+                EnumStyle::BitfieldEnum => builder.bitfield_enum(name),
+                EnumStyle::NewtypeEnum => builder.newtype_enum(name),
+                EnumStyle::RustifiedEnum => builder.rustified_enum(name),
+                EnumStyle::RustifiedNonExhaustiveEnum => {
+                    builder.rustified_non_exhaustive_enum(name)
+                }
+            };
         }
 
         for item in &self.config.opaquelist {

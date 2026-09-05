@@ -1175,6 +1175,265 @@ fn test_enum_with_funcs() {
     run_test(cxx, hdr, rs, &["Bob", "give_bob"], &[]);
 }
 
+/// A flag enum, plus a C++ function which inspects one, for the
+/// `enum_style!` tests below.
+fn flags_header() -> &'static str {
+    indoc! {"
+        #include <cstdint>
+        enum Flags : int {
+            FLAG_A = 1 << 0,            // 0x1
+            FLAG_B = 1 << 2,            // 0x4
+            FLAG_C = 1 << 3,            // 0x8
+        };
+        inline uint32_t count_flags(Flags flags) {
+            uint32_t count = 0;
+            if (flags & FLAG_A) count++;
+            if (flags & FLAG_B) count++;
+            if (flags & FLAG_C) count++;
+            return count;
+        }
+    "}
+}
+
+#[test]
+fn test_enum_style_bitfield() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(BitfieldEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            assert_eq!(ffi::Flags::FLAG_A.0, 0x1);
+            assert_eq!(ffi::Flags::FLAG_B.0, 0x4);
+            assert_eq!(ffi::Flags::FLAG_C.0, 0x8);
+
+            // The whole point of this style: combine two flags into a value
+            // which is not itself a declared enumerator. 0x5 is none of
+            // FLAG_A, FLAG_B or FLAG_C, and a Rust enum could not hold it.
+            let both = ffi::Flags::FLAG_A | ffi::Flags::FLAG_B;
+            assert_eq!(both.0, 0x5);
+            assert!(both.0 != ffi::Flags::FLAG_A.0);
+            assert!(both.0 != ffi::Flags::FLAG_B.0);
+            assert!(both.0 != ffi::Flags::FLAG_C.0);
+            assert_eq!((ffi::Flags::FLAG_A & ffi::Flags::FLAG_B).0, 0x0);
+
+            // ...and hand it back to C++, which agrees about what it means.
+            assert_eq!(ffi::count_flags(both), 2);
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_A), 1);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+fn test_enum_style_newtype() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(NewtypeEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            assert_eq!(ffi::Flags::FLAG_A.0, 0x1);
+            assert_eq!(ffi::Flags::FLAG_B.0, 0x4);
+            assert_eq!(ffi::Flags::FLAG_C.0, 0x8);
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_C), 1);
+            // A newtype with no operators: `|` is the caller's job.
+            let both = ffi::Flags(ffi::Flags::FLAG_A.0 | ffi::Flags::FLAG_B.0);
+            assert_eq!(ffi::count_flags(both), 2);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+fn test_enum_style_rustified() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(RustifiedEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            // A native Rust enum, so it can be matched exhaustively...
+            let described = match ffi::Flags::FLAG_C {
+                ffi::Flags::FLAG_A => 1,
+                ffi::Flags::FLAG_B => 2,
+                ffi::Flags::FLAG_C => 3,
+            };
+            assert_eq!(described, 3);
+            // ...and handed back to C++.
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_C), 1);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+/// `RustifiedNonExhaustiveEnum` produces the same Rust `enum` as
+/// `RustifiedEnum` with `#[non_exhaustive]` added. That attribute only binds
+/// on code outside the defining crate, and the generated bindings live in the
+/// same crate as the test, so this checks the enum itself rather than the
+/// attribute's effect.
+fn test_enum_style_rustified_non_exhaustive() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(RustifiedNonExhaustiveEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            let described = match ffi::Flags::FLAG_C {
+                ffi::Flags::FLAG_A => 1,
+                _ => 3,
+            };
+            assert_eq!(described, 3);
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_C), 1);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+/// Several enums, several styles, one `include_cpp!` - including one enum
+/// left at the default style.
+fn test_enum_style_several_enums() {
+    let hdr = indoc! {"
+        enum First : int {
+            FIRST_A = 5,
+            FIRST_B = 6
+        };
+        enum Second {
+            SECOND_A,
+            SECOND_B
+        };
+        enum Third : int {
+            THIRD_A = 1 << 1,
+            THIRD_B = 1 << 3
+        };
+        enum Fourth {
+            FOURTH_A,
+            FOURTH_B
+        };
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(BitfieldEnum, "First", "Second")
+            enum_style!(NewtypeEnum, "Fourth")
+            generate_pod!("First")
+            generate_pod!("Second")
+            generate_pod!("Fourth")
+            generate!("Third")
+        }
+
+        fn main() {
+            assert_eq!((ffi::First::FIRST_A & ffi::First::FIRST_B).0, 0x4);
+            assert_eq!((ffi::Second::SECOND_A | ffi::Second::SECOND_B).0, 0x1);
+            // Left at the default, so a native Rust enum.
+            assert!(ffi::Third::THIRD_A != ffi::Third::THIRD_B);
+            assert!(ffi::Fourth::FOURTH_A != ffi::Fourth::FOURTH_B);
+        }
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+#[test]
+/// `NewtypeEnum` and `BitfieldEnum` reach Rust as a struct whose enumerators
+/// are associated constants, and autocxx only re-exports the generated type
+/// with those constants for types it holds by value. So a plain `generate!`
+/// gives an opaque type with nothing on it, and naming an enumerator fails to
+/// compile. This is documented in `enum_style!` and in the book; pin it here
+/// so the documentation can't quietly go stale.
+fn test_enum_style_newtype_needs_generate_pod() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(NewtypeEnum, "Flags")
+            generate!("Flags")
+        }
+
+        fn main() {
+            let _ = ffi::Flags::FLAG_A;
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None)
+        .expect_err("a newtype enum behind generate! should not offer its enumerators");
+}
+
+#[test]
+/// A styled enum arrives from bindgen looking like a struct, so autocxx used
+/// to synthesize the implicit constructors and destructor a class would have.
+/// C++ has none of those for an enum, and for a nested one the generated
+/// `p->Inner::~Inner()` doesn't even compile.
+fn test_enum_style_nested_enum_has_no_synthesized_members() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Holder {
+        public:
+            enum Inner : int {
+                INNER_A = 1,
+                INNER_B = 2,
+            };
+            Holder() {}
+        };
+        struct HasEnumField {
+            Holder::Inner field;
+            uint32_t other;
+        };
+        inline uint32_t read_field(HasEnumField f) { return (uint32_t)f.field + f.other; }
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            // Named as `generate!` names it: bindgen flattens a nested type's
+            // name, so it is `Holder_Inner`, not `Holder::Inner`.
+            enum_style!(BitfieldEnum, "Holder_Inner")
+            generate_pod!("Holder_Inner")
+            generate_pod!("HasEnumField")
+            generate!("Holder")
+            generate!("read_field")
+        }
+        fn main() {
+            let both = ffi::Holder_Inner::INNER_A | ffi::Holder_Inner::INNER_B;
+            assert_eq!(both.0, 3);
+            let s = ffi::HasEnumField { field: ffi::Holder_Inner::INNER_B, other: 5 };
+            assert_eq!(ffi::read_field(s), 7);
+        }
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
 #[test]
 fn test_re_export() {
     let cxx = indoc! {"

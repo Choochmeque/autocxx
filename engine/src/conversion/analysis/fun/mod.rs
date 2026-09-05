@@ -2261,6 +2261,22 @@ impl<'a> FnAnalyzer<'a> {
             {
                 continue;
             }
+            // `enum_style!(NewtypeEnum, ...)` and its bitfield sibling make
+            // `bindgen` render a C++ `enum` as a Rust struct, so it arrives
+            // here looking like a class. It isn't one: C++ has no constructors
+            // or destructor to call on an enum, and writing what we normally
+            // write - `p->Inner::~Inner()` for a nested type - doesn't compile.
+            // The enumerators are all the API such a type has.
+            //
+            // The name is matched exactly, and spelled the way `generate!`
+            // spells it; see `enum_style!`'s documentation.
+            if self
+                .config
+                .enum_style(&self_ty.to_string())
+                .is_some_and(|style| style.is_newtype())
+            {
+                continue;
+            }
             let path = self_ty.to_type_path();
             if items_found.implicit_default_constructor_needed() {
                 self.synthesize_special_member(
