@@ -9,6 +9,7 @@
 use autocxx_bindgen::callbacks::{Explicitness, SpecialMemberKind, Visibility as CppVisibility};
 use indexmap::map::IndexMap as HashMap;
 use indexmap::{map::Entry, set::IndexSet as HashSet};
+use itertools::Itertools;
 
 use syn::{PatType, Type, TypeArray};
 
@@ -16,7 +17,10 @@ use crate::conversion::analysis::type_converter::TypeKind;
 use crate::conversion::type_helpers::type_is_reference;
 use crate::{
     conversion::{
-        analysis::{depth_first::fields_and_bases_first, pod::PodAnalysis},
+        analysis::{
+            depth_first::fields_and_bases_first,
+            pod::{FieldInfo, PodAnalysis},
+        },
         api::{Api, ApiName, FuncToConvert},
         apivec::ApiVec,
         convert_error::{ConvertErrorWithContext, ErrorContext},
@@ -26,7 +30,10 @@ use crate::{
     types::{make_ident, QualifiedName},
 };
 
-use super::{FnAnalysis, FnKind, FnPrePhase1, MethodKind, ReceiverMutability, TraitMethodKind};
+use super::{
+    special_member_to_string, FnAnalysis, FnKind, FnPrePhase1, MethodKind, ReceiverMutability,
+    TraitMethodKind,
+};
 
 /// Indicates what we found out about a category of special member function.
 ///
@@ -79,6 +86,171 @@ impl SpecialMemberFound {
     }
 }
 
+/// Why a class hasn't got one of the special member functions which autocxx
+/// would otherwise have given Rust a way to call.
+///
+/// A type with no constructors at all is baffling to meet in the generated
+/// docs, and every fact needed to explain it is right here in this analysis.
+/// See <https://github.com/google/autocxx/issues/1034>.
+#[derive(Debug, Clone)]
+pub(crate) enum WhyNoSpecialMember {
+    /// autocxx doesn't understand some of this class's own bases or fields
+    /// well enough to run C++'s rules, so it declined to guess. Describes the
+    /// ones it couldn't work out, where it knows which they were.
+    DependenciesNotUnderstood(Vec<String>),
+    /// A base class or a field has no version of the member which this class
+    /// could have called.
+    DependencyLacksIt {
+        /// The base or field, described for a human: "base class `B`",
+        /// "field `x` of type `Foo`".
+        dependency: String,
+        /// Which of *its* special member functions was missing. Not always
+        /// the same one: a class with an undestroyable member has no default
+        /// constructor either, because the constructor could never be undone.
+        member: SpecialMemberKind,
+    },
+    /// The class has a field of reference type and no default member
+    /// initializer to bind it, which deletes the default constructor C++
+    /// would otherwise have declared implicitly. Only that one: a constructor
+    /// the C++ source writes out can bind the reference in its member
+    /// initializer list, and the copy and move constructors bind it to
+    /// whatever the object they're copying from bound it to.
+    ReferenceField { field: Option<String> },
+    /// The class has a field of rvalue reference (`&&`) type.
+    RvalueReferenceField,
+    /// C++ withdraws a class's implicitly declared copy constructor once the
+    /// class declares a move constructor.
+    MoveConstructorDeclared,
+}
+
+impl WhyNoSpecialMember {
+    /// The note to leave in the generated documentation for a type which
+    /// hasn't got `member`.
+    pub(crate) fn describe(&self, member: SpecialMemberKind) -> String {
+        let member = special_member_to_string(member);
+        match self {
+            Self::DependenciesNotUnderstood(names) if names.is_empty() => format!(
+                "autocxx has not given this type a {member}: it could not work out all of this \
+                 class's members, and so cannot tell which special member functions C++ declares \
+                 for it. Any constructor which the C++ source declares explicitly is still \
+                 available."
+            ),
+            Self::DependenciesNotUnderstood(names) => format!(
+                "autocxx has not given this type a {member}: it does not understand {}, which \
+                 this class has as a base or a field, and so cannot tell which special member \
+                 functions C++ declares for it. Naming the offending type in a `generate!` \
+                 directive may be enough to work it out. Any constructor which the C++ source \
+                 declares explicitly is still available.",
+                names.iter().join(", ")
+            ),
+            Self::DependencyLacksIt {
+                dependency,
+                member: dependency_member,
+            } => format!(
+                "C++ gives this type no {member}, because its {dependency} has no accessible {}.",
+                special_member_to_string(*dependency_member)
+            ),
+            Self::ReferenceField { field: Some(field) } => format!(
+                "C++ gives this type no {member}, because its field `{field}` is a reference with \
+                 no default member initializer, leaving an implicitly declared constructor \
+                 nothing to bind it to. A constructor written out in the C++ source can bind it \
+                 in its member initializer list."
+            ),
+            Self::ReferenceField { field: None } => format!(
+                "C++ gives this type no {member}, because it has a reference field with no \
+                 default member initializer, leaving an implicitly declared constructor nothing \
+                 to bind it to. A constructor written out in the C++ source can bind it in its \
+                 member initializer list."
+            ),
+            Self::RvalueReferenceField => format!(
+                "C++ gives this type no {member}, because it has a field of rvalue reference \
+                 (`&&`) type."
+            ),
+            Self::MoveConstructorDeclared => format!(
+                "C++ gives this type no {member}, because it declares a move constructor, which \
+                 withdraws the copy constructor C++ would otherwise have declared implicitly."
+            ),
+        }
+    }
+}
+
+/// Why each of the constructors autocxx would have offered is missing, where
+/// we both know and think it worth saying. See [`WhyNoSpecialMember`].
+///
+/// Deliberately silent about the everyday case of a class which declares
+/// constructors of its own, and so gets no implicit ones: those classes have
+/// visible constructors already, and a note on each of them would be noise.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WhyNoConstructors {
+    pub(crate) default_constructor: Option<WhyNoSpecialMember>,
+    pub(crate) copy_constructor: Option<WhyNoSpecialMember>,
+    pub(crate) move_constructor: Option<WhyNoSpecialMember>,
+}
+
+/// Describes a base class for [`WhyNoSpecialMember::DependencyLacksIt`].
+fn describe_base(base: &QualifiedName) -> String {
+    format!("base class `{}`", base.to_cpp_name())
+}
+
+/// Describes a field for [`WhyNoSpecialMember::DependencyLacksIt`], with
+/// whatever of its name and type we happen to know.
+fn describe_field(field: &FieldInfo, ty: Option<&QualifiedName>) -> String {
+    match (&field.name, ty) {
+        (Some(name), Some(ty)) => format!("field `{name}` of type `{}`", ty.to_cpp_name()),
+        (Some(name), None) => format!("field `{name}`"),
+        (None, Some(ty)) => format!("field of type `{}`", ty.to_cpp_name()),
+        (None, None) => "a field".to_string(),
+    }
+}
+
+/// Describes the bases and fields whose own special member functions autocxx
+/// couldn't work out. Those are what stop it running C++'s rules for the class
+/// which has them, and so what the user would have to name in a `generate!`
+/// directive to get constructors for that class.
+fn unknown_dependencies(
+    bases: &HashSet<QualifiedName>,
+    field_info: &[FieldInfo],
+    get_items_found: impl Fn(&QualifiedName) -> Option<ItemsFound>,
+    field_type_name: impl Fn(&FieldInfo) -> Option<QualifiedName>,
+) -> Vec<String> {
+    let name_of = |qn: &QualifiedName| format!("`{}`", qn.to_cpp_name());
+    bases
+        .iter()
+        .filter(|base| get_items_found(base).is_none())
+        .map(name_of)
+        .chain(field_info.iter().filter_map(|field| match field.type_kind {
+            TypeKind::Regular | TypeKind::SubclassHolder(_) => match field_type_name(field) {
+                // A field whose type we can't even name is still a field we
+                // don't understand, so say what we can about it.
+                None => Some(describe_field(field, None)),
+                Some(ty) if get_items_found(&ty).is_none() => Some(name_of(&ty)),
+                Some(_) => None,
+            },
+            // Pointer and reference fields are always understood; see the
+            // arms which handle them in `find_constructors_present`.
+            _ => None,
+        }))
+        .collect()
+}
+
+/// Runs the requirements one of C++'s "the implicitly declared X is deleted
+/// if..." rules places on a class's bases or fields, and reports the first
+/// base or field which fails one, along with which requirement it failed.
+fn first_dependency_lacking<const N: usize>(
+    dependencies: &[(String, ItemsFound)],
+    requirements: impl Fn(&ItemsFound) -> [(SpecialMemberKind, bool); N],
+) -> Option<WhyNoSpecialMember> {
+    dependencies.iter().find_map(|(dependency, items_found)| {
+        requirements(items_found)
+            .into_iter()
+            .find(|(_, met)| !met)
+            .map(|(member, _)| WhyNoSpecialMember::DependencyLacksIt {
+                dependency: dependency.clone(),
+                member,
+            })
+    })
+}
+
 /// Information about which special member functions exist based on the C++ rules.
 ///
 /// Not all of this information is used directly, but we need to track it to determine the
@@ -100,6 +272,11 @@ pub(super) struct ItemsFound {
     /// Will always be `Some` if any of the other fields are [`SpecialMemberFound::Implict`],
     /// otherwise optional.
     pub(super) name: Option<ApiName>,
+
+    /// Why the constructors above came out [`SpecialMemberFound::NotPresent`],
+    /// where we can usefully say. Used only to document the absence to whoever
+    /// reads the generated bindings.
+    pub(super) why_no_constructors: WhyNoConstructors,
 }
 
 impl ItemsFound {
@@ -274,6 +451,7 @@ pub(super) fn find_constructors_present(
                         non_const_copy_constructor: SpecialMemberFound::NotPresent,
                         move_constructor: SpecialMemberFound::Implicit,
                         name: Some(name.clone()),
+                        why_no_constructors: Default::default(),
                     })
                 } else if let Some(constructor_details) = known_types().get_constructor_details(qn)
                 {
@@ -282,51 +460,83 @@ pub(super) fn find_constructors_present(
                     all_items_found.get(qn).cloned()
                 }
             };
-            let bases_items_found: Vec<_> = bases.iter().map_while(get_items_found).collect();
-            let fields_items_found: Vec<_> = field_info
-                .iter()
-                .filter_map(|field_info| match field_info.type_kind {
-                    TypeKind::Regular | TypeKind::SubclassHolder(_) => match field_info.ty {
-                        Type::Path(ref qn) => get_items_found(&QualifiedName::from_type_path(qn)),
-                        Type::Array(TypeArray { ref elem, .. }) => match elem.as_ref() {
-                            Type::Path(ref qn) => {
-                                get_items_found(&QualifiedName::from_type_path(qn))
-                            }
-                            _ => None,
-                        },
+            // The name of the type a field is declared with, where it has one
+            // we could look up. Kept alongside each field's analysis so that
+            // we can name the culprit if it turns out to block a constructor.
+            let field_type_name = |field_info: &FieldInfo| -> Option<QualifiedName> {
+                match field_info.ty {
+                    Type::Path(ref qn) => Some(QualifiedName::from_type_path(qn)),
+                    Type::Array(TypeArray { ref elem, .. }) => match elem.as_ref() {
+                        Type::Path(ref qn) => Some(QualifiedName::from_type_path(qn)),
                         _ => None,
                     },
-                    // A pointer field does not delete the implicit default constructor: it is
-                    // simply left uninitialized. bindgen tells pointers and references apart for
-                    // us by wrapping the latter in its `__bindgen_marker_Reference` /
-                    // `__bindgen_marker_RValueReference` markers, which the type converter turns
-                    // into the reference `TypeKind`s below, so a `TypeKind::Pointer` here really
-                    // is a C++ pointer. Treating it like a reference silently suppressed `new()`
-                    // for any struct with a pointer member.
-                    // See https://github.com/google/autocxx/issues/1366.
-                    TypeKind::Pointer => Some(ItemsFound {
-                        default_constructor: SpecialMemberFound::Implicit,
-                        destructor: SpecialMemberFound::Implicit,
-                        const_copy_constructor: SpecialMemberFound::Implicit,
-                        non_const_copy_constructor: SpecialMemberFound::NotPresent,
-                        move_constructor: SpecialMemberFound::Implicit,
-                        name: Some(name.clone()),
-                    }),
-                    // A reference field, by contrast, does delete the implicit default
-                    // constructor unless it has a default member initializer.
-                    TypeKind::Reference
-                    | TypeKind::MutableReference
-                    | TypeKind::RValueReference => Some(ItemsFound {
-                        default_constructor: SpecialMemberFound::NotPresent,
-                        destructor: SpecialMemberFound::Implicit,
-                        const_copy_constructor: SpecialMemberFound::Implicit,
-                        non_const_copy_constructor: SpecialMemberFound::NotPresent,
-                        move_constructor: SpecialMemberFound::Implicit,
-                        name: Some(name.clone()),
-                    }),
+                    _ => None,
+                }
+            };
+            let bases_items_found: Vec<(String, ItemsFound)> = bases
+                .iter()
+                .map_while(|base| Some((describe_base(base), get_items_found(base)?)))
+                .collect();
+            let fields_items_found: Vec<(String, ItemsFound)> = field_info
+                .iter()
+                .filter_map(|field_info| {
+                    let ty = field_type_name(field_info);
+                    let items_found = match field_info.type_kind {
+                        TypeKind::Regular | TypeKind::SubclassHolder(_) => {
+                            get_items_found(ty.as_ref()?)
+                        }
+                        // A pointer field does not delete the implicit default constructor: it is
+                        // simply left uninitialized. bindgen tells pointers and references apart for
+                        // us by wrapping the latter in its `__bindgen_marker_Reference` /
+                        // `__bindgen_marker_RValueReference` markers, which the type converter turns
+                        // into the reference `TypeKind`s below, so a `TypeKind::Pointer` here really
+                        // is a C++ pointer. Treating it like a reference silently suppressed `new()`
+                        // for any struct with a pointer member.
+                        // See https://github.com/google/autocxx/issues/1366.
+                        TypeKind::Pointer => Some(ItemsFound {
+                            default_constructor: SpecialMemberFound::Implicit,
+                            destructor: SpecialMemberFound::Implicit,
+                            const_copy_constructor: SpecialMemberFound::Implicit,
+                            non_const_copy_constructor: SpecialMemberFound::NotPresent,
+                            move_constructor: SpecialMemberFound::Implicit,
+                            name: Some(name.clone()),
+                            why_no_constructors: Default::default(),
+                        }),
+                        // A reference field, by contrast, does delete the implicit default
+                        // constructor unless it has a default member initializer.
+                        TypeKind::Reference
+                        | TypeKind::MutableReference
+                        | TypeKind::RValueReference => Some(ItemsFound {
+                            default_constructor: SpecialMemberFound::NotPresent,
+                            destructor: SpecialMemberFound::Implicit,
+                            const_copy_constructor: SpecialMemberFound::Implicit,
+                            non_const_copy_constructor: SpecialMemberFound::NotPresent,
+                            move_constructor: SpecialMemberFound::Implicit,
+                            name: Some(name.clone()),
+                            why_no_constructors: Default::default(),
+                        }),
+                    }?;
+                    Some((describe_field(field_info, ty.as_ref()), items_found))
                 })
                 .collect();
             let has_rvalue_reference_fields = details.has_rvalue_reference_fields;
+            // A reference member is the only field whose stand-in analysis
+            // above reports "no default constructor". Explaining it in those
+            // terms would name a Rust type the user never wrote, so keep hold
+            // of the field itself and report it in C++'s terms instead.
+            let reference_field = field_info
+                .iter()
+                .find(|field| {
+                    matches!(
+                        field.type_kind,
+                        TypeKind::Reference
+                            | TypeKind::MutableReference
+                            | TypeKind::RValueReference
+                    )
+                })
+                .map(|field| WhyNoSpecialMember::ReferenceField {
+                    field: field.name.clone(),
+                });
 
             // Check that all the bases and field types are known first. This combined with
             // iterating via [`depth_first`] means we can safely search in `items_found` for all of
@@ -403,6 +613,32 @@ pub(super) fn find_constructors_present(
                     non_const_copy_constructor: is_explicit(ExplicitKind::NonConstCopyConstructor),
                     move_constructor: is_explicit(ExplicitKind::MoveConstructor),
                     name: Some(name.clone()),
+                    // This is the case google/autocxx#1034 is about: a type
+                    // with no constructors at all and, until now, nothing at
+                    // all in the bindings to say why. Name the bases and
+                    // fields we couldn't work out, so that the user can go
+                    // and add them to a `generate!` directive.
+                    why_no_constructors: {
+                        let unknown = unknown_dependencies(
+                            bases,
+                            field_info,
+                            get_items_found,
+                            field_type_name,
+                        );
+                        let why = |found| {
+                            matches!(found, SpecialMemberFound::NotPresent).then(|| {
+                                WhyNoSpecialMember::DependenciesNotUnderstood(unknown.clone())
+                            })
+                        };
+                        WhyNoConstructors {
+                            default_constructor: why(is_explicit(ExplicitKind::DefaultConstructor)),
+                            // Either shape of copy constructor will do, so
+                            // only report one as missing when neither is here.
+                            copy_constructor: why(is_explicit(ExplicitKind::ConstCopyConstructor))
+                                .and(why(is_explicit(ExplicitKind::NonConstCopyConstructor))),
+                            move_constructor: why(is_explicit(ExplicitKind::MoveConstructor)),
+                        }
+                    },
                 };
                 log::info!(
                     "Special member functions (explicits only) found for {:?}: {:?}",
@@ -447,25 +683,55 @@ pub(super) fn find_constructors_present(
                                     }
                             }));
                     if have_defaulted {
-                        let bases_allow = bases_items_found.iter().all(|items_found| {
-                            items_found.destructor.callable_subclass()
-                                && items_found.default_constructor.callable_subclass()
-                        });
-                        // TODO: Allow member initializers for
-                        // https://github.com/google/autocxx/issues/816.
-                        let members_allow = fields_items_found.iter().all(|items_found| {
-                            items_found.destructor.callable_any()
-                                && items_found.default_constructor.callable_any()
-                        });
-                        if !has_rvalue_reference_fields && bases_allow && members_allow {
-                            found_as_declared(explicit)
+                        // TODO: a `const` member with no initializer also
+                        // deletes the default constructor, and we don't
+                        // notice - `field_info` doesn't record constness, so
+                        // we synthesize a `new()` which C++ refuses to
+                        // compile. Same missing information as the member
+                        // initializers of google/autocxx#816.
+                        let blocker = if has_rvalue_reference_fields {
+                            Some(WhyNoSpecialMember::RvalueReferenceField)
+                        } else if let Some(reference_field) = reference_field.clone() {
+                            Some(reference_field)
                         } else {
-                            SpecialMemberFound::NotPresent
+                            first_dependency_lacking(&bases_items_found, |items_found| {
+                                [
+                                    (
+                                        SpecialMemberKind::Destructor,
+                                        items_found.destructor.callable_subclass(),
+                                    ),
+                                    (
+                                        SpecialMemberKind::DefaultConstructor,
+                                        items_found.default_constructor.callable_subclass(),
+                                    ),
+                                ]
+                            })
+                            // TODO: Allow member initializers for
+                            // https://github.com/google/autocxx/issues/816.
+                            .or_else(|| {
+                                first_dependency_lacking(&fields_items_found, |items_found| {
+                                    [
+                                        (
+                                            SpecialMemberKind::Destructor,
+                                            items_found.destructor.callable_any(),
+                                        ),
+                                        (
+                                            SpecialMemberKind::DefaultConstructor,
+                                            items_found.default_constructor.callable_any(),
+                                        ),
+                                    ]
+                                })
+                            })
+                        };
+                        match blocker {
+                            None => (found_as_declared(explicit), None),
+                            Some(blocker) => (SpecialMemberFound::NotPresent, Some(blocker)),
                         }
                     } else {
-                        found_if_user_defined(explicit)
+                        (found_if_user_defined(explicit), None)
                     }
                 };
+                let (default_constructor, why_no_default_constructor) = default_constructor;
 
                 // If no user-declared prospective destructor is provided for a class type (struct, class, or union), the compiler will always declare a destructor as an inline public member of its class.
                 //
@@ -479,10 +745,10 @@ pub(super) fn find_constructors_present(
                     if explicit.is_none() || is_defaulted(explicit) {
                         let bases_allow = bases_items_found
                             .iter()
-                            .all(|items_found| items_found.destructor.callable_subclass());
+                            .all(|(_, items_found)| items_found.destructor.callable_subclass());
                         let members_allow = fields_items_found
                             .iter()
-                            .all(|items_found| items_found.destructor.callable_any());
+                            .all(|(_, items_found)| items_found.destructor.callable_any());
                         if bases_allow && members_allow {
                             found_as_declared(explicit)
                         } else {
@@ -506,7 +772,7 @@ pub(super) fn find_constructors_present(
                 // T has direct or virtual base class that cannot be copied (has deleted, inaccessible, or ambiguous copy constructors);
                 // T has direct or virtual base class or a non-static data member with a deleted or inaccessible destructor;
                 // T has a data member of rvalue reference type;
-                let (const_copy_constructor, non_const_copy_constructor) = {
+                let (const_copy_constructor, non_const_copy_constructor, why_no_copy_constructor) = {
                     let explicit_const = find_explicit(ExplicitKind::ConstCopyConstructor);
                     let explicit_non_const = find_explicit(ExplicitKind::NonConstCopyConstructor);
                     let explicit_move = find_explicit(ExplicitKind::MoveConstructor);
@@ -516,23 +782,49 @@ pub(super) fn find_constructors_present(
                     let have_defaulted = (explicit_const.is_none() || is_defaulted(explicit_const))
                         && (explicit_non_const.is_none() || is_defaulted(explicit_non_const));
                     if have_defaulted {
+                        let blocker = if has_rvalue_reference_fields {
+                            Some(WhyNoSpecialMember::RvalueReferenceField)
                         // A user-declared move constructor deletes the
                         // *implicitly declared* copy constructor, but not one
                         // the user asked for with `= default`.
-                        let class_allows = (copy_is_defaulted || explicit_move.is_none())
-                            && !has_rvalue_reference_fields;
-                        let bases_allow = bases_items_found.iter().all(|items_found| {
-                            items_found.destructor.callable_subclass()
-                                && (items_found.const_copy_constructor.callable_subclass()
-                                    || items_found.non_const_copy_constructor.callable_subclass())
-                        });
-                        let members_allow = fields_items_found.iter().all(|items_found| {
-                            items_found.destructor.callable_any()
-                                && (items_found.const_copy_constructor.callable_any()
-                                    || items_found.non_const_copy_constructor.callable_any())
-                        });
-                        if class_allows && bases_allow && members_allow {
-                            if copy_is_defaulted {
+                        } else if !copy_is_defaulted && explicit_move.is_some() {
+                            Some(WhyNoSpecialMember::MoveConstructorDeclared)
+                        } else {
+                            first_dependency_lacking(&bases_items_found, |items_found| {
+                                [
+                                    (
+                                        SpecialMemberKind::Destructor,
+                                        items_found.destructor.callable_subclass(),
+                                    ),
+                                    (
+                                        SpecialMemberKind::CopyConstructor,
+                                        items_found.const_copy_constructor.callable_subclass()
+                                            || items_found
+                                                .non_const_copy_constructor
+                                                .callable_subclass(),
+                                    ),
+                                ]
+                            })
+                            .or_else(|| {
+                                first_dependency_lacking(&fields_items_found, |items_found| {
+                                    [
+                                        (
+                                            SpecialMemberKind::Destructor,
+                                            items_found.destructor.callable_any(),
+                                        ),
+                                        (
+                                            SpecialMemberKind::CopyConstructor,
+                                            items_found.const_copy_constructor.callable_any()
+                                                || items_found
+                                                    .non_const_copy_constructor
+                                                    .callable_any(),
+                                        ),
+                                    ]
+                                })
+                            })
+                        };
+                        match blocker {
+                            None if copy_is_defaulted => {
                                 // The user wrote the signature out, so it
                                 // decides which of the two the class has, and
                                 // how visible each is - not the bases and
@@ -541,28 +833,41 @@ pub(super) fn find_constructors_present(
                                 (
                                     found_only_if_defaulted(explicit_const),
                                     found_only_if_defaulted(explicit_non_const),
+                                    None,
                                 )
-                            } else {
+                            }
+                            None => {
                                 let dependencies_are_const = bases_items_found
                                     .iter()
                                     .chain(fields_items_found.iter())
-                                    .all(|items_found| items_found.const_copy_constructor.exists());
+                                    .all(|(_, items_found)| {
+                                        items_found.const_copy_constructor.exists()
+                                    });
                                 if dependencies_are_const {
-                                    (SpecialMemberFound::Implicit, SpecialMemberFound::NotPresent)
+                                    (
+                                        SpecialMemberFound::Implicit,
+                                        SpecialMemberFound::NotPresent,
+                                        None,
+                                    )
                                 } else {
-                                    (SpecialMemberFound::NotPresent, SpecialMemberFound::Implicit)
+                                    (
+                                        SpecialMemberFound::NotPresent,
+                                        SpecialMemberFound::Implicit,
+                                        None,
+                                    )
                                 }
                             }
-                        } else {
-                            (
+                            Some(blocker) => (
                                 SpecialMemberFound::NotPresent,
                                 SpecialMemberFound::NotPresent,
-                            )
+                                Some(blocker),
+                            ),
                         }
                     } else {
                         (
                             found_if_user_defined(explicit_const),
                             found_if_user_defined(explicit_non_const),
+                            None,
                         )
                     }
                 };
@@ -596,22 +901,35 @@ pub(super) fn find_constructors_present(
                             || find_explicit(ExplicitKind::MoveAssignmentOperator).is_some()
                             || find_explicit(ExplicitKind::Destructor).is_some());
                     if have_defaulted {
-                        let bases_allow = bases_items_found.iter().all(|items_found| {
-                            items_found.destructor.callable_subclass()
-                                && items_found.move_constructor.callable_subclass()
+                        let blocker = first_dependency_lacking(&bases_items_found, |items_found| {
+                            [
+                                (
+                                    SpecialMemberKind::Destructor,
+                                    items_found.destructor.callable_subclass(),
+                                ),
+                                (
+                                    SpecialMemberKind::MoveConstructor,
+                                    items_found.move_constructor.callable_subclass(),
+                                ),
+                            ]
+                        })
+                        .or_else(|| {
+                            first_dependency_lacking(&fields_items_found, |items_found| {
+                                [(
+                                    SpecialMemberKind::MoveConstructor,
+                                    items_found.move_constructor.callable_any(),
+                                )]
+                            })
                         });
-                        let members_allow = fields_items_found
-                            .iter()
-                            .all(|items_found| items_found.move_constructor.callable_any());
-                        if bases_allow && members_allow {
-                            found_as_declared(explicit)
-                        } else {
-                            SpecialMemberFound::NotPresent
+                        match blocker {
+                            None => (found_as_declared(explicit), None),
+                            Some(blocker) => (SpecialMemberFound::NotPresent, Some(blocker)),
                         }
                     } else {
-                        found_if_user_defined(explicit)
+                        (found_if_user_defined(explicit), None)
                     }
                 };
+                let (move_constructor, why_no_move_constructor) = move_constructor;
 
                 let items_found = ItemsFound {
                     default_constructor,
@@ -620,6 +938,11 @@ pub(super) fn find_constructors_present(
                     non_const_copy_constructor,
                     move_constructor,
                     name: Some(name.clone()),
+                    why_no_constructors: WhyNoConstructors {
+                        default_constructor: why_no_default_constructor,
+                        copy_constructor: why_no_copy_constructor,
+                        move_constructor: why_no_move_constructor,
+                    },
                 };
                 log::info!(
                     "Special member items found for {:?}: {:?}",
@@ -820,6 +1143,17 @@ fn find_explicit_items(
                 TraitMethodKind::Destructor => Some(ExplicitKind::Destructor),
                 // In `analyze_foreign_fn` we mark non-const copy constructors as not being copy
                 // constructors for now, so we don't have to worry about them.
+                //
+                // TODO: which means `ExplicitKind::NonConstCopyConstructor` is
+                // never recorded here, and a class whose only copy constructor
+                // is `T(T&)` looks to the rules below like a class which
+                // declares no copy constructor at all. They then hand it an
+                // implicit `T(const T&)` and an implicit `T(T&&)`, neither of
+                // which C++ declares for such a class, and we synthesize
+                // wrappers calling both - so the generated C++ doesn't
+                // compile. `T(T&)` reaches here as an
+                // `ExplicitKind::OtherConstructor`, which is what would have
+                // to be told apart to fix it.
                 TraitMethodKind::CopyConstructor => Some(ExplicitKind::ConstCopyConstructor),
                 TraitMethodKind::MoveConstructor => Some(ExplicitKind::MoveConstructor),
                 _ => None,
@@ -859,5 +1193,6 @@ fn known_type_items_found(constructor_details: KnownTypeConstructorDetails) -> I
         non_const_copy_constructor: SpecialMemberFound::NotPresent,
         move_constructor: exists_public_if(constructor_details.has_move_constructor),
         name: None,
+        why_no_constructors: Default::default(),
     }
 }

@@ -16,7 +16,7 @@ use crate::conversion::analysis::fun::{FnKind, MethodKind, ReceiverMutability, U
 use crate::conversion::analysis::pod::PodPhase;
 use crate::conversion::api::{
     CppVisibility, FuncToConvert, Provenance, RustSubclassFnDetails, SubclassConstructorDetails,
-    SubclassName, SuperclassMethod, UnsafetyNeeded,
+    SubclassName, SuperclassBinding, SuperclassMethod, UnsafetyNeeded,
 };
 use crate::conversion::apivec::ApiVec;
 use crate::conversion::parse::CppRefQualifier;
@@ -86,9 +86,11 @@ pub(super) fn create_subclass_fn_wrapper(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_subclass_trait_item(
     name: ApiName,
     analysis: &FnAnalysis,
+    superclass_analysis: &FnAnalysis,
     receiver_mutability: &ReceiverMutability,
     receiver: QualifiedName,
     is_pure_virtual: bool,
@@ -104,6 +106,21 @@ pub(super) fn create_subclass_trait_item(
     } else {
         UnsafetyNeeded::from_param_details(&analysis.param_details, false)
     };
+    // `analysis` describes the shape the trait uses, which is the simplified
+    // one we give subclasses; `superclass_analysis` describes the binding the
+    // superclass got for the very same C++ method. Note down how to call the
+    // latter. Whether the superclass ends up with that binding at all isn't
+    // known until codegen, which checks before making any use of this.
+    let superclass_binding = SuperclassBinding {
+        // A non-POD return value is handed back to Rust by constructing it
+        // into a placement parameter, which codegen turns into an `impl New`
+        // return type. The trait's simplified shape always uses a `UniquePtr`
+        // instead.
+        returns_new: superclass_analysis
+            .param_details
+            .iter()
+            .any(|pd| pd.is_placement_return_destination),
+    };
     Api::SubclassTraitItem {
         name,
         details: SuperclassMethod {
@@ -115,6 +132,7 @@ pub(super) fn create_subclass_trait_item(
             requires_unsafe,
             is_pure_virtual,
             receiver,
+            superclass_binding,
         },
     }
 }

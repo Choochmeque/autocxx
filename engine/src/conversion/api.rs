@@ -100,6 +100,24 @@ pub(crate) struct SuperclassMethod {
     pub(crate) receiver_mutability: ReceiverMutability,
     pub(crate) requires_unsafe: UnsafetyNeeded,
     pub(crate) is_pure_virtual: bool,
+    /// How to call the superclass's own binding for this method, so that the
+    /// superclass can implement its own `_methods` trait alongside its
+    /// subclasses. Whether such a binding exists at all is not settled until
+    /// codegen; see <https://github.com/google/autocxx/issues/609>.
+    pub(crate) superclass_binding: SuperclassBinding,
+}
+
+/// How the superclass's own binding for a virtual method differs from the
+/// shape its `_methods` trait uses. The two are generated from the same
+/// C++ method, so the parameters always line up - a `UniquePtr<T>` is
+/// accepted wherever the superclass's binding asks for an
+/// `impl ValueParam<T>` or an `impl ToCppString` - but the return value
+/// need not.
+#[derive(Clone, Debug)]
+pub(crate) struct SuperclassBinding {
+    /// The superclass's binding hands back an `impl New`, where the trait
+    /// deals in `UniquePtr`, so forwarding to it has to emplace the result.
+    pub(crate) returns_new: bool,
 }
 
 #[derive(Clone, Debug)]

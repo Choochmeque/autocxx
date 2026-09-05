@@ -34,6 +34,10 @@ use super::tdef::{TypedefAnalysis, TypedefPhase};
 #[derive(std::fmt::Debug)]
 
 pub(crate) struct FieldInfo {
+    /// The field's name, as bindgen spelled it. Absent for the members of an
+    /// anonymous union, which bindgen doesn't name. Only used to explain
+    /// things to the user, never to generate code.
+    pub(crate) name: Option<String>,
     pub(crate) ty: Type,
     pub(crate) type_kind: type_converter::TypeKind,
     pub(crate) bindgen_opaque_data: bool,
@@ -254,6 +258,7 @@ fn get_struct_field_types(
                         field_definition_deps.insert(QualifiedName::from_type_path(typ));
                     }
                     field_info.push(FieldInfo {
+                        name: f.ident.as_ref().map(|id| id.to_string()),
                         ty: r.ty,
                         type_kind: r.kind,
                         bindgen_opaque_data: f

@@ -100,6 +100,28 @@ pub(crate) fn make_string_finder(error_texts: Vec<String>) -> CodeChecker {
     Box::new(StringFinder(error_texts))
 }
 
+struct StringAbsenceFinder(Vec<String>);
+
+impl CodeCheckerFns for StringAbsenceFinder {
+    fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        let toks = rs.to_token_stream().to_string();
+        for msg in &self.0 {
+            if toks.contains(msg) {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "Unexpectedly found string '{msg}'"
+                )));
+            };
+        }
+        Ok(())
+    }
+}
+
+/// Returns a code checker which insists the given strings are _not_ in the
+/// generated Rust - for pinning down what we deliberately don't say.
+pub(crate) fn make_string_absence_finder(texts: Vec<String>) -> CodeChecker {
+    Box::new(StringAbsenceFinder(texts))
+}
+
 struct RustCodeFinder(Vec<TokenStream>);
 
 impl CodeCheckerFns for RustCodeFinder {

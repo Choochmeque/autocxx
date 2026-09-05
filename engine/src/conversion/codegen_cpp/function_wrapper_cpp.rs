@@ -86,8 +86,17 @@ impl TypeConversionPolicy {
             }
             CppConversionType::FromPointerToReference => Some(format!("(*{var_name})")),
             CppConversionType::Move => Some(format!("std::move({var_name})")),
-            CppConversionType::FromUniquePtrToValue | CppConversionType::FromPtrToMove => {
-                Some(format!("std::move(*{var_name})"))
+            // A move constructor has to have a move constructor to call, so
+            // `std::move` says exactly what is meant here.
+            CppConversionType::FromPtrToMove => Some(format!("std::move(*{var_name})")),
+            // Whereas these two are handing an ordinary parameter over by
+            // value out of storage the Rust side owns and is about to destroy,
+            // so a move is merely an optimization and must give way to a copy
+            // for types whose move constructor is deleted. Name the helper
+            // from the global namespace, or the argument's own namespaces
+            // could offer a better-matching function of that name.
+            CppConversionType::FromUniquePtrToValue => {
+                Some(format!("::autocxx_move_or_copy(*{var_name})"))
             }
             CppConversionType::FromValueToUniquePtr => Some(format!(
                 "std::make_unique<{}>({})",
@@ -99,11 +108,22 @@ impl TypeConversionPolicy {
                 Some(if is_return {
                     dereference
                 } else {
-                    format!("std::move({dereference})")
+                    format!("::autocxx_move_or_copy({dereference})")
                 })
             }
             CppConversionType::IgnoredPlacementPtrParameter => None,
             CppConversionType::FromReferenceToPointer => Some(format!("&{var_name}")),
         })
+    }
+
+    /// Whether [`Self::cpp_conversion`] may emit a call to the
+    /// `autocxx_move_or_copy` helper, so that callers know to emit its
+    /// definition. Keep in step with that function; over-reporting only costs
+    /// an unused template definition, under-reporting fails to compile.
+    pub(super) fn may_use_move_or_copy_helper(&self) -> bool {
+        matches!(
+            self.cpp_conversion,
+            CppConversionType::FromUniquePtrToValue | CppConversionType::FromPtrToValue
+        )
     }
 }

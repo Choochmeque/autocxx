@@ -60,7 +60,7 @@ use self::{
     bridge_name_tracker::BridgeNameTracker,
     function_wrapper::RustConversionType,
     implicit_constructors::{
-        discard_deleted_defaulted_members, find_constructors_present, ItemsFound,
+        discard_deleted_defaulted_members, find_constructors_present, ItemsFound, WhyNoConstructors,
     },
     overload_tracker::OverloadTracker,
     subclass::{
@@ -259,7 +259,7 @@ pub(crate) struct PodAndDepAnalysis {
 pub(crate) struct FnPhase;
 
 /// Indicates which kinds of public constructors are known to exist for a type.
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PublicConstructors {
     pub(crate) move_constructor: bool,
     /// Whether anyone outside the class can destroy one of these.
@@ -274,6 +274,11 @@ pub(crate) struct PublicConstructors {
     /// so it is safe to use it to *remove* API surface.
     /// See <https://github.com/google/autocxx/issues/829>.
     pub(crate) destructor_inaccessible: bool,
+    /// Why C++'s rules withheld each of the constructors we'd otherwise have
+    /// offered, where we know and it's worth saying. Purely for documenting
+    /// the absence to whoever reads the bindings; nothing is generated from
+    /// it. See <https://github.com/google/autocxx/issues/1034>.
+    pub(crate) why_no_constructors: WhyNoConstructors,
 }
 
 impl PublicConstructors {
@@ -282,6 +287,7 @@ impl PublicConstructors {
             move_constructor: items_found.move_constructor.callable_any(),
             destructor: items_found.destructor.callable_any(),
             destructor_inaccessible: !items_found.destructor.callable_any(),
+            why_no_constructors: items_found.why_no_constructors.clone(),
         }
     }
 }
@@ -702,6 +708,7 @@ impl<'a> FnAnalyzer<'a> {
                     results.push(create_subclass_trait_item(
                         ApiName::new_from_qualified_name(trait_api_name),
                         &simpler_analysis,
+                        &analysis,
                         receiver_mutability,
                         sup.clone(),
                         is_pure_virtual,

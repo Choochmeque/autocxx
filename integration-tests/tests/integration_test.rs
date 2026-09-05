@@ -12,8 +12,8 @@ use crate::{
         SetSuppressSystemHeaders,
     },
     code_checkers::{
-        make_checks_without_building, make_error_finder, make_rust_code_finder, make_string_finder,
-        CppMatcher, NoSystemHeadersChecker,
+        make_checks_without_building, make_error_finder, make_rust_code_finder,
+        make_string_absence_finder, make_string_finder, CppMatcher, NoSystemHeadersChecker,
     },
 };
 use autocxx_integration_tests::{
@@ -10120,6 +10120,223 @@ fn test_pv_subclass_derive_defaults() {
     );
 }
 
+/// A C++ superclass should implement its own `_methods` trait, so that Rust
+/// code generic over that trait takes the C++ type as readily as any of its
+/// Rust subclasses. See <https://github.com/google/autocxx/issues/609>.
+#[test]
+fn test_superclass_implements_its_own_methods_trait() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct Thing {
+        Thing() : val(0) {}
+        uint32_t get() const { return val; }
+        uint32_t val;
+        std::string so_we_are_non_trivial;
+    };
+    class Observer {
+    public:
+        Observer() : a_(0) {}
+        virtual uint32_t foo() const { return 1; }
+        virtual void set(uint32_t a) { a_ = a; }
+        virtual uint32_t get() const { return a_; }
+        virtual Thing make() const { Thing t; t.val = a_; return t; }
+        virtual void take(std::string) {}
+        virtual ~Observer() {}
+    private:
+        uint32_t a_;
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut obs = ffi::Observer::new().within_unique_ptr();
+            assert_eq!(call_foo(obs.as_ref().unwrap()), 1);
+            // Safe Rust is never handed a `&mut` to a C++ object, so anyone
+            // wanting the `&mut self` methods has to promise not to move it.
+            let obs_mut = unsafe { core::pin::Pin::into_inner_unchecked(obs.pin_mut()) };
+            assert_eq!(set_and_get(obs_mut, 42), 42);
+            assert_eq!(call_make(obs.as_ref().unwrap()), 42);
+
+            let sub = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(call_foo(&*sub.borrow()), 4);
+            assert_eq!(call_make(&*sub.borrow()), 0);
+        },
+        quote! {
+            generate!("Thing")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            fn call_foo(o: &impl Observer_methods) -> u32 {
+                o.foo()
+            }
+            fn call_make(o: &impl Observer_methods) -> u32 {
+                o.make().as_ref().unwrap().get()
+            }
+            fn set_and_get(o: &mut impl Observer_methods, v: u32) -> u32 {
+                o.set(v);
+                o.get()
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+/// As [`test_superclass_implements_its_own_methods_trait`], but for a
+/// superclass which is abstract: it can't be instantiated, yet generic code
+/// should still be able to name one trait rather than two.
+#[test]
+fn test_abstract_superclass_implements_its_own_methods_trait() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const = 0;
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_implements::<ffi::Observer>();
+            let sub = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(call_foo(&*sub.borrow()), 4);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            fn assert_implements<T: Observer_methods + ?Sized>() {}
+            fn call_foo(o: &impl Observer_methods) -> u32 {
+                o.foo()
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+/// A protected virtual method gets an item in the `_methods` trait - a Rust
+/// subclass may well want to override it - but no binding of its own, since
+/// nothing outside the class may call it. The superclass therefore can't
+/// implement its own trait, and must not pretend to: an impl forwarding to
+/// the missing binding would resolve straight back to the trait and recurse
+/// for ever. See <https://github.com/google/autocxx/issues/609>.
+#[test]
+fn test_superclass_with_protected_virtual_method() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual ~Observer() {}
+    protected:
+        virtual uint32_t hidden() const { return 2; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let sub = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(call_foo(&*sub.borrow()), 4);
+            assert_eq!(sub.borrow().hidden(), 2);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        // An `impl Observer_supers for Observer` would compile - `Observer::hidden`
+        // resolves to the trait item it's meant to be implementing - and then
+        // recurse until the stack ran out, so pin down that we don't write one.
+        Some(make_string_absence_finder(vec![
+            "impl Observer_supers for Observer".to_string(),
+            "impl Observer_methods for Observer".to_string(),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            fn call_foo(o: &impl Observer_methods) -> u32 {
+                o.foo()
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+/// The superclass's own impl of its `_methods` trait has to reach the
+/// `Pin<&mut Self>` the C++ binding wants from the `&mut self` the trait
+/// gives it. Cover the shape where that happens inside an `unsafe fn`, which
+/// a method with a pointer parameter gets.
+#[test]
+fn test_superclass_implements_its_own_methods_trait_unsafely() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    struct A { uint8_t a; };
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo(const A*) {};
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+        },
+        quote! {
+            generate!("A")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        // Nothing here calls the impl, so insist it was written: without this
+        // the test would pass just as well if we'd stopped emitting it.
+        Some(make_string_finder(vec![
+            "impl Observer_supers for Observer".to_string(),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                unsafe fn foo(&mut self, _a: *const ffi::A) {}
+            }
+        }),
+    );
+}
+
 #[test]
 fn test_non_pv_subclass_simple() {
     let hdr = indoc! {"
@@ -11606,6 +11823,225 @@ fn test_nonconst_reference_method_parameter() {
         b.take_a(a.pin_mut());
     };
     run_test("", hdr, rs, &["NOP", "A", "B"], &[]);
+}
+
+/// A type whose move constructor is deleted, but which can still be copied,
+/// must still be passable by value. C++ overload resolution prefers a deleted
+/// move constructor to a perfectly good copy constructor, so the `std::move`
+/// the generated wrapper used to apply to every value parameter refused to
+/// compile for these. See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_deleted_move_constructor() {
+    let hdr = indoc! {"
+    #include <string>
+    struct A {
+        A() {}
+        A(const A&) {}
+        A(A&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_a(A) {}
+    struct B {
+        void take_a(A) const {}
+        // Force autocxx to generate a wrapper for the method above.
+        void take_a(A, int) const {}
+    };
+    "};
+    let rs = quote! {
+        moveit! {
+            let stack_obj = ffi::A::new();
+        }
+        ffi::take_a(&*stack_obj);
+        ffi::take_a(as_copy(stack_obj.as_ref()));
+
+        let heap_obj = ffi::A::new().within_unique_ptr();
+        ffi::take_a(&heap_obj);
+        ffi::take_a(heap_obj); // consume
+
+        let b = ffi::B::new().within_unique_ptr();
+        b.take_a(&*stack_obj);
+        b.take_a1(as_copy(stack_obj.as_ref()), autocxx::c_int(3));
+    };
+    run_test("", hdr, rs, &["A", "B", "take_a"], &[]);
+}
+
+/// Handing a value parameter to C++ should move it where C++ allows that - the
+/// Rust side owns the storage it comes out of and destroys it straight
+/// afterwards - and should fall back to a copy only where the move constructor
+/// can't be called. See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_moves_where_it_can() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& copies() { static int32_t c = 0; return c; }
+    inline int32_t& moves() { static int32_t m = 0; return m; }
+    struct Movable {
+        Movable() {}
+        Movable(const Movable&) { copies()++; }
+        Movable(Movable&&) { moves()++; }
+        std::string so_we_are_non_trivial;
+    };
+    struct Unmovable {
+        Unmovable() {}
+        Unmovable(const Unmovable&) { copies()++; }
+        Unmovable(Unmovable&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_movable(Movable) {}
+    inline void take_unmovable(Unmovable) {}
+    inline int32_t copy_count() { return copies(); }
+    inline int32_t move_count() { return moves(); }
+    inline void reset_counts() { copies() = 0; moves() = 0; }
+    "};
+    let rs = quote! {
+        // Consuming a UniquePtr hands C++ the object Rust was about to
+        // destroy, so it should be moved, not copied.
+        let heap_obj = ffi::Movable::new().within_unique_ptr();
+        ffi::reset_counts();
+        ffi::take_movable(heap_obj);
+        assert_eq!(ffi::copy_count(), 0);
+        assert_eq!(ffi::move_count(), 1);
+
+        // Borrowing one costs a copy into Rust-side storage, and then a move
+        // out of that storage into the parameter.
+        let heap_obj = ffi::Movable::new().within_unique_ptr();
+        ffi::reset_counts();
+        ffi::take_movable(&heap_obj);
+        assert_eq!(ffi::copy_count(), 1);
+        assert_eq!(ffi::move_count(), 1);
+
+        // A type which can't be moved is copied instead of failing to build.
+        let heap_obj = ffi::Unmovable::new().within_unique_ptr();
+        ffi::reset_counts();
+        ffi::take_unmovable(heap_obj);
+        assert_eq!(ffi::copy_count(), 1);
+        assert_eq!(ffi::move_count(), 0);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "Movable",
+            "Unmovable",
+            "take_movable",
+            "take_unmovable",
+            "copy_count",
+            "move_count",
+            "reset_counts",
+        ],
+        &[],
+    );
+}
+
+/// A type whose only copy constructor takes `T&` rather than `const T&` can be
+/// passed by value from an lvalue, which is exactly what the generated wrapper
+/// has. Neither `std::move` nor a `const T&` will bind to that constructor, so
+/// the wrapper has to hand the parameter over as a plain mutable lvalue.
+/// See <https://github.com/google/autocxx/issues/873>.
+///
+/// The `= delete`d move constructor is not incidental: without it, autocxx
+/// mistakes this class for one which declares no copy constructor and
+/// synthesizes wrappers calling implicit members C++ never gave it. See the
+/// note on `TraitMethodKind::CopyConstructor` in `implicit_constructors.rs`.
+#[test]
+fn test_pass_by_value_non_const_copy_constructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& mutable_copies() { static int32_t c = 0; return c; }
+    struct MutableCopyOnly {
+        MutableCopyOnly() {}
+        MutableCopyOnly(MutableCopyOnly&) { mutable_copies()++; }
+        MutableCopyOnly(MutableCopyOnly&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_it(MutableCopyOnly) {}
+    inline int32_t mutable_copy_count() { return mutable_copies(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::MutableCopyOnly::new().within_unique_ptr();
+        ffi::take_it(obj);
+        assert_eq!(ffi::mutable_copy_count(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["MutableCopyOnly", "take_it", "mutable_copy_count"],
+        &[],
+    );
+}
+
+/// The helper which hands a value parameter over is called with an argument of
+/// the parameter's own type, so C++ looks for it in that type's namespaces too
+/// - where a function of the same name would be a better match than our
+/// template. The generated call has to name ours from the global namespace.
+/// See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_helper_name_shadowed_in_namespace() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& hijacks() { static int32_t h = 0; return h; }
+    namespace shady {
+        struct A {
+            A() {}
+            A(const A&) {}
+            A(A&&) {}
+            std::string so_we_are_non_trivial;
+        };
+        // Argument-dependent lookup offers this to any unqualified call whose
+        // argument is a `shady::A`, and being an exact match it wins.
+        inline A autocxx_move_or_copy(A&) { hijacks()++; return A(); }
+        inline void take_a(A) {}
+    }
+    inline int32_t hijack_count() { return hijacks(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::shady::A::new().within_unique_ptr();
+        ffi::shady::take_a(obj);
+        assert_eq!(ffi::hijack_count(), 0);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["shady::A", "shady::take_a", "hijack_count"],
+        &[],
+    );
+}
+
+/// A type with neither a copy nor a move constructor can't be passed by value
+/// at all. The helper which hands value parameters over must leave that
+/// refusal where it was - in the C++ compiler - rather than swallowing it or
+/// turning it into an error inside the helper's own template.
+///
+/// Manually observed: the compiler's message names the user's own deleted
+/// constructor at the `take_it` call. This test can only assert that the C++
+/// build fails, though: `TestError::CppBuild` wraps `cc::Error`, which
+/// carries "command failed" and not the compiler's diagnostics - the same
+/// swallowed-diagnostics gap `RsBuild` had before the harness captured the
+/// child's output. Fixing that for the C++ side would let this pin the text.
+/// See <https://github.com/google/autocxx/issues/873>.
+#[test]
+fn test_pass_by_value_no_copy_or_move() {
+    let hdr = indoc! {"
+    #include <string>
+    struct Neither {
+        Neither() {}
+        Neither(const Neither&) = delete;
+        Neither(Neither&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_it(Neither) {}
+    "};
+    let rs = quote! {
+        let obj = ffi::Neither::new().within_unique_ptr();
+        ffi::take_it(obj);
+    };
+    run_test_expect_fail_with_error("", hdr, rs, &["Neither", "take_it"], &[], "CppBuild");
 }
 
 fn destruction_test(ident: proc_macro2::Ident, extra_bit: Option<TokenStream>) {
@@ -16280,6 +16716,125 @@ fn test_defaulted_destructor_which_is_deleted() {
             make_string_finder(vec![
                 "autocxx has not generated any way for Rust to own one of these".to_string(),
             ]),
+        ])),
+        None,
+    );
+}
+
+/// A type which turns up with no constructors is a mystery unless the
+/// bindings say which member or base took them away, so say it.
+/// See <https://github.com/google/autocxx/issues/1034>.
+#[test]
+fn test_absent_constructors_explain_themselves() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NoDefault {
+            NoDefault() = delete;
+            NoDefault(const NoDefault&) {}
+            uint32_t a;
+        };
+        struct HasUnconstructibleMember { NoDefault m; };
+        struct HasReferenceMember { uint32_t& r; };
+        class PrivateCopy {
+        public:
+            PrivateCopy() {}
+            uint32_t a;
+        private:
+            PrivateCopy(const PrivateCopy&) {}
+        };
+        struct DerivesPrivateCopy : public PrivateCopy { uint32_t b; };
+        struct DeclaresMove {
+            DeclaresMove() {}
+            DeclaresMove(DeclaresMove&&) {}
+            uint32_t a;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(
+            &[
+                "HasUnconstructibleMember",
+                "HasReferenceMember",
+                "DerivesPrivateCopy",
+                "DeclaresMove",
+            ],
+            &[],
+            None,
+        ),
+        None,
+        Some(make_string_finder(vec![
+            "C++ gives this type no default constructor, because its field `m` of type \
+             `NoDefault` has no accessible default constructor."
+                .to_string(),
+            "C++ gives this type no default constructor, because its field `r` is a reference \
+             with no default member initializer, leaving an implicitly declared constructor \
+             nothing to bind it to. A constructor written out in the C++ source can bind it in \
+             its member initializer list."
+                .to_string(),
+            "C++ gives this type no copy constructor, because its base class `PrivateCopy` has \
+             no accessible copy constructor."
+                .to_string(),
+            "C++ gives this type no copy constructor, because it declares a move constructor, \
+             which withdraws the copy constructor C++ would otherwise have declared implicitly."
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The case google/autocxx#1034 was reported for: autocxx doesn't understand
+/// one of the class's members, so it declines to work out any of the class's
+/// constructors, and until now said nothing about it outside the logs.
+#[test]
+fn test_absent_constructors_name_the_members_we_dont_understand() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> struct Tmpl { T t; };
+        struct HasTemplatedMember { Tmpl<uint32_t> t; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["HasTemplatedMember"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "autocxx has not given this type a default constructor: it does not understand"
+                .to_string(),
+            "which this class has as a base or a field, and so cannot tell which special member \
+             functions C++ declares for it."
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A type whose destructor Rust can't reach has no constructors either, but
+/// the note google/autocxx#829 added already says why - so don't say it again
+/// once per constructor.
+#[test]
+fn test_inaccessible_destructor_explains_itself_only_once() {
+    let hdr = indoc! {"
+        class PrivateDtor {
+        public:
+            PrivateDtor() {}
+        private:
+            ~PrivateDtor() {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["PrivateDtor"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(vec![
+                "autocxx has not generated any way for Rust to own one of these".to_string(),
+            ]),
+            make_string_absence_finder(vec!["C++ gives this type no".to_string()]),
         ])),
         None,
     );
