@@ -234,17 +234,20 @@ impl ApiName {
         id: Ident,
         cpp_name: Option<CppOriginalName>,
     ) -> Self {
-        Self {
-            name: QualifiedName::new(ns, id),
-            cpp_name,
-        }
+        Self::new_from_qualified_name_and_cpp_name(QualifiedName::new(ns, id), cpp_name)
+    }
+
+    /// For callers which have already built the [`QualifiedName`] - typically
+    /// because they needed it to look the C++ name up in the first place.
+    pub(crate) fn new_from_qualified_name_and_cpp_name(
+        name: QualifiedName,
+        cpp_name: Option<CppOriginalName>,
+    ) -> Self {
+        Self { name, cpp_name }
     }
 
     pub(crate) fn new_from_qualified_name(name: QualifiedName) -> Self {
-        Self {
-            name,
-            cpp_name: None,
-        }
+        Self::new_from_qualified_name_and_cpp_name(name, None)
     }
 
     pub(crate) fn new_in_root_namespace(id: Ident) -> Self {

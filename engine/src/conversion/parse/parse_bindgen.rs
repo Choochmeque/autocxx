@@ -47,9 +47,9 @@ pub(super) fn api_name(
     id: Ident,
     callback_results: &ParseCallbackResults,
 ) -> ApiName {
-    let qn = QualifiedName::new(ns, minisyn::Ident(id.clone()));
-    // TODO FIXME squash reduncancy
-    ApiName::new_with_cpp_name(ns, id.into(), callback_results.get_original_name(&qn))
+    let qn = QualifiedName::new(ns, minisyn::Ident(id));
+    let cpp_name = callback_results.get_original_name(&qn);
+    ApiName::new_from_qualified_name_and_cpp_name(qn, cpp_name)
 }
 
 pub(crate) fn api_name_qualified(
