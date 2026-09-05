@@ -7898,13 +7898,15 @@ fn test_take_nonpod_rvalue_from_stack() {
 /// usefully: `$expr`'s type is the `New` recipe itself
 /// (`impl New<Output = A>`), which is `Unpin`, so `pin!` happily pins *that*
 /// rather than ever constructing an `A`. The resulting
-/// `Pin<&mut impl New<Output = A>>` has no path to the constructed object:
-/// this test pins the diagnostic (`Pin::deref`/`Pin::get_mut` don't apply to
-/// `New`, and `New` has no method of its own besides the unsafe, place-taking
-/// `new`), which is what a user attempting this will see. `moveit!` avoids
-/// all of this by allocating the destination `MaybeUninit` slot itself and
-/// driving `New::new` to write into it directly, never producing a bare `A`
-/// value at all.
+/// `Pin<&mut impl New<Output = A>>` has no path to the constructed object, so
+/// the very next line - calling a real method of `A` on it - fails to
+/// compile, with rustc naming the pinned type as the `New` recipe rather
+/// than `A`. This test pins only that type name from the diagnostic (not
+/// rustc's surrounding prose, which is more likely to reword over time)
+/// as evidence that `pin!` captured the recipe rather than the object.
+/// `moveit!` avoids all of this by allocating the destination
+/// `MaybeUninit` slot itself and driving `New::new` to write into it
+/// directly, never producing a bare `A` value at all.
 #[test]
 fn test_issue_770_std_pin_macro_does_not_replace_moveit() {
     let cxx = "void A::set(uint32_t val) { a = val; } uint32_t A::get() const { return a; }";
@@ -7928,7 +7930,9 @@ fn test_issue_770_std_pin_macro_does_not_replace_moveit() {
         rs,
         &["A"],
         &[],
-        "no method named `get` found for struct `Pin<&mut impl autocxx::prelude::New<Output = ffi::A>>`",
+        // Only the discriminating fragment: rustc's rendering of the full
+        // pinned type (path prefixes, spacing) varies across versions.
+        "New<Output = ffi::A>",
     );
 }
 
