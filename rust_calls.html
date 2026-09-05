@@ -320,6 +320,14 @@ fn main() {
 </code></pre>
 <h2 id="subclass-casting"><a class="header" href="#subclass-casting">Subclass casting</a></h2>
 <p>Subclasses implement <code>AsRef</code> to enable casting to superclasses.</p>
+<p>The superclass implements its own <code>_methods</code> trait too, so a function written
+as <code>fn feed(d: &amp;impl Dinosaur_methods)</code> takes a <code>TRex</code>, a <code>Diplodocus</code>, or a
+C++ <code>Dinosaur</code> alike. (autocxx can't do this where one of the superclass's
+virtual methods has no binding of its own - a private or protected one, for
+instance - because there would be nothing for the implementation to call.)</p>
+<p>autocxx has not always written that impl. If you filled the gap with an
+<code>impl Dinosaur_methods for Dinosaur</code> of your own, delete it when you upgrade:
+Rust rejects the two together with <code>E0119</code>, conflicting implementations.</p>
 
                     </main>
 
