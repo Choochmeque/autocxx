@@ -6241,6 +6241,35 @@ fn test_derived_abstract_class_no_make_unique() {
     run_test("", hdr, rs, &["A", "B"], &[]);
 }
 
+/// Upstream #1326's own reduced repro: `B` inherits `A` *virtually*, and
+/// only overrides `A`'s pure virtual `f()` implicitly (i.e. not at all), so
+/// `B` remains abstract. bindgen does not surface the virtual-base link from
+/// `B` to `A` at all (confirmed via the issue's bindgen-output excerpt in
+/// its own thread, and unchanged here), so autocxx has no way to know `B` is
+/// still abstract and generates constructor/destructor wrapper code for it
+/// as though it were concrete. Retested 2026-09-05 against
+/// `abstract_types.rs` after fork PR #36 (which fixed pure-virtual
+/// *destructor* propagation, a different code path in the same file): still
+/// fails, now with real-clang diagnostics rather than the bindgen dump the
+/// issue was originally filed with -
+/// `error: allocating an object of abstract class type 'B'` from the
+/// generated `autocxxgen_ffi.h` wrapper, plus several
+/// `-Wdelete-abstract-non-virtual-dtor` errors. Root cause unchanged from
+/// the issue: needs bindgen to expose virtual inheritance (see #124/#1461).
+#[test]
+#[ignore] // https://github.com/google/autocxx/issues/1326
+fn test_issue_1326() {
+    let hdr = indoc! {"
+        struct A {
+            virtual int f() = 0;
+        };
+        struct B : virtual public A {
+            static void i_want_this_function();
+        };
+    "};
+    run_test("", hdr, quote! {}, &["B"], &[]);
+}
+
 #[test]
 fn test_recursive_derived_abstract_class_no_make_unique() {
     let hdr = indoc! {"
@@ -7845,6 +7874,66 @@ fn test_take_nonpod_rvalue_from_stack() {
         ffi::take_a(a);
     };
     run_test("", hdr, rs, &["A", "take_a"], &[]);
+}
+
+/// Upstream #770 asked us to test against `std::pin::pin!`, the official
+/// pin macro stabilized in Rust 1.68, once it existed, as a possible
+/// replacement for the `moveit!` macro when emplacing a non-POD object on
+/// the stack.
+///
+/// It does not work, and the reason is architectural rather than a bug we
+/// could fix: `moveit::New::new` (what `ffi::A::new()` returns something
+/// implementing) is `unsafe fn new(self, this: Pin<&mut MaybeUninit<Output>>)`
+/// - it only ever *writes into* a place the caller already supplied. There is
+/// no method that hands back an owned `A` by value, because a non-POD C++
+/// object can only be brought into existence via a C++ constructor running
+/// directly at its final address (see the top of this file's module docs on
+/// POD vs non-POD). `std::pin::pin!($expr)`, by contrast, is sugar for
+/// "evaluate `$expr` to an owned, already-constructed value, move it once
+/// into a local, and pin a reference to that local" - it has nothing to
+/// write a constructor's output into, so it cannot drive construction at
+/// all.
+///
+/// Concretely, `std::pin::pin!(ffi::A::new())` still type-checks, but not
+/// usefully: `$expr`'s type is the `New` recipe itself
+/// (`impl New<Output = A>`), which is `Unpin`, so `pin!` happily pins *that*
+/// rather than ever constructing an `A`. The resulting
+/// `Pin<&mut impl New<Output = A>>` has no path to the constructed object, so
+/// the very next line - calling a real method of `A` on it - fails to
+/// compile, with rustc naming the pinned type as the `New` recipe rather
+/// than `A`. This test pins only that type name from the diagnostic (not
+/// rustc's surrounding prose, which is more likely to reword over time)
+/// as evidence that `pin!` captured the recipe rather than the object.
+/// `moveit!` avoids all of this by allocating the destination
+/// `MaybeUninit` slot itself and driving `New::new` to write into it
+/// directly, never producing a bare `A` value at all.
+#[test]
+fn test_issue_770_std_pin_macro_does_not_replace_moveit() {
+    let cxx = "void A::set(uint32_t val) { a = val; } uint32_t A::get() const { return a; }";
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            A() {}
+            void set(uint32_t val);
+            uint32_t get() const;
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let mut stack_obj = std::pin::pin!(ffi::A::new());
+        stack_obj.as_mut().set(42);
+        assert_eq!(stack_obj.get(), 42);
+    };
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        rs,
+        &["A"],
+        &[],
+        // Only the discriminating fragment: rustc's rendering of the full
+        // pinned type (path prefixes, spacing) varies across versions.
+        "New<Output = ffi::A>",
+    );
 }
 
 #[test]
@@ -15243,6 +15332,62 @@ fn test_issue_1229() {
         fn main() {
             let _thing = thing::Thing::new(15.).within_unique_ptr();
             let _item = item::Item::new(15.).within_unique_ptr();
+        }
+    };
+
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+/// Upstream #1239, following on from #1229/#1235: two separate
+/// `include_cpp!` bridges (mods) in the same crate, each generating a class
+/// with an identically-named ordinary method, here `foo()`. #1229/#1235 was
+/// about the *constructor* wrapper symbol colliding, because that wrapper's
+/// name didn't depend on which type it constructed - literally
+/// `cxxbridge1$new_autocxx_autocxx_wrapper` in both bridges, so the linker
+/// saw a duplicate definition. This test pins that the same is not true of
+/// ordinary methods: their `extern "C"` wrapper names are already derived
+/// from bindgen's per-class mangled name (`Thing_foo`/`Item_foo` here), so
+/// two same-named methods on differently-named classes were never at risk of
+/// colliding, and this now builds and links cleanly.
+#[test]
+fn test_issue_1239() {
+    let hdr = indoc! {"
+    struct Thing {
+        float id;
+
+        Thing(float id) : id(id) {}
+        float foo() const { return id; }
+    };
+
+    struct Item {
+        float id;
+
+        Item(float id) : id(id) {}
+        float foo() const { return id; }
+    };
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::WithinUniquePtr;
+
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            name!(thing)
+            safety!(unsafe)
+            generate!("Thing")
+        }
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            name!(item)
+            safety!(unsafe)
+            generate!("Item")
+        }
+
+        fn main() {
+            let thing = thing::Thing::new(15.).within_unique_ptr();
+            let item = item::Item::new(16.).within_unique_ptr();
+            assert_eq!(thing.foo(), 15.);
+            assert_eq!(item.foo(), 16.);
         }
     };
 
