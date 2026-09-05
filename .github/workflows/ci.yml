@@ -80,6 +80,29 @@ jobs:
         shell: bash
       - run: cargo test --workspace ${{steps.testsuite.outputs.exclude}}
 
+  # Every other job runs on nightly, beta or stable, so nothing checks that we
+  # still build on the version `rust-version` in Cargo.toml promises. Compile
+  # only - running the suite here would double the cost of CI to tell us
+  # something the `test` job already knows.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # Keep in step with `rust-version` in the top-level Cargo.toml.
+          toolchain: "1.88"
+      # Its own cache: artifacts built by this toolchain are no use to the
+      # jobs sharing `fullBuild`, and vice versa.
+      - uses: Swatinem/rust-cache@v1
+        with: { sharedKey: msrv }
+      # `--locked` so that this tests the dependency versions we ship, rather
+      # than whatever the resolver picks on the day.
+      - run: cargo check --workspace --all-targets --locked
+
   examples:
     name: Examples ${{matrix.name || format('Rust {0}', matrix.rust)}}
     runs-on: ${{matrix.os || 'ubuntu'}}-latest
