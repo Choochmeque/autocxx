@@ -19,7 +19,8 @@ use crate::{
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
     run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
-    run_test_expect_fail_with_error_ex, BuilderModifier, CodeCheckerFns, TestError,
+    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_errors, BuilderModifier,
+    CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -12746,12 +12747,12 @@ fn test_pass_by_value_helper_name_shadowed_in_namespace() {
 /// refusal where it was - in the C++ compiler - rather than swallowing it or
 /// turning it into an error inside the helper's own template.
 ///
-/// Manually observed: the compiler's message names the user's own deleted
-/// constructor at the `take_it` call. This test can only assert that the C++
-/// build fails, though: `TestError::CppBuild` wraps `cc::Error`, which
-/// carries "command failed" and not the compiler's diagnostics - the same
-/// swallowed-diagnostics gap `RsBuild` had before the harness captured the
-/// child's output. Fixing that for the C++ side would let this pin the text.
+/// The message has to be the compiler's own, about the user's own type, and
+/// not something the helper template says about itself. Every compiler words
+/// this differently - gcc "use of deleted function", clang "call to deleted
+/// constructor", cl.exe "attempting to reference a deleted function" - so what
+/// is pinned here is the part they agree on: the type's name, and that
+/// something about it was deleted.
 /// See <https://github.com/google/autocxx/issues/873>.
 #[test]
 fn test_pass_by_value_no_copy_or_move() {
@@ -12769,7 +12770,14 @@ fn test_pass_by_value_no_copy_or_move() {
         let obj = ffi::Neither::new().within_unique_ptr();
         ffi::take_it(obj);
     };
-    run_test_expect_fail_with_error("", hdr, rs, &["Neither", "take_it"], &[], "CppBuild");
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["Neither", "take_it"],
+        &[],
+        &["CppBuild", "Neither", "delete"],
+    );
 }
 
 fn destruction_test(ident: proc_macro2::Ident, extra_bit: Option<TokenStream>) {

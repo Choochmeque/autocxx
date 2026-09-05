@@ -102,12 +102,11 @@ pub fn build_from_folder(
     for cpp_file in cpp_files.iter() {
         b.file(folder.join(cpp_file));
     }
-    configure_builder(&mut b)
+    let b = configure_builder(&mut b)
         .out_dir(&target_dir)
         .include(folder)
-        .include(folder.join("demo"))
-        .try_compile("autocxx-demo")
-        .map_err(TestError::CppBuild)?;
+        .include(folder.join("demo"));
+    build_cpp(b, "autocxx-demo").map_err(TestError::CppBuild)?;
     // use the trybuild crate to build the Rust file.
     get_builder()
         .lock()
@@ -477,32 +476,132 @@ fn build_in_process(
     }
 }
 
-/// Rust build failures can run to thousands of lines once every warning in the
-/// generated code is included. Keep the tail, which is where the errors and
-/// trybuild's own summary are.
+/// Build failures can run to thousands of lines once every warning in the
+/// generated code is included. Keep the tail, which is where the errors and any
+/// summary are.
 const MAX_DIAGNOSTIC_LINES: usize = 200;
 
 fn summarize_rs_build_failure(child_output: &str) -> String {
-    let mut lines: &[&str] = &child_output
+    let lines: Vec<&str> = child_output
         .lines()
         // Our own handshake with the child, of no interest to whoever is reading
         // the failure.
         .filter(|line| line.trim() != TRYBUILD_CHILD_SENTINEL)
-        .skip_while(|line| line.trim().is_empty())
-        .collect::<Vec<_>>()[..];
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines = &lines[..lines.len() - 1];
-    }
-    if lines.is_empty() {
-        return "the build failed, but the child process printed nothing.".to_string();
-    }
-    match lines.len().checked_sub(MAX_DIAGNOSTIC_LINES) {
+        .collect();
+    keep_last_lines(&lines)
+        .unwrap_or_else(|| "the build failed, but the child process printed nothing.".to_string())
+}
+
+/// The last [`MAX_DIAGNOSTIC_LINES`] of `lines`, without the blank lines at
+/// either end, and saying how many were dropped off the front. `None` if there
+/// was nothing but blank lines to begin with.
+fn keep_last_lines(lines: &[&str]) -> Option<String> {
+    let first = lines.iter().position(|line| !line.trim().is_empty())?;
+    let last = lines.iter().rposition(|line| !line.trim().is_empty())?;
+    let lines = &lines[first..=last];
+    Some(match lines.len().checked_sub(MAX_DIAGNOSTIC_LINES) {
         None | Some(0) => lines.join("\n"),
         Some(omitted) => format!(
             "[...{omitted} earlier lines omitted...]\n{}",
             lines[omitted..].join("\n")
         ),
+    })
+}
+
+/// Builds the C++ side, and on failure returns what the compiler said.
+///
+/// `cc` does not hand its caller the compiler's diagnostics. It pipes the
+/// compiler's stderr and reprints it as `cargo:warning=` lines on this
+/// process's *stdout* - where, under `cargo test`, libtest's capture swallows
+/// them and attributes them to no test in particular - while the [`cc::Error`]
+/// it returns says only "command did not execute successfully" and repeats the
+/// command line. A C++ build failure therefore used to arrive with no
+/// indication of what the compiler had objected to: the same hole the Rust side
+/// had before this harness started capturing trybuild's output, and the reason
+/// a test could assert that the C++ build failed but never assert *why*.
+///
+/// So, on failure, compile each source again here, with as close a command as
+/// `cc` will describe to us, and keep what it prints. Only a failing build pays
+/// for this. What comes back is evidence about the sources, not proof about the
+/// build that failed: see [`cpp_compiler_diagnostics`] for what the second pass
+/// can and cannot stand for.
+fn build_cpp(b: &cc::Build, output: &str) -> Result<(), String> {
+    match b.try_compile(output) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(format!("{err}\n{}", cpp_compiler_diagnostics(b))),
     }
+}
+
+/// Compiles each of `b`'s sources on its own and returns what the compiler said
+/// about the ones that failed - or, when none of them did, an explanation of
+/// why there is nothing to show.
+///
+/// The command is rebuilt from [`cc::Build::try_get_compiler`], which is `cc`'s
+/// own account of the tool and its flags (the target and optimisation flags,
+/// the include directories, everything this harness configured), plus the `-c`
+/// and output-file arguments `cc` adds per source.
+///
+/// That is a reconstruction, not the invocation `cc` made. It is close enough
+/// to be useful, and on `cc` 1.2.15 nothing observed here diverges - the
+/// working directory and environment are this process's either way, the
+/// arguments come out in the same order, and no response file is involved - but
+/// none of that is promised by `cc`'s API and a later version could change it.
+/// So a diagnostic reported here is what the compiler says about that source
+/// now; it is not proof of what happened during the build that failed.
+fn cpp_compiler_diagnostics(b: &cc::Build) -> String {
+    let tool = match b.try_get_compiler() {
+        Ok(tool) => tool,
+        Err(err) => return format!("The compiler could not be identified to re-run it: {err}"),
+    };
+    let obj_dir = match tempdir() {
+        Ok(obj_dir) => obj_dir,
+        Err(err) => return format!("There was no temporary directory to compile into: {err}"),
+    };
+    let mut report = Vec::new();
+    for (index, file) in b.get_files().enumerate() {
+        let mut cmd = tool.to_command();
+        // `-Fo` on MSVC-like compilers, `-o` everywhere else, following what
+        // cc's own `command_add_output_file` does for the C++ sources this
+        // harness builds.
+        let obj = obj_dir.path().join(format!("diagnostics{index}.o"));
+        if tool.is_like_msvc() {
+            let mut arg = OsString::from("-Fo");
+            arg.push(&obj);
+            cmd.arg(arg);
+        } else {
+            cmd.arg("-o").arg(&obj);
+        }
+        cmd.arg("-c").arg(file);
+        let output = match cmd.output() {
+            Ok(output) => output,
+            Err(err) => {
+                report.push(format!(
+                    "{} could not be recompiled to find out why: {err}",
+                    file.display()
+                ));
+                continue;
+            }
+        };
+        if output.status.success() {
+            continue;
+        }
+        // Both streams: gcc and clang put diagnostics on stderr, cl.exe puts
+        // them on stdout.
+        report.push(format!(
+            "--- compiling {} said: ---\n{}{}",
+            file.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let report = report.join("\n");
+    keep_last_lines(&report.lines().collect::<Vec<_>>()).unwrap_or_else(|| {
+        "All sources compiled individually on re-run, so there are no diagnostics to \
+         show. The original failure may have been transient, may have come from a \
+         difference between that command and this one, or may have happened while \
+         archiving or linking the objects rather than while compiling any of them."
+            .to_string()
+    })
 }
 
 fn write_to_file(tdir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -635,6 +734,28 @@ pub fn run_test_expect_fail_with_error(
     generate_pods: &[&str],
     expected: &str,
 ) {
+    run_test_expect_fail_with_errors(
+        cxx_code,
+        header_code,
+        rust_code,
+        generate,
+        generate_pods,
+        &[expected],
+    )
+}
+
+/// As [`run_test_expect_fail_with_error`], but insists on several things at
+/// once, for a diagnostic which no single substring pins down - a C++
+/// compiler's, say, where each compiler words the complaint differently and
+/// only the type and verb they have in common can be relied upon.
+pub fn run_test_expect_fail_with_errors(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    generate: &[&str],
+    generate_pods: &[&str],
+    expected: &[&str],
+) {
     let err = do_run_test(
         cxx_code,
         header_code,
@@ -650,7 +771,7 @@ pub fn run_test_expect_fail_with_error(
     assert_error_mentions(&err, expected);
 }
 
-/// As [`run_test_expect_fail_with_error`], but takes the directives verbatim,
+/// As [`run_test_expect_fail_with_errors`], but takes the directives verbatim,
 /// for a test which needs one the `generate` lists can't express.
 pub fn run_test_expect_fail_with_error_ex(
     cxx_code: &str,
@@ -671,10 +792,10 @@ pub fn run_test_expect_fail_with_error_ex(
         None,
     )
     .expect_err("Unexpected success");
-    assert_error_mentions(&err, expected);
+    assert_error_mentions(&err, &[expected]);
 }
 
-fn assert_error_mentions(err: &TestError, expected: &str) {
+fn assert_error_mentions(err: &TestError, expected: &[&str]) {
     // Both renderings, because a test may want to pin either: the `Debug` form
     // names the error variants, which is what a test about *classification*
     // cares about, while the `Display` form is the prose a user actually reads,
@@ -684,10 +805,12 @@ fn assert_error_mentions(err: &TestError, expected: &str) {
         TestError::AutoCxx(err) => format!("{err:?}\n{err}"),
         err => format!("{err:?}"),
     };
-    assert!(
-        reported.contains(expected),
-        "expected the failure to mention {expected:?}, but it was: {reported}"
-    );
+    for expected in expected {
+        assert!(
+            reported.contains(expected),
+            "expected the failure to mention {expected:?}, but it was: {reported}"
+        );
+    }
 }
 
 pub fn run_test_expect_fail_ex(
@@ -716,7 +839,10 @@ pub fn run_test_expect_fail_ex(
 /// In the future maybe the tests will distinguish the exact type of failure expected.
 pub enum TestError {
     AutoCxx(BuilderError),
-    CppBuild(cc::Error),
+    /// The C++ code failed to build. Carries `cc`'s own error, and after it the
+    /// C++ compiler's diagnostics as `build_cpp` recovered them, truncated to
+    /// the last `MAX_DIAGNOSTIC_LINES` lines.
+    CppBuild(String),
     /// The generated Rust code failed to build. Carries rustc's diagnostics as
     /// trybuild rendered them, truncated to the last `MAX_DIAGNOSTIC_LINES`
     /// lines.
@@ -729,15 +855,17 @@ pub enum TestError {
     CppCodeExaminationFail,
 }
 
-/// Hand-written rather than derived so that `RsBuild`'s diagnostics come out
-/// verbatim. The derived `Debug` would escape every newline, turning rustc's
-/// output into one unreadable line in the panic message from `.unwrap()` - which
-/// is precisely where a human needs to read it.
+/// Hand-written rather than derived so that the build errors' diagnostics come
+/// out verbatim. The derived `Debug` would escape every newline, turning the
+/// compilers' output into one unreadable line in the panic message from
+/// `.unwrap()` - which is precisely where a human needs to read it.
 impl std::fmt::Debug for TestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TestError::AutoCxx(err) => write!(f, "AutoCxx({err:?})"),
-            TestError::CppBuild(err) => write!(f, "CppBuild({err:?})"),
+            TestError::CppBuild(diagnostics) => {
+                write!(f, "CppBuild: the C++ failed to build:\n{diagnostics}")
+            }
             TestError::RsBuild(diagnostics) => {
                 write!(
                     f,
@@ -899,9 +1027,7 @@ pub fn do_run_test_manual(
     } else {
         b
     };
-    b.include(tdir.path())
-        .try_compile("autocxx-demo")
-        .map_err(TestError::CppBuild)?;
+    build_cpp(b.include(tdir.path()), "autocxx-demo").map_err(TestError::CppBuild)?;
     if KEEP_TEMPDIRS {
         println!("Generated .rs files: {generated_rs_files:?}");
     }

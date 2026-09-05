@@ -27,7 +27,9 @@ trybuild = "=1.0.81"
 test-log = "0.2.2"
 env_logger = "0.9.0"
 rust_info = "0.3.1"
-cc = "1.0"
+# 1.0.89 for `cc::Build::get_files`, which is how a failed C++ build's
+# diagnostics are recovered - see `build_cpp`.
+cc = "1.0.89"
 quote = "1.0"
 once_cell = "1.7"
 # This is necessary for building the projects created
