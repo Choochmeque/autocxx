@@ -8,13 +8,29 @@
 
 use autocxx_parser::{IncludeCppConfig, MultiBindings};
 use proc_macro2::TokenStream;
+use quote::ToTokens;
+use syn::ItemMod;
 
 /// Opaque structure representing the Rust which needs to be generated
 /// for a given `include_cpp!` macro. You will want to pass this into
 /// either [`generate_rs_single`] or [`generate_rs_archive`].
 pub struct RsOutput<'a> {
     pub(crate) config: &'a IncludeCppConfig,
-    pub(crate) rs: TokenStream,
+    /// The generated mod, or `None` for a `parse_only!` invocation which
+    /// generates nothing.
+    pub(crate) rs: Option<&'a ItemMod>,
+}
+
+impl RsOutput<'_> {
+    fn to_token_stream(&self) -> TokenStream {
+        self.rs.map(ToTokens::to_token_stream).unwrap_or_default()
+    }
+
+    fn pretty_print(&self) -> String {
+        self.rs
+            .map(crate::rust_pretty_printer::pretty_print)
+            .unwrap_or_default()
+    }
 }
 
 /// Creates an on-disk archive (actually a JSON file) of the Rust side of the bindings
@@ -24,7 +40,7 @@ pub struct RsOutput<'a> {
 pub fn generate_rs_archive<'a>(rs_outputs: impl Iterator<Item = RsOutput<'a>>) -> String {
     let mut multi_bindings = MultiBindings::default();
     for rs in rs_outputs {
-        multi_bindings.insert(rs.config, rs.rs);
+        multi_bindings.insert(rs.config, rs.to_token_stream());
     }
     serde_json::to_string(&multi_bindings).expect("Unable to encode JSON archive")
 }
@@ -65,8 +81,17 @@ const GENERATED_MARKER: &str = concat!(
 /// to a file which can simply be `include!`ed by `autocxx_macro` when you give
 /// it the `AUTOCXX_RS_FILE` environment variable.
 pub fn generate_rs_single(rs_output: RsOutput) -> RsInclude {
+    // `pretty!()` costs a `prettyplease` pass over the whole mod and is worth
+    // it only to someone who intends to read the file, so it stays off unless
+    // asked for. Either way the marker keeps the first line - `prettyplease`
+    // renders the mod alone, and the marker is prepended afterwards.
+    let code = if rs_output.config.prettify {
+        rs_output.pretty_print()
+    } else {
+        rs_output.to_token_stream().to_string()
+    };
     RsInclude {
-        code: format!("{}{}", GENERATED_MARKER, rs_output.rs),
+        code: format!("{GENERATED_MARKER}{code}"),
         filename: rs_output.config.get_rs_filename(),
     }
 }

@@ -183,6 +183,18 @@ macro_rules! exclude_utilities {
     ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
 }
 
+/// Pretty-print the generated Rust instead of emitting it as one
+/// enormous line of tokens. This costs a little build time and changes
+/// nothing about what the bindings do; it is for when you want to read
+/// the file `AUTOCXX_RS_FILE` names, or diff it between two runs.
+///
+/// A directive to be included inside
+/// [include_cpp] - see [include_cpp] for general information.
+#[macro_export]
+macro_rules! pretty {
+    ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
+}
+
 /// Entirely block some type from appearing in the generated
 /// code. This can be useful if there is a type which is not
 /// understood by bindgen or autocxx, and incorrect code is
