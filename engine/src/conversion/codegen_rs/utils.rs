@@ -26,11 +26,21 @@ pub(super) fn generate_cxx_use_stmt_for_id(
     let segs = find_output_mod_root(name.get_namespace())
         .chain(std::iter::once(make_ident("cxxbridge")))
         .chain(std::iter::once(bridge_id.clone()));
+    // The re-export is how a caller names this item at all, so it is not dead
+    // when nobody uses it - and it can look dead to rustc even when someone
+    // does. cxx emits a function's uses of a parameter or return type against
+    // the binding inside `cxxbridge`, not against this re-export, so a type
+    // which appears only in signatures has no user here; and the mod holding
+    // these is usually private to the caller's crate, which is what stops a
+    // `pub use` counting as reachable. Matches what the bindgen-side
+    // re-exports do in `generate_bindgen_use_stmt`.
     Item::Use(match alias {
         None => parse_quote! {
+            #[allow(unused_imports)]
             pub use #(#segs)::*;
         },
         Some(alias) => parse_quote! {
+            #[allow(unused_imports)]
             pub use #(#segs)::* as #alias;
         },
     })

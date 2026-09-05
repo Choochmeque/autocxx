@@ -12858,6 +12858,39 @@ fn test_abstract_up_multiple_bridge() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
+/// Nothing autocxx re-exports into the output mod should warn as an unused
+/// import. Those `pub use`s are the only names a caller has for the generated
+/// API, and a caller who uses part of an API but not all of it has done
+/// nothing wrong - most of the time the mod holding them is private to the
+/// caller's crate, which is what makes rustc consider an unused one dead.
+/// `deny(unused_imports)` on the generated crate turns the warning into a
+/// build failure this test can see.
+#[test]
+fn test_generated_reexports_do_not_warn_as_unused() {
+    let hdr = indoc! {"
+    class A {
+    public:
+        virtual void foo() const = 0;
+        virtual ~A() {}
+    };
+    inline void take_a(const A&) {}
+    "};
+    do_run_test(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["A", "take_a"], &[], None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(unused_imports)]
+        }),
+    )
+    .unwrap()
+}
+
 #[test]
 fn test_abstract_private() {
     let hdr = indoc! {"
