@@ -106,21 +106,21 @@ fn skew_between(cxx_header: &str, cxx_gen_mangling: &Mangling) -> Option<CxxVers
     })
 }
 
-/// The patch level of a `1.0.x` cxx.
+/// The patch level a `1.x` cxx will demand in mangled symbols.
 ///
-/// Only that series is judged. The patch levels of cxx and cxx-gen correspond
-/// because the two are released together as `1.0.N` and `0.7.N`; there is no
-/// reason to believe that survives a bump of either crate's minor version, and
-/// guessing wrong would mean rejecting a build which would have linked
-/// perfectly well.
+/// cxx mangles `CARGO_PKG_VERSION_PATCH` into every bridge symbol from
+/// 1.0.189 onward, whatever the minor version says - so every 1.x release
+/// is judged by its patch component. Judging only `1.0.x` would let a
+/// hypothetical `cxx 1.1.0` (demanding `$0$`) skew silently against a
+/// `cxx-gen` mangling `$199$`, which is a guaranteed link failure. A major
+/// version other than 1 is uncharted: no claim is made.
 fn cxx_patch_level(cxx_version: &str) -> Option<u32> {
-    let one_oh_x = regex_static::static_regex!(r"^1\.0\.(\d+)$");
-    one_oh_x
-        .captures(cxx_version)?
-        .get(1)?
-        .as_str()
-        .parse()
-        .ok()
+    let one_x = regex_static::static_regex!(r"^1\.(\d+)\.(\d+)$");
+    let caps = one_x.captures(cxx_version)?;
+    let minor: u32 = caps.get(1)?.as_str().parse().ok()?;
+    let patch: u32 = caps.get(2)?.as_str().parse().ok()?;
+    let _ = minor; // every 1.x minor is judged; the capture exists to pin the shape
+    Some(patch)
 }
 
 /// The cxx version named by the path of the `cxx.h` being linked against.
@@ -323,12 +323,25 @@ mod tests {
     }
 
     #[test]
-    fn only_the_1_0_series_is_judged() {
-        // The patch levels of cxx and cxx-gen correspond because they are
-        // released together as 1.0.N and 0.7.N. Outside that series there is
-        // nothing to compare, and refusing a build over it would be a guess.
+    fn every_1_x_release_is_judged_by_its_patch_component() {
+        // cxx mangles CARGO_PKG_VERSION_PATCH into symbols from 1.0.189 on,
+        // whatever the minor version - so a hypothetical cxx 1.1.0 demands
+        // `$0$` and genuinely skews against a cxx-gen mangling `$199$`.
+        // Silently accepting that would be a guaranteed link failure.
         assert!(skew_between(
             "/x/cxx-1.1.0/include/cxx.h",
+            &Mangling::Versioned("199".to_string())
+        )
+        .is_some());
+        // A matching patch agrees even across the minor bump.
+        assert!(skew_between(
+            "/x/cxx-1.1.199/include/cxx.h",
+            &Mangling::Versioned("199".to_string())
+        )
+        .is_none());
+        // A major version other than 1 is uncharted: no claim either way.
+        assert!(skew_between(
+            "/x/cxx-2.0.0/include/cxx.h",
             &Mangling::Versioned("199".to_string())
         )
         .is_none());
