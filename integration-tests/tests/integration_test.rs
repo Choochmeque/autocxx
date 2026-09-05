@@ -15537,6 +15537,55 @@ fn test_rs_build_error_reports_rustc_diagnostics() {
     );
 }
 
+/// The harness prefers to be told where its helper binary is rather than to go
+/// looking: cargo hands a package's own test binaries the path to each of that
+/// package's binaries. This checks the promise still holds, and with it that the
+/// helper's name here matches the one in `Cargo.toml` - a rename would otherwise
+/// surface as a build failure reported without diagnostics, which is the exact
+/// failure the helper exists to prevent.
+#[test]
+fn test_cargo_says_where_the_trybuild_child_helper_is() {
+    let helper = std::env::var_os("CARGO_BIN_EXE_autocxx-trybuild-child")
+        .expect("cargo tells its own package's test binaries where its binaries are");
+    assert!(
+        std::path::Path::new(&helper).is_file(),
+        "cargo pointed at {helper:?}, which is not a file"
+    );
+}
+
+/// Also guards the harness: whatever it does to capture those diagnostics, it
+/// must not do it by registering anything of its own in this binary's test list.
+/// A pseudo-test shows up in `--list`, in the ignored count, and in every tool
+/// that reads either, where it looks like a test somebody forgot to fix.
+#[test]
+fn test_harness_registers_no_pseudo_tests() {
+    let listing =
+        std::process::Command::new(std::env::current_exe().expect("this test binary's own path"))
+            .arg("--list")
+            .output()
+            .expect("re-running this test binary with --list");
+    assert!(
+        listing.status.success(),
+        "listing this binary's tests failed: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    // `--list` prints `some::module::test_name: test`. Match the name exactly:
+    // tests that merely talk *about* the helper, this file's own included, are
+    // not what this is looking for.
+    let harness_entries: Vec<_> = listing
+        .lines()
+        .filter_map(|line| line.rsplit_once(": "))
+        .map(|(name, _kind)| name)
+        .filter(|name| name.rsplit("::").next() == Some("autocxx_trybuild_child"))
+        .collect();
+    assert!(
+        harness_entries.is_empty(),
+        "the harness registered these as tests of this binary:\n{}",
+        harness_entries.join("\n")
+    );
+}
+
 // --- types hidden by a same-named variable ---
 //
 // These reproduce the POSIX `struct stat` / `extern struct stat stat` shape,

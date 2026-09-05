@@ -54,13 +54,6 @@ for subsequent preprocessors and renderers.
 static RUST_MDBOOK_SINGLE_TEST: &str = "RUST_MDBOOK_SINGLE_TEST";
 
 fn main() {
-    // The doctest harness builds generated Rust code by re-running this
-    // executable, so that it can capture the compiler's diagnostics. Has to come
-    // before any argument parsing, because the harness passes arguments meant
-    // for a test binary rather than for us.
-    if autocxx_integration_tests::run_trybuild_child_if_requested() {
-        return;
-    }
     let matches = Command::new("autocxx-mdbook-preprocessor")
         .version(crate_version!())
         .author(crate_authors!())

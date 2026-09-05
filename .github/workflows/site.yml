@@ -18,8 +18,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build preprocessor
-        run: cargo build
-        working-directory: tools/mdbook-preprocessor
+        # ...and the `autocxx-trybuild-child` helper alongside it. The
+        # preprocessor compiles the book's code examples through the integration
+        # test harness, which runs each build in that helper so that it can
+        # report the compiler's diagnostics. Without it a book example that stops
+        # compiling fails this job with no indication of why.
+        run: cargo build -p autocxx-mdbook-preprocessor -p autocxx-integration-tests
 
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
