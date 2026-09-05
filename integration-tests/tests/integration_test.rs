@@ -190,8 +190,24 @@ fn test_return_big_ints() {
     );
 }
 
+/// Still gated on `cxx`. `cxx::UniquePtr<T>` needs `T: UniquePtrTarget`, and
+/// that trait's methods bottom out in `extern "C"` shims named
+/// `cxxbridge1$unique_ptr$...`, which only the `#[cxx::bridge]` macro can emit.
+/// `cxx` therefore implements it for exactly three things: `CxxString`,
+/// `CxxVector<T>`, and the opaque C++ types a bridge declares. A primitive is
+/// none of those, and no autocxx-side code could implement the trait for one
+/// without those symbols existing.
+///
+/// So we reject the function up front rather than emit a bridge that will not
+/// compile: `known_types::permissible_within_unique_ptr` allows only
+/// `CxxString` and `CxxVector`, and this test dies as
+/// `DidNotGenerateAnythingUsable("give_up", InvalidTypeForCppPtr(u32))`.
+///
+/// Nobody has filed a `cxx` issue for `UniquePtr` of a primitive; the nearest
+/// live thread is dtolnay/cxx#1538, on supporting arbitrary `T` in
+/// `CxxVector<T>` and friends.
 #[test]
-#[ignore] // because cxx doesn't support unique_ptrs to primitives.
+#[ignore]
 fn test_give_up_int() {
     let cxx = indoc! {"
         std::unique_ptr<uint32_t> give_up() {
@@ -209,8 +225,17 @@ fn test_give_up_int() {
     run_test(cxx, hdr, rs, &["give_up"], &[]);
 }
 
+/// Still gated on `cxx`, for the reason given on `test_give_up_int` directly
+/// above: `UniquePtrTarget` cannot be implemented outside a `#[cxx::bridge]`,
+/// so it doesn't matter that `autocxx::c_int` is ours to write impls for.
+///
+/// The ignore reason this test used to carry - that we don't yet implement
+/// `UniquePtr` for `autocxx::c_int` and friends - read as if the work were on
+/// our side. It isn't. What would remove the whole `c_int` family, and with it
+/// this test and google/autocxx#422, is dtolnay/cxx#874, which teaches `cxx`
+/// the variable-width C numeric types natively. It is open and unmerged.
 #[test]
-#[ignore] // because we don't yet implement UniquePtr etc. for autocxx::c_int and friends
+#[ignore]
 fn test_give_up_ctype() {
     let cxx = indoc! {"
         std::unique_ptr<int> give_up() {
@@ -3426,11 +3451,10 @@ fn test_conflicting_ns_funcs() {
     run_test(cxx, hdr, rs, &["A::get", "B::get"], &[]);
 }
 
-#[ignore]
-// because currently we feed a flat namespace to cxx
-// This would be relatively easy to enable now that we have the facility
-// to add aliases to the 'use' statements we generate, plus
-// bridge_name_tracker to pick a unique name. TODO.
+/// Two types which differ only in their namespace, which the `cxx::bridge`
+/// mod's flat namespace has to be talked out of confusing - google/autocxx#486.
+/// The two are given different field names so that mixing them up would be a
+/// compile error rather than a silent success.
 #[test]
 fn test_conflicting_ns_structs() {
     let hdr = indoc! {"
@@ -3442,15 +3466,57 @@ fn test_conflicting_ns_structs() {
         }
         namespace B {
             struct Bob {
-                uint32_t a;
+                uint32_t b;
             };
+        }
+        namespace A {
+            inline uint32_t take_bob(const Bob& bob) { return bob.a; }
+        }
+        namespace B {
+            inline uint32_t take_bob(const Bob& bob) { return bob.b; }
         }
     "};
     let rs = quote! {
-        ffi::A::Bob { a: 12 };
-        ffi::B::Bob { b: 12 };
+        let a = ffi::A::Bob { a: 12 };
+        let b = ffi::B::Bob { b: 13 };
+        assert_eq!(ffi::A::take_bob(&a), 12);
+        assert_eq!(ffi::B::take_bob(&b), 13);
     };
-    run_test("", hdr, rs, &[], &["A::Bob", "B::Bob"]);
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["A::take_bob", "B::take_bob"],
+        &["A::Bob", "B::Bob"],
+    );
+}
+
+/// As above, except that qualifying the second `Bob` with its namespace would
+/// spell it `a__Bob`, and cxx takes no identifier with two adjacent
+/// underscores in it. C++ is perfectly happy with this header, so both types
+/// still have to arrive. (Which name the second one ends up with inside the
+/// bridge is `bridge_type_names`' own business, and is pinned there.)
+#[test]
+fn test_conflicting_ns_structs_in_underscored_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            uint32_t a;
+        };
+        namespace a_ {
+            struct Bob {
+                uint32_t b;
+            };
+            inline uint32_t take_bob(const Bob& bob) { return bob.b; }
+        }
+    "};
+    let rs = quote! {
+        let outer = ffi::Bob { a: 12 };
+        assert_eq!(outer.a, 12);
+        let inner = ffi::a_::Bob { b: 13 };
+        assert_eq!(ffi::a_::take_bob(&inner), 13);
+    };
+    run_test("", hdr, rs, &["a_::take_bob"], &["Bob", "a_::Bob"]);
 }
 
 #[test]
@@ -6527,9 +6593,9 @@ fn test_colliding_names_from_template_members() {
     // types, but because both are members of a class template specialization
     // bindgen emits each into the root module under the bare name `iterator`,
     // which is E0428. (This is within one module, so it is not the flat
-    // cxx::bridge namespace collision of google/autocxx#486, which is
-    // reported cleanly as a duplicate cxx bridge name.) Neither type is
-    // usable, so all that is asked here is that the bindings still compile.
+    // cxx::bridge namespace collision of google/autocxx#486, which is settled
+    // by renaming one of the two within the bridge.) Neither type is usable,
+    // so all that is asked here is that the bindings still compile.
     let hdr = indoc! {"
         namespace outer {
         template <typename T> class Alpha {
@@ -6755,10 +6821,14 @@ fn test_bridge_conflict_ty() {
             struct Key { int a; };
         }
     "};
-    let rs = quote! {};
-    // Neither type can be represented in the flat cxx::bridge namespace, and
-    // both were explicitly requested, so we say so - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["a::Key", "b::Key"], &[]);
+    // Only one of these can be called `Key` in the flat cxx::bridge namespace,
+    // so one of them is renamed there - google/autocxx#486. Both are still
+    // called `Key` in the Rust we hand back, which is what this asks for.
+    let rs = quote! {
+        let _: *const ffi::a::Key = std::ptr::null();
+        let _: *const ffi::b::Key = std::ptr::null();
+    };
+    run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
 }
 
 #[test]
@@ -6771,17 +6841,14 @@ fn test_bridge_conflict_ty_fn() {
             inline void Key() {}
         }
     "};
-    let rs = quote! {};
-    if std::env::var_os("AUTOCXX_FORCE_WRAPPER_GENERATION").is_some() {
-        // Forced wrapper generation renames the function, so the flat
-        // cxx::bridge namespace conflict never arises and generation
-        // legitimately succeeds.
-        run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
-    } else {
-        // As test_bridge_conflict_ty: explicitly requested, can't be
-        // generated, therefore reported - google/autocxx#1269.
-        run_test_expect_fail("", hdr, rs, &["a::Key", "b::Key"], &[]);
-    }
+    // As test_bridge_conflict_ty, except that the name is contested by a
+    // function, which was already being renamed by `bridge_name_tracker`; the
+    // type has to dodge whatever the function settled on.
+    let rs = quote! {
+        let _: *const ffi::a::Key = std::ptr::null();
+        ffi::b::Key();
+    };
+    run_test("", hdr, rs, &["a::Key", "b::Key"], &[]);
 }
 
 #[test]
@@ -8140,17 +8207,18 @@ fn test_extern_cpp_type_namespace() {
 }
 
 #[test]
-#[ignore] // because we currently require UniquePtrTarget which this can't implement
+/// Tests `extern_cpp_type!` pointing at an `ExternType` the user wrote out by
+/// hand, rather than one another `include_cpp!` generated.
 fn test_extern_cpp_type_manual() {
     let hdr = indoc! {"
         #include <cstdint>
         struct A {
             int a;
         };
-        inline void handle_a(const A& a) {
+        inline void handle_a(const A&) {
         }
         inline A create_a() {
-            A a;
+            A a { 3 };
             return a;
         }
     "};
@@ -8167,7 +8235,7 @@ fn test_extern_cpp_type_manual() {
             use autocxx::cxx::{type_id, ExternType};
             #[repr(C)]
             pub struct A {
-                a: std::os::raw::c_int
+                pub a: std::os::raw::c_int
             }
             unsafe impl ExternType for A {
                 type Kind = autocxx::cxx::kind::Opaque;
@@ -8178,6 +8246,11 @@ fn test_extern_cpp_type_manual() {
         fn main() {
             let a = ffi2::A { a: 3 };
             ffi::handle_a(&a);
+            // `create_a` returns `A` by value, so it is the half of this test
+            // which needs autocxx to own an `A` it did not itself declare.
+            autocxx::moveit::moveit! { let b = ffi::create_a(); }
+            assert_eq!(b.a, 3);
+            ffi::handle_a(&b);
         }
     };
     do_run_test_manual("", hdr, rs, None, None).unwrap();
@@ -8198,12 +8271,11 @@ fn test_issue486() {
             };
         } // namespace spanner
     "};
+    // The two Keys would land on the same name within the cxx::bridge, so one
+    // of them is renamed there - this is the repro google/autocxx#486 was
+    // filed with.
     let rs = quote! {};
-    // Both Keys would land on the same name within the cxx::bridge, so
-    // neither can be generated; spanner::Key was requested explicitly, so we
-    // report that instead of quietly generating nothing
-    // (google/autocxx#1269).
-    run_test_expect_fail("", hdr, rs, &["spanner::Key"], &[]);
+    run_test("", hdr, rs, &["spanner::Key"], &[]);
 }
 
 #[test]
@@ -8422,6 +8494,38 @@ fn test_extern_rust_fn_callback() {
         pub fn called_from_cpp(_a: Pin<&mut a>) {}
 
         fn main() {}
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+/// A Rust function and a C++ type wanting the same name in the one bridge mod.
+/// It works because Rust keeps types and values in separate namespaces, which
+/// is worth pinning, since the bridge name allocator of google/autocxx#486
+/// deliberately does not lean on it.
+#[test]
+fn test_extern_rust_fn_name_is_not_reused_for_a_type() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace a {
+            struct bob { uint32_t q; };
+        }
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            generate_pod!("a::bob")
+        }
+
+        #[autocxx::extern_rust::extern_rust_function]
+        pub fn bob() {}
+
+        fn main() {
+            let b = ffi::a::bob { q: 3 };
+            assert_eq!(b.q, 3);
+            bob();
+        }
     };
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
@@ -9283,22 +9387,20 @@ fn test_issue_1269_explicit_fn_discarded_due_to_param() {
     );
 }
 
-/// Explicitly requested types which are both discarded during analysis
-/// (here, because they'd collide within the flat cxx::bridge namespace)
-/// must be a hard error.
+/// An explicitly requested type which is discarded during analysis (here,
+/// because cxx can't cope with `__` in names) must be a hard error, just as
+/// for a function.
 #[test]
 fn test_issue_1269_explicit_type_discarded_by_name_check() {
     let hdr = indoc! {"
-        namespace a { struct Dupe { int q; }; }
-        namespace b { struct Dupe { int r; }; }
+        namespace a { struct __Dupe { int q; }; }
     "};
     run_test_expect_fail_ex(
         "",
         hdr,
         quote! {},
         quote! {
-            generate!("a::Dupe")
-            generate!("b::Dupe")
+            generate!("a::__Dupe")
         },
         None,
         None,
@@ -12349,10 +12451,10 @@ fn test_issue486_multi_types() {
             };
         } // namespace spanner
     "};
+    // As test_issue486, with four different kinds of thing - class, struct,
+    // typedef and enum - contesting the one bridge name.
     let rs = quote! {};
-    // As test_issue486: these all collide within the cxx::bridge, and they
-    // were requested by name, so this is reported - google/autocxx#1269.
-    run_test_expect_fail(
+    run_test(
         "",
         hdr,
         rs,
@@ -15360,15 +15462,10 @@ fn test_elab_struct_shadowed_by_variable_nonpod() {
 }
 
 #[test]
-#[ignore] // a function hiding a type is a Rust naming collision, not just a C++ one
 fn test_elab_struct_shadowed_by_function() {
     // A function hides a type of the same name in C++ exactly as a variable
-    // does, so this header needs the same unshadowing treatment. But it never
-    // gets as far as C++ codegen: `struct foo` and `void foo()` are separate
-    // entities in C++ and both want to be called `foo` in the generated Rust,
-    // so `ApiVec` throws both away as duplicates and the type is lost before
-    // we could rename it. Fixing that means giving one of them a different
-    // Rust name, which is a different job from spelling C++ types correctly.
+    // does, so this header needs the same unshadowing treatment - and, like a
+    // variable, the function has to give up the name it shares with the type.
     let hdr = indoc! {"
         struct foo { int y; };
         inline void foo() {}
@@ -15379,6 +15476,122 @@ fn test_elab_struct_shadowed_by_function() {
         assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
     };
     run_test("", hdr, rs, &["take_foo"], &["foo"]);
+}
+
+/// The function which lost the name is not silently forgotten: the output mod
+/// carries a documented stub saying what became of it.
+///
+/// There is deliberately no companion test asserting that a directive naming
+/// the *function* fails, because no such directive can be written: `foo` is
+/// the only name either of them has, and asking for it gets you the type. This
+/// stub is the whole of what we can say about the function, so it is what this
+/// pins.
+#[test]
+fn test_function_hidden_by_type_is_documented() {
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let f = ffi::foo { y: 7 };
+            assert_eq!(f.y, 7);
+        },
+        quote! { generate_pod!("foo") },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden")),
+        None,
+    );
+}
+
+/// `foo_autocxx_hidden` is a name a C++ author may perfectly well have used
+/// themselves. Here they got there first - `bindgen` reports types before the
+/// functions of the same mod - so the stub has to take the next name along
+/// rather than either of them being lost.
+#[test]
+fn test_function_hidden_by_type_yields_stub_name_to_real_type() {
+    let hdr = indoc! {"
+        struct foo_autocxx_hidden { int z; };
+        struct foo { int y; };
+        inline void foo() {}
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let f = ffi::foo { y: 7 };
+            assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
+            // The C++ author's own type kept the name it asked for.
+            let h = ffi::foo_autocxx_hidden { z: 8 };
+            assert_eq!(h.z, 8);
+        },
+        quote! {
+            generate!("take_foo")
+            generate_pod!("foo")
+            generate_pod!("foo_autocxx_hidden")
+        },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden1")),
+        None,
+    );
+}
+
+/// The same clash the other way round: the stub is filed first, and the C++
+/// author's own `foo_autocxx_hidden` - a function, so that it arrives after
+/// `foo` does - turns up afterwards. The stub is documentation under a name we
+/// invented, so it is the one that moves.
+#[test]
+fn test_function_hidden_by_type_yields_stub_name_to_later_real_fn() {
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+        inline int foo_autocxx_hidden(int a) { return a + 1; }
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let f = ffi::foo { y: 7 };
+            assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
+            // The C++ author's own function is still callable.
+            assert_eq!(ffi::foo_autocxx_hidden(autocxx::c_int(1)), autocxx::c_int(2));
+        },
+        quote! {
+            generate!("take_foo")
+            generate!("foo_autocxx_hidden")
+            generate_pod!("foo")
+        },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden1")),
+        None,
+    );
+}
+
+/// As above under blanket generation, where nothing was asked for by name.
+/// `foo` is not POD here - `generate_all!` makes nothing POD - so all the Rust
+/// side does is prove the type arrived; what is being pinned is the stub.
+#[test]
+fn test_function_hidden_by_type_is_documented_in_generate_all() {
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _: *const ffi::foo = std::ptr::null();
+        },
+        quote! { generate_all!() },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden")),
+        None,
+    );
 }
 
 #[test]

@@ -135,6 +135,8 @@ pub enum ConvertErrorFromCpp {
     MethodOfGenericType,
     #[error("bindgen generated multiple different APIs (functions/types) with this name. autocxx doesn't know how to disambiguate them, so we won't generate bindings for any of them.")]
     DuplicateItemsFoundInParsing,
+    #[error("C++ declares a type of this name in the same scope, which hides this function. Only one of the two can keep the name in the bindings we generate, and it has to be the type, because other bindings may depend on it. Rename the function in C++ if you need to call it from Rust.")]
+    FunctionHiddenByType,
     #[error(
         "bindgen generated a move or copy constructor with an unexpected number of parameters."
     )]
@@ -251,6 +253,21 @@ impl ErrorContext {
                 PhantomSanitized,
             ),
         }
+    }
+
+    /// An item which lost its own name to something else we kept - a C++
+    /// function hidden by a type of the same name, say. The stub goes under
+    /// `display`, which the caller has established nothing else has claimed,
+    /// since the real name now belongs to whatever won it; the user still
+    /// knows the item as `lookup`, which is the name they wrote.
+    pub(crate) fn new_for_displaced_item(lookup: Ident, display: Ident) -> Self {
+        // Both names are built by appending to an identifier we already know
+        // to be legal, which keeps them legal and takes them out of reach of
+        // any built-in type name, so `sanitize_error_ident` has nothing to do.
+        Self(
+            Box::new(ErrorContextType::SanitizedItem { lookup, display }),
+            PhantomSanitized,
+        )
     }
 
     pub(crate) fn new_for_method(self_ty: Ident, method: Ident) -> Self {

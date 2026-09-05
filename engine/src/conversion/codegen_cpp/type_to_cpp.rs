@@ -24,11 +24,13 @@ use syn::{Token, Type};
 const UNSHADOWING_SUFFIX: &str = "_autocxx_unshadowed";
 
 /// A typedef we generate so that a type whose name is hidden by a same-named
-/// variable can still be named.
+/// variable or function can still be named.
 ///
 /// C++ lets a variable hide a type of the same name in the same scope, which
 /// POSIX does all over the place (`struct stat` and `extern struct stat stat`,
-/// `struct timeval`, `struct timezone`...). Once hidden, the type can only be
+/// `struct timeval`, `struct timezone`...), and a function hides a type in
+/// exactly the same way (`struct foo {...}; void foo();`). Once hidden, the
+/// type can only be
 /// named with an elaborated type specifier - `struct stat` rather than `stat` -
 /// and that spelling isn't available to us everywhere we need it: `cxx`
 /// generates its own C++ referring to `::stat`, and elaborated specifiers can't
@@ -44,8 +46,9 @@ const UNSHADOWING_SUFFIX: &str = "_autocxx_unshadowed";
 /// and then use `stat_autocxx_unshadowed` as the type's C++ name throughout -
 /// in the C++ we generate ourselves, and in the `#[cxx_name]`/`#[namespace]`
 /// pair and `type_id!` string which decide what `cxx` generates. A typedef name
-/// is not hidden by the variable and is valid in every context where we spell a
-/// type, including as a template argument (`new_appropriately<T>`), in a
+/// is not hidden by the declaration which hid the type, and is valid in every
+/// context where we spell a type, including as a template argument
+/// (`new_appropriately<T>`), in a
 /// placement new, and in a pseudo-destructor call (`p->T::~T()`) - none of
 /// which accept an elaborated specifier directly.
 ///
@@ -82,18 +85,18 @@ pub(crate) struct UnshadowingAlias {
 /// where the typename might be A::B within a namespace C::D.
 pub(crate) struct CppNameMap {
     original_names: HashMap<QualifiedName, CppOriginalName>,
-    /// Types whose plain C++ name is hidden by a variable, and the typedef we
-    /// generate to get at them anyway.
+    /// Types whose plain C++ name is hidden by a variable or function, and the
+    /// typedef we generate to get at them anyway.
     unshadowing_aliases: HashMap<QualifiedName, UnshadowingAlias>,
 }
 
 impl CppNameMap {
     /// Look through the APIs we've found to assemble the original name
-    /// map. `shadowed_by_variables` is the set of names which C++ won't look
-    /// up as types, per [`crate::conversion::parse::find_types_shadowed_by_variables`].
+    /// map. `shadowed_types` is the set of names which C++ won't look
+    /// up as types, per [`crate::conversion::parse::find_shadowed_types`].
     pub(crate) fn new_from_apis<T: AnalysisPhase>(
         apis: &ApiVec<T>,
-        shadowed_by_variables: &HashSet<QualifiedName>,
+        shadowed_types: &HashSet<QualifiedName>,
     ) -> Self {
         let original_names: HashMap<_, _> = apis
             .iter()
@@ -105,7 +108,7 @@ impl CppNameMap {
             .collect();
         let unshadowing_aliases = apis
             .iter()
-            .filter(|api| shadowed_by_variables.contains(api.name()))
+            .filter(|api| shadowed_types.contains(api.name()))
             .filter_map(|api| {
                 // Only a class, struct or enum can be named with an elaborated
                 // type specifier, so those are the only kinds we can rescue. A

@@ -2443,18 +2443,6 @@ impl Api<FnPhase> {
                 }
         )
     }
-
-    pub(crate) fn cxxbridge_name(&self) -> Option<crate::minisyn::Ident> {
-        match self {
-            Api::Function { ref analysis, .. } => Some(analysis.cxxbridge_name.clone()),
-            Api::StringConstructor { .. }
-            | Api::Const { .. }
-            | Api::Static { .. }
-            | Api::IgnoredItem { .. }
-            | Api::RustSubclassFn { .. } => None,
-            _ => Some(self.name().get_final_ident()),
-        }
-    }
 }
 
 fn return_type_is_reference(output: &crate::minisyn::ReturnType) -> bool {

@@ -15,4 +15,4 @@ mod shadowed_types;
 
 pub(crate) use parse_bindgen::ParseBindgen;
 pub(crate) use ref_qualifier::CppRefQualifier;
-pub(crate) use shadowed_types::find_types_shadowed_by_variables;
+pub(crate) use shadowed_types::find_shadowed_types;

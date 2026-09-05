@@ -20,11 +20,13 @@ use crate::{
     types::validate_ident_ok_for_cxx,
 };
 
+use super::bridge_type_names::{declares_bridge_type, fixed_bridge_names, BridgeTypeNames};
 use super::fun::FnPhase;
 
 /// Do some final checks that the names we've come up with can be represented
-/// within cxx.
-pub(crate) fn check_names(apis: ApiVec<FnPhase>) -> ApiVec<FnPhase> {
+/// within cxx, and settle on the name each type will go by inside the bridge
+/// mod, whose namespace is flat.
+pub(crate) fn check_names(apis: ApiVec<FnPhase>) -> (ApiVec<FnPhase>, BridgeTypeNames) {
     // If any items have names which can't be represented by cxx,
     // abort. This check should ideally be done at the times we fill in the
     // `name` field of each `api` in the first place, at parse time, though
@@ -75,33 +77,47 @@ pub(crate) fn check_names(apis: ApiVec<FnPhase>) -> ApiVec<FnPhase> {
         | Api::IgnoredItem { .. } => Ok(Box::new(std::iter::once(api))),
     });
 
-    // Reject any names which are duplicates within the cxx bridge mod,
-    // that has a flat namespace.
+    // Give each type its own name within the bridge mod, which has a flat
+    // namespace - see google/autocxx#486.
+    let (bridge_type_names, unnameable) = BridgeTypeNames::new(&intermediate);
+
+    // Anything which still shares a bridge name with something else at this
+    // point is beyond our renaming, and would make `cxx` fail with "the name
+    // is defined multiple times". Say which items collided instead.
     let mut names_found: HashMap<Ident, Vec<String>> = HashMap::new();
     for api in intermediate.iter() {
-        let my_name = api.cxxbridge_name();
-        if let Some(name) = my_name {
+        if let Some(name) = bridge_name(api, &bridge_type_names) {
             let e = names_found.entry(name).or_default();
             e.push(api.name_info().name.to_string());
         }
     }
     let mut results = ApiVec::new();
     convert_item_apis(intermediate, &mut results, |api| {
-        let my_name = api.cxxbridge_name();
-        if let Some(name) = my_name {
+        if let Some(e) = unnameable.get(api.name()) {
+            return Err(ConvertErrorFromCpp::InvalidIdent(e.clone()));
+        }
+        if let Some(name) = bridge_name(&api, &bridge_type_names) {
             let symbols_for_this_name = names_found.entry(name).or_default();
             if symbols_for_this_name.len() > 1usize {
-                Err(ConvertErrorFromCpp::DuplicateCxxBridgeName(
+                return Err(ConvertErrorFromCpp::DuplicateCxxBridgeName(
                     symbols_for_this_name.clone(),
-                ))
-            } else {
-                Ok(Box::new(std::iter::once(api)))
+                ));
             }
-        } else {
-            Ok(Box::new(std::iter::once(api)))
         }
+        Ok(Box::new(std::iter::once(api)))
     });
-    results
+    (results, bridge_type_names)
+}
+
+/// The name this API will go by inside the bridge mod, if it declares anything
+/// there at all.
+fn bridge_name(api: &Api<FnPhase>, bridge_type_names: &BridgeTypeNames) -> Option<Ident> {
+    if declares_bridge_type(api) {
+        return Some(bridge_type_names.get(api.name()));
+    }
+    fixed_bridge_names(api)
+        .first()
+        .map(crate::types::make_ident)
 }
 
 fn validate_all_segments_ok_for_cxx<'a>(
