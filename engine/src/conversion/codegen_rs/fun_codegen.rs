@@ -236,6 +236,86 @@ pub(super) fn gen_function(
     }
 }
 
+/// `#[must_use]` for a function which hands back an `impl New`, or `None` if it
+/// hands back anything else.
+///
+/// An `impl New` is a recipe for constructing a C++ object, not the object:
+/// dropping one runs no constructor, allocates nothing and reports nothing, so
+/// a caller who writes `Goat::new();` and moves on gets no goat and no
+/// complaint. That silence is what the attribute buys back, and the message
+/// names the three ways to cash the recipe in.
+fn must_use_attr_if_impl_new(ret_type: &ReturnType) -> Option<Attribute> {
+    returns_impl_new(ret_type).then(|| {
+        parse_quote! {
+            #[must_use = "this is a recipe for constructing a C++ object, and constructs nothing until it is stored somewhere: finish it with .within_unique_ptr(), .within_box(), or the moveit! macro"]
+        }
+    })
+}
+
+/// Whether this is one of the `-> impl autocxx::moveit::new::New<Output = T>`
+/// return types we synthesize, either for a constructor or for a function
+/// which returns a non-POD type by value; or the
+/// `-> Result<impl ...New<Output = T>, cxx::Exception>` a `throws!` function
+/// gets instead.
+///
+/// `Result` is itself `#[must_use]`, so the throwing case is not silent to
+/// begin with - but it is the case where a caller is least likely to guess what
+/// to do, since discarding the `Result` and discarding the object are two
+/// different mistakes with one diagnostic between them. Our message names the
+/// second one.
+///
+/// No integration test covers the `Result` arm, because a `throws!` function
+/// which returns a non-POD type by value does not compile today: see the FIXME
+/// in [`FnGenerator::common_parts`]. The arm is here so that the attribute
+/// arrives with that combination rather than after it, and the unit tests below
+/// pin it in the meantime.
+///
+/// This inspects the return type we ended up with rather than tracking how we
+/// got there, because several later steps rewrite it: an explicit lifetime may
+/// be added to the bound, a return type conversion may replace it outright, and
+/// the `Result` above is wrapped around it last of all.
+fn returns_impl_new(ret_type: &ReturnType) -> bool {
+    let ty = match ret_type {
+        ReturnType::Default => return false,
+        ReturnType::Type(_, ty) => &**ty,
+    };
+    is_impl_new(ty) || result_ok_type(ty).is_some_and(is_impl_new)
+}
+
+/// The `T` of a `Result<T, E>`, if this is one. Only the single `Result`
+/// wrapper which [`FnGenerator::common_parts`] puts around a throwing
+/// function's return type is of interest, so this does not recurse.
+fn result_ok_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let last = match ty {
+        syn::Type::Path(p) => p.path.segments.last()?,
+        _ => return None,
+    };
+    if last.ident != "Result" {
+        return None;
+    }
+    match &last.arguments {
+        syn::PathArguments::AngleBracketed(args) => args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether this type is `impl ...New<..>`, whatever else it is bounded by.
+fn is_impl_new(ty: &syn::Type) -> bool {
+    let bounds = match ty {
+        syn::Type::ImplTrait(imp) => &imp.bounds,
+        _ => return false,
+    };
+    bounds.iter().any(|bound| match bound {
+        syn::TypeParamBound::Trait(t) => {
+            t.path.segments.last().is_some_and(|seg| seg.ident == "New")
+        }
+        _ => false,
+    })
+}
+
 /// Knows how to generate a given function.
 #[derive(Clone)]
 struct FnGenerator<'a> {
@@ -381,6 +461,18 @@ impl<'a> FnGenerator<'a> {
             _ => (call_body, ret_type),
         };
 
+        // FIXME: a `throws!` function which returns a non-POD type by value
+        // generates code which does not compile. `bridge_call` above ends in
+        // `?` when `may_throw`, and this branch buries that call inside the
+        // `by_raw` closure, whose return type is `()`:
+        //   error[E0277]: the `?` operator can only be used in a closure that
+        //   returns `Result` or `Option`
+        // The fix is presumably for the closure to keep the `Result` and for
+        // the `Ok(..)` wrapper below to be moved inside it, or for the
+        // placement call to be made outside the closure - but either is a
+        // change to how exceptions and placement returns compose, which is
+        // more than a passing note can settle. Until then that combination of
+        // directives is unusable, and no test exercises it.
         let call_stmts = if let Some(ptr_arg_name) = ptr_arg_name {
             let mut closure_stmts = local_variables;
             closure_stmts.push(MaybeUnsafeStmt::binary(
@@ -429,10 +521,12 @@ impl<'a> FnGenerator<'a> {
         let rust_name = make_ident(self.rust_name);
         let unsafety = self.unsafety.wrapper_token();
         let doc_attrs = self.doc_attrs;
+        let must_use = must_use_attr_if_impl_new(&ret_type);
         let ty = impl_block_type_name.get_final_ident();
         Box::new(ImplBlockDetails {
             item: ImplItem::Fn(parse_quote! {
                 #(#doc_attrs)*
+                #must_use
                 pub #unsafety fn #rust_name #lifetime_tokens ( #wrapper_params ) #ret_type {
                     #call_body
                 }
@@ -442,6 +536,13 @@ impl<'a> FnGenerator<'a> {
     }
 
     /// Generate an 'impl Trait for Type { methods-go-here }' in its entrety.
+    ///
+    /// Unlike the other generators here this one adds no `#[must_use]`, even
+    /// when the method hands back an `impl New`: rustc rejects the attribute on
+    /// a trait method in an impl block (`unused_attributes`, on its way to
+    /// becoming a hard error). Today no such method returns one - the moveit
+    /// traits construct into a placement parameter and return `()` - so nothing
+    /// is lost, but if one ever does, its callers will not be warned.
     fn generate_trait_impl(&self, details: &TraitMethodDetails) -> Box<TraitImplBlockDetails> {
         let (lifetime_tokens, wrapper_params, ret_type, call_body) =
             self.common_parts(details.avoid_self, &details.parameter_reordering, None);
@@ -470,10 +571,12 @@ impl<'a> FnGenerator<'a> {
         let rust_name = make_ident(self.rust_name);
         let doc_attrs = self.doc_attrs;
         let unsafety = self.unsafety.wrapper_token();
+        let must_use = must_use_attr_if_impl_new(&ret_type);
         let ty = impl_block_type_name.get_final_ident();
         let ty = parse_quote! { #ty };
         let stuff = quote! {
                 #(#doc_attrs)*
+                #must_use
                 pub #unsafety fn #rust_name #lifetime_tokens ( #wrapper_params ) #ret_type {
                     #call_body
                 }
@@ -491,8 +594,10 @@ impl<'a> FnGenerator<'a> {
         let rust_name = make_ident(self.rust_name);
         let doc_attrs = self.doc_attrs;
         let unsafety = self.unsafety.wrapper_token();
+        let must_use = must_use_attr_if_impl_new(&ret_type);
         Item::Fn(parse_quote! {
             #(#doc_attrs)*
+            #must_use
             pub #unsafety fn #rust_name #lifetime_tokens ( #wrapper_params ) #ret_type {
                 #call_body
             }
@@ -508,5 +613,54 @@ impl<'a> FnGenerator<'a> {
             .iter()
             .map(|n| old_params.get(*n).unwrap().clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::must_use_attr_if_impl_new;
+    use syn::{parse_quote, ReturnType};
+
+    fn is_must_use(ret_type: ReturnType) -> bool {
+        must_use_attr_if_impl_new(&ret_type).is_some()
+    }
+
+    #[test]
+    fn impl_new_returns_are_marked() {
+        // What a constructor gets.
+        assert!(is_must_use(
+            parse_quote! { -> impl autocxx::moveit::new::New<Output=Self> }
+        ));
+        // What a function returning a non-POD type by value gets, after
+        // `add_explicit_lifetime_if_necessary` has been at it.
+        assert!(is_must_use(
+            parse_quote! { -> impl autocxx::moveit::new::New<Output = Bob> + 'a }
+        ));
+    }
+
+    /// The shape a `throws!` function returning a non-POD type by value would
+    /// get. It cannot be generated today - see the FIXME in
+    /// `FnGenerator::common_parts` - so this is the only thing pinning it.
+    #[test]
+    fn a_result_of_impl_new_is_marked_too() {
+        assert!(is_must_use(
+            parse_quote! { -> Result<impl autocxx::moveit::new::New<Output=Self>, cxx::Exception> }
+        ));
+    }
+
+    #[test]
+    fn ordinary_returns_are_left_alone() {
+        assert!(!is_must_use(ReturnType::Default));
+        assert!(!is_must_use(parse_quote! { -> u32 }));
+        assert!(!is_must_use(parse_quote! { -> cxx::UniquePtr<Bob> }));
+        // A `Result` of something else is already `#[must_use]` by virtue of
+        // being a `Result`, and has no object to emplace.
+        assert!(!is_must_use(
+            parse_quote! { -> Result<u32, cxx::Exception> }
+        ));
+        // Not every `impl Trait` we could ever return is a `New`.
+        assert!(!is_must_use(
+            parse_quote! { -> impl std::iter::Iterator<Item = u32> }
+        ));
     }
 }
