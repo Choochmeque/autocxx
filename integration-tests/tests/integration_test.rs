@@ -190,8 +190,24 @@ fn test_return_big_ints() {
     );
 }
 
+/// Still gated on `cxx`. `cxx::UniquePtr<T>` needs `T: UniquePtrTarget`, and
+/// that trait's methods bottom out in `extern "C"` shims named
+/// `cxxbridge1$unique_ptr$...`, which only the `#[cxx::bridge]` macro can emit.
+/// `cxx` therefore implements it for exactly three things: `CxxString`,
+/// `CxxVector<T>`, and the opaque C++ types a bridge declares. A primitive is
+/// none of those, and no autocxx-side code could implement the trait for one
+/// without those symbols existing.
+///
+/// So we reject the function up front rather than emit a bridge that will not
+/// compile: `known_types::permissible_within_unique_ptr` allows only
+/// `CxxString` and `CxxVector`, and this test dies as
+/// `DidNotGenerateAnythingUsable("give_up", InvalidTypeForCppPtr(u32))`.
+///
+/// Nobody has filed a `cxx` issue for `UniquePtr` of a primitive; the nearest
+/// live thread is dtolnay/cxx#1538, on supporting arbitrary `T` in
+/// `CxxVector<T>` and friends.
 #[test]
-#[ignore] // because cxx doesn't support unique_ptrs to primitives.
+#[ignore]
 fn test_give_up_int() {
     let cxx = indoc! {"
         std::unique_ptr<uint32_t> give_up() {
@@ -209,8 +225,17 @@ fn test_give_up_int() {
     run_test(cxx, hdr, rs, &["give_up"], &[]);
 }
 
+/// Still gated on `cxx`, for the reason given on `test_give_up_int` directly
+/// above: `UniquePtrTarget` cannot be implemented outside a `#[cxx::bridge]`,
+/// so it doesn't matter that `autocxx::c_int` is ours to write impls for.
+///
+/// The ignore reason this test used to carry - that we don't yet implement
+/// `UniquePtr` for `autocxx::c_int` and friends - read as if the work were on
+/// our side. It isn't. What would remove the whole `c_int` family, and with it
+/// this test and google/autocxx#422, is dtolnay/cxx#874, which teaches `cxx`
+/// the variable-width C numeric types natively. It is open and unmerged.
 #[test]
-#[ignore] // because we don't yet implement UniquePtr etc. for autocxx::c_int and friends
+#[ignore]
 fn test_give_up_ctype() {
     let cxx = indoc! {"
         std::unique_ptr<int> give_up() {
