@@ -193,6 +193,19 @@
     println!("cargo:rerun-if-changed=src/main.rs");
     // Add instructions to link to any C++ libraries you need.
 }</code></pre>
+<h2 id="keeping-cxx-and-cxx-gen-level"><a class="header" href="#keeping-cxx-and-cxx-gen-level">Keeping <code>cxx</code> and <code>cxx-gen</code> level</a></h2>
+<p><code>autocxx</code> writes the C++ half of each generated function using <code>cxx-gen</code>, while
+the Rust half comes from the <code>cxx</code> crate your own crate depends on. Since cxx
+1.0.189 the patch level of each is part of the symbol name they agree on, so
+<code>cxx-gen</code> 0.7.199 and <code>cxx</code> 1.0.190 produce two halves which never meet and the
+link fails naming a symbol you never wrote.</p>
+<p>Both are ordinary version requirements which cargo resolves to the newest
+release, so they agree unless something pins one and not the other - usually a
+lockfile updated in one place. <code>cargo update -p cxx -p cxx-gen</code> puts them back
+in step. <code>autocxx-build</code> reports the mismatch before generating anything, as
+long as your crate depends on <code>cxx</code> directly (which it needs to anyway, since
+the generated code names <code>::cxx</code>) and both crates come from a registry rather
+than a <code>[patch]</code> or a vendor directory.</p>
 <h2 id="building---if-youre-not-using-cargo"><a class="header" href="#building---if-youre-not-using-cargo">Building - if you're not using cargo</a></h2>
 <p>See the <code>autocxx-gen</code> crate. You'll need to:</p>
 <ul>

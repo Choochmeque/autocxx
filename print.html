@@ -454,6 +454,19 @@ see the chapter on <a href="cpp_types.html">C++ types</a>.</li>
     println!("cargo:rerun-if-changed=src/main.rs");
     // Add instructions to link to any C++ libraries you need.
 }</code></pre>
+<h2 id="keeping-cxx-and-cxx-gen-level"><a class="header" href="#keeping-cxx-and-cxx-gen-level">Keeping <code>cxx</code> and <code>cxx-gen</code> level</a></h2>
+<p><code>autocxx</code> writes the C++ half of each generated function using <code>cxx-gen</code>, while
+the Rust half comes from the <code>cxx</code> crate your own crate depends on. Since cxx
+1.0.189 the patch level of each is part of the symbol name they agree on, so
+<code>cxx-gen</code> 0.7.199 and <code>cxx</code> 1.0.190 produce two halves which never meet and the
+link fails naming a symbol you never wrote.</p>
+<p>Both are ordinary version requirements which cargo resolves to the newest
+release, so they agree unless something pins one and not the other - usually a
+lockfile updated in one place. <code>cargo update -p cxx -p cxx-gen</code> puts them back
+in step. <code>autocxx-build</code> reports the mismatch before generating anything, as
+long as your crate depends on <code>cxx</code> directly (which it needs to anyway, since
+the generated code names <code>::cxx</code>) and both crates come from a registry rather
+than a <code>[patch]</code> or a vendor directory.</p>
 <h2 id="building---if-youre-not-using-cargo"><a class="header" href="#building---if-youre-not-using-cargo">Building - if you're not using cargo</a></h2>
 <p>See the <code>autocxx-gen</code> crate. You'll need to:</p>
 <ul>
@@ -1517,6 +1530,26 @@ do this:</p>
 <pre><code># mod ffi { pub static BOB: [u8; 6] = [72u8, 101u8, 108u8, 108u8, 111u8, 0u8]; }
 assert_eq!(std::str::from_utf8(&amp;ffi::BOB).unwrap().trim_end_matches(char::from(0)), "Hello");
 </code></pre>
+<h2 id="stdfunction"><a class="header" href="#stdfunction"><code>std::function</code></a></h2>
+<p><code>bindgen</code> has no way to describe a <code>std::function</code> in Rust, and <code>cxx</code> cannot
+bind one either; its function support stops at
+<a href="https://cxx.rs/binding/fn.html">function pointers</a>. <code>autocxx</code> therefore
+generates nothing which takes or returns one. Only the members which mention
+<code>std::function</code> are lost: the rest of the enclosing class is generated as usual.</p>
+<p>A shim which takes a plain C function pointer does not help, because <code>bindgen</code>
+writes those as <code>Option&lt;extern "C" fn(..)&gt;</code> and <code>autocxx</code> has no binding for
+<code>Option</code> either. To have C++ call into Rust, either subclass a C++ observer
+class from Rust or hand C++ a named Rust function; both are described under
+<a href="rust_calls.html">callbacks into Rust</a>.</p>
+<p>Where the explanation appears depends on your standard library, because the two
+put <code>std::function</code> beyond <code>bindgen</code> differently. With libstdc++ and libc++ it
+is reduced to an opaque blob of bytes, and the doc comment of the stub standing
+in for that blob carries the explanation - as it does for any other type
+<code>bindgen</code> reduces the same way, which in practice means templated types whose
+parameters it cannot model. With MSVC's standard library the type keeps its
+name, and the explanation is attached to <code>std::function</code> itself; a
+class-scoped <code>using</code> alias of it is reported less precisely, as a forward
+declaration whose target could not be generated.</p>
 <hr>
 <ol class="footnote-definition"><li id="footnote-ifdef">
 <p><a href="https://github.com/google/autocxx/issues/57">This feature</a> should add ifdef support. <a href="#fr-ifdef-1">↩</a></p>
