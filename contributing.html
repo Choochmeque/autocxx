@@ -229,7 +229,7 @@ First of all, <code>cargo run</code> in the <code>demo</code> directory. If it b
 in the way of useful diagnostics, because <code>stdout</code> is swallowed by cargo build scripts.
 So, practically speaking, you would almost always move onto running one of the tests
 in the test suite. With suitable options, you can get plenty of output. For instance:</p>
-<pre><code class="language-ignore">RUST_BACKTRACE=1 RUST_LOG=autocxx_engine=info cargo test --all test_cycle_string_full_pipeline -- --nocapture
+<pre><code class="language-ignore">RUST_BACKTRACE=1 RUST_LOG=autocxx_engine=info cargo test --workspace integration_test::test_cycle_string -- --exact --nocapture
 </code></pre>
 <p>This is especially valuable to see the <code>bindgen</code> output Rust code, and then the converted Rust code which we pass into cxx. Usually, most problems are due to some mis-conversion somewhere
 in <code>engine/src/conversion</code>. See <a href="https://docs.rs/autocxx-engine/latest/autocxx_engine/struct.IncludeCppEngine.html">here</a> for documentation and diagrams on how the engine works.</p>
