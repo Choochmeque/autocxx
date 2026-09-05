@@ -11,7 +11,7 @@ use crate::{
         api::{AnalysisPhase, Api, ApiName, NullPhase, TypedefKind, UnanalyzedApi},
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
-        type_helpers::{unwrap_has_opaque, unwrap_has_unused_template_param, unwrap_reference},
+        type_helpers::{unwrap_has_opaque, unwrap_reference},
         ConvertErrorFromCpp,
     },
     known_types::{known_types, CxxGenericType},
@@ -191,11 +191,13 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // First we try to spot if these are the special marker paths that
-        // bindgen uses to denote references or other things.
-        // TODO the next two lines can be removed
-        if let Some(ty) = unwrap_has_unused_template_param(&typ) {
-            self.convert_type(ty.clone(), ns, ctx)
-        } else if let Some(ty) = unwrap_has_opaque(&typ) {
+        // bindgen uses to denote references or other things. Note that
+        // there is deliberately no `__bindgen_marker_UnusedTemplateParam`
+        // case here: bindgen reports that condition per-item through the
+        // `denote_discards_template_param` callback (see
+        // `ParseCallbackResults::discards_template_param`), not by wrapping
+        // a type.
+        if let Some(ty) = unwrap_has_opaque(&typ) {
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ptr) = unwrap_reference(&typ, false) {
             // LValue reference
@@ -552,8 +554,6 @@ impl<'a> TypeConverter<'a> {
     ) -> Result<(QualifiedName, Option<UnanalyzedApi>), ConvertErrorFromCpp> {
         let count = self.concrete_templates.len();
         // We just use this as a hash key, essentially.
-        // TODO: Once we've completed the TypeConverter refactoring (see #220),
-        // pass in an actual original_name_map here.
         let cpp_definition = self.original_name_map.type_to_cpp(rs_definition)?;
         let e = self.concrete_templates.get(&cpp_definition);
         match e {
