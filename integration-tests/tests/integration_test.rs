@@ -16352,3 +16352,198 @@ fn test_defaulted_special_members_keep_their_visibility() {
     };
     run_test("", hdr, rs, &["PrivateDefaultedCopy"], &[]);
 }
+
+#[test]
+fn test_impl_new_returns_are_must_use() {
+    // Anything which hands back an `impl New` - a constructor, or a function
+    // returning a non-POD type by value - constructs nothing until the caller
+    // emplaces it. moveit's `New` is itself `#[must_use]`, so the mistake is
+    // already caught, but its message says only that the value does nothing;
+    // ours has to say what to do about it. See google/autocxx#1090.
+    struct MustUseOnNewReturns;
+    impl CodeCheckerFns for MustUseOnNewReturns {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let mut checked = 0usize;
+            for (name, sig, attrs) in collect_fns(&rs) {
+                let returns_new = quote!(#sig).to_string().contains(":: New <");
+                let must_use = attrs.iter().any(|attr| attr.path.is_ident("must_use"));
+                if returns_new {
+                    checked += 1;
+                }
+                if returns_new != must_use {
+                    return Err(TestError::RsCodeExaminationFail(format!(
+                        "fn {name} returns an impl New: {returns_new}, but is #[must_use]: \
+                         {must_use}"
+                    )));
+                }
+            }
+            // Guard against the checks above passing vacuously.
+            if checked < 2 {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "expected both the constructor and the by-value return to hand back an \
+                     impl New, but found {checked} of them"
+                )));
+            }
+            Ok(())
+        }
+    }
+    /// Every free function and inherent method in the generated code, other
+    /// than those in trait impls - rustc rejects `#[must_use]` on those.
+    fn collect_fns(rs: &syn::File) -> Vec<(String, syn::Signature, Vec<syn::Attribute>)> {
+        fn walk(items: &[syn::Item], out: &mut Vec<(String, syn::Signature, Vec<syn::Attribute>)>) {
+            for item in items {
+                match item {
+                    syn::Item::Mod(m) => {
+                        if let Some((_, items)) = &m.content {
+                            walk(items, out);
+                        }
+                    }
+                    syn::Item::Fn(f) => {
+                        out.push((f.sig.ident.to_string(), f.sig.clone(), f.attrs.clone()))
+                    }
+                    syn::Item::Impl(i) if i.trait_.is_none() => {
+                        for item in &i.items {
+                            if let syn::ImplItem::Method(f) = item {
+                                out.push((f.sig.ident.to_string(), f.sig.clone(), f.attrs.clone()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&rs.items, &mut out);
+        out
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            Bob() : a(3) {}
+            uint32_t plain() const { return a; }
+            uint32_t a;
+        };
+        inline Bob make_bob() { return Bob(); }
+    "};
+    // The `Result<impl New, cxx::Exception>` a `throws!` function would return
+    // is deliberately absent: that combination does not compile today, for
+    // reasons unrelated to this attribute. See `returns_impl_new` in
+    // `fun_codegen.rs`, which handles the shape anyway, and the unit tests
+    // there which pin it.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::make_bob().within_unique_ptr().plain(), 3);
+        },
+        directives_from_lists(&["Bob", "make_bob"], &[], None),
+        None,
+        Some(Box::new(MustUseOnNewReturns)),
+        None,
+    );
+}
+
+#[test]
+fn test_dropping_an_impl_new_is_diagnosed_with_instructions() {
+    // The user-visible half of google/autocxx#1090: dropping the `impl New`
+    // rather than emplacing it silently constructs nothing, so the diagnostic
+    // has to name the ways of emplacing it.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            Bob() : a(3) {}
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        #[deny(unused_must_use)]
+        fn drops_it() {
+            ffi::Bob::new();
+        }
+        drops_it();
+    };
+    run_test_expect_fail_with_error("", hdr, rs, &["Bob"], &[], ".within_unique_ptr()");
+}
+
+#[test]
+fn test_std_function_parameter_says_what_went_wrong() {
+    // What autocxx used to report was whichever of bindgen's limits the type
+    // happened to trip over, which told the user nothing about their own code.
+    // See google/autocxx#1279.
+    //
+    // The two standard libraries trip over different limits, so this pins the
+    // wording rather than the classification. libstdc++ and libc++ hide
+    // std::function behind reserved implementation-detail names, so bindgen
+    // erases it to an opaque blob (`InvalidIdentError::BindgenOpaqueType`);
+    // MSVC's spells it as a partial specialization over a function type, which
+    // bindgen keeps as a named class with a discarded template parameter
+    // (`ConvertErrorFromCpp::UnsupportedStdFunction`). Both end at the same
+    // advice, which is the part a user acts on.
+    let hdr = indoc! {"
+        #include <functional>
+        inline void takes_callback(std::function<void(int)> f) { (void) f; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["takes_callback"],
+        &[],
+        "std::function is not supported by bindgen or cxx",
+    );
+}
+
+#[test]
+fn test_std_function_method_costs_only_that_method() {
+    // The rest of a class whose method takes a std::function must survive.
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <functional>
+        class Requester {
+        public:
+            Requester() {}
+            using RespHandler = std::function<void(int)>;
+            void sendRequest(RespHandler handler) { (void) handler; }
+            uint32_t answer() const { return 42; }
+        };
+    "};
+    let rs = quote! {
+        let requester = ffi::Requester::new().within_unique_ptr();
+        assert_eq!(requester.answer(), 42);
+    };
+    // The explanation reaches the user through the doc comment of the stub
+    // standing in for the type autocxx could not generate - but only where the
+    // typedef is what failed. On MSVC it is not: bindgen keeps std::function as
+    // a named class with a discarded template parameter, the typedef to it
+    // becomes an `OpaqueTypedef { forward_declaration: true }`, and the method
+    // is then refused with `TypeContainingForwardDeclaration`, whose message
+    // talks about UniquePtr and CxxVector and never mentions std::function.
+    // Carrying the reason across that hop needs it threaded through
+    // `OpaqueTypedef`, `TypeConverter::find_incomplete_types` and
+    // `TypeContainingForwardDeclaration`, the way `IgnoredDependent` now
+    // carries it - a change to core analysis which should be made by someone
+    // who can run it on MSVC.
+    if cfg!(target_env = "msvc") {
+        run_test_ex(
+            "",
+            hdr,
+            rs,
+            directives_from_lists(&["Requester"], &[], None),
+            None,
+            None,
+            None,
+        );
+    } else {
+        run_test_ex(
+            "",
+            hdr,
+            rs,
+            directives_from_lists(&["Requester"], &[], None),
+            None,
+            Some(make_string_finder(vec![
+                "std::function is not supported by bindgen or cxx".to_string(),
+            ])),
+            None,
+        );
+    }
+}

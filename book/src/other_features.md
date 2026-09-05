@@ -96,3 +96,26 @@ do this:
 assert_eq!(std::str::from_utf8(&ffi::BOB).unwrap().trim_end_matches(char::from(0)), "Hello");
 ```
 
+## `std::function`
+
+`bindgen` has no way to describe a `std::function` in Rust, and `cxx` cannot
+bind one either; its function support stops at
+[function pointers](https://cxx.rs/binding/fn.html). `autocxx` therefore
+generates nothing which takes or returns one. Only the members which mention
+`std::function` are lost: the rest of the enclosing class is generated as usual.
+
+A shim which takes a plain C function pointer does not help, because `bindgen`
+writes those as `Option<extern "C" fn(..)>` and `autocxx` has no binding for
+`Option` either. To have C++ call into Rust, either subclass a C++ observer
+class from Rust or hand C++ a named Rust function; both are described under
+[callbacks into Rust](rust_calls.md).
+
+Where the explanation appears depends on your standard library, because the two
+put `std::function` beyond `bindgen` differently. With libstdc++ and libc++ it
+is reduced to an opaque blob of bytes, and the doc comment of the stub standing
+in for that blob carries the explanation - as it does for any other type
+`bindgen` reduces the same way, which in practice means templated types whose
+parameters it cannot model. With MSVC's standard library the type keeps its
+name, and the explanation is attached to `std::function` itself; a
+class-scoped `using` alias of it is reported less precisely, as a forward
+declaration whose target could not be generated.

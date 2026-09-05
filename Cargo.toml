@@ -30,12 +30,19 @@ arbitrary_self_types = []
 
 [dependencies]
 autocxx-macro = { path="macro", version="0.30.0" }
-# TODO: this floor is too low and has been for a while. `reference_wrapper.rs`
-# calls `UniquePtr::as_ptr`/`as_mut_ptr`, neither of which existed before cxx
-# 1.0.136 (1.0.135 has neither, 1.0.136 has both), so a `-Z minimal-versions`
-# resolve picks a cxx this crate cannot build against. Raising it to "1.0.136"
-# is the fix, but that narrows the supported range, so it wants a deliberate
-# call rather than a drive-by bump.
+# The floor is what `reference_wrapper.rs` needs: `UniquePtr::as_ptr` and
+# `as_mut_ptr` both first appear in cxx 1.0.136 (1.0.135 has neither), so a
+# `-Z minimal-versions` resolve below that picks a cxx this crate cannot build
+# against.
+#
+# Whatever version is resolved has to match, patch level and all, the cxx-gen
+# that autocxx-engine generates C++ with: since cxx 1.0.189 the patch level is
+# part of every symbol a bridge produces (`cxxbridge1$199$f`), so a mismatch
+# means every generated function fails to link against a symbol that appears in
+# nobody's source. No version requirement can ask for that - only an exact pin
+# would, and that would stop downstream crates choosing any other cxx - so
+# `autocxx-build` checks it at build time instead. See
+# `engine/src/cxx_version_parity.rs`.
 cxx = "1.0.136" # ... also needed because expansion of type_id refers to ::cxx
 aquamarine = "0.1" # docs
 moveit = { version = "0.6", features = [ "cxx" ] }

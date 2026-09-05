@@ -78,6 +78,20 @@ pub(crate) fn replace_hopeless_typedef_targets(
                     }
                 }
             }
+            // Unlike the arm above, this one drops the reason on the floor:
+            // `OpaqueTypedef` has nowhere to put it. Anything which then uses
+            // this typedef is refused with
+            // `TypeContainingForwardDeclaration`, whose message talks about
+            // UniquePtr and CxxVector and says nothing about what was actually
+            // wrong with the target. That is what a user sees on MSVC for a
+            // class-scoped typedef of `std::function`
+            // (`test_std_function_method_costs_only_that_method`), where the
+            // real explanation - `UnsupportedStdFunction` - belongs to the
+            // forward declaration and never travels. Fixing it means carrying
+            // the error through `OpaqueTypedef`,
+            // `TypeConverter::find_incomplete_types` and
+            // `TypeContainingForwardDeclaration`, the way `IgnoredDependent`
+            // now carries it.
             Api::Typedef {
                 analysis: TypedefAnalysis { ref deps, .. },
                 ..
