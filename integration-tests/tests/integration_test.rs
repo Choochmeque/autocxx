@@ -17884,6 +17884,33 @@ fn test_elab_shadowed_type_via_unique_ptr() {
     );
 }
 
+/// A shadowed *union*. The unshadowing alias names the type with an elaborated
+/// type specifier, and the tag in that has to be the one C++ gave the type:
+/// `struct` and `class` are interchangeable, but `union` is neither, and naming
+/// it wrongly is an error rather than a warning. Turned up by running
+/// `generate_all!` over a libc++ header, which reaches `union wait` from
+/// `<sys/wait.h>` past the `wait` function that hides it.
+#[test]
+fn test_elab_shadowed_union() {
+    let hdr = indoc! {"
+        union fx_holder { int as_int; unsigned as_uint; };
+        inline int fx_holder(int x) { return x; }
+        inline int read_holder(const union fx_holder& h) { return h.as_int; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_holder", "read_holder"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["typedef union ::fx_holder fx_holder_autocxx_unshadowed;"],
+            &[],
+        ))),
+        None,
+    );
+}
+
 #[test]
 fn test_pure_virtual_destructor_makes_class_abstract() {
     // A pure virtual destructor is the whole of what makes this class
