@@ -51,6 +51,17 @@ version = "1.0.39"
 features = ["full"]
 #features = [ "full", "extra-traits" ]
 
+# The process the harness re-runs to build generated Rust code. `test = false`
+# because it contains no tests, and `doc = false` because it has no API to
+# document - and because `cargo rustdoc -p autocxx-integration-tests`, which CI
+# runs over every package, refuses to work on a package offering it more than
+# one documentable target.
+[[bin]]
+name = "autocxx-trybuild-child"
+path = "src/bin/autocxx-trybuild-child.rs"
+test = false
+doc = false
+
 [[test]]
 name = "integration_tests"
 path = "tests/lib.rs"

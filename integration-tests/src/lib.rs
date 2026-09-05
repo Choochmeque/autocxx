@@ -216,41 +216,39 @@ fn rs_find_env(rs_find_mode: RsFindMode, temp_dir: &Path) -> RsFindEnv {
     }
 }
 
-/// Name of the test that a test binary must expose so that this harness can
-/// re-enter it as a child process. See [`run_trybuild_child_if_requested`].
-pub const TRYBUILD_CHILD_TEST_NAME: &str = "autocxx_trybuild_child";
+/// Name of the binary this harness runs to build generated Rust code. It is a
+/// `[[bin]]` of this same crate, so cargo builds it into the profile directory
+/// of whatever target directory is in use. See [`find_trybuild_child_bin`] for
+/// how it is located from there.
+const TRYBUILD_CHILD_BIN_NAME: &str = "autocxx-trybuild-child";
 
-/// Carries the path of the Rust file to build. Its presence is what puts a
-/// re-entered process into child mode.
+/// Carries the path of the Rust file to build. Its presence is what puts the
+/// child binary into build mode.
 const TRYBUILD_CHILD_RS_PATH: &str = "AUTOCXX_TRYBUILD_CHILD_RS_PATH";
 
-/// Printed by the child the moment it enters child mode, so that the parent can
-/// tell "the build ran and succeeded" apart from "this executable has no
-/// re-entry hook, so the child did nothing at all". Without it a missing hook
-/// would look exactly like a passing test.
+/// Printed by the child the moment it enters build mode, so that the parent can
+/// tell "the build ran and succeeded" apart from "whatever ran under that name
+/// was not the child, and did nothing at all". Without it a missing or wrong
+/// child would look exactly like a passing test.
 const TRYBUILD_CHILD_SENTINEL: &str = "@@ autocxx trybuild child running @@";
 
-/// Re-entry point for the child process that actually builds the generated Rust
-/// code. Returns `true` if it ran, in which case the caller must return
-/// immediately and do nothing else.
+/// Body of the `autocxx-trybuild-child` binary: builds the Rust file named by
+/// the `AUTOCXX_TRYBUILD_CHILD_RS_PATH` environment variable, and returns `true`
+/// if it did. `false` means the variable was unset, so nobody asked for a build
+/// and the caller has nothing to do.
 ///
-/// Every executable that can reach [`build_from_folder`], [`do_run_test`] and
-/// friends should give this a chance to run before doing anything else: a test
-/// binary by exposing an `#[ignore]`d test named [`TRYBUILD_CHILD_TEST_NAME`]
-/// that calls it, any other binary by calling it at the top of `main`. An
-/// executable that does not is still correct - the harness spots that the child
-/// did nothing and builds in-process instead - but its build failures come
-/// without diagnostics.
+/// It lives here, rather than in the binary, so that both ends of the protocol -
+/// the variable, the sentinel, what an exit status means - are written down
+/// once, next to the code that starts the child.
+#[doc(hidden)]
 pub fn run_trybuild_child_if_requested() -> bool {
     let rs_path = match std::env::var_os(TRYBUILD_CHILD_RS_PATH) {
         Some(rs_path) => PathBuf::from(rs_path),
         None => return false,
     };
     // Before anything is allowed to spawn a process. trybuild's cargo, and every
-    // rustc and build script under it, inherit this environment; if one of them
-    // happened to be an executable with this same hook - the mdbook preprocessor
-    // is exactly that - it would enter child mode and start building instead of
-    // doing its job.
+    // rustc and build script under it, inherit this environment, and nothing
+    // underneath a build has any business being told to start one of its own.
     std::env::remove_var(TRYBUILD_CHILD_RS_PATH);
     println!("{TRYBUILD_CHILD_SENTINEL}");
     let test_cases = trybuild::TestCases::new();
@@ -282,38 +280,22 @@ pub fn run_trybuild_child_if_requested() -> bool {
 /// so it would swallow output belonging to unrelated tests. A child's pipe
 /// belongs to that child alone.
 ///
-/// The child is this same executable, re-entered via
-/// [`run_trybuild_child_if_requested`]; the arguments below select just the
-/// re-entry test when it is a test binary, and are ignored by anything else,
-/// which checks the hook before it looks at its arguments.
+/// The child is the [`TRYBUILD_CHILD_BIN_NAME`] binary, whose entire job this
+/// is. It used to be this same executable re-entered, which meant every test
+/// binary had to expose a pseudo-test for the harness to filter on - and then
+/// carry it in every listing of its tests, and in every ignored count, forever.
 fn run_trybuild(
     rs_path: &Path,
     rustflags: &str,
     rs_find_env: &[(String, OsString)],
 ) -> Result<(), String> {
-    let current_exe = match std::env::current_exe() {
-        Ok(current_exe) => current_exe,
-        Err(err) => {
-            return build_in_process(
-                rs_path,
-                rustflags,
-                rs_find_env,
-                &format!("this executable's own path could not be determined ({err})"),
-            )
-        }
+    let child_bin = match find_trybuild_child_bin() {
+        Ok(child_bin) => child_bin,
+        Err(reason) => return build_in_process(rs_path, rustflags, rs_find_env, &reason),
     };
-    let mut cmd = std::process::Command::new(current_exe);
+    let mut cmd = std::process::Command::new(child_bin);
     cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
         .env("RUSTFLAGS", rustflags)
-        .args([
-            "--exact",
-            TRYBUILD_CHILD_TEST_NAME,
-            "--ignored",
-            // So that trybuild's report reaches the child's real stderr, and
-            // hence our pipe, rather than libtest's own capture buffer.
-            "--nocapture",
-            "--test-threads=1",
-        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -332,22 +314,23 @@ fn run_trybuild(
                 rs_path,
                 rustflags,
                 rs_find_env,
-                &format!("this executable could not be re-run ({err})"),
+                &format!("the `{TRYBUILD_CHILD_BIN_NAME}` helper could not be run ({err})"),
             )
         }
     };
     let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
     report.push_str(&String::from_utf8_lossy(&output.stderr));
     if !report.contains(TRYBUILD_CHILD_SENTINEL) {
-        // The child never reached the re-entry hook, so its exit status says
-        // nothing about the build and must not be trusted.
+        // Whatever ran never announced itself as the child, so its exit status
+        // says nothing about the build and must not be trusted.
         return build_in_process(
             rs_path,
             rustflags,
             rs_find_env,
             &format!(
-                "this executable has no `{TRYBUILD_CHILD_TEST_NAME}` re-entry hook \
-                 (see `autocxx_integration_tests::run_trybuild_child_if_requested`)"
+                "the executable found as `{TRYBUILD_CHILD_BIN_NAME}` did not announce \
+                 itself as this harness's child process, so it is not the helper this \
+                 harness expects"
             ),
         );
     }
@@ -358,18 +341,105 @@ fn run_trybuild(
     }
 }
 
-/// Last resort for an executable this harness cannot re-enter: build here, the
-/// way this harness always used to. The diagnostics go wherever trybuild puts
-/// them and cannot be recovered, so the error says why.
+/// How far above the running executable to look for the helper. Cargo's classic
+/// layout needs two levels - a test binary sits in `<profile>/deps` and the
+/// helper in `<profile>` - but the per-unit layout cargo uses on nightly puts
+/// that same test binary in `<profile>/build/<package>/<hash>/out`, five levels
+/// down. Eight leaves room for the layout to change again without the search
+/// wandering out of the target directory.
+const TRYBUILD_CHILD_SEARCH_DEPTH: usize = 8;
+
+/// Locates the [`TRYBUILD_CHILD_BIN_NAME`] binary.
+///
+/// Cargo hands a package's own test binaries the path to each of its binaries in
+/// `CARGO_BIN_EXE_<name>`, and that is the answer whenever there is one: it is
+/// cargo's own, so no layout of the target directory can invalidate it. Only the
+/// test targets of the crate that *owns* the helper get it, though, and the
+/// harness is also used from another package's tests and from the mdbook
+/// preprocessor - so failing that, look for the file, from the running
+/// executable's own directory upwards.
+///
+/// Nothing here reads a variable that this process might have set for itself.
+/// The harness and its tests write to the environment (`OUT_DIR`, `RUSTFLAGS`,
+/// the `AUTOCXX_RS*` family) while other tests are running, and a search that
+/// consulted those would find whatever the last test happened to leave behind.
+///
+/// The `Err` is the reason to show whoever ends up reading a build failure
+/// without diagnostics, so it says what would have to be built to get them.
+fn find_trybuild_child_bin() -> Result<PathBuf, String> {
+    let file_name = format!("{TRYBUILD_CHILD_BIN_NAME}{}", std::env::consts::EXE_SUFFIX);
+    // Checked rather than trusted: an inherited value could name a binary from
+    // some other build, and falling through to the search is better than running
+    // whatever that is.
+    let from_cargo = std::env::var_os(format!("CARGO_BIN_EXE_{TRYBUILD_CHILD_BIN_NAME}"))
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if let Some(child_bin) = from_cargo {
+        return Ok(child_bin);
+    }
+    let current_exe = std::env::current_exe()
+        .map_err(|err| format!("this executable's own path could not be determined ({err})"))?;
+    let dir = current_exe.parent().ok_or_else(|| {
+        format!(
+            "this executable's own path ({}) names no directory to look in",
+            current_exe.display()
+        )
+    })?;
+    find_bin_in_ancestors(dir, &file_name).ok_or_else(|| {
+        format!(
+            "cargo did not say where the `{TRYBUILD_CHILD_BIN_NAME}` helper is, and there is \
+             no `{file_name}` in {} or the {} directories above it. It is a binary of the \
+             `autocxx-integration-tests` package, which cargo builds only when asked to build \
+             that package - so a run confined to some other package, such as \
+             `cargo test -p autocxx-gen`, does not have it. Building the \
+             `autocxx-integration-tests` package (in this workspace, \
+             `cargo build -p autocxx-integration-tests`) puts it there",
+            dir.display(),
+            TRYBUILD_CHILD_SEARCH_DEPTH - 1
+        )
+    })
+}
+
+/// The first `<ancestor>/<file_name>` that is a file, starting at `dir` itself
+/// and climbing at most [`TRYBUILD_CHILD_SEARCH_DEPTH`] directories.
+fn find_bin_in_ancestors(dir: &Path, file_name: &str) -> Option<PathBuf> {
+    dir.ancestors()
+        .take(TRYBUILD_CHILD_SEARCH_DEPTH)
+        .map(|ancestor| ancestor.join(file_name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Last resort for when the child cannot be run: build here, the way this
+/// harness always used to. The diagnostics go wherever trybuild puts them and
+/// cannot be recovered, so the error says why.
 fn build_in_process(
     rs_path: &Path,
     rustflags: &str,
     rs_find_env: &[(String, OsString)],
     reason: &str,
 ) -> Result<(), String> {
-    // Unlike the child, this has to go through the process environment, so it
-    // is racy if other tests are building at the same time. That is the price of
-    // an executable that cannot be re-entered.
+    // Say so, once per process. Losing the compiler's diagnostics is the whole
+    // thing the child process exists to prevent, and a build that then passes
+    // says nothing at all - so whoever eventually hits a failure here would have
+    // to work out from scratch why it came without them.
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        // Written straight to the process's stderr, not via eprintln!:
+        // libtest's per-test capture hooks the std macros, so under
+        // `cargo test` the macro form would land in a captured buffer
+        // that is only shown for failing tests - and the whole point is
+        // to be seen before anything fails. Write errors are ignored;
+        // a warning that cannot be delivered has nowhere better to go.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: building generated Rust in this process, without capturing \
+             the compiler's diagnostics, because {reason}."
+        );
+    });
+    // Unlike the child, this has to go through the process environment. Callers
+    // hold the builder mutex, so two of these cannot overlap, but the variables
+    // are visible to the rest of the process for as long as this takes.
     std::env::set_var("RUSTFLAGS", rustflags);
     for key in RS_FIND_KEYS {
         std::env::remove_var(key);
@@ -834,5 +904,86 @@ impl BuilderModifierFns for ForceWrapperGeneration {
         } else {
             builder
         }
+    }
+}
+
+/// Tests for how the harness finds the process it builds generated Rust in.
+///
+/// These build directory trees by hand rather than looking at a real one,
+/// because the shapes that matter are cargo's and change between releases: the
+/// per-unit layout below is the one cargo started using on nightly, where a test
+/// binary that used to sit in `<profile>/deps` is five directories further down.
+#[cfg(test)]
+mod tests {
+    use super::{find_bin_in_ancestors, find_trybuild_child_bin, TRYBUILD_CHILD_SEARCH_DEPTH};
+    use tempfile::tempdir;
+
+    /// Lays out `dirs` under a temporary root and puts `helper` in the root's
+    /// `debug` directory, the way cargo puts a package's binaries there.
+    fn profile_dir_with(exe_dir: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("target").join("debug");
+        std::fs::create_dir_all(profile.join(exe_dir)).unwrap();
+        std::fs::write(profile.join("autocxx-trybuild-child"), "").unwrap();
+        let exe_dir = profile.join(exe_dir);
+        (root, exe_dir)
+    }
+
+    #[test]
+    fn finds_the_helper_in_cargos_classic_layout() {
+        let (_root, exe_dir) = profile_dir_with("deps");
+        assert!(find_bin_in_ancestors(&exe_dir, "autocxx-trybuild-child").is_some());
+    }
+
+    /// The layout that broke this: `<profile>/build/<package>/<hash>/out`.
+    #[test]
+    fn finds_the_helper_in_cargos_per_unit_layout() {
+        let (_root, exe_dir) = profile_dir_with("build/autocxx-integration-tests/8966641ba8/out");
+        assert!(find_bin_in_ancestors(&exe_dir, "autocxx-trybuild-child").is_some());
+    }
+
+    /// The search is bounded, so that a stray file further up the filesystem is
+    /// never mistaken for the helper. The tree here is deeper than
+    /// [`TRYBUILD_CHILD_SEARCH_DEPTH`], and raising that would rightly break it.
+    #[test]
+    fn does_not_climb_out_of_the_target_directory() {
+        let root = tempdir().unwrap();
+        let mut deep = root.path().to_owned();
+        for level in 0..=TRYBUILD_CHILD_SEARCH_DEPTH {
+            deep.push(format!("level{level}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.path().join("autocxx-trybuild-child"), "").unwrap();
+        assert!(find_bin_in_ancestors(&deep, "autocxx-trybuild-child").is_none());
+    }
+
+    #[test]
+    fn does_not_mistake_a_directory_for_the_helper() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("autocxx-trybuild-child")).unwrap();
+        assert!(find_bin_in_ancestors(root.path(), "autocxx-trybuild-child").is_none());
+    }
+
+    /// The harness and its tests write to the environment while other tests are
+    /// running, so discovery must not depend on anything they could have left
+    /// there. `OUT_DIR` is the one that names a directory of exactly the shape
+    /// the helper lives in, and `gen/cmd`'s tests set it to a temporary
+    /// directory of their own.
+    #[test]
+    fn a_polluted_environment_does_not_change_what_is_found() {
+        let before = find_trybuild_child_bin();
+        let elsewhere = tempdir().unwrap();
+        let restore = std::env::var_os("OUT_DIR");
+        std::env::set_var("OUT_DIR", elsewhere.path());
+        let polluted = find_trybuild_child_bin();
+        match restore {
+            Some(restore) => std::env::set_var("OUT_DIR", restore),
+            None => std::env::remove_var("OUT_DIR"),
+        }
+        assert_eq!(
+            before.as_ref().map(|found| found.as_path()),
+            polluted.as_ref().map(|found| found.as_path()),
+            "OUT_DIR changed where the helper was looked for"
+        );
     }
 }
