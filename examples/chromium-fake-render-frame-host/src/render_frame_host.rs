@@ -215,9 +215,18 @@ pub struct RenderFrameHostForWebContents {
     rfh: *mut ffi::content::RenderFrameHost,
 }
 
+/// How many handles have been told their RenderFrameHost died. `main`
+/// asserts on this: a deregistered observer must not hear the news, so
+/// after dropping one handle and keeping one, the count has to be
+/// exactly one.
+pub static DELETION_NOTICES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl ffi::content::WebContentsObserver_methods for RenderFrameHostForWebContents {
     unsafe fn RenderFrameDeleted(&mut self, destroyed_rfh: *mut ffi::content::RenderFrameHost) {
         if self.rfh == destroyed_rfh {
+            println!("a handle noticed its RenderFrameHost being destroyed");
+            DELETION_NOTICES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.rfh = std::ptr::null_mut()
         }
     }

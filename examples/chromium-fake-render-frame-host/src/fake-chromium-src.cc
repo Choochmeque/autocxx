@@ -63,7 +63,13 @@ void WebContentsImpl::AddObserver(WebContentsObserver *observer) {
   observers_.push_back(observer);
 }
 void WebContentsImpl::RemoveObserver(WebContentsObserver *observer) {
-  std::remove(std::begin(observers_), std::end(observers_), observer);
+  // The erase-remove idiom. `std::remove` only shuffles the survivors to the
+  // front and hands back the new logical end; without the `erase` the vector
+  // keeps its old size and we'd go on notifying an observer that has been
+  // destroyed.
+  observers_.erase(
+      std::remove(std::begin(observers_), std::end(observers_), observer),
+      std::end(observers_));
 }
 
 void WebContentsImpl::DeleteRFH() {
