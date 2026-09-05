@@ -522,10 +522,12 @@ mod parse_tests {
             subclass!("Observer", MyObserver)
         };
         let allowlist: Vec<String> = config.bindgen_allowlist().unwrap().collect();
-        assert!(allowlist.contains(&"MyObserverCpp".to_string()));
-        assert!(allowlist.contains(&"Observer".to_string()));
-        assert!(!allowlist.contains(&"MyObserver".to_string()));
+        let has = |name: &str| allowlist.iter().any(|entry| entry == name);
+        assert!(has("MyObserverCpp"));
+        assert!(has("Observer"));
+        assert!(!has("MyObserver"));
     }
+
     #[test]
     fn test_safety_unsafe() {
         let us: UnsafePolicy = parse_quote! {
