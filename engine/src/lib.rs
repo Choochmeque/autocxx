@@ -14,6 +14,7 @@
 #![cfg_attr(feature = "nightly", feature(doc_cfg))]
 
 mod ast_discoverer;
+mod clang_target;
 mod conversion;
 mod cxxbridge;
 mod known_types;
@@ -734,11 +735,15 @@ pub fn make_clang_args<'a>(
     incs: &'a [PathBuf],
     extra_args: &'a [&str],
 ) -> impl Iterator<Item = String> + 'a {
+    // Which target to parse for, where clang would otherwise guess wrong -
+    // see `clang_target`. Nothing here when the caller has already said.
+    let target_arg = clang_target::extra_clang_target_arg(extra_args);
     // AUTOCXX_CLANG_ARGS come first so that any defaults defined there(e.g. for the `-std`
     // argument) can be overridden by extra_args.
     AUTOCXX_CLANG_ARGS
         .iter()
         .map(|s| s.to_string())
+        .chain(target_arg)
         .chain(incs.iter().map(|i| format!("-I{}", i.to_str().unwrap())))
         .chain(extra_args.iter().map(|s| s.to_string()))
 }

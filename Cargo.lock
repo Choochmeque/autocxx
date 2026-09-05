@@ -214,6 +214,7 @@ dependencies = [
  "regex_static",
  "rustversion",
  "serde_json",
+ "shlex",
  "syn 2.0.98",
  "tempfile",
  "thiserror 1.0.69",
