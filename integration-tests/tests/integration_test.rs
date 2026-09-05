@@ -6854,6 +6854,48 @@ fn test_string_transparent_function() {
     run_test("", hdr, rs, &["take_string"], &[]);
 }
 
+/// The same function, with the parameter named through a namespace-scope
+/// `using std::string;` rather than written out. autocxx should substitute
+/// `CxxString` for it exactly as above, and doesn't:
+///
+/// ```text
+/// DidNotGenerateAnythingUsable("take_string",
+///   Argument { arg: "a", err: InvalidIdent(BindgenOpaqueType) })
+/// ```
+///
+/// Nothing autocxx can do about it, because nothing reaches autocxx to work
+/// with. bindgen lists `CXCursor_UsingDeclaration` among the cursor kinds it
+/// deliberately does not handle (`ir/item.rs`, `Item::from_ty` returning
+/// `ParseError::Continue`), so the alias appears nowhere in its output and the
+/// parameter arrives as an opaque blob of bytes:
+///
+/// ```text
+/// pub fn take_string_bindgen_original(
+///     a: __bindgen_marker_Opaque<root::__BindgenOpaqueArray<u64, 3usize>>,
+/// ) -> u32;
+/// ```
+///
+/// against `a: root::std::string` for the qualified spelling. autocxx's own
+/// handling of `use` items (`parse_bindgen.rs`) and of typedefs is not
+/// implicated: `typedef std::string mystring;`, `using mystring = std::string;`
+/// and `using namespace std;` all work. It is specifically a using-declaration
+/// naming a typedef of a class template instantiation. Fixing it means teaching
+/// autocxx-bindgen that cursor kind.
+#[test]
+#[ignore]
+fn test_string_through_a_using_declaration() {
+    let hdr = indoc! {"
+        #include <string>
+        #include <cstdint>
+        using std::string;
+        inline uint32_t take_string(string a) { return a.size(); }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::take_string("hello"), 5);
+    };
+    run_test("", hdr, rs, &["take_string"], &[]);
+}
+
 #[test]
 fn test_string_transparent_method() {
     let hdr = indoc! {"
