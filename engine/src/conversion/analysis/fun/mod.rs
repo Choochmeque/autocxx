@@ -907,10 +907,12 @@ impl<'a> FnAnalyzer<'a> {
                         .map(|param| param.conversion.cxxbridge_type()),
                     Some(Type::Reference(_))
                 );
-                // Some exotic forms of copy constructor have const and/or volatile qualifiers.
-                // These are not sufficient to implement CopyNew, so we just treat them as regular
-                // constructors. We detect them by their argument being translated to Pin at this
-                // point.
+                // A copy constructor taking a non-const source - `T(T&)` or
+                // `T(volatile T&)` - cannot implement CopyNew, which copies from
+                // a `&self`, so we treat it as a regular constructor. We detect
+                // the two by their argument being translated to Pin at this
+                // point. The const-qualified forms, `T(const T&)` and
+                // `T(const volatile T&)`, both can and do implement CopyNew.
                 if is_move || arg_is_reference {
                     let (kind, method_name, trait_id) = if is_move {
                         (
@@ -2224,7 +2226,7 @@ impl<'a> FnAnalyzer<'a> {
                     parse_quote! { this: *mut #path, other: __bindgen_marker_RValueReference < *mut #path > },
                 )
             }
-            if items_found.implicit_copy_constructor_needed() {
+            if items_found.implicit_const_copy_constructor_needed() {
                 self.synthesize_special_member(
                     items_found,
                     "const_copy_ctor",

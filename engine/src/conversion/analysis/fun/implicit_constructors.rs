@@ -121,6 +121,12 @@ pub(crate) enum WhyNoSpecialMember {
     /// C++ withdraws a class's implicitly declared copy constructor once the
     /// class declares a move constructor.
     MoveConstructorDeclared,
+    /// C++ declares this class's copy constructor as `T(T&)` rather than
+    /// `T(const T&)`, because the named base or field has no copy constructor
+    /// which accepts a const source. autocxx has no way to offer that shape:
+    /// `moveit`'s `CopyNew` copies from a `&self`, and this constructor wants
+    /// a mutable lvalue.
+    ImplicitCopyConstructorIsNonConst { dependency: String },
 }
 
 impl WhyNoSpecialMember {
@@ -169,6 +175,13 @@ impl WhyNoSpecialMember {
             Self::MoveConstructorDeclared => format!(
                 "C++ gives this type no {member}, because it declares a move constructor, which \
                  withdraws the copy constructor C++ would otherwise have declared implicitly."
+            ),
+            Self::ImplicitCopyConstructorIsNonConst { dependency } => format!(
+                "autocxx has not given this type a {member}. C++ declares one, but as \
+                 `T(T&)` rather than `T(const T&)`, because its {dependency} has no copy \
+                 constructor accepting a const source - and a constructor which copies from a \
+                 mutable lvalue is not something autocxx can synthesize or expose as CopyNew. \
+                 A copy constructor written out in the C++ source is still available."
             ),
         }
     }
@@ -286,14 +299,17 @@ impl ItemsFound {
         self.default_constructor.exists_implicit()
     }
 
-    /// Returns whether we should generate a copy constructor wrapper, because bindgen won't do one
-    /// for the implicit copy constructor which exists.
-    pub(super) fn implicit_copy_constructor_needed(&self) -> bool {
-        let any_implicit_copy = self.const_copy_constructor.exists_implicit()
-            || self.non_const_copy_constructor.exists_implicit();
-        let no_explicit_copy = !(self.const_copy_constructor.exists_explicit()
-            || self.non_const_copy_constructor.exists_explicit());
-        any_implicit_copy && no_explicit_copy
+    /// Returns whether we should generate a wrapper for an implicitly declared
+    /// `T(const T&)`, because bindgen won't do one.
+    pub(super) fn implicit_const_copy_constructor_needed(&self) -> bool {
+        self.const_copy_constructor.exists_implicit() && self.no_explicit_copy_constructor()
+    }
+
+    /// Whether the class declares a copy constructor of its own, of either
+    /// shape, in which case bindgen has already given us a function for it.
+    fn no_explicit_copy_constructor(&self) -> bool {
+        !(self.const_copy_constructor.exists_explicit()
+            || self.non_const_copy_constructor.exists_explicit())
     }
 
     /// Returns whether we should generate a move constructor wrapper, because bindgen won't do one
@@ -837,24 +853,37 @@ pub(super) fn find_constructors_present(
                                 )
                             }
                             None => {
-                                let dependencies_are_const = bases_items_found
+                                // C++ declares the implicit copy constructor
+                                // as `T(const T&)` only if every base and
+                                // field has one whose parameter is `const B&`
+                                // or `const volatile B&`; otherwise it
+                                // declares `T(T&)`. Both of those spellings
+                                // land in `const_copy_constructor`, since
+                                // that slot means "copyable from a const
+                                // source" - which is the question this rule
+                                // asks.
+                                let non_const_dependency = bases_items_found
                                     .iter()
                                     .chain(fields_items_found.iter())
-                                    .all(|(_, items_found)| {
-                                        items_found.const_copy_constructor.exists()
-                                    });
-                                if dependencies_are_const {
-                                    (
+                                    .find(|(_, items_found)| {
+                                        !items_found.const_copy_constructor.exists()
+                                    })
+                                    .map(|(dependency, _)| dependency.clone());
+                                match non_const_dependency {
+                                    None => (
                                         SpecialMemberFound::Implicit,
                                         SpecialMemberFound::NotPresent,
                                         None,
-                                    )
-                                } else {
-                                    (
+                                    ),
+                                    Some(dependency) => (
                                         SpecialMemberFound::NotPresent,
                                         SpecialMemberFound::Implicit,
-                                        None,
-                                    )
+                                        Some(
+                                            WhyNoSpecialMember::ImplicitCopyConstructorIsNonConst {
+                                                dependency,
+                                            },
+                                        ),
+                                    ),
                                 }
                             }
                             Some(blocker) => (
@@ -1124,7 +1153,28 @@ fn find_explicit_items(
                     Some(ExplicitKind::DefaultConstructor)
                 }
                 MethodKind::Constructor { is_default: false } => {
-                    Some(ExplicitKind::OtherConstructor)
+                    // `analyze_foreign_fn` sends a copy constructor whose
+                    // parameter is not const-qualified - `T(T&)` or
+                    // `T(volatile T&)` - down here rather than to
+                    // `TraitMethodKind::CopyConstructor`, because neither can
+                    // implement `CopyNew`: that copies from a `&self`, and
+                    // these want a mutable lvalue. The split is on constness
+                    // alone, which is the axis C++ uses too, so the two
+                    // const-qualified spellings - `T(const T&)` and
+                    // `T(const volatile T&)` - both go the other way and land
+                    // in `ExplicitKind::ConstCopyConstructor`.
+                    //
+                    // C++ still counts all four as copy constructors when
+                    // deciding which special members it declares implicitly,
+                    // so they mustn't be mistaken for ordinary constructors: a
+                    // class whose only copy constructor is `T(T&)` gets
+                    // neither an implicit `T(const T&)` nor an implicit
+                    // `T(T&&)`.
+                    if matches!(fun.special_member, Some(SpecialMemberKind::CopyConstructor)) {
+                        Some(ExplicitKind::NonConstCopyConstructor)
+                    } else {
+                        Some(ExplicitKind::OtherConstructor)
+                    }
                 }
                 _ => None,
             }
@@ -1141,19 +1191,13 @@ fn find_explicit_items(
                 ..
             } => match kind {
                 TraitMethodKind::Destructor => Some(ExplicitKind::Destructor),
-                // In `analyze_foreign_fn` we mark non-const copy constructors as not being copy
-                // constructors for now, so we don't have to worry about them.
-                //
-                // TODO: which means `ExplicitKind::NonConstCopyConstructor` is
-                // never recorded here, and a class whose only copy constructor
-                // is `T(T&)` looks to the rules below like a class which
-                // declares no copy constructor at all. They then hand it an
-                // implicit `T(const T&)` and an implicit `T(T&&)`, neither of
-                // which C++ declares for such a class, and we synthesize
-                // wrappers calling both - so the generated C++ doesn't
-                // compile. `T(T&)` reaches here as an
-                // `ExplicitKind::OtherConstructor`, which is what would have
-                // to be told apart to fix it.
+                // Only the const-qualified copy constructors reach us here:
+                // `analyze_foreign_fn` routes the rest to the `FnKind::Method`
+                // arm above, which records them as
+                // `ExplicitKind::NonConstCopyConstructor`. So this slot means
+                // "copyable from a const source", which is exactly what the
+                // rule choosing the shape of a containing class's implicit
+                // copy constructor asks about.
                 TraitMethodKind::CopyConstructor => Some(ExplicitKind::ConstCopyConstructor),
                 TraitMethodKind::MoveConstructor => Some(ExplicitKind::MoveConstructor),
                 _ => None,

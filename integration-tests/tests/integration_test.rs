@@ -12029,11 +12029,6 @@ fn test_pass_by_value_moves_where_it_can() {
 /// has. Neither `std::move` nor a `const T&` will bind to that constructor, so
 /// the wrapper has to hand the parameter over as a plain mutable lvalue.
 /// See <https://github.com/google/autocxx/issues/873>.
-///
-/// The `= delete`d move constructor is not incidental: without it, autocxx
-/// mistakes this class for one which declares no copy constructor and
-/// synthesizes wrappers calling implicit members C++ never gave it. See the
-/// note on `TraitMethodKind::CopyConstructor` in `implicit_constructors.rs`.
 #[test]
 fn test_pass_by_value_non_const_copy_constructor() {
     let hdr = indoc! {"
@@ -12044,6 +12039,118 @@ fn test_pass_by_value_non_const_copy_constructor() {
         MutableCopyOnly() {}
         MutableCopyOnly(MutableCopyOnly&) { mutable_copies()++; }
         MutableCopyOnly(MutableCopyOnly&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_it(MutableCopyOnly) {}
+    inline int32_t mutable_copy_count() { return mutable_copies(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::MutableCopyOnly::new().within_unique_ptr();
+        ffi::take_it(obj);
+        assert_eq!(ffi::mutable_copy_count(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["MutableCopyOnly", "take_it", "mutable_copy_count"],
+        &[],
+    );
+}
+
+/// Which of the two shapes of copy constructor a class has is decided by
+/// constness alone: `T(const T&)` and `T(const volatile T&)` both accept a
+/// const source, so both are bridgeable as `CopyNew`, while `T(T&)` and
+/// `T(volatile T&)` are neither. That distinction is what C++ consults when
+/// deciding the shape of a *containing* class's implicit copy constructor,
+/// so it has to stay exactly on the const axis.
+#[test]
+fn test_copy_constructor_qualifier_forms() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct QConst { QConst() {} QConst(const QConst&) {} std::string s; };
+    struct QConstVolatile {
+        QConstVolatile() {}
+        QConstVolatile(const volatile QConstVolatile&) {}
+        std::string s;
+    };
+    struct QNonConst { QNonConst() {} QNonConst(QNonConst&) {} std::string s; };
+    struct QVolatile { QVolatile() {} QVolatile(volatile QVolatile&) {} std::string s; };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::QConst: moveit::CopyNew);
+        static_assertions::assert_impl_all!(ffi::QConstVolatile: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::QNonConst: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::QVolatile: moveit::CopyNew);
+        // The two non-const forms are still bound, as ordinary constructors.
+        let _ = ffi::QNonConst::new().within_unique_ptr();
+        let _ = ffi::QVolatile::new().within_unique_ptr();
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["QConst", "QConstVolatile", "QNonConst", "QVolatile"],
+        &[],
+    );
+}
+
+/// A class is handed an implicit `T(T&)` rather than an implicit
+/// `T(const T&)` when one of its fields has no copy constructor accepting a
+/// const source. autocxx can't express that shape, so it must synthesize
+/// nothing at all rather than a `T(const T&)` wrapper C++ would refuse - and
+/// it should say so in the bindings.
+#[test]
+fn test_member_with_only_non_const_copy_constructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct MutableCopyOnly {
+        MutableCopyOnly() {}
+        MutableCopyOnly(MutableCopyOnly&) {}
+        std::string so_we_are_non_trivial;
+    };
+    struct Holder {
+        Holder() {}
+        MutableCopyOnly m;
+    };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Holder: moveit::CopyNew);
+        let _ = ffi::Holder::new().within_unique_ptr();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Holder", "MutableCopyOnly"], &[], None),
+        None,
+        Some(make_string_finder(
+            [
+                "but as `T(T&)` rather than `T(const T&)`",
+                "its field `m` of type `MutableCopyOnly` has no copy constructor accepting a const source",
+            ]
+            .map(|s| s.to_string())
+            .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// The same class without the `= delete`d move constructor. Declaring
+/// `T(T&)` is enough on its own for C++ to declare neither an implicit
+/// `T(const T&)` nor an implicit `T(T&&)`, so autocxx must not synthesize
+/// wrappers which call either of them.
+#[test]
+fn test_only_non_const_copy_constructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& mutable_copies() { static int32_t c = 0; return c; }
+    struct MutableCopyOnly {
+        MutableCopyOnly() {}
+        MutableCopyOnly(MutableCopyOnly&) { mutable_copies()++; }
         std::string so_we_are_non_trivial;
     };
     inline void take_it(MutableCopyOnly) {}
