@@ -16578,6 +16578,226 @@ fn test_opaque_directive() {
     );
 }
 
+#[test]
+/// Asking bindgen to derive `Default` must never turn into a zero-filled
+/// `Default` for a type whose all-bits-zero form isn't a valid value.
+///
+/// When a type can't derive `Default`, bindgen writes an `impl Default`
+/// by hand which zeroes the bytes. For a struct holding a Rust `enum` whose
+/// discriminants don't include 0 - the shape `enum_style!(RustifiedEnum)`
+/// exists to produce - that hands out an enum value which is not any of its
+/// variants, which is instant undefined behaviour. So no `Default` at all for
+/// such a struct; `test_take_bitfield` pins the other side, that a struct
+/// whose fields are all default-able still gets one.
+fn test_no_zero_filled_default_for_enum_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum Fruit : int {
+            APPLE = 1,
+            PEAR = 2,
+        };
+        struct Basket {
+            Fruit fruit;
+            uint32_t count;
+        };
+        inline uint32_t count_of(Basket b) { return b.count; }
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Basket: Default);
+        // ...and the type is otherwise perfectly usable.
+        let basket = ffi::Basket { fruit: ffi::Fruit::APPLE, count: 3 };
+        assert_eq!(ffi::count_of(basket), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            enum_style!(RustifiedEnum, "Fruit")
+            generate_pod!("Fruit")
+            generate_pod!("Basket")
+            generate!("count_of")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+/// Turning on bindgen's `derive_default` must not put `Default` into an
+/// enum's derive list, which rustc rejects outright: E0665, because bindgen
+/// marks no variant `#[default]`.
+///
+/// It happens because bindgen's `lookup_can_derive_default` treats an item its
+/// derive analysis never visited as derivable, and an enum nested inside a
+/// class autocxx makes opaque - as it does the standard library's internals -
+/// is exactly such an item. This fixture stands in for the libstdc++ shape
+/// that broke CI (an anonymous enum inside `std::_Rb_tree`) without depending
+/// on any particular standard library being installed.
+fn test_no_default_derive_on_enum_in_opaqued_class() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace __gnu_cxx {
+        class Detail {
+        public:
+            enum { AS_LVALUE = 0 };
+            uint32_t v;
+        };
+        }
+        struct Wrapper {
+            __gnu_cxx::Detail detail;
+            uint32_t n;
+        };
+        inline uint32_t read_wrapper(const Wrapper& w) { return w.n; }
+    "};
+    // Nothing to call - the generated bindings simply have to compile.
+    run_test("", hdr, quote! {}, &["Wrapper", "read_wrapper"], &[]);
+}
+
+/// A struct mixing bitfields with an ordinary field, for the tests below.
+fn bitfield_header() -> &'static str {
+    indoc! {"
+        #include <cstdint>
+        struct Bitfieldy {
+            uint8_t unsigned3 : 3;
+            int8_t signed3 : 3;
+            bool bool1 : 1;
+
+            uint32_t separator;
+
+            uint32_t unsigned12 : 12;
+            int32_t signed4 : 4;
+        };
+    "}
+}
+
+#[test]
+/// A bitfield is laid out by C++ inside an allocation unit which bindgen
+/// represents as `__BindgenBitfieldUnit<[u8; N]>`. That's a plain byte array
+/// with accessors, so a struct containing one is as movable as any other POD
+/// struct; autocxx used to refuse to make such a struct POD at all.
+fn test_take_bitfield() {
+    let cxx = indoc! {"
+        bool take_bitfield(Bitfieldy x) {
+            return (
+                x.unsigned3 == 2 &&
+                x.signed3 == -3 &&
+                x.bool1 == false &&
+                x.separator == 424242 &&
+                x.unsigned12 == 3000 &&
+                x.signed4 == -1
+            );
+        }
+    "};
+    let hdr = format!("{}bool take_bitfield(Bitfieldy);\n", bitfield_header());
+    let rs = quote! {
+        // Every field of this struct is default-able, so bindgen derives
+        // `Default` for it - see `test_no_zero_filled_default_for_enum_field`
+        // for the types that must *not* get one.
+        static_assertions::assert_impl_all!(ffi::Bitfieldy: Default);
+
+        // `Default` gives us the bitfield allocation units and the padding
+        // bindgen inserted, none of which can be written by hand. The
+        // functional-record-update form (`..Default::default()`) would be
+        // tidier, but autocxx gives every type with a destructor a `Drop`
+        // impl, and Rust won't move fields out of one of those.
+        let mut bitfield = ffi::Bitfieldy::default();
+        bitfield._bitfield_1 = ffi::Bitfieldy::new_bitfield_1(2, -3, false);
+        bitfield.separator = 424242;
+        bitfield.set_unsigned12(3000);
+        bitfield.set_signed4(-1);
+
+        assert_eq!(ffi::take_bitfield(bitfield), true);
+    };
+    run_test(cxx, &hdr, rs, &["take_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+/// The other direction: C++ fills in the bitfields and Rust reads them back.
+/// Only the unsigned fields are checked here; see
+/// `test_give_bitfield_signed_fields` for why.
+fn test_give_bitfield() {
+    let cxx = indoc! {"
+        Bitfieldy give_bitfield() {
+            Bitfieldy result{};
+            result.unsigned3 = 2;
+            result.signed3 = -3;
+            result.bool1 = false;
+            result.separator = 424242;
+            result.unsigned12 = 3000;
+            result.signed4 = -1;
+            return result;
+        }
+    "};
+    let hdr = format!("{}Bitfieldy give_bitfield();\n", bitfield_header());
+    let rs = quote! {
+        let bitfield = ffi::give_bitfield();
+
+        assert_eq!(bitfield.unsigned3(), 2);
+        assert_eq!(bitfield.bool1(), false);
+        assert_eq!(bitfield.separator, 424242);
+        assert_eq!(bitfield.unsigned12(), 3000);
+    };
+    run_test(cxx, &hdr, rs, &["give_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+#[ignore = "bindgen's generated getter for a signed bitfield does not sign-extend: \
+            `__BindgenBitfieldUnit::get` returns the raw bits in a u64 and the getter \
+            casts them straight to the field's signed type, so `signed3` holding -3 \
+            reads back as 5. See https://github.com/rust-lang/rust-bindgen/issues/1160. \
+            Nothing in autocxx can fix it; autocxx-bindgen 0.73.0 does not carry a fix."]
+/// The signed half of [`test_give_bitfield`]. Kept as a live (if ignored) test
+/// rather than commented out, so that whoever picks up the bindgen fix can
+/// just delete the `#[ignore]` and see whether it passes.
+fn test_give_bitfield_signed_fields() {
+    let cxx = indoc! {"
+        Bitfieldy give_bitfield() {
+            Bitfieldy result{};
+            result.signed3 = -3;
+            result.signed4 = -1;
+            return result;
+        }
+    "};
+    let hdr = format!("{}Bitfieldy give_bitfield();\n", bitfield_header());
+    let rs = quote! {
+        let bitfield = ffi::give_bitfield();
+        assert_eq!(bitfield.signed3(), -3);
+        assert_eq!(bitfield.signed4(), -1);
+    };
+    run_test(cxx, &hdr, rs, &["give_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+/// A struct with bitfields which nobody asked to be POD stays non-POD, and
+/// keeps working as an opaque type.
+fn test_bitfield_non_pod() {
+    let cxx = indoc! {"
+        uint32_t read_separator(const Bitfieldy& x) { return x.separator; }
+        Bitfieldy make_bitfield() {
+            Bitfieldy result{};
+            result.separator = 42;
+            return result;
+        }
+    "};
+    let hdr = format!(
+        "{}uint32_t read_separator(const Bitfieldy&);\nBitfieldy make_bitfield();\n",
+        bitfield_header()
+    );
+    let rs = quote! {
+        let bitfield = ffi::make_bitfield().within_unique_ptr();
+        assert_eq!(ffi::read_separator(&bitfield), 42);
+    };
+    run_test(
+        cxx,
+        &hdr,
+        rs,
+        &["Bitfieldy", "read_separator", "make_bitfield"],
+        &[],
+    );
+}
+
 // Yet to test:
 // - Ifdef
 // - Out param pointers

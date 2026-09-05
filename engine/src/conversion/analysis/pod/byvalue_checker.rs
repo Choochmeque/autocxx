@@ -12,6 +12,7 @@ use crate::{
     conversion::{
         analysis::tdef::TypedefPhase,
         api::{Api, TypedefKind},
+        type_helpers::unwrap_bitfield,
     },
     types::{Namespace, QualifiedName},
 };
@@ -189,12 +190,6 @@ impl ByValueChecker {
                     ));
                     break;
                 }
-                None if ty_id.get_final_item() == "__BindgenBitfieldUnit" => {
-                    field_safety_problem = PodState::UnsafeToBePod(format!(
-                        "Type {tyname} could not be POD because it is a bitfield"
-                    ));
-                    break;
-                }
                 None => {
                     field_safety_problem = PodState::UnsafeToBePod(format!(
                         "Type {tyname} could not be POD because its dependent type {ty_id} isn't known"
@@ -325,8 +320,24 @@ impl ByValueChecker {
     fn get_field_types(def: &ItemStruct) -> Vec<QualifiedName> {
         let mut results = Vec::new();
         for f in &def.fields {
+            if f.ident
+                .as_ref()
+                .is_some_and(|id| id.to_string().starts_with("__bindgen_padding_"))
+            {
+                // Bytes bindgen inserted to reproduce the C++ layout. They
+                // hold nothing, so they neither block POD-ness nor depend on
+                // any type we'd have to settle first - which matters, because
+                // their type is a blob wrapped in `__bindgen_marker_Opaque`
+                // and we'd otherwise report it as an unknown dependency.
+                continue;
+            }
             let fty = &f.ty;
             if let Type::Path(p) = fty {
+                if unwrap_bitfield(p).is_some() {
+                    // A bitfield allocation unit is a byte array with
+                    // accessors, so likewise.
+                    continue;
+                }
                 results.push(QualifiedName::from_type_path(p));
             }
             // TODO handle anything else which bindgen might spit out, e.g. arrays?
@@ -516,5 +527,24 @@ mod tests {
             format!("{err:?}").contains("SomethingWeNeverSaw"),
             "error should name the missing target, was: {err:?}"
         );
+    }
+
+    /// A bitfield allocation unit is a byte array with accessors, so it
+    /// doesn't stop the struct holding it being POD - nor does the padding
+    /// bindgen adds alongside, whose type nobody else has heard of.
+    #[test]
+    fn test_with_bitfield() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Foo {
+                a: root::__BindgenBitfieldUnit<[u8; 4usize]>,
+                b: i64,
+                __bindgen_padding_0: __bindgen_marker_Opaque<u16>,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        bvc.satisfy_requests(vec![t_id.clone()]).unwrap();
+        assert!(bvc.is_pod(&t_id));
     }
 }

@@ -260,8 +260,6 @@ pub(crate) fn is_std_function(name: &QualifiedName) -> bool {
 pub enum InvalidIdentError {
     #[error("Union are not supported by autocxx (and their bindgen names have __ so are not acceptable to cxx)")]
     Union,
-    #[error("Bitfields are not supported by autocxx (and their bindgen names have __ so are not acceptable to cxx)")]
-    Bitfield,
     #[error("Names containing __ are reserved by C++ so not acceptable to cxx")]
     TooManyUnderscores,
     #[error("bindgen could not represent this C++ type, and replaced it with an opaque blob of bytes, so autocxx has nothing it can pass across the language boundary. std::function is the usual cause. {}", STD_FUNCTION_ADVICE)]
@@ -280,9 +278,12 @@ pub enum InvalidIdentError {
 pub fn validate_ident_ok_for_cxx(id: &str) -> Result<(), InvalidIdentError> {
     validate_str_ok_for_rust(id)?;
     // Provide a couple of more specific diagnostics if we can.
-    if id.starts_with("__BindgenBitfieldUnit") {
-        Err(InvalidIdentError::Bitfield)
-    } else if id.starts_with("__BindgenUnionField") {
+    // Note there is no `__BindgenBitfieldUnit` case: a bitfield allocation
+    // unit never reaches the bridge under that name, because
+    // `type_helpers::unwrap_bitfield` replaces it with the byte array it
+    // wraps. The type itself still can't be named in cxx, and falls through
+    // to the `__` rule below, which is the truth about it.
+    if id.starts_with("__BindgenUnionField") {
         Err(InvalidIdentError::Union)
     } else if id.starts_with("__BindgenOpaqueArray") {
         // bindgen's stand-in for a type it could not model: an array of bytes
