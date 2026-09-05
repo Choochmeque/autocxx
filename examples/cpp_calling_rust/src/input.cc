@@ -17,3 +17,9 @@ void jurassic() {
     predator->eat(std::move(prey));
     go_extinct();
 }
+
+void raise_fences(bool generators_running) {
+    if (!generators_running) {
+        throw std::runtime_error("the generators are off");
+    }
+}
