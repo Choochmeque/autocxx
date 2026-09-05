@@ -70,6 +70,7 @@ impl AnalysisPhase for PodPhase {
     type TypedefAnalysis = TypedefAnalysis;
     type StructAnalysis = PodAnalysis;
     type FunAnalysis = ();
+    type SubclassAnalysis = ();
 }
 
 /// In our set of APIs, work out which ones are safe to represent
@@ -107,6 +108,7 @@ pub(crate) fn analyze_pod_apis(
         },
         |name, item| analyze_enum(name, item, parse_callback_results),
         Api::typedef_unchanged,
+        Api::subclass_unchanged,
     );
     // Conceivably, the process of POD-analysing the first set of APIs could result
     // in us creating new APIs to concretize generic types.
@@ -129,6 +131,7 @@ pub(crate) fn analyze_pod_apis(
         },
         |name, item| analyze_enum(name, item, parse_callback_results),
         Api::typedef_unchanged,
+        Api::subclass_unchanged,
     );
     assert!(more_extra_apis.is_empty());
     Ok(results)

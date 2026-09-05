@@ -75,21 +75,22 @@ fn matches_bindgen_marker(ty: &syn::Type, marker_name: &str) -> bool {
                }) if segments.first().map(|seg| seg.ident == marker_name).unwrap_or_default())
 }
 
+/// If `seg` is `Wrapper<Inner>` for the given wrapper name, return `Inner`.
+fn unwrap_newtype<'a>(seg: &'a PathSegment, wrapper_name: &str) -> Option<&'a syn::Type> {
+    if seg.ident != wrapper_name {
+        return None;
+    }
+    let PathArguments::AngleBracketed(ref angle_bracketed_args) = seg.arguments else {
+        return None;
+    };
+    match angle_bracketed_args.args.first()? {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    }
+}
+
 fn unwrap_bindgen_marker<'a>(ty: &'a TypePath, marker_name: &str) -> Option<&'a syn::Type> {
-    ty.path
-        .segments
-        .first()
-        .filter(|seg| seg.ident == marker_name)
-        .and_then(|seg| match seg.arguments {
-            PathArguments::AngleBracketed(ref angle_bracketed_args) => {
-                angle_bracketed_args.args.first()
-            }
-            _ => None,
-        })
-        .and_then(|generic_argument| match generic_argument {
-            GenericArgument::Type(ty) => Some(ty),
-            _ => None,
-        })
+    unwrap_newtype(ty.path.segments.first()?, marker_name)
 }
 
 pub(crate) fn unwrap_reference(ty: &TypePath, search_for_rvalue: bool) -> Option<&syn::TypePtr> {
@@ -103,4 +104,23 @@ pub(crate) fn unwrap_reference(ty: &TypePath, search_for_rvalue: bool) -> Option
 
 pub(crate) fn unwrap_has_opaque(ty: &TypePath) -> Option<&syn::Type> {
     unwrap_bindgen_marker(ty, "__bindgen_marker_Opaque")
+}
+
+/// If `ty` is `root::__BindgenBitfieldUnit<[u8; N]>` - the allocation unit
+/// bindgen puts a run of C++ bitfields into - return the `[u8; N]` storage it
+/// wraps.
+///
+/// Unlike the `__bindgen_marker_` types above, this one is a real struct
+/// bindgen emits, so it is namespaced under `root` and we insist on exactly
+/// that shape rather than matching any segment.
+pub(crate) fn unwrap_bitfield(ty: &TypePath) -> Option<&syn::Type> {
+    let mut segments = ty.path.segments.iter();
+    if segments.next()?.ident != "root" {
+        return None;
+    }
+    let inner = unwrap_newtype(segments.next()?, "__BindgenBitfieldUnit");
+    if segments.next().is_some() {
+        return None;
+    }
+    inner
 }

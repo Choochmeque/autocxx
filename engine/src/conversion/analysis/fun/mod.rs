@@ -221,6 +221,16 @@ pub(crate) struct PodAndConstructorAnalysis {
     pub(crate) constructors: PublicConstructors,
 }
 
+/// What we've worked out about the superclass of a `subclass!()`ed type.
+#[derive(std::fmt::Debug)]
+pub(crate) struct SubclassAnalysis {
+    /// Who C++ lets destroy a superclass instance, or `None` if we never
+    /// found a destructor for it at all. A subclass may call a `protected`
+    /// destructor, but only a `public` one lets anyone else - in particular
+    /// `std::unique_ptr<Superclass>` - do so.
+    pub(crate) superclass_destructor_visibility: Option<CppVisibility>,
+}
+
 /// An analysis phase where we've analyzed each function, but
 /// haven't yet determined which constructors/etc. belong to each type.
 #[derive(std::fmt::Debug)]
@@ -230,6 +240,7 @@ impl AnalysisPhase for FnPrePhase1 {
     type TypedefAnalysis = TypedefAnalysis;
     type StructAnalysis = PodAnalysis;
     type FunAnalysis = FnAnalysis;
+    type SubclassAnalysis = ();
 }
 
 /// An analysis phase where we've analyzed each function, and identified
@@ -241,6 +252,19 @@ impl AnalysisPhase for FnPrePhase2 {
     type TypedefAnalysis = TypedefAnalysis;
     type StructAnalysis = PodAndConstructorAnalysis;
     type FunAnalysis = FnAnalysis;
+    type SubclassAnalysis = ();
+}
+
+/// An analysis phase where we've additionally annotated each subclass with
+/// its superclass's destructor visibility.
+#[derive(std::fmt::Debug)]
+pub(crate) struct FnPrePhase3;
+
+impl AnalysisPhase for FnPrePhase3 {
+    type TypedefAnalysis = TypedefAnalysis;
+    type StructAnalysis = PodAndConstructorAnalysis;
+    type FunAnalysis = FnAnalysis;
+    type SubclassAnalysis = SubclassAnalysis;
 }
 
 #[derive(Debug)]
@@ -293,6 +317,7 @@ impl AnalysisPhase for FnPhase {
     type TypedefAnalysis = TypedefAnalysis;
     type StructAnalysis = PodAndDepAnalysis;
     type FunAnalysis = FnAnalysis;
+    type SubclassAnalysis = SubclassAnalysis;
 }
 
 /// Whether to allow highly optimized calls because this is a simple Rust->C++ call,
@@ -327,7 +352,7 @@ impl<'a> FnAnalyzer<'a> {
         unsafe_policy: &'a UnsafePolicy,
         config: &'a IncludeCppConfig,
         force_wrapper_generation: bool,
-    ) -> ApiVec<FnPrePhase2> {
+    ) -> ApiVec<FnPrePhase3> {
         let mut me = Self {
             unsafe_policy,
             extra_apis: ApiVec::new(),
@@ -353,9 +378,10 @@ impl<'a> FnAnalyzer<'a> {
             Api::struct_unchanged,
             Api::enum_unchanged,
             Api::typedef_unchanged,
+            Api::subclass_unchanged,
         );
-        let mut results = me.add_constructors_present(results);
-        me.add_subclass_constructors(&mut results);
+        let results = me.add_constructors_present(results);
+        let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
         results
     }
@@ -523,12 +549,12 @@ impl<'a> FnAnalyzer<'a> {
         }
     }
 
-    fn add_subclass_constructors(&mut self, apis: &mut ApiVec<FnPrePhase2>) {
+    fn add_subclass_constructors(&mut self, apis: ApiVec<FnPrePhase2>) -> ApiVec<FnPrePhase3> {
         let mut results = ApiVec::new();
 
-        // Pre-assemble a list of types with known destructors, to avoid having to
-        // do a O(n^2) nested loop.
-        let types_with_destructors: HashSet<_> = apis
+        // Pre-assemble a list of superclass destructor visibility, to avoid
+        // having to do a O(n^2) nested loop.
+        let destructor_visibility_by_class: HashMap<_, _> = apis
             .iter()
             .filter_map(|api| match api {
                 Api::Function {
@@ -548,16 +574,14 @@ impl<'a> FnAnalyzer<'a> {
                     FuncToConvert {
                         special_member: Some(SpecialMemberKind::Destructor),
                         is_deleted: None | Some(Explicitness::Defaulted),
-                        cpp_vis: CppVisibility::Public,
                         ..
                     }
                 ) =>
                 {
-                    Some(impl_for)
+                    Some((impl_for.clone(), fun.cpp_vis))
                 }
                 _ => None,
             })
-            .cloned()
             .collect();
 
         for api in apis.iter() {
@@ -576,9 +600,14 @@ impl<'a> FnAnalyzer<'a> {
                 ..
             } = api
             {
-                // If we don't have an accessible destructor, then std::unique_ptr cannot be
-                // instantiated for this C++ type.
-                if !types_with_destructors.contains(sup) {
+                // If we don't have an accessible destructor, then the subclass
+                // itself cannot be destroyed, so there is no point synthesizing
+                // a constructor for it. Both public and protected destructors
+                // are accessible from a subclass's own destructor.
+                if !matches!(
+                    destructor_visibility_by_class.get(sup),
+                    Some(CppVisibility::Public | CppVisibility::Protected)
+                ) {
                     continue;
                 }
 
@@ -597,7 +626,30 @@ impl<'a> FnAnalyzer<'a> {
                 }
             }
         }
-        apis.extend(results.into_iter());
+
+        // Carry every other API across unchanged, annotating each subclass
+        // with what we just learned about its superclass's destructor.
+        convert_apis(
+            apis,
+            &mut results,
+            Api::fun_unchanged,
+            Api::struct_unchanged,
+            Api::enum_unchanged,
+            Api::typedef_unchanged,
+            |name, superclass, _| {
+                Ok(Box::new(std::iter::once(Api::Subclass {
+                    name,
+                    analysis: SubclassAnalysis {
+                        superclass_destructor_visibility: destructor_visibility_by_class
+                            .get(&superclass)
+                            .copied(),
+                    },
+                    superclass,
+                })))
+            },
+        );
+
+        results
     }
 
     /// Analyze a given function, and any permutations of that function which
@@ -2209,6 +2261,22 @@ impl<'a> FnAnalyzer<'a> {
             {
                 continue;
             }
+            // `enum_style!(NewtypeEnum, ...)` and its bitfield sibling make
+            // `bindgen` render a C++ `enum` as a Rust struct, so it arrives
+            // here looking like a class. It isn't one: C++ has no constructors
+            // or destructor to call on an enum, and writing what we normally
+            // write - `p->Inner::~Inner()` for a nested type - doesn't compile.
+            // The enumerators are all the API such a type has.
+            //
+            // The name is matched exactly, and spelled the way `generate!`
+            // spells it; see `enum_style!`'s documentation.
+            if self
+                .config
+                .enum_style(&self_ty.to_string())
+                .is_some_and(|style| style.is_newtype())
+            {
+                continue;
+            }
             let path = self_ty.to_type_path();
             if items_found.implicit_default_constructor_needed() {
                 self.synthesize_special_member(
@@ -2271,6 +2339,7 @@ impl<'a> FnAnalyzer<'a> {
             },
             Api::enum_unchanged,
             Api::typedef_unchanged,
+            Api::subclass_unchanged,
         );
         results
     }
@@ -2532,7 +2601,7 @@ impl HasFieldsAndBases for Api<FnPrePhase1> {
     }
 }
 
-impl HasFieldsAndBases for Api<FnPrePhase2> {
+impl HasFieldsAndBases for Api<FnPrePhase3> {
     fn name(&self) -> &QualifiedName {
         self.name()
     }

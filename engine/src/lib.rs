@@ -30,7 +30,7 @@ mod builder;
 mod cxx_version_parity;
 
 use autocxx_bindgen::BindgenError;
-use autocxx_parser::{IncludeCppConfig, UnsafePolicy};
+use autocxx_parser::{EnumStyle, IncludeCppConfig, UnsafePolicy};
 use conversion::BridgeConverter;
 use miette::{SourceOffset, SourceSpan};
 use parse_callbacks::{AutocxxParseCallbacks, ParseCallbackResults, UnindexedParseCallbackResults};
@@ -335,7 +335,21 @@ impl IncludeCppEngine {
         let bindgen_marker_types = ["Opaque", "Reference", "RValueReference"];
         let raw_line = bindgen_marker_types
             .iter()
-            .map(|t| format!("#[repr(transparent)] pub struct __bindgen_marker_{t}<T: ?Sized>(T);"))
+            .map(|t| {
+                // `Default` because we ask bindgen to derive it for the
+                // structs it generates, so that a struct containing bitfields
+                // can be built in Rust at all (see google/autocxx#1478), and
+                // bindgen assumes these types of ours are as default-able as
+                // anything else it emits - which they are, whenever what they
+                // wrap is. It has to be the `derive`, not a hand-written impl:
+                // `codegen_rs::bindgen_sanitizer` strips every hand-written
+                // `impl Default` out of the bindgen mod, because bindgen's own
+                // are zero-filling and unsound for us.
+                format!(
+                    "#[repr(transparent)] #[derive(Default)] \
+                     pub struct __bindgen_marker_{t}<T: ?Sized>(T);"
+                )
+            })
             .join(" ");
         let use_list = bindgen_marker_types
             .iter()
@@ -347,6 +361,10 @@ impl IncludeCppEngine {
             .clang_args(make_clang_args(inc_dirs, extra_clang_args))
             .derive_copy(false)
             .derive_debug(false)
+            // A struct with bitfields can only be built in Rust by filling in
+            // the opaque allocation unit bindgen generates for them, which is
+            // what `..Default::default()` is for. See google/autocxx#1478.
+            .derive_default(true)
             .default_enum_style(bindgen::EnumVariation::Rust {
                 non_exhaustive: false,
             })
@@ -382,6 +400,18 @@ impl IncludeCppEngine {
                     .allowlist_function(format!("{a}_bindgen_original"))
                     .allowlist_var(&a);
             }
+        }
+
+        // Per-enum overrides of `default_enum_style` above, from `enum_style!`.
+        for (name, style) in self.config.enum_styles() {
+            builder = match style {
+                EnumStyle::BitfieldEnum => builder.bitfield_enum(name),
+                EnumStyle::NewtypeEnum => builder.newtype_enum(name),
+                EnumStyle::RustifiedEnum => builder.rustified_enum(name),
+                EnumStyle::RustifiedNonExhaustiveEnum => {
+                    builder.rustified_non_exhaustive_enum(name)
+                }
+            };
         }
 
         for item in &self.config.opaquelist {

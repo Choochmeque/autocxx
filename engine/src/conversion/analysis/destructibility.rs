@@ -34,7 +34,7 @@ use indexmap::set::IndexSet as HashSet;
 use crate::{
     conversion::{
         analysis::fun::{
-            FnKind, FnPrePhase2, MethodKind, PodAndConstructorAnalysis, TraitMethodKind,
+            FnKind, FnPrePhase3, MethodKind, PodAndConstructorAnalysis, TraitMethodKind,
         },
         api::Api,
         apivec::ApiVec,
@@ -54,8 +54,8 @@ use crate::{
 /// synthesizes the `MakeCppStorage` alloc/free pair before any of that is
 /// known.
 pub(crate) fn remove_ownership_of_non_destructible_types(
-    apis: ApiVec<FnPrePhase2>,
-) -> ApiVec<FnPrePhase2> {
+    apis: ApiVec<FnPrePhase3>,
+) -> ApiVec<FnPrePhase3> {
     let non_destructible: HashSet<QualifiedName> = apis
         .iter()
         .filter_map(|api| match api {

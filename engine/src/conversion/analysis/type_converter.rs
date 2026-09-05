@@ -11,7 +11,7 @@ use crate::{
         api::{AnalysisPhase, Api, ApiName, NullPhase, TypedefKind, UnanalyzedApi},
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
-        type_helpers::{unwrap_has_opaque, unwrap_reference},
+        type_helpers::{unwrap_bitfield, unwrap_has_opaque, unwrap_reference},
         ConvertErrorFromCpp,
     },
     known_types::{known_types, CxxGenericType},
@@ -198,6 +198,13 @@ impl<'a> TypeConverter<'a> {
         // `ParseCallbackResults::discards_template_param`), not by wrapping
         // a type.
         if let Some(ty) = unwrap_has_opaque(&typ) {
+            self.convert_type(ty.clone(), ns, ctx)
+        } else if let Some(ty) = unwrap_bitfield(&typ) {
+            // A bindgen bitfield unit is a `__BindgenBitfieldUnit` wrapping
+            // the byte array C++ actually laid the bitfields out in. cxx has
+            // no business knowing about the wrapper - and couldn't name it
+            // anyway, since its name contains `__` - so pretend the field is
+            // just that storage.
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ptr) = unwrap_reference(&typ, false) {
             // LValue reference

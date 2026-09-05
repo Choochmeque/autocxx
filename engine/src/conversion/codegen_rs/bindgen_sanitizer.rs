@@ -76,12 +76,66 @@
 //! the same name survives, is re-exported verbatim, and may be
 //! genuinely referenced. Collapsing that would quietly turn an alias
 //! of a pointer into a zero-sized struct, so we leave it alone.
+//!
+//! # Unwanted `Default`
+//!
+//! We ask bindgen to `derive_default`, because a struct containing
+//! bitfields cannot otherwise be built in Rust at all: neither the
+//! allocation unit nor the padding beside it can be written by hand.
+//! For a struct whose fields are all default-able that is exactly what
+//! we want - bindgen adds `#[derive(Default)]` and every field
+//! supplies its own default. It also has two consequences we don't
+//! want, and this pass withdraws both.
+//!
+//! ## On an `enum`
+//!
+//! Nothing makes one enumerator of a C++ enum the default, so autocxx
+//! should never offer `Default` for one - and Rust agrees: a
+//! `#[derive(Default)]` on an enum with no variant marked `#[default]`
+//! is E0665, a hard error. bindgen marks no variant, and its enum
+//! codegen puts `Default` in the derive list whenever `derive_default`
+//! is on and its analysis says the item can derive it, so the mod
+//! simply fails to compile. That is what happened to
+//! `_Rb_tree__bindgen_ty_1`, an anonymous enum inside libstdc++, once
+//! `derive_default` was turned on: invisible on a libc++ box, fatal on
+//! CI. Whether any given enum trips it depends on the standard library
+//! and libclang in front of us, so we strip `Default` from every enum's
+//! derive list rather than reacting to the ones we happen to have seen.
+//!
+//! ## Zero-filled, on anything
+//!
+//! Unlike everything above, this one is about code which compiles
+//! perfectly well and is unsound.
+//!
+//! For a type which *cannot* derive `Default`, bindgen instead writes
+//! an `impl Default` of its own which zeroes the object's bytes. That
+//! is a defensible default for C, and wrong for us: a struct holding a
+//! Rust `enum` whose discriminants don't include 0 - precisely the
+//! shape `enum_style!(RustifiedEnum, ...)` exists to produce - would
+//! hand out an enum value which is none of its variants, which is
+//! undefined behaviour, reachable from entirely safe Rust.
+//!
+//! bindgen offers no switch separating the two: its `no_default`
+//! blocklist suppresses the derive as well, being consulted by the
+//! derive analysis itself. So we keep the derives and drop the
+//! zero-filling impls here. For the types that had one, this restores
+//! exactly the previous behaviour: before we turned `derive_default`
+//! on, bindgen wrote neither a derive nor an impl for them.
+//!
+//! "Zero-filling" is meant literally, and is what the pass matches on.
+//! Not every hand-written `Default` in the bindgen output is one:
+//! bindgen also writes `Default` for its own `__BindgenUnionField` and
+//! `__BindgenOpaqueArray` helpers, regardless of `derive_default`, and
+//! those construct a value properly rather than zeroing bytes. They
+//! are none of our business and are left alone.
 
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
+use proc_macro2::{TokenStream, TokenTree};
+use quote::ToTokens;
 use syn::{
-    parse_quote, GenericArgument, GenericParam, Ident, Item, ItemMod, PathArguments, ReturnType,
-    Type, TypeParamBound, UseTree,
+    parse_quote, Attribute, GenericArgument, GenericParam, Ident, ImplItem, Item, ItemMod, Path,
+    PathArguments, ReturnType, Type, TypeParamBound, UseTree,
 };
 
 use crate::types::{make_ident, Namespace, QualifiedName};
@@ -107,6 +161,112 @@ pub(super) fn remove_unbound_type_aliases(bindgen_mod: &mut ItemMod) {
             defined.swap_remove(&name);
         }
     }
+}
+
+/// Withdraw the two kinds of `Default` we asked bindgen for by accident,
+/// keeping the one we wanted:
+///
+/// * the `impl Default` blocks bindgen wrote by hand, which zero the object's
+///   bytes;
+/// * `Default` in the derive list of an `enum`.
+///
+/// A struct's `#[derive(Default)]` is left alone: it delegates to each field's
+/// own `Default`, and is the reason we turn `derive_default` on at all.
+///
+/// See the module documentation for both rationales.
+pub(super) fn remove_unwanted_defaults(bindgen_mod: &mut ItemMod) {
+    if let Some((_, items)) = &mut bindgen_mod.content {
+        items.retain(|item| !is_zero_filling_default_impl(item));
+        for item in items {
+            match item {
+                Item::Enum(e) => remove_default_from_derives(&mut e.attrs),
+                Item::Mod(m) => remove_unwanted_defaults(m),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Take `Default` out of any `#[derive(...)]` among `attrs`, dropping the
+/// attribute altogether if nothing else was being derived.
+///
+/// A `derive` we can't parse is left exactly as it was: this is a narrowing of
+/// what bindgen asked for, so declining to act is always the safe answer.
+fn remove_default_from_derives(attrs: &mut Vec<Attribute>) {
+    attrs.retain_mut(|attr| {
+        if !attr.path().is_ident("derive") {
+            return true;
+        }
+        let mut kept: Vec<Path> = Vec::new();
+        let mut found_default = false;
+        let parsed = attr.parse_nested_meta(|meta| {
+            if meta
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "Default")
+            {
+                found_default = true;
+            } else {
+                kept.push(meta.path.clone());
+            }
+            Ok(())
+        });
+        if parsed.is_err() || !found_default {
+            return true;
+        }
+        if kept.is_empty() {
+            return false;
+        }
+        *attr = parse_quote! { #[derive(#(#kept),*)] };
+        true
+    });
+}
+
+/// Whether `item` is an `impl Default` whose `default` zeroes the object's
+/// bytes.
+///
+/// The test is the body, not the trait name, because the trait name alone
+/// catches impls we must keep: bindgen emits `Default` for its own
+/// `__BindgenUnionField` (which calls `Self::new()`) and `__BindgenOpaqueArray`
+/// (which initializes each element), and does so whether or not
+/// `derive_default` was asked for. Neither zeroes anything, and neither is ours
+/// to remove.
+///
+/// Every zero-filling body bindgen generates goes through `ptr::write_bytes` -
+/// it uses that rather than `mem::zeroed` so that padding is zeroed too - in
+/// one of two shapes depending on whether the target supports `MaybeUninit`.
+/// Looking for that call recognizes both, and says in the code what the actual
+/// objection is.
+fn is_zero_filling_default_impl(item: &Item) -> bool {
+    let Item::Impl(imp) = item else {
+        return false;
+    };
+    let Some((None, trait_path, _)) = &imp.trait_ else {
+        return false;
+    };
+    if !trait_path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "Default")
+    {
+        return false;
+    }
+    imp.items.iter().any(|item| match item {
+        ImplItem::Fn(f) if f.sig.ident == "default" => {
+            mentions_ident(f.block.to_token_stream(), "write_bytes")
+        }
+        _ => false,
+    })
+}
+
+/// Whether `tokens` mentions `wanted` anywhere, at any nesting depth.
+fn mentions_ident(tokens: TokenStream, wanted: &str) -> bool {
+    tokens.into_iter().any(|tt| match tt {
+        TokenTree::Ident(id) => id == wanted,
+        TokenTree::Group(g) => mentions_ident(g.stream(), wanted),
+        _ => false,
+    })
 }
 
 /// Collapse type-namespace items which share a name within the same
@@ -790,5 +950,202 @@ mod tests {
             }
         };
         assert_collapse_is_a_no_op(&m, &duplicated_names(&["LIMIT"]));
+    }
+
+    /// The bindgen output a `derive_default` build produces, in miniature:
+    /// a struct which could derive `Default`, one which could not and so got
+    /// a zero-filling impl of bindgen's own, and the two helper impls bindgen
+    /// writes whatever we asked for.
+    fn mod_with_default_impls() -> ItemMod {
+        parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    #[repr(C)]
+                    #[derive(Default)]
+                    pub struct Bitfieldy {
+                        pub _bitfield_1: root::__BindgenBitfieldUnit<[u8; 1usize]>,
+                    }
+                    #[repr(u32)]
+                    #[derive(Default, Clone, Hash, PartialEq, Eq)]
+                    pub enum Fruit {
+                        APPLE = 1,
+                        PEAR = 2,
+                    }
+                    #[repr(u32)]
+                    #[derive(Default)]
+                    pub enum Lonely {
+                        ONLY = 1,
+                    }
+                    #[repr(C)]
+                    pub struct Basket {
+                        pub fruit: root::Fruit,
+                    }
+                    impl Default for Basket {
+                        fn default() -> Self {
+                            let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+                            unsafe {
+                                ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+                                s.assume_init()
+                            }
+                        }
+                    }
+                    impl<T> ::core::default::Default for __BindgenUnionField<T> {
+                        #[inline]
+                        fn default() -> Self {
+                            Self::new()
+                        }
+                    }
+                    impl<T: Copy + Default, const N: usize> Default for __BindgenOpaqueArray<T, N> {
+                        fn default() -> Self {
+                            Self([<T as Default>::default(); N])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn default_impl_self_types(item_mod: &ItemMod) -> Vec<String> {
+        let mut found = Vec::new();
+        fn walk(item_mod: &ItemMod, found: &mut Vec<String>) {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    match item {
+                        Item::Impl(i) if i.trait_.is_some() => {
+                            found.push(i.self_ty.to_token_stream().to_string())
+                        }
+                        Item::Mod(m) => walk(m, found),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        walk(item_mod, &mut found);
+        found
+    }
+
+    #[test]
+    fn strips_only_the_zero_filling_default_impl() {
+        let mut m = mod_with_default_impls();
+        remove_unwanted_defaults(&mut m);
+        let remaining = default_impl_self_types(&m);
+        // The zero-filler for a type holding an enum is the unsound one.
+        assert!(
+            !remaining.iter().any(|ty| ty == "Basket"),
+            "zero-filling impl survived: {remaining:?}"
+        );
+        // bindgen's own helpers construct a value properly; they stay.
+        assert!(
+            remaining
+                .iter()
+                .any(|ty| ty.contains("__BindgenUnionField")),
+            "__BindgenUnionField impl was removed: {remaining:?}"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|ty| ty.contains("__BindgenOpaqueArray")),
+            "__BindgenOpaqueArray impl was removed: {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_a_structs_derived_default_alone() {
+        let mut m = mod_with_default_impls();
+        remove_unwanted_defaults(&mut m);
+        // A struct's derive delegates to its fields, and is the whole point
+        // of asking bindgen for `derive_default` in the first place.
+        let attrs = derives_of(&m, "Bitfieldy");
+        assert!(
+            attrs.contains(&"Default".to_string()),
+            "the struct's derive was disturbed: {attrs:?}"
+        );
+    }
+
+    /// Nothing makes one enumerator the default, and rustc rejects the derive
+    /// outright (E0665), so `Default` comes off every enum - but only
+    /// `Default`.
+    #[test]
+    fn strips_default_from_enum_derives_and_keeps_the_rest() {
+        let mut m = mod_with_default_impls();
+        remove_unwanted_defaults(&mut m);
+        let attrs = derives_of(&m, "Fruit");
+        assert!(
+            !attrs.contains(&"Default".to_string()),
+            "Default survived on an enum: {attrs:?}"
+        );
+        assert_eq!(
+            attrs,
+            vec!["Clone", "Hash", "PartialEq", "Eq"],
+            "the other derives were disturbed"
+        );
+    }
+
+    #[test]
+    fn drops_the_derive_attribute_when_only_default_was_in_it() {
+        let mut m = mod_with_default_impls();
+        remove_unwanted_defaults(&mut m);
+        // An empty `#[derive()]` is legal but pointless; check we removed the
+        // attribute rather than emptying it.
+        assert!(
+            derives_of(&m, "Lonely").is_empty(),
+            "expected no derive attribute at all"
+        );
+        let rendered = enum_tokens(&m, "Lonely");
+        assert!(
+            !rendered.contains("derive"),
+            "an empty derive was left behind: {rendered}"
+        );
+    }
+
+    /// The derive list of the named enum or struct, as plain strings.
+    fn derives_of(item_mod: &ItemMod, name: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for attr in attrs_of(item_mod, name) {
+            if !attr.path().is_ident("derive") {
+                continue;
+            }
+            attr.parse_nested_meta(|meta| {
+                found.push(meta.path.to_token_stream().to_string());
+                Ok(())
+            })
+            .unwrap();
+        }
+        found
+    }
+
+    fn attrs_of(item_mod: &ItemMod, name: &str) -> Vec<Attribute> {
+        let mut found = Vec::new();
+        fn walk(item_mod: &ItemMod, name: &str, found: &mut Vec<Attribute>) {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    match item {
+                        Item::Enum(e) if e.ident == name => found.extend(e.attrs.iter().cloned()),
+                        Item::Struct(s) if s.ident == name => found.extend(s.attrs.iter().cloned()),
+                        Item::Mod(m) => walk(m, name, found),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        walk(item_mod, name, &mut found);
+        found
+    }
+
+    fn enum_tokens(item_mod: &ItemMod, name: &str) -> String {
+        fn walk(item_mod: &ItemMod, name: &str, out: &mut String) {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    match item {
+                        Item::Enum(e) if e.ident == name => *out = e.to_token_stream().to_string(),
+                        Item::Mod(m) => walk(m, name, out),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut out = String::new();
+        walk(item_mod, name, &mut out);
+        out
     }
 }

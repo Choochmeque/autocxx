@@ -107,6 +107,87 @@ fn main() {
 )
 ```
 
+## Enums
+
+A C++ `enum` becomes a native Rust `enum` by default. That's the right shape
+for an enumeration whose values are a closed set - a colour, a state, an error
+code - and it lets you `match` on it exhaustively.
+
+It is the wrong shape for a flag enum. Writing `FLAG_A | FLAG_B` in C++ gives
+you an `int` - the operands are promoted, unless the enum has an overloaded
+`operator|` - but converting that back to the enum type is ordinary, deliberate
+C++, and the result is a perfectly good enum object. A C++ enum object may hold
+values no enumerator names: for an enum with a fixed underlying type, such as
+`enum Flags : int`, every value that type can represent; for one without, every
+value in the bit range its enumerators span. A Rust `enum` may not - a value
+which is none of its variants is instant undefined behaviour - so the
+combination has no representation at all.
+
+Use [`enum_style!`](https://docs.rs/autocxx/latest/autocxx/macro.enum_style.html)
+to pick a different representation for particular enums:
+
+| Style | What you get | Good for |
+| ----- | ------------ | -------- |
+| `RustifiedEnum` | A native Rust `enum`. This is the default. | Closed sets of values |
+| `RustifiedNonExhaustiveEnum` | The same, marked `#[non_exhaustive]`, so your `match`es need a catch-all arm | Closed sets which C++ may extend later |
+| `NewtypeEnum` | An integer newtype whose enumerators are associated constants | Values which may be arbitrary integers |
+| `BitfieldEnum` | The same newtype, plus `&`, `|`, `^` and `!` | Flags |
+
+The directive takes the style first, then any number of enum names, and may be
+repeated to give different styles to different enums:
+
+```rust,ignore
+enum_style!(BitfieldEnum, "FileFlags", "WindowFlags")
+enum_style!(RustifiedNonExhaustiveEnum, "ErrorCode")
+```
+
+Name each enum exactly as you would in `generate!` - so a namespaced enum is
+`ns::Thing`, and an enum nested inside a class is `Outer_Inner`, because that
+is the name `bindgen` gives it. Asking for two different styles for the same
+enum is an error, as is anything that isn't a plain name.
+
+### `NewtypeEnum` and `BitfieldEnum` need `generate_pod!`
+
+These two styles reach Rust as a `struct`, not an `enum`, and their
+enumerators are associated constants on it. `autocxx` only re-exports the
+generated type - constants and all - for types it holds by value, so those two
+styles have to be asked for with
+[`generate_pod!`](https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html).
+A plain [`generate!`](https://docs.rs/autocxx/latest/autocxx/macro.generate.html)
+gives you an opaque type with no constants on it, which is unlikely to be what
+you wanted. The two rustified styles work with either, since a Rust `enum` is
+POD regardless.
+
+```rust,ignore,autocxx,hidecpp
+autocxx_integration_tests::doctest(
+"",
+"enum FileFlags {
+    READ = 1 << 0,
+    WRITE = 1 << 1,
+    EXECUTE = 1 << 2,
+};
+inline bool is_writable(FileFlags flags) { return flags & FileFlags::WRITE; }
+",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    enum_style!(BitfieldEnum, "FileFlags")
+    generate_pod!("FileFlags")
+    generate!("is_writable")
+}
+
+fn main() {
+    let flags = ffi::FileFlags::READ | ffi::FileFlags::WRITE;
+    assert!(ffi::is_writable(flags));
+    assert!(!ffi::is_writable(ffi::FileFlags::READ));
+}
+}
+)
+```
+
 ## Forward declarations
 
 A type which is incomplete in the C++ headers (i.e. represented only by a forward

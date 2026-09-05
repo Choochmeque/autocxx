@@ -222,6 +222,7 @@ pub(crate) trait AnalysisPhase: std::fmt::Debug {
     type TypedefAnalysis: std::fmt::Debug;
     type StructAnalysis: std::fmt::Debug;
     type FunAnalysis: std::fmt::Debug;
+    type SubclassAnalysis: std::fmt::Debug;
 }
 
 /// No analysis has been applied to this API.
@@ -232,6 +233,7 @@ impl AnalysisPhase for NullPhase {
     type TypedefAnalysis = ();
     type StructAnalysis = ();
     type FunAnalysis = ();
+    type SubclassAnalysis = ();
 }
 
 #[derive(Clone, Debug)]
@@ -510,6 +512,7 @@ pub(crate) enum Api<T: AnalysisPhase> {
     Subclass {
         name: SubclassName,
         superclass: QualifiedName,
+        analysis: T::SubclassAnalysis,
     },
     /// Contributions to the traits representing superclass methods that we might
     /// subclass in Rust.
@@ -692,5 +695,20 @@ impl<T: AnalysisPhase> Api<T> {
         T: 'static,
     {
         Ok(Box::new(std::iter::once(Api::Enum { name, item })))
+    }
+
+    pub(crate) fn subclass_unchanged(
+        name: SubclassName,
+        superclass: QualifiedName,
+        analysis: T::SubclassAnalysis,
+    ) -> Result<Box<dyn Iterator<Item = Api<T>>>, ConvertErrorWithContext>
+    where
+        T: 'static,
+    {
+        Ok(Box::new(std::iter::once(Api::Subclass {
+            name,
+            superclass,
+            analysis,
+        })))
     }
 }

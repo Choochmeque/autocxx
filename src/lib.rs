@@ -458,6 +458,57 @@ macro_rules! throws {
     ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
 }
 
+/// Chooses how a C++ `enum` is rendered in Rust.
+///
+/// By default every C++ enum becomes a native Rust `enum`, which is ideal
+/// for enumerations whose values are a closed set. It is a poor fit for flag
+/// enums. Combining two enumerators in C++ yields an `int` - the operands are
+/// promoted, unless the enum overloads `operator|` - and converting that back
+/// to the enum type is ordinary practice: a C++ enum object may hold values no
+/// enumerator names. For an enum with a fixed underlying type, such as
+/// `enum Flags : int`, that is every value the type can represent; for one
+/// without, every value in the bit range its enumerators span. A Rust `enum`
+/// may not, since a value which is none of its variants is instant undefined
+/// behaviour. Use this directive to pick a representation that suits each
+/// enum.
+///
+/// The syntax is:
+/// `enum_style!(StyleName, "FirstEnum", "SecondEnum")`
+///
+/// The styles are:
+/// * `BitfieldEnum` - an integer newtype whose variants are associated
+///   constants, plus the bitwise operators `&`, `|`, `^` and `!`. This is
+///   what you want for flags.
+/// * `NewtypeEnum` - the same newtype without the operators.
+/// * `RustifiedEnum` - a native Rust `enum`. This is the default, so naming
+///   it is only useful for emphasis.
+/// * `RustifiedNonExhaustiveEnum` - a native Rust `enum` marked
+///   `#[non_exhaustive]`, so that your `match`es must have a catch-all arm
+///   and adding a variant on the C++ side isn't a breaking change.
+///
+/// Name each enum exactly as you would in [`generate`] - so a namespaced enum
+/// is `"ns::Thing"`, and an enum nested inside a class is `"Outer_Inner"`,
+/// because that is the name `bindgen` gives it. Repeat the directive to give
+/// different styles to different enums. Asking for two different styles for
+/// the same enum is an error, as is anything that isn't a plain name.
+///
+/// # `BitfieldEnum` and `NewtypeEnum` need [`generate_pod`]
+///
+/// These two styles reach Rust as a `struct`, not an `enum`, and their
+/// variants are associated constants on it. autocxx only re-exports the
+/// generated type - constants and all - for types it holds by value, so
+/// those two styles must be requested with [`generate_pod`]. A plain
+/// [`generate`] gives you an opaque type with no constants on it, which is
+/// unlikely to be what you wanted. The two rustified styles work with
+/// either.
+///
+/// A directive to be included inside
+/// [include_cpp] - see [include_cpp] for general information.
+#[macro_export]
+macro_rules! enum_style {
+    ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! usage {

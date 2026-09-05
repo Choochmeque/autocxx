@@ -25,6 +25,7 @@ use syn::{
 use syn::{Ident, Result as ParseResult};
 use thiserror::Error;
 
+use crate::enum_style::{EnumStyle, EnumStyleMap};
 use crate::{directives::get_directives, RustPath};
 
 use quote::quote;
@@ -225,6 +226,7 @@ pub struct IncludeCppConfig {
     pub externs: ExternCppTypeMap,
     pub opaquelist: Vec<String>,
     pub(crate) throws_list: Vec<String>,
+    pub(crate) enum_styles: EnumStyleMap,
 }
 
 impl Parse for IncludeCppConfig {
@@ -391,6 +393,17 @@ impl IncludeCppConfig {
             .any(|entry| cpp_name == entry || cpp_name.ends_with(&format!("::{}", entry)))
     }
 
+    /// The `enum_style!` a given C++ type was given, if any.
+    pub fn enum_style(&self, cpp_name: &str) -> Option<EnumStyle> {
+        self.enum_styles.get(cpp_name)
+    }
+
+    /// Every `enum_style!` request, so that the engine can pass them on to
+    /// `bindgen`.
+    pub fn enum_styles(&self) -> impl Iterator<Item = (&str, EnumStyle)> {
+        self.enum_styles.iter()
+    }
+
     pub fn get_blocklist(&self) -> impl Iterator<Item = &String> {
         self.blocklist.iter()
     }
@@ -509,8 +522,89 @@ impl ToTokens for IncludeCppConfig {
 #[cfg(test)]
 mod parse_tests {
     use crate::config::UnsafePolicy;
-    use crate::IncludeCppConfig;
+    use crate::{EnumStyle, IncludeCppConfig};
     use syn::parse_quote;
+
+    #[test]
+    fn test_enum_style() {
+        let config: IncludeCppConfig = parse_quote! {
+            enum_style!(BitfieldEnum, "Flags", "MoreFlags")
+            enum_style!(RustifiedNonExhaustiveEnum, "ns::Error")
+            generate_pod!("Flags")
+        };
+        assert_eq!(config.enum_style("Flags"), Some(EnumStyle::BitfieldEnum));
+        assert_eq!(
+            config.enum_style("MoreFlags"),
+            Some(EnumStyle::BitfieldEnum)
+        );
+        assert_eq!(
+            config.enum_style("ns::Error"),
+            Some(EnumStyle::RustifiedNonExhaustiveEnum)
+        );
+        assert_eq!(config.enum_style("Unmentioned"), None);
+    }
+
+    /// The reproduction case has to re-parse to the same configuration, so
+    /// the style has to come out before the names, as `enum_style!` reads it.
+    #[cfg(feature = "reproduction_case")]
+    #[test]
+    fn test_enum_style_reproduction_case_round_trips() {
+        let config: IncludeCppConfig = parse_quote! {
+            enum_style!(BitfieldEnum, "Flags", "MoreFlags")
+            enum_style!(NewtypeEnum, "Other")
+            generate_pod!("Flags")
+        };
+        let reparsed: IncludeCppConfig =
+            syn::parse2(quote::ToTokens::to_token_stream(&config)).unwrap();
+        assert_eq!(reparsed.enum_style("Flags"), Some(EnumStyle::BitfieldEnum));
+        assert_eq!(
+            reparsed.enum_style("MoreFlags"),
+            Some(EnumStyle::BitfieldEnum)
+        );
+        assert_eq!(reparsed.enum_style("Other"), Some(EnumStyle::NewtypeEnum));
+    }
+
+    fn enum_style_parse_error(directive: proc_macro2::TokenStream) -> String {
+        syn::parse2::<IncludeCppConfig>(directive)
+            .expect_err("expected the enum_style! directive to be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn test_enum_style_unknown_style_rejected() {
+        let err = enum_style_parse_error(quote::quote! {
+            enum_style!(ConstifiedEnum, "Flags")
+        });
+        assert!(
+            err.contains("unknown enum style `ConstifiedEnum`") && err.contains("BitfieldEnum"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_enum_style_conflicting_styles_rejected() {
+        let err = enum_style_parse_error(quote::quote! {
+            enum_style!(BitfieldEnum, "Flags")
+            enum_style!(NewtypeEnum, "Flags")
+        });
+        assert!(
+            err.contains("Flags") && err.contains("BitfieldEnum") && err.contains("NewtypeEnum"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// A pattern would reach bindgen but not autocxx's own bookkeeping, so it
+    /// is refused rather than silently half-honoured.
+    #[test]
+    fn test_enum_style_regex_rejected() {
+        let err = enum_style_parse_error(quote::quote! {
+            enum_style!(BitfieldEnum, ".*Flags")
+        });
+        assert!(
+            err.contains("not a plain enum name"),
+            "unhelpful error: {err}"
+        );
+    }
 
     /// The bindgen allowlist for a subclass carries the C++ peer class autocxx
     /// generates and the superclass being derived from, and nothing else. The

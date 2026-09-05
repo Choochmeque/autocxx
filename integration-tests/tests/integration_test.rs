@@ -1175,6 +1175,265 @@ fn test_enum_with_funcs() {
     run_test(cxx, hdr, rs, &["Bob", "give_bob"], &[]);
 }
 
+/// A flag enum, plus a C++ function which inspects one, for the
+/// `enum_style!` tests below.
+fn flags_header() -> &'static str {
+    indoc! {"
+        #include <cstdint>
+        enum Flags : int {
+            FLAG_A = 1 << 0,            // 0x1
+            FLAG_B = 1 << 2,            // 0x4
+            FLAG_C = 1 << 3,            // 0x8
+        };
+        inline uint32_t count_flags(Flags flags) {
+            uint32_t count = 0;
+            if (flags & FLAG_A) count++;
+            if (flags & FLAG_B) count++;
+            if (flags & FLAG_C) count++;
+            return count;
+        }
+    "}
+}
+
+#[test]
+fn test_enum_style_bitfield() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(BitfieldEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            assert_eq!(ffi::Flags::FLAG_A.0, 0x1);
+            assert_eq!(ffi::Flags::FLAG_B.0, 0x4);
+            assert_eq!(ffi::Flags::FLAG_C.0, 0x8);
+
+            // The whole point of this style: combine two flags into a value
+            // which is not itself a declared enumerator. 0x5 is none of
+            // FLAG_A, FLAG_B or FLAG_C, and a Rust enum could not hold it.
+            let both = ffi::Flags::FLAG_A | ffi::Flags::FLAG_B;
+            assert_eq!(both.0, 0x5);
+            assert!(both.0 != ffi::Flags::FLAG_A.0);
+            assert!(both.0 != ffi::Flags::FLAG_B.0);
+            assert!(both.0 != ffi::Flags::FLAG_C.0);
+            assert_eq!((ffi::Flags::FLAG_A & ffi::Flags::FLAG_B).0, 0x0);
+
+            // ...and hand it back to C++, which agrees about what it means.
+            assert_eq!(ffi::count_flags(both), 2);
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_A), 1);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+fn test_enum_style_newtype() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(NewtypeEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            assert_eq!(ffi::Flags::FLAG_A.0, 0x1);
+            assert_eq!(ffi::Flags::FLAG_B.0, 0x4);
+            assert_eq!(ffi::Flags::FLAG_C.0, 0x8);
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_C), 1);
+            // A newtype with no operators: `|` is the caller's job.
+            let both = ffi::Flags(ffi::Flags::FLAG_A.0 | ffi::Flags::FLAG_B.0);
+            assert_eq!(ffi::count_flags(both), 2);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+fn test_enum_style_rustified() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(RustifiedEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            // A native Rust enum, so it can be matched exhaustively...
+            let described = match ffi::Flags::FLAG_C {
+                ffi::Flags::FLAG_A => 1,
+                ffi::Flags::FLAG_B => 2,
+                ffi::Flags::FLAG_C => 3,
+            };
+            assert_eq!(described, 3);
+            // ...and handed back to C++.
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_C), 1);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+/// `RustifiedNonExhaustiveEnum` produces the same Rust `enum` as
+/// `RustifiedEnum` with `#[non_exhaustive]` added. That attribute only binds
+/// on code outside the defining crate, and the generated bindings live in the
+/// same crate as the test, so this checks the enum itself rather than the
+/// attribute's effect.
+fn test_enum_style_rustified_non_exhaustive() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(RustifiedNonExhaustiveEnum, "Flags")
+            generate_pod!("Flags")
+            generate!("count_flags")
+        }
+
+        fn main() {
+            let described = match ffi::Flags::FLAG_C {
+                ffi::Flags::FLAG_A => 1,
+                _ => 3,
+            };
+            assert_eq!(described, 3);
+            assert_eq!(ffi::count_flags(ffi::Flags::FLAG_C), 1);
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None).unwrap();
+}
+
+#[test]
+/// Several enums, several styles, one `include_cpp!` - including one enum
+/// left at the default style.
+fn test_enum_style_several_enums() {
+    let hdr = indoc! {"
+        enum First : int {
+            FIRST_A = 5,
+            FIRST_B = 6
+        };
+        enum Second {
+            SECOND_A,
+            SECOND_B
+        };
+        enum Third : int {
+            THIRD_A = 1 << 1,
+            THIRD_B = 1 << 3
+        };
+        enum Fourth {
+            FOURTH_A,
+            FOURTH_B
+        };
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(BitfieldEnum, "First", "Second")
+            enum_style!(NewtypeEnum, "Fourth")
+            generate_pod!("First")
+            generate_pod!("Second")
+            generate_pod!("Fourth")
+            generate!("Third")
+        }
+
+        fn main() {
+            assert_eq!((ffi::First::FIRST_A & ffi::First::FIRST_B).0, 0x4);
+            assert_eq!((ffi::Second::SECOND_A | ffi::Second::SECOND_B).0, 0x1);
+            // Left at the default, so a native Rust enum.
+            assert!(ffi::Third::THIRD_A != ffi::Third::THIRD_B);
+            assert!(ffi::Fourth::FOURTH_A != ffi::Fourth::FOURTH_B);
+        }
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+#[test]
+/// `NewtypeEnum` and `BitfieldEnum` reach Rust as a struct whose enumerators
+/// are associated constants, and autocxx only re-exports the generated type
+/// with those constants for types it holds by value. So a plain `generate!`
+/// gives an opaque type with nothing on it, and naming an enumerator fails to
+/// compile. This is documented in `enum_style!` and in the book; pin it here
+/// so the documentation can't quietly go stale.
+fn test_enum_style_newtype_needs_generate_pod() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            enum_style!(NewtypeEnum, "Flags")
+            generate!("Flags")
+        }
+
+        fn main() {
+            let _ = ffi::Flags::FLAG_A;
+        }
+    };
+    do_run_test_manual("", flags_header(), rs, None, None)
+        .expect_err("a newtype enum behind generate! should not offer its enumerators");
+}
+
+#[test]
+/// A styled enum arrives from bindgen looking like a struct, so autocxx used
+/// to synthesize the implicit constructors and destructor a class would have.
+/// C++ has none of those for an enum, and for a nested one the generated
+/// `p->Inner::~Inner()` doesn't even compile.
+fn test_enum_style_nested_enum_has_no_synthesized_members() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Holder {
+        public:
+            enum Inner : int {
+                INNER_A = 1,
+                INNER_B = 2,
+            };
+            Holder() {}
+        };
+        struct HasEnumField {
+            Holder::Inner field;
+            uint32_t other;
+        };
+        inline uint32_t read_field(HasEnumField f) { return (uint32_t)f.field + f.other; }
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            // Named as `generate!` names it: bindgen flattens a nested type's
+            // name, so it is `Holder_Inner`, not `Holder::Inner`.
+            enum_style!(BitfieldEnum, "Holder_Inner")
+            generate_pod!("Holder_Inner")
+            generate_pod!("HasEnumField")
+            generate!("Holder")
+            generate!("read_field")
+        }
+        fn main() {
+            let both = ffi::Holder_Inner::INNER_A | ffi::Holder_Inner::INNER_B;
+            assert_eq!(both.0, 3);
+            let s = ffi::HasEnumField { field: ffi::Holder_Inner::INNER_B, other: 5 };
+            assert_eq!(ffi::read_field(s), 7);
+        }
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
 #[test]
 fn test_re_export() {
     let cxx = indoc! {"
@@ -10829,6 +11088,141 @@ fn test_pv_protected_constructor() {
 }
 
 #[test]
+fn test_pv_protected_destructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    protected:
+        virtual ~Observer() {}
+    };
+    inline void bar() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            obs.borrow().foo();
+        },
+        quote! {
+            generate!("bar")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+#[test]
+/// A subclass may call its superclass's `protected` destructor, so
+/// `subclass!()` must produce a working, destroyable peer for such a
+/// superclass. Rust still may not own the superclass *itself*, which is
+/// checked separately by `test_subclass_superclass_protected_destructor_still_unownable`.
+/// See google/autocxx#1481 and google/autocxx#829.
+fn test_subclass_superclass_protected_destructor_runs() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    inline uint32_t& observer_destructions() {
+        static uint32_t count = 0;
+        return count;
+    }
+    inline uint32_t get_observer_destructions() { return observer_destructions(); }
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    protected:
+        virtual ~Observer() { observer_destructions()++; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            {
+                let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+                obs.borrow().foo();
+                assert_eq!(ffi::get_observer_destructions(), 0);
+            }
+            // Dropping the last reference drops the C++ peer, whose own
+            // (public, implicit) destructor calls the protected `~Observer`.
+            assert_eq!(ffi::get_observer_destructions(), 1);
+        },
+        quote! {
+            generate!("get_observer_destructions")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+#[test]
+/// Subclassing a superclass with a protected destructor must not re-open the
+/// google/autocxx#829 hole: Rust may still not own an `Observer` by value.
+fn test_subclass_superclass_protected_destructor_still_unownable() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    protected:
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_expect_fail_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::Observer::new().within_box();
+        },
+        quote! {
+            generate!("Observer")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+#[test]
 fn test_pv_protected_method() {
     let hdr = indoc! {"
     #include <cstdint>
@@ -16181,6 +16575,259 @@ fn test_opaque_directive() {
         None,
         None,
         None,
+    );
+}
+
+#[test]
+/// A class member typedef to a template instantiation, used as a
+/// const-reference parameter. The typedef becomes `B_F` in the bridge with a
+/// `#[namespace = "B"]` attribute, where `B` names a class rather than a
+/// namespace; the generated C++ used to declare `namespace B` alongside
+/// `class B` and fail to compile. See google/autocxx#1479.
+fn test_nested_typedef_to_template_instantiation() {
+    let hdr = indoc! {"
+        template <class T>
+        class X;
+
+        class B {
+        public:
+            typedef X<void> F;
+            void foo(const F&) {}
+        };
+    "};
+    let rs = quote! {
+        let _b = ffi::B::new().within_unique_ptr();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("B")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+/// Asking bindgen to derive `Default` must never turn into a zero-filled
+/// `Default` for a type whose all-bits-zero form isn't a valid value.
+///
+/// When a type can't derive `Default`, bindgen writes an `impl Default`
+/// by hand which zeroes the bytes. For a struct holding a Rust `enum` whose
+/// discriminants don't include 0 - the shape `enum_style!(RustifiedEnum)`
+/// exists to produce - that hands out an enum value which is not any of its
+/// variants, which is instant undefined behaviour. So no `Default` at all for
+/// such a struct; `test_take_bitfield` pins the other side, that a struct
+/// whose fields are all default-able still gets one.
+fn test_no_zero_filled_default_for_enum_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum Fruit : int {
+            APPLE = 1,
+            PEAR = 2,
+        };
+        struct Basket {
+            Fruit fruit;
+            uint32_t count;
+        };
+        inline uint32_t count_of(Basket b) { return b.count; }
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Basket: Default);
+        // ...and the type is otherwise perfectly usable.
+        let basket = ffi::Basket { fruit: ffi::Fruit::APPLE, count: 3 };
+        assert_eq!(ffi::count_of(basket), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            enum_style!(RustifiedEnum, "Fruit")
+            generate_pod!("Fruit")
+            generate_pod!("Basket")
+            generate!("count_of")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+/// Turning on bindgen's `derive_default` must not put `Default` into an
+/// enum's derive list, which rustc rejects outright: E0665, because bindgen
+/// marks no variant `#[default]`.
+///
+/// It happens because bindgen's `lookup_can_derive_default` treats an item its
+/// derive analysis never visited as derivable, and an enum nested inside a
+/// class autocxx makes opaque - as it does the standard library's internals -
+/// is exactly such an item. This fixture stands in for the libstdc++ shape
+/// that broke CI (an anonymous enum inside `std::_Rb_tree`) without depending
+/// on any particular standard library being installed.
+fn test_no_default_derive_on_enum_in_opaqued_class() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace __gnu_cxx {
+        class Detail {
+        public:
+            enum { AS_LVALUE = 0 };
+            uint32_t v;
+        };
+        }
+        struct Wrapper {
+            __gnu_cxx::Detail detail;
+            uint32_t n;
+        };
+        inline uint32_t read_wrapper(const Wrapper& w) { return w.n; }
+    "};
+    // Nothing to call - the generated bindings simply have to compile.
+    run_test("", hdr, quote! {}, &["Wrapper", "read_wrapper"], &[]);
+}
+
+/// A struct mixing bitfields with an ordinary field, for the tests below.
+fn bitfield_header() -> &'static str {
+    indoc! {"
+        #include <cstdint>
+        struct Bitfieldy {
+            uint8_t unsigned3 : 3;
+            int8_t signed3 : 3;
+            bool bool1 : 1;
+
+            uint32_t separator;
+
+            uint32_t unsigned12 : 12;
+            int32_t signed4 : 4;
+        };
+    "}
+}
+
+#[test]
+/// A bitfield is laid out by C++ inside an allocation unit which bindgen
+/// represents as `__BindgenBitfieldUnit<[u8; N]>`. That's a plain byte array
+/// with accessors, so a struct containing one is as movable as any other POD
+/// struct; autocxx used to refuse to make such a struct POD at all.
+fn test_take_bitfield() {
+    let cxx = indoc! {"
+        bool take_bitfield(Bitfieldy x) {
+            return (
+                x.unsigned3 == 2 &&
+                x.signed3 == -3 &&
+                x.bool1 == false &&
+                x.separator == 424242 &&
+                x.unsigned12 == 3000 &&
+                x.signed4 == -1
+            );
+        }
+    "};
+    let hdr = format!("{}bool take_bitfield(Bitfieldy);\n", bitfield_header());
+    let rs = quote! {
+        // Every field of this struct is default-able, so bindgen derives
+        // `Default` for it - see `test_no_zero_filled_default_for_enum_field`
+        // for the types that must *not* get one.
+        static_assertions::assert_impl_all!(ffi::Bitfieldy: Default);
+
+        // `Default` gives us the bitfield allocation units and the padding
+        // bindgen inserted, none of which can be written by hand. The
+        // functional-record-update form (`..Default::default()`) would be
+        // tidier, but autocxx gives every type with a destructor a `Drop`
+        // impl, and Rust won't move fields out of one of those.
+        let mut bitfield = ffi::Bitfieldy::default();
+        bitfield._bitfield_1 = ffi::Bitfieldy::new_bitfield_1(2, -3, false);
+        bitfield.separator = 424242;
+        bitfield.set_unsigned12(3000);
+        bitfield.set_signed4(-1);
+
+        assert_eq!(ffi::take_bitfield(bitfield), true);
+    };
+    run_test(cxx, &hdr, rs, &["take_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+/// The other direction: C++ fills in the bitfields and Rust reads them back.
+/// Only the unsigned fields are checked here; see
+/// `test_give_bitfield_signed_fields` for why.
+fn test_give_bitfield() {
+    let cxx = indoc! {"
+        Bitfieldy give_bitfield() {
+            Bitfieldy result{};
+            result.unsigned3 = 2;
+            result.signed3 = -3;
+            result.bool1 = false;
+            result.separator = 424242;
+            result.unsigned12 = 3000;
+            result.signed4 = -1;
+            return result;
+        }
+    "};
+    let hdr = format!("{}Bitfieldy give_bitfield();\n", bitfield_header());
+    let rs = quote! {
+        let bitfield = ffi::give_bitfield();
+
+        assert_eq!(bitfield.unsigned3(), 2);
+        assert_eq!(bitfield.bool1(), false);
+        assert_eq!(bitfield.separator, 424242);
+        assert_eq!(bitfield.unsigned12(), 3000);
+    };
+    run_test(cxx, &hdr, rs, &["give_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+#[ignore = "bindgen's generated getter for a signed bitfield does not sign-extend: \
+            `__BindgenBitfieldUnit::get` returns the raw bits in a u64 and the getter \
+            casts them straight to the field's signed type, so `signed3` holding -3 \
+            reads back as 5. See https://github.com/rust-lang/rust-bindgen/issues/1160. \
+            Nothing in autocxx can fix it; autocxx-bindgen 0.73.0 does not carry a fix."]
+/// The signed half of [`test_give_bitfield`]. Kept as a live (if ignored) test
+/// rather than commented out, so that whoever picks up the bindgen fix can
+/// just delete the `#[ignore]` and see whether it passes.
+fn test_give_bitfield_signed_fields() {
+    let cxx = indoc! {"
+        Bitfieldy give_bitfield() {
+            Bitfieldy result{};
+            result.signed3 = -3;
+            result.signed4 = -1;
+            return result;
+        }
+    "};
+    let hdr = format!("{}Bitfieldy give_bitfield();\n", bitfield_header());
+    let rs = quote! {
+        let bitfield = ffi::give_bitfield();
+        assert_eq!(bitfield.signed3(), -3);
+        assert_eq!(bitfield.signed4(), -1);
+    };
+    run_test(cxx, &hdr, rs, &["give_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+/// A struct with bitfields which nobody asked to be POD stays non-POD, and
+/// keeps working as an opaque type.
+fn test_bitfield_non_pod() {
+    let cxx = indoc! {"
+        uint32_t read_separator(const Bitfieldy& x) { return x.separator; }
+        Bitfieldy make_bitfield() {
+            Bitfieldy result{};
+            result.separator = 42;
+            return result;
+        }
+    "};
+    let hdr = format!(
+        "{}uint32_t read_separator(const Bitfieldy&);\nBitfieldy make_bitfield();\n",
+        bitfield_header()
+    );
+    let rs = quote! {
+        let bitfield = ffi::make_bitfield().within_unique_ptr();
+        assert_eq!(ffi::read_separator(&bitfield), 42);
+    };
+    run_test(
+        cxx,
+        &hdr,
+        rs,
+        &["Bitfieldy", "read_separator", "make_bitfield"],
+        &[],
     );
 }
 
