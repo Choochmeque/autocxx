@@ -530,11 +530,27 @@ impl<T: UniquePtrTarget> CppUniquePtrPin<T> {
     }
 
     /// Get an immutable pointer to the underlying object.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the [`UniquePtr`] is null, since a C++ reference can never
+    /// be null and so there is nothing to point at.
     pub fn as_ptr(&self) -> *const T {
-        // TODO - avoid brief reference here
-        self.0
-            .as_ref()
-            .expect("UniquePtr was null; we can't make a C++ reference")
+        // Deliberately *not* `self.0.as_ref()`. Materializing even a transient
+        // Rust `&T` would assert Rust's aliasing rules over an object whose
+        // entire reason for being in a `CppUniquePtrPin` is that C++ may hold
+        // aliasing mutable references to it. `UniquePtr::as_ptr` gets us the
+        // address without ever forming a Rust reference.
+        //
+        // The null check is kept separate so this still panics where it used
+        // to. Note that `new` above does no such check, so `as_cpp_mut_ref`
+        // will happily vend a null `CppMutRef` for the same object; the two
+        // paths disagree, and reconciling them would be a behaviour change.
+        assert!(
+            !self.0.is_null(),
+            "UniquePtr was null; we can't make a C++ reference"
+        );
+        self.0.as_ptr()
     }
 }
 
@@ -562,6 +578,22 @@ impl<T: UniquePtrTarget> Deref for CppUniquePtrPin<T> {
 impl<T: UniquePtrTarget> AsCppRef<T> for cxx::UniquePtr<T> {
     fn as_cpp_ref(&self) -> CppRef<T> {
         CppRef::from_ptr(self.as_ptr())
+    }
+}
+
+#[cfg(test)]
+mod unique_ptr_pin_tests {
+    use super::*;
+    use cxx::CxxString;
+
+    /// A C++ reference can't be null, so asking a null-holding
+    /// [`CppUniquePtrPin`] for one has to keep failing loudly rather than
+    /// handing back a null pointer for C++ to dereference.
+    #[test]
+    #[should_panic(expected = "UniquePtr was null")]
+    fn as_ptr_rejects_null() {
+        let pin = CppUniquePtrPin::new(UniquePtr::<CxxString>::null());
+        let _ = pin.as_ptr();
     }
 }
 

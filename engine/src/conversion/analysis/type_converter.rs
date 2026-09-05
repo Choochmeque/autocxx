@@ -11,7 +11,7 @@ use crate::{
         api::{AnalysisPhase, Api, ApiName, NullPhase, TypedefKind, UnanalyzedApi},
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
-        type_helpers::{unwrap_has_opaque, unwrap_has_unused_template_param, unwrap_reference},
+        type_helpers::{unwrap_has_opaque, unwrap_reference},
         ConvertErrorFromCpp,
     },
     known_types::{known_types, CxxGenericType},
@@ -191,11 +191,13 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // First we try to spot if these are the special marker paths that
-        // bindgen uses to denote references or other things.
-        // TODO the next two lines can be removed
-        if let Some(ty) = unwrap_has_unused_template_param(&typ) {
-            self.convert_type(ty.clone(), ns, ctx)
-        } else if let Some(ty) = unwrap_has_opaque(&typ) {
+        // bindgen uses to denote references or other things. Note that
+        // there is deliberately no `__bindgen_marker_UnusedTemplateParam`
+        // case here: bindgen reports that condition per-item through the
+        // `denote_discards_template_param` callback (see
+        // `ParseCallbackResults::discards_template_param`), not by wrapping
+        // a type.
+        if let Some(ty) = unwrap_has_opaque(&typ) {
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ptr) = unwrap_reference(&typ, false) {
             // LValue reference
@@ -205,10 +207,22 @@ impl<'a> TypeConverter<'a> {
                 ns,
                 &TypeConversionContext::WithinReference,
             )?;
-            // TODO - in the future, we should check if this is a rust::Str and throw
-            // a wobbler if not. rust::Str should only be seen _by value_ in C++
-            // headers; it manifests as &str in Rust but on the C++ side it must
-            // be a plain value. We should detect and abort.
+            // A `rust::Str` referent has already been turned into `&str` by the
+            // `should_dereference_in_cpp` branch below, so a C++ `rust::Str&`
+            // gets wrapped again here into `&&str`. That is deliberate and
+            // correct: cxx spells `&str` as a `rust::Str` value and `&T` as
+            // `const T&`, so `&&str` *is* `const rust::Str&`, and `rust::Str`
+            // has the same (pointer, length) layout as Rust's `&str`.
+            // `test_pass_rust_str_by_ref` and `test_pass_rust_str_by_mut_ref`
+            // run both shapes end to end.
+            //
+            // TODO: the mutable case is the one worth revisiting. `rust::Str&`
+            // becomes `Pin<&mut &str>`, which lets C++ overwrite the fat
+            // pointer with one it owns; Rust then holds a `&str` whose lifetime
+            // nothing checked. That is a real hazard, but it is a lifetime
+            // problem rather than the layout problem an earlier comment here
+            // assumed, and rejecting `rust::Str&` outright would break the
+            // working const case too.
             let mut outer = elem.map(|elem| match mutability {
                 Some(_) => Type::Path(parse_quote! {
                     ::core::pin::Pin < & #mutability #elem >
@@ -552,8 +566,6 @@ impl<'a> TypeConverter<'a> {
     ) -> Result<(QualifiedName, Option<UnanalyzedApi>), ConvertErrorFromCpp> {
         let count = self.concrete_templates.len();
         // We just use this as a hash key, essentially.
-        // TODO: Once we've completed the TypeConverter refactoring (see #220),
-        // pass in an actual original_name_map here.
         let cpp_definition = self.original_name_map.type_to_cpp(rs_definition)?;
         let e = self.concrete_templates.get(&cpp_definition);
         match e {

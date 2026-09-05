@@ -313,13 +313,17 @@ impl IncludeCppConfig {
                     .map(AllowlistEntry::to_bindgen_item)
                     .chain(self.pod_requests.iter().cloned())
                     .chain(self.active_utilities())
-                    .chain(self.subclasses.iter().flat_map(|sc| {
-                        [
-                            format!("{}Cpp", sc.subclass),
-                            sc.subclass.to_string(), // TODO may not be necessary
-                            sc.superclass.clone(),
-                        ]
-                    })),
+                    // A subclass needs the C++ peer class autocxx generates for
+                    // it, plus the superclass it derives from. The plain
+                    // subclass name is deliberately absent: that names a Rust
+                    // struct, and no C++ entity is ever emitted under it, so
+                    // allowlisting it could only ever match a user's own type
+                    // by coincidence.
+                    .chain(
+                        self.subclasses
+                            .iter()
+                            .flat_map(|sc| [format!("{}Cpp", sc.subclass), sc.superclass.clone()]),
+                    ),
             )),
             Allowlist::Unspecified(_) => unreachable!(),
         }
@@ -504,7 +508,26 @@ impl ToTokens for IncludeCppConfig {
 #[cfg(test)]
 mod parse_tests {
     use crate::config::UnsafePolicy;
+    use crate::IncludeCppConfig;
     use syn::parse_quote;
+
+    /// The bindgen allowlist for a subclass carries the C++ peer class autocxx
+    /// generates and the superclass being derived from, and nothing else. The
+    /// plain subclass name used to be in there too, but it names a Rust
+    /// struct which has no C++ counterpart, so it matched nothing.
+    #[test]
+    fn test_subclass_bindgen_allowlist() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate!("Bar")
+            subclass!("Observer", MyObserver)
+        };
+        let allowlist: Vec<String> = config.bindgen_allowlist().unwrap().collect();
+        let has = |name: &str| allowlist.iter().any(|entry| entry == name);
+        assert!(has("MyObserverCpp"));
+        assert!(has("Observer"));
+        assert!(!has("MyObserver"));
+    }
+
     #[test]
     fn test_safety_unsafe() {
         let us: UnsafePolicy = parse_quote! {

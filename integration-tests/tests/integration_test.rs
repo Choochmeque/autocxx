@@ -923,6 +923,10 @@ fn test_take_char_by_ptr_in_wrapped_method_with_unsigned_chars() {
 fn test_take_nonpod_by_mut_ref() {
     let cxx = indoc! {"
         uint32_t take_bob(Bob& a) {
+            a.a++;
+            return a.a;
+        }
+        uint32_t peek_bob(const Bob& a) {
             return a.a;
         }
         std::unique_ptr<Bob> make_bob(uint32_t a) {
@@ -939,14 +943,24 @@ fn test_take_nonpod_by_mut_ref() {
         };
         std::unique_ptr<Bob> make_bob(uint32_t a);
         uint32_t take_bob(Bob& a);
+        uint32_t peek_bob(const Bob& a);
     "};
+    // `take_bob` mutates through the reference, and `peek_bob` reads the same
+    // object back afterwards, so this checks C++ was handed the real object
+    // rather than something copied on the way through. Bob is non-POD here,
+    // so Rust can't read the field itself to check.
     let rs = quote! {
         let mut a = ffi::make_bob(12);
-        assert_eq!(ffi::take_bob(a.pin_mut()), 12);
+        assert_eq!(ffi::take_bob(a.pin_mut()), 13);
+        assert_eq!(ffi::peek_bob(a.as_ref().unwrap()), 13);
     };
-    // TODO confirm that the object really was mutated by C++ in this
-    // and similar tests.
-    run_test(cxx, hdr, rs, &["take_bob", "Bob", "make_bob"], &[]);
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob", "peek_bob", "Bob", "make_bob"],
+        &[],
+    );
 }
 
 #[test]
@@ -1046,6 +1060,9 @@ fn test_cycle_nonpod_with_str_by_ref() {
     run_test(cxx, hdr, rs, &["take_bob", "Bob", "make_bob"], &[]);
 }
 
+/// The no-argument case. Constructor arguments are covered by
+/// `test_make_up_with_args`, `test_make_up_int`, `test_overload_constructors`
+/// and the `test_implicit_constructor_rules` matrix.
 #[test]
 fn test_make_up() {
     let cxx = indoc! {"
@@ -1065,7 +1082,7 @@ fn test_make_up() {
         uint32_t take_bob(const Bob& a);
     "};
     let rs = quote! {
-        let a = ffi::Bob::new().within_unique_ptr(); // TODO test with all sorts of arguments.
+        let a = ffi::Bob::new().within_unique_ptr();
         assert_eq!(ffi::take_bob(a.as_ref().unwrap()), 3);
     };
     run_test(cxx, hdr, rs, &["Bob", "take_bob"], &[]);
@@ -2116,6 +2133,51 @@ fn test_pass_rust_str() {
     let rs = quote! {
         let c = ffi::measure_string("hello");
         assert_eq!(c, 5);
+    };
+    run_test(cxx, hdr, rs, &["measure_string"], &[]);
+}
+
+/// `rust::Str` is a value type in C++ which manifests as `&str` in Rust, so a
+/// C++ `const rust::Str&` parameter comes out as `&&str`. That double
+/// reference is right, not a bug: cxx spells `&str` as a `rust::Str` value and
+/// `&T` as `const T&`, and `rust::Str` has `&str`'s (pointer, length) layout.
+#[test]
+fn test_pass_rust_str_by_ref() {
+    let cxx = indoc! {"
+        uint32_t measure_string(const rust::Str& z) {
+            return std::string(z).length();
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        uint32_t measure_string(const rust::Str& z);
+    "};
+    let rs = quote! {
+        let s = "hello";
+        assert_eq!(ffi::measure_string(&s), 5);
+    };
+    run_test(cxx, hdr, rs, &["measure_string"], &[]);
+}
+
+/// As [`test_pass_rust_str_by_ref`], for a mutable `rust::Str&`, which becomes
+/// `Pin<&mut &str>`. See the note in `type_converter.rs`: this works, but
+/// nothing stops C++ writing a fat pointer of its own into the slot.
+#[test]
+fn test_pass_rust_str_by_mut_ref() {
+    let cxx = indoc! {"
+        uint32_t measure_string(rust::Str& z) {
+            return std::string(z).length();
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        uint32_t measure_string(rust::Str& z);
+    "};
+    let rs = quote! {
+        let mut s = "hello";
+        assert_eq!(ffi::measure_string(std::pin::Pin::new(&mut s)), 5);
     };
     run_test(cxx, hdr, rs, &["measure_string"], &[]);
 }
@@ -8530,10 +8592,54 @@ fn test_extern_rust_fn_name_is_not_reused_for_a_type() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
-// TODO: there are various other tests for extern_rust_fn we should add:
-// 1) taking mutable and immutable references
-// 2) ensuring that types on which the signature depends as receiver,
-//    parameters and return are not garbage collected
+/// An `extern_rust_function` taking `&mut` a Rust type. C++ receives a
+/// `RustType&` and hands it straight back to Rust, so the increment has to
+/// land on the caller's own object. This is the mutable counterpart to
+/// `test_extern_rust_method`, which covers `&`.
+#[test]
+fn test_extern_rust_fn_mutable_reference() {
+    let cpp = indoc! {"
+        void bump_it(RustType& a) {
+            bump(a);
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cxx.h>
+        struct RustType;
+        void bump_it(RustType& a);
+    "};
+    run_test_ex(
+        cpp,
+        hdr,
+        quote! {
+            let mut a = RustType(1);
+            ffi::bump_it(std::pin::Pin::new(&mut a));
+            assert_eq!(a.0, 2);
+        },
+        directives_from_lists(&["bump_it"], &[], None),
+        Some(Box::new(EnableAutodiscover)),
+        None,
+        Some(quote! {
+            use std::pin::Pin;
+
+            #[autocxx::extern_rust::extern_rust_type]
+            pub struct RustType(i32);
+
+            // autocxx insists on Pin for a mutable reference crossing into
+            // C++ (PinnedReferencesRequiredForExternFun), and on an unqualified
+            // name for it (NamespacesNotSupportedForExternFun).
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn bump(mut a: Pin<&mut RustType>) {
+                a.0 += 1;
+            }
+        }),
+    );
+}
+
+// TODO: one more extern_rust_fn test is still missing: that types the
+// signature depends on, as receiver, parameters and return, are not garbage
+// collected. References in both directions are now covered, by
+// test_extern_rust_method and test_extern_rust_fn_mutable_reference.
 
 #[test]
 fn test_rust_reference_no_autodiscover() {
@@ -8615,8 +8721,19 @@ fn test_rust_reference_no_autodiscover_no_usage() {
 
 #[test]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
-// TODO - replace make_clang_arg_adder with something that knows how to add an MSVC-suitable
-// directive for the cc build.
+// TODO - make this work on MSVC. `make_cpp17_adder` passes a GNU-spelled
+// `-std=c++17` to the cc build, which cl.exe does not accept. Three separate
+// things need fixing, not just the one this note used to describe:
+//   1. the flag spelling. `cc::Build::std("c++17")` handles this - cc picks
+//      `-std=c++17` or `-std:c++17` from the tool family (cc 1.2.15 lib.rs,
+//      the `if let Some(ref std) = self.std` block).
+//   2. `__cplusplus`. MSVC reports 199711L whatever `/std` says unless
+//      `/Zc:__cplusplus` is also passed, so the static_assert below fails
+//      anyway. cc never adds it - the string appears nowhere in cc 1.2.15.
+//   3. `configure_builder` in integration-tests/src/lib.rs hardcodes
+//      `.flag("-std=c++14") // For clang` for every test, unconditionally and
+//      not via `flag_if_supported`, so MSVC gets that too.
+// Needs verifying on a real MSVC runner once done.
 fn test_cpp17() {
     let hdr = indoc! {"
         static_assert(__cplusplus >= 201703L, \"This file expects a C++17 compatible compiler.\");
