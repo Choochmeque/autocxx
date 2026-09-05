@@ -151,8 +151,6 @@ jobs:
         run: echo "LIBCLANG_PATH=$((gcm clang).source -replace "clang.exe")" >> $env:GITHUB_ENV
       - name: Build s2 example
         working-directory: ./examples/s2
-        # s2 doesn't link on Windows
-        if: matrix.os != 'windows'
         run: cargo build
       - name: Build steam example
         working-directory: ./examples/steam-mini
@@ -165,8 +163,6 @@ jobs:
         run: cargo build
       - name: Build chromium render-frame-host example
         working-directory: ./examples/chromium-fake-render-frame-host
-        # chromium-fake-render-frame-host doesn't link on Windows
-        if: matrix.os != 'windows'
         run: cargo build
       - name: Build non-trivial-type-on-stack example
         working-directory: ./examples/non-trivial-type-on-stack
