@@ -10829,6 +10829,141 @@ fn test_pv_protected_constructor() {
 }
 
 #[test]
+fn test_pv_protected_destructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    protected:
+        virtual ~Observer() {}
+    };
+    inline void bar() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            obs.borrow().foo();
+        },
+        quote! {
+            generate!("bar")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+#[test]
+/// A subclass may call its superclass's `protected` destructor, so
+/// `subclass!()` must produce a working, destroyable peer for such a
+/// superclass. Rust still may not own the superclass *itself*, which is
+/// checked separately by `test_subclass_superclass_protected_destructor_still_unownable`.
+/// See google/autocxx#1481 and google/autocxx#829.
+fn test_subclass_superclass_protected_destructor_runs() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    inline uint32_t& observer_destructions() {
+        static uint32_t count = 0;
+        return count;
+    }
+    inline uint32_t get_observer_destructions() { return observer_destructions(); }
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    protected:
+        virtual ~Observer() { observer_destructions()++; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            {
+                let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+                obs.borrow().foo();
+                assert_eq!(ffi::get_observer_destructions(), 0);
+            }
+            // Dropping the last reference drops the C++ peer, whose own
+            // (public, implicit) destructor calls the protected `~Observer`.
+            assert_eq!(ffi::get_observer_destructions(), 1);
+        },
+        quote! {
+            generate!("get_observer_destructions")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+#[test]
+/// Subclassing a superclass with a protected destructor must not re-open the
+/// google/autocxx#829 hole: Rust may still not own an `Observer` by value.
+fn test_subclass_superclass_protected_destructor_still_unownable() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    protected:
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_expect_fail_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::Observer::new().within_box();
+        },
+        quote! {
+            generate!("Observer")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+#[test]
 fn test_pv_protected_method() {
     let hdr = indoc! {"
     #include <cstdint>
