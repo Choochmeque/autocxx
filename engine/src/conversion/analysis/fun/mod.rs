@@ -111,9 +111,6 @@ pub(crate) struct TraitMethodDetails {
     /// interface, we may need to reorder the parameters to fit that
     /// interface.
     pub(crate) parameter_reordering: Option<Vec<usize>>,
-    /// The function we're calling from the trait requires unsafe even
-    /// though the trait and its function aren't.
-    pub(crate) trait_call_is_unsafe: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -941,7 +938,6 @@ impl<'a> FnAnalyzer<'a> {
                                 avoid_self: true,
                                 method_name: make_ident(method_name),
                                 parameter_reordering: Some(vec![1, 0]),
-                                trait_call_is_unsafe: false,
                             }),
                         },
                         error_context,
@@ -977,7 +973,6 @@ impl<'a> FnAnalyzer<'a> {
                             avoid_self: false,
                             method_name: make_ident("drop"),
                             parameter_reordering: None,
-                            trait_call_is_unsafe: false,
                         }),
                     },
                     error_context,
@@ -1721,7 +1716,6 @@ impl<'a> FnAnalyzer<'a> {
                             avoid_self: false,
                             method_name,
                             parameter_reordering: None,
-                            trait_call_is_unsafe: false,
                         }),
                     },
                     ErrorContext::new_for_item(make_ident(&rust_name)),
@@ -1765,7 +1759,6 @@ impl<'a> FnAnalyzer<'a> {
                     avoid_self: false,
                     method_name: make_ident(method_name),
                     parameter_reordering: None,
-                    trait_call_is_unsafe: false,
                 }),
                 kind,
             },

@@ -12891,6 +12891,51 @@ fn test_generated_reexports_do_not_warn_as_unused() {
     .unwrap()
 }
 
+/// Generated code must satisfy RFC 2585: an unsafe operation inside an
+/// `unsafe fn` needs its own `unsafe` block, not the function's signature as
+/// blanket permission. The generated mod used to carry a blanket
+/// `#[allow(unsafe_op_in_unsafe_fn)]`; with that gone, denying the lint from
+/// the caller's crate makes any remaining bare unsafe operation a build
+/// failure. `unused_unsafe` is denied alongside it to catch the opposite
+/// mistake - an `unsafe` block wrapped around something already inside one.
+/// (bindgen's own output keeps the allow, so this only exercises the code
+/// autocxx writes.)
+#[test]
+fn test_generated_code_wraps_unsafe_ops_in_unsafe_fns() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    inline void take_ptr(uint32_t*) {}
+    inline uint32_t* give_ptr() { return nullptr; }
+    class A {
+    public:
+        A() {}
+        void take_ptr_method(uint32_t*) {}
+    };
+    "};
+    do_run_test(
+        "",
+        hdr,
+        quote! {
+            let mut val: u32 = 3;
+            unsafe { ffi::take_ptr(&mut val) };
+            let p = ffi::give_ptr();
+            assert!(p.is_null());
+            let mut a = ffi::A::new().within_unique_ptr();
+            unsafe { a.pin_mut().take_ptr_method(&mut val) };
+        },
+        directives_from_lists(&["take_ptr", "give_ptr", "A"], &[], None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(unsafe_op_in_unsafe_fn)]
+            #![deny(unused_unsafe)]
+        }),
+    )
+    .unwrap()
+}
+
 #[test]
 fn test_abstract_private() {
     let hdr = indoc! {"
