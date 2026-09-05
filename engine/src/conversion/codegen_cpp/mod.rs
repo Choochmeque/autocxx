@@ -114,7 +114,7 @@ pub(crate) struct CppCodeGenerator<'a> {
 
 struct SubclassFunction<'a> {
     fun: &'a CppFunction,
-    is_pure_virtual: bool,
+    has_super_helper: bool,
 }
 
 impl<'a> CppCodeGenerator<'a> {
@@ -252,7 +252,7 @@ impl<'a> CppCodeGenerator<'a> {
                         .or_default()
                         .push(SubclassFunction {
                             fun: &details.cpp_impl,
-                            is_pure_virtual: details.is_pure_virtual,
+                            has_super_helper: details.has_super_helper,
                         });
                 }
                 Api::Struct {
@@ -777,7 +777,7 @@ impl<'a> CppCodeGenerator<'a> {
             method_decls.push(fn_impl.declaration.take().unwrap());
             self.additional_functions.push(fn_impl);
             // And now the function to be called from Rust for default implementation (calls superclass in C++)
-            if !method.is_pure_virtual {
+            if method.has_super_helper {
                 let mut super_method = method.fun.clone();
                 super_method.pass_obs_field = false;
                 // `super_foo` is a new method on the subclass which we call

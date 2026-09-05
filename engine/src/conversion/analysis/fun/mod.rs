@@ -641,6 +641,14 @@ impl<'a> FnAnalyzer<'a> {
                         ..
                     }
                 );
+                // Whether the peer class can offer a `foo_super` helper which
+                // calls the superclass's own implementation. A pure virtual
+                // method has no such implementation; a `private` one has one
+                // the peer isn't allowed to call, even though C++ does let it
+                // override the method. `protected` is fine - access from a
+                // derived class is precisely what it permits.
+                let has_super_helper =
+                    !is_pure_virtual && !matches!(fun.cpp_vis, CppVisibility::Private);
 
                 // The peer class's method keeps its plain `foo_super` name in
                 // Rust - that's what subclass authors write - but in C++ it
@@ -659,7 +667,7 @@ impl<'a> FnAnalyzer<'a> {
                 let trait_api_name = SubclassName::get_trait_api_name(sup, &analysis.rust_name);
 
                 let mut subclass_fn_deps = vec![trait_api_name.clone()];
-                if !is_pure_virtual {
+                if has_super_helper {
                     // Create a C++ API representing the superclass implementation (allowing
                     // calls from Rust->C++)
                     let maybe_wrap = create_subclass_fn_wrapper(&sub, &super_fn_cpp_name, &fun);
@@ -691,6 +699,7 @@ impl<'a> FnAnalyzer<'a> {
                     subclass_fn_deps,
                     self.unsafe_policy,
                     fun.ref_qualifier,
+                    has_super_helper,
                 ));
 
                 // Create the trait item for the <superclass>_methods and <superclass>_supers
@@ -708,7 +717,7 @@ impl<'a> FnAnalyzer<'a> {
                         &analysis,
                         receiver_mutability,
                         sup.clone(),
-                        is_pure_virtual,
+                        has_super_helper,
                         self.unsafe_policy,
                     ));
                 }
@@ -904,10 +913,12 @@ impl<'a> FnAnalyzer<'a> {
                         .map(|param| param.conversion.cxxbridge_type()),
                     Some(Type::Reference(_))
                 );
-                // Some exotic forms of copy constructor have const and/or volatile qualifiers.
-                // These are not sufficient to implement CopyNew, so we just treat them as regular
-                // constructors. We detect them by their argument being translated to Pin at this
-                // point.
+                // A copy constructor taking a non-const source - `T(T&)` or
+                // `T(volatile T&)` - cannot implement CopyNew, which copies from
+                // a `&self`, so we treat it as a regular constructor. We detect
+                // the two by their argument being translated to Pin at this
+                // point. The const-qualified forms, `T(const T&)` and
+                // `T(const volatile T&)`, both can and do implement CopyNew.
                 if is_move || arg_is_reference {
                     let (kind, method_name, trait_id) = if is_move {
                         (
@@ -2217,7 +2228,7 @@ impl<'a> FnAnalyzer<'a> {
                     parse_quote! { this: *mut #path, other: __bindgen_marker_RValueReference < *mut #path > },
                 )
             }
-            if items_found.implicit_copy_constructor_needed() {
+            if items_found.implicit_const_copy_constructor_needed() {
                 self.synthesize_special_member(
                     items_found,
                     "const_copy_ctor",

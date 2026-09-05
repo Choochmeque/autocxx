@@ -749,7 +749,7 @@ impl<'a> RsCodeGenerator<'a> {
             let methods_impls: Vec<ImplItem> = methods
                 .iter()
                 .zip(super_fn_names(methods))
-                .filter(|(m, _)| !m.is_pure_virtual)
+                .filter(|(m, _)| m.has_super_helper)
                 .map(|(m, trait_super_method_name)| {
                     let peer_super_method_name =
                         SubclassName::get_super_fn_name(&Namespace::new(), &m.name.to_string())
@@ -1049,7 +1049,10 @@ impl<'a> RsCodeGenerator<'a> {
                     let (params, param_names) = Self::superclass_trait_method_signature(method);
                     let ret_type = &method.ret_type;
                     let unsafe_token = method.requires_unsafe.wrapper_token();
-                    if method.is_pure_virtual {
+                    if !method.has_super_helper {
+                        // No superclass implementation this subclass could
+                        // call, so no default body: every Rust subclass has
+                        // to provide one.
                         (
                             None,
                             parse_quote!(
@@ -1186,11 +1189,15 @@ impl<'a> RsCodeGenerator<'a> {
                 } else {
                     call
                 };
-                if method.is_pure_virtual {
+                if !method.has_super_helper {
                     // There's no `_super` item for a pure virtual method, so
                     // this has to implement the `_methods` item itself; for
                     // the others the trait's own default body forwards to
-                    // `_supers` for us.
+                    // `_supers` for us. The other reason for a method to have
+                    // no `_super` item - being `private` - can't reach here,
+                    // because such a method has no binding of the superclass's
+                    // own for this impl to call, and our caller only runs when
+                    // every method has one.
                     let item: ImplItem = parse_quote!(
                         #unsafe_token fn #id(#params) #ret_type { #body }
                     );

@@ -19,7 +19,7 @@ use crate::{
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
     run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
-    BuilderModifier, CodeCheckerFns, TestError,
+    run_test_expect_fail_with_error_ex, BuilderModifier, CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -2621,24 +2621,28 @@ fn test_overload_numeric_functions_bogus_suffix_still_errors() {
 fn test_overload_numeric_functions_discarded_overload_still_errors() {
     // pp2 is a name an overload really does get (the second pp, numbered
     // around the real pp1), but that overload is discarded during analysis
-    // because we can't handle char16_t. Deferring the check on such a
+    // because its parameter type is blocked. Deferring the check on such a
     // directive past the parse phase must not let that pass silently, and
     // the error must name pp2 - the name the user wrote - even though the
     // discarded API is internally called after the C++ wrapper it needed.
     let hdr = indoc! {"
         #include <cstdint>
-        typedef char16_t my_char;
+        struct Unwanted { uint32_t a; };
         inline void pp(uint32_t) {}
-        inline void pp(my_char) {}
+        inline void pp(Unwanted) {}
         inline void pp1(uint32_t) {}
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_error_ex(
         "",
         hdr,
         quote! {},
-        &["pp", "pp1", "pp2"],
-        &[],
-        "DidNotGenerateAnythingUsable(\"pp2\", UnknownDependentType(",
+        quote! {
+            generate!("pp")
+            generate!("pp1")
+            generate!("pp2")
+            block!("Unwanted")
+        },
+        "DidNotGenerateAnythingUsable(\"pp2\", Argument { arg: \"arg1\", err: Blocked(",
     );
 }
 
@@ -9107,42 +9111,36 @@ fn test_typedef_to_char16() {
     // A C++ typedef to char16_t makes bindgen emit
     // `pub type my_char = bindgen_cchar16_t;` where
     // bindgen_cchar16_t is bound by an injected `use` rename.
-    // The bindgen sanitizer must not prune it.
-    //
-    // We can't yet generate anything usable for a char16_t parameter:
-    // `bindgen_cchar16_t` is neither a known type nor an API of its own, so
-    // the function is discarded during analysis. That used to pass silently;
-    // since google/autocxx#1269 an explicitly requested item which generates
-    // nothing is reported instead, naming the reason it was discarded.
+    // The bindgen sanitizer must not prune it, and the type database has to
+    // know that name, or the typedef resolves to nothing we can generate.
     let hdr = indoc! {"
+        #include <cstdint>
         typedef char16_t my_char;
-        inline void take_my_char(my_char) {}
+        inline my_char double_it(my_char c) { return static_cast<my_char>(c * 2); }
     "};
-    run_test_expect_fail_with_error(
-        "",
-        hdr,
-        quote! {},
-        &["take_my_char"],
-        &[],
-        "DidNotGenerateAnythingUsable(\"take_my_char\", UnknownDependentType(",
-    );
+    let rs = quote! {
+        assert_eq!(ffi::double_it(autocxx::c_char16_t(21)).0, 42);
+    };
+    run_test("", hdr, rs, &["double_it"], &[]);
 }
 
 #[test]
 fn test_discarded_wrapper_fn_error_stub_uses_user_facing_name() {
-    // take_my_char needs a C++ wrapper (its char16_t parameter has to be
-    // passed by pointer), so the API's own name is the wrapper's internal
-    // name. When the function is then discarded, the documentation stub
-    // must still be filed under the name the user knows the function by.
+    // take_my_char needs a C++ wrapper (its parameter is a non-POD passed by
+    // value, which has to go by pointer), so the API's own name is the
+    // wrapper's internal name. When the function is then discarded, the
+    // documentation stub must still be filed under the name the user knows
+    // the function by.
     let hdr = indoc! {"
-        typedef char16_t my_char;
-        inline void take_my_char(my_char) {}
+        #include <cstdint>
+        struct Unwanted { uint32_t a; };
+        inline void take_my_char(Unwanted) {}
     "};
     run_test_ex(
         "",
         hdr,
         quote! {},
-        quote! { generate_all!() },
+        quote! { generate_all!() block!("Unwanted") },
         None,
         Some(make_error_finder("take_my_char")),
         None,
@@ -9157,16 +9155,19 @@ fn test_discarded_wrapper_fn_with_sanitized_name_still_attributed() {
     // must not be what we match the user's directive against, or the
     // reason for the failure is lost all over again.
     let hdr = indoc! {"
-        typedef char16_t my_char;
-        inline void Pin(my_char) {}
+        #include <cstdint>
+        struct Unwanted { uint32_t a; };
+        inline void Pin(Unwanted) {}
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_error_ex(
         "",
         hdr,
         quote! {},
-        &["Pin"],
-        &[],
-        "DidNotGenerateAnythingUsable(\"Pin\", UnknownDependentType(",
+        quote! {
+            generate!("Pin")
+            block!("Unwanted")
+        },
+        "DidNotGenerateAnythingUsable(\"Pin\", Argument { arg: \"arg1\", err: Blocked(",
     );
 }
 
@@ -9181,7 +9182,7 @@ fn test_discarded_overload_with_sanitized_name_still_attributed() {
     // emit the family at all.
     let hdr = indoc! {"
         #include <cstdint>
-        typedef char16_t my_char;
+        struct Unwanted { uint32_t a; };
         inline void i(uint8_t) {}
         inline void i(uint16_t) {}
         inline void i(uint32_t) {}
@@ -9190,15 +9191,18 @@ fn test_discarded_overload_with_sanitized_name_still_attributed() {
         inline void i(int16_t) {}
         inline void i(int32_t) {}
         inline void i(int64_t) {}
-        inline void i(my_char) {}
+        inline void i(Unwanted) {}
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_error_ex(
         "",
         hdr,
         quote! {},
-        &["i", "i8"],
-        &[],
-        "DidNotGenerateAnythingUsable(\"i8\", UnknownDependentType(",
+        quote! {
+            generate!("i")
+            generate!("i8")
+            block!("Unwanted")
+        },
+        "DidNotGenerateAnythingUsable(\"i8\", Argument { arg: \"arg1\", err: Blocked(",
     );
 }
 
@@ -9207,14 +9211,15 @@ fn test_discarded_wrapper_fn_with_sanitized_name_stub_stays_scrubbed() {
     // The other half of the above: the stub itself must keep the scrubbed
     // name, since that is the whole point of scrubbing it.
     let hdr = indoc! {"
-        typedef char16_t my_char;
-        inline void Pin(my_char) {}
+        #include <cstdint>
+        struct Unwanted { uint32_t a; };
+        inline void Pin(Unwanted) {}
     "};
     run_test_ex(
         "",
         hdr,
         quote! {},
-        quote! { generate_all!() },
+        quote! { generate_all!() block!("Unwanted") },
         None,
         Some(make_error_finder("Pin_autocxx_error")),
         None,
@@ -9246,10 +9251,10 @@ fn test_discarded_wrapper_method_error_stub_uses_user_facing_name() {
     }
     let hdr = indoc! {"
         #include <cstdint>
-        typedef char16_t my_char;
+        struct Unwanted { uint32_t a; };
         struct Bob {
             uint32_t a;
-            void take_my_char(my_char) const {}
+            void take_my_char(Unwanted) const {}
         };
     "};
     run_test_ex(
@@ -9259,7 +9264,7 @@ fn test_discarded_wrapper_method_error_stub_uses_user_facing_name() {
             let b = ffi::Bob { a: 12 };
             assert_eq!(b.a, 12);
         },
-        quote! { generate_pod!("Bob") },
+        quote! { generate_pod!("Bob") block!("Unwanted") },
         None,
         Some(Box::new(FindMethodStub)),
         None,
@@ -9837,11 +9842,7 @@ fn test_issue_956() {
     );
 }
 
-/// The char16_t half of test_issue_956. We don't currently manage to generate
-/// anything for a char16_t parameter - the injected `bindgen_cchar16_t` alias
-/// is neither a known type nor an API in its own right, so such functions are
-/// discarded during analysis. Until that's fixed, an explicit request for one
-/// is reported rather than silently ignored (google/autocxx#1269).
+/// The char16_t half of test_issue_956.
 #[test]
 fn test_issue_956_char16() {
     let hdr = indoc! {"
@@ -9849,7 +9850,31 @@ fn test_issue_956_char16() {
         inline void take_char16(char16_t) {}
         inline void take_char16_ref(char16_t &) {}
     "};
-    run_test_expect_fail("", hdr, quote! {}, &["take_char16", "take_char16_ref"], &[]);
+    run_test("", hdr, quote! {}, &["take_char16", "take_char16_ref"], &[]);
+}
+
+/// `char16_t` values crossing the bridge in both directions. bindgen renders
+/// the type as the injected `bindgen_cchar16_t` alias, which autocxx binds to
+/// `autocxx::c_char16_t` - a transparent newtype over `u16`.
+#[test]
+fn test_char16_t_values() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char16_t next_char(char16_t c) { return static_cast<char16_t>(c + 1); }
+        inline void bump(char16_t& c) { c = static_cast<char16_t>(c + 1); }
+        inline uint32_t widen(char16_t c) { return c; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_char(autocxx::c_char16_t(65)), autocxx::c_char16_t(66));
+        // The newtype is transparent over u16 in both directions.
+        assert_eq!(u16::from(ffi::next_char(65u16.into())), 66);
+        let mut c = autocxx::c_char16_t(70);
+        ffi::bump(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        // A value above the ASCII range survives unchanged.
+        assert_eq!(ffi::widen(autocxx::c_char16_t(0x263A)), 0x263A);
+    };
+    run_test("", hdr, rs, &["next_char", "bump", "widen"], &[]);
 }
 
 #[test]
@@ -12132,11 +12157,6 @@ fn test_pass_by_value_moves_where_it_can() {
 /// has. Neither `std::move` nor a `const T&` will bind to that constructor, so
 /// the wrapper has to hand the parameter over as a plain mutable lvalue.
 /// See <https://github.com/google/autocxx/issues/873>.
-///
-/// The `= delete`d move constructor is not incidental: without it, autocxx
-/// mistakes this class for one which declares no copy constructor and
-/// synthesizes wrappers calling implicit members C++ never gave it. See the
-/// note on `TraitMethodKind::CopyConstructor` in `implicit_constructors.rs`.
 #[test]
 fn test_pass_by_value_non_const_copy_constructor() {
     let hdr = indoc! {"
@@ -12147,6 +12167,118 @@ fn test_pass_by_value_non_const_copy_constructor() {
         MutableCopyOnly() {}
         MutableCopyOnly(MutableCopyOnly&) { mutable_copies()++; }
         MutableCopyOnly(MutableCopyOnly&&) = delete;
+        std::string so_we_are_non_trivial;
+    };
+    inline void take_it(MutableCopyOnly) {}
+    inline int32_t mutable_copy_count() { return mutable_copies(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::MutableCopyOnly::new().within_unique_ptr();
+        ffi::take_it(obj);
+        assert_eq!(ffi::mutable_copy_count(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["MutableCopyOnly", "take_it", "mutable_copy_count"],
+        &[],
+    );
+}
+
+/// Which of the two shapes of copy constructor a class has is decided by
+/// constness alone: `T(const T&)` and `T(const volatile T&)` both accept a
+/// const source, so both are bridgeable as `CopyNew`, while `T(T&)` and
+/// `T(volatile T&)` are neither. That distinction is what C++ consults when
+/// deciding the shape of a *containing* class's implicit copy constructor,
+/// so it has to stay exactly on the const axis.
+#[test]
+fn test_copy_constructor_qualifier_forms() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct QConst { QConst() {} QConst(const QConst&) {} std::string s; };
+    struct QConstVolatile {
+        QConstVolatile() {}
+        QConstVolatile(const volatile QConstVolatile&) {}
+        std::string s;
+    };
+    struct QNonConst { QNonConst() {} QNonConst(QNonConst&) {} std::string s; };
+    struct QVolatile { QVolatile() {} QVolatile(volatile QVolatile&) {} std::string s; };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::QConst: moveit::CopyNew);
+        static_assertions::assert_impl_all!(ffi::QConstVolatile: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::QNonConst: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::QVolatile: moveit::CopyNew);
+        // The two non-const forms are still bound, as ordinary constructors.
+        let _ = ffi::QNonConst::new().within_unique_ptr();
+        let _ = ffi::QVolatile::new().within_unique_ptr();
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["QConst", "QConstVolatile", "QNonConst", "QVolatile"],
+        &[],
+    );
+}
+
+/// A class is handed an implicit `T(T&)` rather than an implicit
+/// `T(const T&)` when one of its fields has no copy constructor accepting a
+/// const source. autocxx can't express that shape, so it must synthesize
+/// nothing at all rather than a `T(const T&)` wrapper C++ would refuse - and
+/// it should say so in the bindings.
+#[test]
+fn test_member_with_only_non_const_copy_constructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct MutableCopyOnly {
+        MutableCopyOnly() {}
+        MutableCopyOnly(MutableCopyOnly&) {}
+        std::string so_we_are_non_trivial;
+    };
+    struct Holder {
+        Holder() {}
+        MutableCopyOnly m;
+    };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Holder: moveit::CopyNew);
+        let _ = ffi::Holder::new().within_unique_ptr();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Holder", "MutableCopyOnly"], &[], None),
+        None,
+        Some(make_string_finder(
+            [
+                "but as `T(T&)` rather than `T(const T&)`",
+                "its field `m` of type `MutableCopyOnly` has no copy constructor accepting a const source",
+            ]
+            .map(|s| s.to_string())
+            .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// The same class without the `= delete`d move constructor. Declaring
+/// `T(T&)` is enough on its own for C++ to declare neither an implicit
+/// `T(const T&)` nor an implicit `T(T&&)`, so autocxx must not synthesize
+/// wrappers which call either of them.
+#[test]
+fn test_only_non_const_copy_constructor() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& mutable_copies() { static int32_t c = 0; return c; }
+    struct MutableCopyOnly {
+        MutableCopyOnly() {}
+        MutableCopyOnly(MutableCopyOnly&) { mutable_copies()++; }
         std::string so_we_are_non_trivial;
     };
     inline void take_it(MutableCopyOnly) {}
@@ -16880,6 +17012,196 @@ fn test_subclass_method_named_like_super_helper_reverse_order() {
     "});
 }
 
+/// A `private` virtual method can be overridden by a derived class, but not
+/// called by one, so the peer class must not get a `_super` helper for it.
+/// The Rust subclass overrides it, and C++ dispatches to that override from
+/// the public method which uses it.
+#[test]
+fn test_subclass_of_class_with_private_virtual_method() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual uint32_t call_hidden() const { return hidden(); }
+    private:
+        virtual uint32_t hidden() const { return 1; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().call_hidden(), 7);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                // There is no `hidden_super` to fall back on, so the trait
+                // requires this.
+                fn hidden(&self) -> u32 {
+                    7
+                }
+            }
+        }),
+    );
+}
+
+/// A `protected` virtual method, by contrast, *is* callable from a derived
+/// class, so the peer's `_super` helper for it is legal C++ and a Rust
+/// subclass can both override it and call the superclass implementation.
+#[test]
+fn test_subclass_of_class_with_protected_virtual_method() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual uint32_t call_prot() const { return prot(); }
+    protected:
+        virtual uint32_t prot() const { return 2; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().call_prot(), 12);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn prot(&self) -> u32 {
+                    self.peer().prot_super() + 10
+                }
+            }
+        }),
+    );
+}
+
+/// The non-virtual interface idiom: every virtual method is private, so the
+/// superclass contributes nothing at all to a `_supers` trait, and there
+/// shouldn't be one.
+#[test]
+fn test_subclass_of_class_with_only_private_virtual_methods() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        uint32_t interface() const { return step_one() + step_two(); }
+    private:
+        virtual uint32_t step_one() const { return 1; }
+        virtual uint32_t step_two() const { return 2; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().peer().As_Observer().interface(), 30);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+            generate!("Observer")
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn step_one(&self) -> u32 {
+                    10
+                }
+                fn step_two(&self) -> u32 {
+                    20
+                }
+            }
+        }),
+    );
+}
+
+/// The three visibilities on one class: the public and protected virtuals
+/// keep their `_super` helpers, the private one doesn't, and the peer still
+/// compiles.
+#[test]
+fn test_subclass_of_class_with_mixed_visibility_virtual_methods() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual uint32_t call_all() const { return pub_v() + prot_v() + priv_v(); }
+        virtual uint32_t pub_v() const { return 1; }
+    protected:
+        virtual uint32_t prot_v() const { return 2; }
+    private:
+        virtual uint32_t priv_v() const { return 4; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            // 11 + 22 + 40
+            assert_eq!(obs.borrow().call_all(), 73);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn pub_v(&self) -> u32 {
+                    self.peer().pub_v_super() + 10
+                }
+                fn prot_v(&self) -> u32 {
+                    self.peer().prot_v_super() + 20
+                }
+                fn priv_v(&self) -> u32 {
+                    40
+                }
+            }
+        }),
+    );
+}
+
 #[test]
 fn test_two_superclasses_with_same_method_name() {
     let hdr = indoc! {"
@@ -16963,6 +17285,43 @@ fn test_defaulted_copy_constructor_which_is_deleted() {
                 &["::new (autocxx_gen_this) DefaultedButDeletedCopy()"],
                 // ...whereas the copy constructor C++ deleted must not be called.
                 &["::new (autocxx_gen_this) DefaultedButDeletedCopy(arg1)"],
+            ),
+        )])),
+        None,
+    );
+}
+
+/// The `T(T&)` form of the same thing: a non-const copy constructor written
+/// `= default` on a class whose members make it deleted. Same rules, same
+/// answer - we must not generate a call to it.
+#[test]
+fn test_defaulted_non_const_copy_constructor_which_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NonCopyable {
+            NonCopyable() = default;
+            NonCopyable(const NonCopyable&) = delete;
+            uint32_t a;
+        };
+        struct DefaultedButDeletedCopy {
+            DefaultedButDeletedCopy() = default;
+            DefaultedButDeletedCopy(DefaultedButDeletedCopy&) = default;
+            NonCopyable m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["NonCopyable", "DefaultedButDeletedCopy"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(
+                // The default constructor is fine and stays...
+                &["DefaultedButDeletedCopy_new_autocxx"],
+                // ...whereas the copy constructor C++ deleted must not be
+                // bound, under the name an ordinary constructor would get.
+                &["DefaultedButDeletedCopy_new1"],
             ),
         )])),
         None,

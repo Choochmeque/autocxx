@@ -12,7 +12,7 @@ use indexmap::map::IndexMap as HashMap;
 
 use syn::{parse_quote, FnArg, PatType, Type, TypePtr};
 
-use crate::conversion::analysis::fun::{FnKind, MethodKind, ReceiverMutability, UnsafePolicy};
+use crate::conversion::analysis::fun::{ReceiverMutability, UnsafePolicy};
 use crate::conversion::analysis::pod::PodPhase;
 use crate::conversion::api::{
     CppVisibility, FuncToConvert, Provenance, RustSubclassFnDetails, SubclassConstructorDetails,
@@ -93,7 +93,7 @@ pub(super) fn create_subclass_trait_item(
     superclass_analysis: &FnAnalysis,
     receiver_mutability: &ReceiverMutability,
     receiver: QualifiedName,
-    is_pure_virtual: bool,
+    has_super_helper: bool,
     unsafe_policy: &UnsafePolicy,
 ) -> Api<FnPrePhase1> {
     let param_names = analysis
@@ -130,7 +130,7 @@ pub(super) fn create_subclass_trait_item(
             param_names,
             receiver_mutability: *receiver_mutability,
             requires_unsafe,
-            is_pure_virtual,
+            has_super_helper,
             receiver,
             superclass_binding,
         },
@@ -147,6 +147,7 @@ pub(super) fn create_subclass_function(
     dependencies: Vec<QualifiedName>,
     unsafe_policy: &UnsafePolicy,
     ref_qualifier: CppRefQualifier,
+    has_super_helper: bool,
 ) -> Api<FnPrePhase1> {
     let cpp = sub.cpp();
     let holder_name = sub.holder();
@@ -203,13 +204,7 @@ pub(super) fn create_subclass_function(
             receiver_mutability: *receiver_mutability,
             dependencies,
             requires_unsafe,
-            is_pure_virtual: matches!(
-                analysis.kind,
-                FnKind::Method {
-                    method_kind: MethodKind::PureVirtual(..),
-                    ..
-                }
-            ),
+            has_super_helper,
         }),
     }
 }
