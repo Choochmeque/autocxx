@@ -2903,6 +2903,38 @@ fn test_destructor() {
 }
 
 #[test]
+fn test_nested_with_static_call() {
+    let hdr = indoc! {"
+        struct A {
+            struct B {
+                static void f() {}
+            };
+        };
+    "};
+    let rs = quote! {
+        ffi::A_B::f();
+    };
+    run_test("", hdr, rs, &["A", "A_B"], &[]);
+}
+
+#[test]
+fn test_nested_in_namespace_with_static_call() {
+    let hdr = indoc! {"
+        namespace outer {
+        struct A {
+            struct B {
+                static void f() {}
+            };
+        };
+        }
+    "};
+    let rs = quote! {
+        ffi::outer::A_B::f();
+    };
+    run_test("", hdr, rs, &["outer::A", "outer::A_B"], &[]);
+}
+
+#[test]
 fn test_nested_with_destructor() {
     // Regression test, naming the destructor in the generated C++ is a bit tricky.
     let hdr = indoc! {"
