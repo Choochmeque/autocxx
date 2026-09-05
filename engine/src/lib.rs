@@ -26,6 +26,8 @@ mod types;
 
 #[cfg(any(test, feature = "build"))]
 mod builder;
+#[cfg(any(test, feature = "build"))]
+mod cxx_version_parity;
 
 use autocxx_bindgen::BindgenError;
 use autocxx_parser::{IncludeCppConfig, UnsafePolicy};

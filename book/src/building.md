@@ -20,6 +20,22 @@ fn main() {
 }
 ```
 
+## Keeping `cxx` and `cxx-gen` level
+
+`autocxx` writes the C++ half of each generated function using `cxx-gen`, while
+the Rust half comes from the `cxx` crate your own crate depends on. Since cxx
+1.0.189 the patch level of each is part of the symbol name they agree on, so
+`cxx-gen` 0.7.199 and `cxx` 1.0.190 produce two halves which never meet and the
+link fails naming a symbol you never wrote.
+
+Both are ordinary version requirements which cargo resolves to the newest
+release, so they agree unless something pins one and not the other - usually a
+lockfile updated in one place. `cargo update -p cxx -p cxx-gen` puts them back
+in step. `autocxx-build` reports the mismatch before generating anything, as
+long as your crate depends on `cxx` directly (which it needs to anyway, since
+the generated code names `::cxx`) and both crates come from a registry rather
+than a `[patch]` or a vendor directory.
+
 ## Building - if you're not using cargo
 
 See the `autocxx-gen` crate. You'll need to:

@@ -35,6 +35,11 @@ pub enum BuilderError {
     NoIncludeCxxMacrosFound,
     #[error("could not create a directory {1}: {0}")]
     UnableToCreateDirectory(std::io::Error, PathBuf),
+    #[error("this build links cxx {cxx_version}, but autocxx generates its C++ with a cxx-gen which names symbols for {cxx_gen_mangling}. Since cxx 1.0.189 the patch level is part of every generated symbol name, so the two halves of each function would not find each other and the link would fail. Update the lockfile so that cxx and cxx-gen agree - `cargo update -p cxx -p cxx-gen` normally does it, since both crates are released together.")]
+    CxxVersionMismatch {
+        cxx_version: String,
+        cxx_gen_mangling: String,
+    },
 }
 
 #[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
@@ -225,6 +230,7 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
             .map(|s| &s[..])
             .collect::<Vec<_>>();
         rust_version_check();
+        cxx_version_check()?;
         let gen_location_strategy = match self.custom_gendir {
             None => FileLocationStrategy::new(),
             Some(custom_dir) => FileLocationStrategy::Custom(custom_dir),
@@ -339,5 +345,18 @@ fn try_write_to_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
 fn rust_version_check() {
     if !version_check::is_min_version("1.54.0").unwrap_or(false) {
         panic!("Rust 1.54 or later is required.")
+    }
+}
+
+/// Refuse to generate C++ which the `cxx` this build links could never link
+/// against. See [`crate::cxx_version_parity`] for why the two can disagree and
+/// when we can tell.
+fn cxx_version_check() -> Result<(), BuilderError> {
+    match crate::cxx_version_parity::detect_cxx_version_skew() {
+        None => Ok(()),
+        Some(skew) => Err(BuilderError::CxxVersionMismatch {
+            cxx_version: skew.cxx_version,
+            cxx_gen_mangling: skew.cxx_gen_mangling,
+        }),
     }
 }
