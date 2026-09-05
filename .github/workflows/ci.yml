@@ -165,11 +165,23 @@ jobs:
         run: cargo build
       - name: Build reference-wrappers example
         working-directory: ./examples/reference-wrappers
-        if: matrix.rust == 'nightly'
+        # Needs the arbitrary_self_types feature, so nightly only. The Windows
+        # legs spell their toolchain nightly-x86_64-pc-windows-{gnu,msvc}, which
+        # an equality test against 'nightly' silently skipped.
+        if: startsWith(matrix.rust, 'nightly')
         run: cargo build
       - name: Build cpp_calling_rust example
         working-directory: ./examples/cpp_calling_rust
         run: cargo build
+      # examples/llvm is still not built here. Its build.rs no longer hardcodes
+      # the LLVM 13 header paths that got this step deleted - it asks
+      # llvm-config - and the example does compile against a current LLVM. What
+      # stops it is this job's -Dwarnings: bindgen generates bitfield accessors
+      # for llvm::ErrorOr that transmute between bool and u8, and rustc's
+      # unnecessary_transmutes lint fires on them. The fix belongs where the
+      # engine attaches allows to the generated `mod bindgen`
+      # (engine/src/conversion/codegen_rs/mod.rs), next to the
+      # unsafe_op_in_unsafe_fn one, and not in this workflow.
 
   sanitizer:
     name: Address Sanitizer

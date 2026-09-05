@@ -11,6 +11,11 @@
 #include <cstdint>
 #include <sstream>
 #include <stdint.h>
+#include <stdexcept>
 #include <string>
 
 void jurassic();
+
+// Brings the park's perimeter fences up, and objects if the generators
+// aren't running. Rust hears the objection as an Err, not as an unwind.
+void raise_fences(bool generators_running);

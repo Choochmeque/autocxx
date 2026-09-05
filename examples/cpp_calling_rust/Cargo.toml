@@ -7,7 +7,7 @@
 # except according to those terms.
 
 [package]
-name = "cpp_calling_rust"
+name = "autocxx-cpp-calling-rust-example"
 version = "0.1.0"
 edition = "2021"
 
@@ -16,11 +16,7 @@ edition = "2021"
 [dependencies]
 cxx = "1.0.136"
 autocxx = { path = "../..", version="0.30.0" }
-uwuify = "0.2.2"
-textwrap = "0.14"
-fastrand = "1.5.0"
 
 [build-dependencies]
 autocxx-build = { path = "../../gen/build", version="0.30.0" }
-regex = "1.5.4"
 miette = { version="5", features = [ "fancy" ] }
