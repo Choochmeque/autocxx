@@ -30,6 +30,12 @@ arbitrary_self_types = []
 
 [dependencies]
 autocxx-macro = { path="macro", version="0.30.0" }
+# TODO: this floor is too low and has been for a while. `reference_wrapper.rs`
+# calls `UniquePtr::as_ptr`/`as_mut_ptr`, neither of which existed before cxx
+# 1.0.136 (1.0.135 has neither, 1.0.136 has both), so a `-Z minimal-versions`
+# resolve picks a cxx this crate cannot build against. Raising it to "1.0.136"
+# is the fix, but that narrows the supported range, so it wants a deliberate
+# call rather than a drive-by bump.
 cxx = "1.0.78" # ... also needed because expansion of type_id refers to ::cxx
 aquamarine = "0.1" # docs
 moveit = { version = "0.6", features = [ "cxx" ] }
