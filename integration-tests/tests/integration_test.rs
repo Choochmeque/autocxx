@@ -6066,12 +6066,12 @@ fn test_double_underscores_ignored() {
 fn test_double_underscore_typedef_ignored() {
     let hdr = indoc! {"
     #include <cstdint>
-    typedef int __int32_t;
-    typedef __int32_t __darwin_pid_t;
-    typedef __darwin_pid_t pid_t;
+    typedef int __fx_int32_t;
+    typedef __fx_int32_t __fx_darwin_pid_t;
+    typedef __fx_darwin_pid_t fx_pid_type;
     struct B {
         B() :a(1) {}
-        uint32_t take_foo(pid_t) const {
+        uint32_t take_foo(fx_pid_type) const {
             return 3;
         }
         uint32_t get_a() const { return 2; }
