@@ -2282,7 +2282,6 @@ fn test_return_string_by_value() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 fn test_method_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t Bob::measure_string(std::string z) const {
@@ -5190,6 +5189,12 @@ fn test_ulong() {
     run_test("", hdr, rs, &["daft"], &[]);
 }
 
+// Skipped on Windows since 2022, and still skipped now that autocxx parses
+// headers for the right ABI and the rest of the 2022 list has come off. What
+// makes this one different is that `unsigned long` is 32 bits on Windows and 64
+// bits everywhere this passes - a difference both Windows ABIs share, so
+// nothing the parsing ABI could have caused. Undiagnosed beyond that; note that
+// the same type without the typedef, in `test_ulong` above, passes everywhere.
 #[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 #[test]
@@ -5266,6 +5271,18 @@ fn test_reserved_name() {
     run_test("", hdr, rs, &["async"], &[]);
 }
 
+// Skipped on Windows since 2022, and still skipped now that autocxx parses
+// headers for the right ABI and the rest of the 2022 list has come off.
+//
+// Why it is not in that list: UNRESOLVED. Nobody has read the failure. Naming
+// no standard library type does not put this beyond the parsing ABI's reach -
+// the mangling of a nested type is ABI-governed too - so the fix might cover
+// it. The competing hypothesis, which would account for both Windows ABIs
+// failing where the parsing ABI does not, is `take_A_B` and `take_A_C`:
+// declared and never defined, so the shims cxx writes for them call functions
+// nothing in the build defines, and the platforms where this passes may simply
+// be the ones whose linker discards those shims rather than reporting them.
+// Deciding between the two needs a run with this skip removed.
 #[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 #[test]
@@ -5713,7 +5730,6 @@ fn test_string_in_struct() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 fn test_up_in_struct() {
     let hdr = indoc! {"
         #include <string>
@@ -5765,7 +5781,6 @@ fn test_typedef_to_std_in_struct() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 fn test_typedef_to_up_in_struct() {
     let hdr = indoc! {"
         #include <string>
@@ -6306,18 +6321,16 @@ fn test_double_underscores_ignored() {
     run_test_ex("", hdr, rs, quote! { generate_all!() }, None, None, None);
 }
 
-// This test fails on Windows gnu but not on Windows msvc
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[test]
 fn test_double_underscore_typedef_ignored() {
     let hdr = indoc! {"
     #include <cstdint>
-    typedef int __int32_t;
-    typedef __int32_t __darwin_pid_t;
-    typedef __darwin_pid_t pid_t;
+    typedef int __fx_int32_t;
+    typedef __fx_int32_t __fx_darwin_pid_t;
+    typedef __fx_darwin_pid_t fx_pid_type;
     struct B {
         B() :a(1) {}
-        uint32_t take_foo(pid_t) const {
+        uint32_t take_foo(fx_pid_type) const {
             return 3;
         }
         uint32_t get_a() const { return 2; }
@@ -7355,7 +7368,6 @@ fn test_error_fatal_for_explicitly_generated_static_data() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_error_generated_for_array_dependent_function() {
     // An explicitly requested function whose parameter we can't handle is a
@@ -7381,7 +7393,6 @@ fn test_error_generated_for_array_dependent_function() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_error_generated_for_array_dependent_method() {
     let hdr = indoc! {"
@@ -7959,7 +7970,6 @@ fn test_ref_qualified_virtual_method() {
 }
 
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[test]
 fn test_stringview() {
     // Test that APIs using std::string_view are handled gracefully. We can't
@@ -12849,8 +12859,6 @@ fn test_copy_and_move_constructor_moveit() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
-// This test fails on Windows gnu but not on Windows msvc
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[test]
 fn test_uniqueptr_moveit() {
     let hdr = indoc! {"
@@ -12873,8 +12881,6 @@ fn test_uniqueptr_moveit() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
-// This test fails on Windows gnu but not on Windows msvc
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[test]
 fn test_various_emplacement() {
     let hdr = indoc! {"
@@ -16491,7 +16497,6 @@ fn test_using_string_method() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
 #[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_override_typedef_fn() {
     let hdr = indoc! {"
