@@ -282,6 +282,10 @@ impl std::fmt::Debug for ApiName {
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub(crate) struct SubclassName(pub(crate) ApiName);
 
+/// What we append to a method name to name the means of calling the
+/// superclass's own implementation of it.
+pub(crate) const SUPER_FN_SUFFIX: &str = "_super";
+
 impl SubclassName {
     pub(crate) fn new(id: Ident) -> Self {
         Self(ApiName::new_in_root_namespace(id))
@@ -320,9 +324,32 @@ impl SubclassName {
             )),
         )
     }
-    // TODO this and the following should probably include both class name and method name
+    /// The Rust name of the method on a subclass's peer class which calls the
+    /// superclass implementation of `id` - `foo_super` for `foo`. Subclass
+    /// authors write this, as `self.peer().foo_super(..)`, so it stays plain.
+    /// Nothing else on the peer class can collide with it: the peer's C++
+    /// overrides of the superclass's methods are called from C++ only.
     pub(crate) fn get_super_fn_name(superclass_namespace: &Namespace, id: &str) -> QualifiedName {
-        let id = make_ident(format!("{id}_super"));
+        let id = make_ident(format!("{id}{SUPER_FN_SUFFIX}"));
+        QualifiedName::new(superclass_namespace, id)
+    }
+    /// The C++ name of that same method, which has to differ: the peer class
+    /// declares each of the superclass's virtual methods under its real C++
+    /// name in order to override it, and one of those may well be called
+    /// `foo_super` already. We can't tell here - this name is minted while we
+    /// analyze a single function, with no list of the superclass's methods to
+    /// check against - so it always carries the `autocxx` marker, and cxx
+    /// bridges the two names with a `#[cxx_name]`.
+    ///
+    /// TODO: a superclass with virtual methods named `foo` and
+    /// `foo_autocxx_super` would still collide here. Nothing short of the full
+    /// method name list can rule that out, and this name has to be settled
+    /// before we have it.
+    pub(crate) fn get_cpp_super_fn_name(
+        superclass_namespace: &Namespace,
+        id: &str,
+    ) -> QualifiedName {
+        let id = make_ident(format!("{id}_autocxx{SUPER_FN_SUFFIX}"));
         QualifiedName::new(superclass_namespace, id)
     }
     pub(crate) fn get_methods_trait_name(superclass_name: &QualifiedName) -> QualifiedName {

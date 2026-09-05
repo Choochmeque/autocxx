@@ -59,7 +59,9 @@ use crate::{
 use self::{
     bridge_name_tracker::BridgeNameTracker,
     function_wrapper::RustConversionType,
-    implicit_constructors::{find_constructors_present, ItemsFound},
+    implicit_constructors::{
+        discard_deleted_defaulted_members, find_constructors_present, ItemsFound,
+    },
     overload_tracker::OverloadTracker,
     subclass::{
         create_subclass_constructor, create_subclass_fn_wrapper, create_subclass_function,
@@ -531,6 +533,10 @@ impl<'a> FnAnalyzer<'a> {
                     analysis:
                         FnAnalysis {
                             kind: FnKind::TraitMethod { impl_for, .. },
+                            // A `= default`ed destructor may have been
+                            // withdrawn by `add_constructors_present` as one
+                            // C++ actually deletes; it's no use to us then.
+                            ignore_reason: Ok(()),
                             ..
                         },
                     ..
@@ -583,6 +589,7 @@ impl<'a> FnAnalyzer<'a> {
                         subclass_constructor_func.clone(),
                         &mut results,
                         TypeConversionSophistication::Regular,
+                        None,
                     );
                 }
             }
@@ -632,7 +639,15 @@ impl<'a> FnAnalyzer<'a> {
                     }
                 );
 
-                let super_fn_call_name =
+                // The peer class's method keeps its plain `foo_super` name in
+                // Rust - that's what subclass authors write - but in C++ it
+                // needs a name which can't collide with the superclass's own
+                // virtual methods, which the peer must declare under their
+                // real names in order to override them. So the two differ, and
+                // cxx bridges them with a #[cxx_name].
+                let super_fn_cpp_name =
+                    SubclassName::get_cpp_super_fn_name(&Namespace::new(), &analysis.rust_name);
+                let super_fn_rust_name =
                     SubclassName::get_super_fn_name(&Namespace::new(), &analysis.rust_name);
                 let super_fn_api_name = SubclassName::get_super_fn_name(
                     &Namespace::new(),
@@ -644,13 +659,19 @@ impl<'a> FnAnalyzer<'a> {
                 if !is_pure_virtual {
                     // Create a C++ API representing the superclass implementation (allowing
                     // calls from Rust->C++)
-                    let maybe_wrap = create_subclass_fn_wrapper(&sub, &super_fn_call_name, &fun);
-                    let super_fn_name = ApiName::new_from_qualified_name(super_fn_api_name);
+                    let maybe_wrap = create_subclass_fn_wrapper(&sub, &super_fn_cpp_name, &fun);
+                    let super_fn_name = ApiName::new_from_qualified_name_and_cpp_name(
+                        super_fn_api_name,
+                        Some(CppOriginalName::from_rust_name(
+                            super_fn_cpp_name.get_final_item().to_string(),
+                        )),
+                    );
                     let super_fn_call_api_name = self.analyze_and_add(
                         super_fn_name,
                         maybe_wrap,
                         &mut results,
                         TypeConversionSophistication::SimpleForSubclasses,
+                        Some(super_fn_rust_name.get_final_item().to_string()),
                     );
                     subclass_fn_deps.push(super_fn_call_api_name);
                 }
@@ -707,8 +728,10 @@ impl<'a> FnAnalyzer<'a> {
         new_func: Box<FuncToConvert>,
         results: &mut ApiVec<P>,
         sophistication: TypeConversionSophistication,
+        predetermined_rust_name: Option<String>,
     ) -> QualifiedName {
-        let (analysis, name) = self.analyze_foreign_fn(name, &new_func, sophistication, None);
+        let (analysis, name) =
+            self.analyze_foreign_fn(name, &new_func, sophistication, predetermined_rust_name);
         results.push(Api::Function {
             fun: new_func,
             analysis,
@@ -2157,13 +2180,16 @@ impl<'a> FnAnalyzer<'a> {
     ///
     /// Also fills out the [`PodAndConstructorAnalysis::constructors`] fields with information useful
     /// for further analysis phases.
-    fn add_constructors_present(&mut self, mut apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase2> {
+    fn add_constructors_present(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase2> {
         let all_items_found = find_constructors_present(&apis);
+        // C++ may have deleted some of the special members it declared for
+        // `= default`. Withdraw those before we consider what to synthesize.
+        let mut apis = discard_deleted_defaulted_members(apis, &all_items_found);
         for (self_ty, items_found) in all_items_found.iter() {
             if self.config.exclude_impls {
-                // Remember that `find_constructors_present` mutates `apis`, so we always have to
-                // call that, even if we don't do anything with the return value. This is kind of
-                // messy, see the comment on this function for why.
+                // Only the synthesis below is skipped. The analysis above runs
+                // either way, because withdrawing the special members C++
+                // deletes is right whether or not we go on to add any.
                 continue;
             }
             if self

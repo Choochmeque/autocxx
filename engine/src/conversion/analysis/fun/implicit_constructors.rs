@@ -19,11 +19,11 @@ use crate::{
         analysis::{depth_first::fields_and_bases_first, pod::PodAnalysis},
         api::{Api, ApiName, FuncToConvert},
         apivec::ApiVec,
-        convert_error::ConvertErrorWithContext,
+        convert_error::{ConvertErrorWithContext, ErrorContext},
         ConvertErrorFromCpp,
     },
     known_types::{known_types, KnownTypeConstructorDetails},
-    types::QualifiedName,
+    types::{make_ident, QualifiedName},
 };
 
 use super::{FnAnalysis, FnKind, FnPrePhase1, MethodKind, ReceiverMutability, TraitMethodKind};
@@ -152,10 +152,15 @@ struct ExplicitType {
 }
 
 /// Includes information about an explicit special member function which was found.
-// TODO: Add Defaulted(CppVisibility) for https://github.com/google/autocxx/issues/815.
 #[derive(Copy, Clone, Debug)]
 enum ExplicitFound {
     UserDefined(CppVisibility),
+    /// Explicitly defaulted, i.e. `= default`. The user asked for exactly what
+    /// C++ would have written implicitly, so whether the member actually
+    /// exists is decided by the same rules - it may well be deleted, which is
+    /// what made this worth telling apart from `UserDefined`. See
+    /// <https://github.com/google/autocxx/issues/815>.
+    Defaulted(CppVisibility),
     /// Note that this always means explicitly deleted, because this enum only represents
     /// explicit declarations.
     Deleted,
@@ -163,6 +168,41 @@ enum ExplicitFound {
     /// them, and we just bail and mostly act as if they're deleted. We'd have to decide whether
     /// they're ambiguous to use them, which is really complicated.
     Multiple,
+}
+
+/// Whether this was declared `= default`.
+fn is_defaulted(explicit: Option<&ExplicitFound>) -> bool {
+    matches!(explicit, Some(ExplicitFound::Defaulted(_)))
+}
+
+/// What to report once the implicit rules have said the member survives.
+/// A `= default`ed one is a real declaration which bindgen has already given
+/// us a function for, and which may not be public; an absent one is implicit
+/// and always public.
+fn found_as_declared(explicit: Option<&ExplicitFound>) -> SpecialMemberFound {
+    match explicit {
+        Some(ExplicitFound::Defaulted(visibility)) => SpecialMemberFound::Explicit(*visibility),
+        _ => SpecialMemberFound::Implicit,
+    }
+}
+
+/// What to report for one of a pair of members - the const and non-const copy
+/// constructors - where the user wrote `= default` on at least one of them,
+/// and so said which of the two the class has.
+fn found_only_if_defaulted(explicit: Option<&ExplicitFound>) -> SpecialMemberFound {
+    match explicit {
+        Some(ExplicitFound::Defaulted(visibility)) => SpecialMemberFound::Explicit(*visibility),
+        _ => SpecialMemberFound::NotPresent,
+    }
+}
+
+/// What to report when the implicit rules don't apply to this member at all,
+/// so only a user-written definition would give it to us.
+fn found_if_user_defined(explicit: Option<&ExplicitFound>) -> SpecialMemberFound {
+    match explicit {
+        Some(ExplicitFound::UserDefined(visibility)) => SpecialMemberFound::Explicit(*visibility),
+        _ => SpecialMemberFound::NotPresent,
+    }
 }
 
 /// Analyzes which constructors are present for each type.
@@ -305,13 +345,16 @@ pub(super) fn find_constructors_present(
                 || unknown_types.contains(&name.name)
             {
                 let is_explicit = |kind: ExplicitKind| -> SpecialMemberFound {
-                    // TODO: For https://github.com/google/autocxx/issues/815, map
-                    // ExplicitFound::Defaulted(_) to NotPresent.
                     match find_explicit(kind) {
                         None => SpecialMemberFound::NotPresent,
-                        Some(ExplicitFound::Deleted | ExplicitFound::Multiple) => {
-                            SpecialMemberFound::NotPresent
-                        }
+                        // We don't understand this class's bases and members,
+                        // so we can't run the rules which decide whether a
+                        // `= default`ed member is deleted. Assume it is.
+                        Some(
+                            ExplicitFound::Deleted
+                            | ExplicitFound::Multiple
+                            | ExplicitFound::Defaulted(_),
+                        ) => SpecialMemberFound::NotPresent,
                         Some(ExplicitFound::UserDefined(visibility)) => {
                             SpecialMemberFound::Explicit(*visibility)
                         }
@@ -319,16 +362,29 @@ pub(super) fn find_constructors_present(
                 };
                 let items_found = ItemsFound {
                     default_constructor: is_explicit(ExplicitKind::DefaultConstructor),
+                    // The destructor is the one member we're optimistic about
+                    // for a class like this. Assuming unknown types have one is
+                    // common and lets us generate UniquePtr wrappers for them;
+                    // assuming they don't would withdraw ownership from a great
+                    // many types we handle perfectly well today.
+                    //
+                    // The cost is the same as it has always been: if the unknown
+                    // type turns out not to have an accessible destructor, the
+                    // C++ we generate won't compile. Maybe we should have a way
+                    // to disable that?
+                    //
+                    // A `= default`ed destructor rides along with that
+                    // optimism, and is the one place a `= default` isn't put
+                    // through the C++ rules the way google/autocxx#815 asks -
+                    // we can't run them without knowing the bases and members
+                    // whose destructors decide the answer. Writing
+                    // `~T() = default;` says exactly what writing nothing says,
+                    // so it would make no sense to treat the two differently
+                    // here, and this arm follows the `None` one above. Deciding
+                    // it properly needs the same thing the surrounding
+                    // conservatism needs: understanding these field types in the
+                    // first place. Remaining #815 scope.
                     destructor: match find_explicit(ExplicitKind::Destructor) {
-                        // Assume that unknown types have destructors. This is common, and allows
-                        // use to generate UniquePtr wrappers with them.
-                        //
-                        // However, this will generate C++ code that doesn't compile if the unknown
-                        // type does not have an accessible destructor. Maybe we should have a way
-                        // to disable that?
-                        //
-                        // TODO: For https://github.com/google/autocxx/issues/815, map
-                        // ExplicitFound::Defaulted(_) to Explicit.
                         None => SpecialMemberFound::Implicit,
                         // If there are multiple destructors, assume that one of them will be
                         // selected by overload resolution.
@@ -336,9 +392,12 @@ pub(super) fn find_constructors_present(
                             SpecialMemberFound::Explicit(CppVisibility::Public)
                         }
                         Some(ExplicitFound::Deleted) => SpecialMemberFound::NotPresent,
-                        Some(ExplicitFound::UserDefined(visibility)) => {
-                            SpecialMemberFound::Explicit(*visibility)
-                        }
+                        // A declared destructor, defaulted or not, at least
+                        // tells us how visible it is.
+                        Some(
+                            ExplicitFound::UserDefined(visibility)
+                            | ExplicitFound::Defaulted(visibility),
+                        ) => SpecialMemberFound::Explicit(*visibility),
                     },
                     const_copy_constructor: is_explicit(ExplicitKind::ConstCopyConstructor),
                     non_const_copy_constructor: is_explicit(ExplicitKind::NonConstCopyConstructor),
@@ -368,23 +427,25 @@ pub(super) fn find_constructors_present(
                 // Variant members are the members of anonymous unions.
                 let default_constructor = {
                     let explicit = find_explicit(ExplicitKind::DefaultConstructor);
-                    // TODO: For https://github.com/google/autocxx/issues/815, replace the first term with:
-                    //   explicit.map_or(true, |explicit_found| matches!(explicit_found, ExplicitFound::Defaulted(_)))
-                    let have_defaulted = explicit.is_none()
-                        && !explicits.iter().any(|(ExplicitType { ty, kind }, _)| {
-                            ty == &name.name
-                                && match *kind {
-                                    ExplicitKind::DefaultConstructor => false,
-                                    ExplicitKind::ConstCopyConstructor => true,
-                                    ExplicitKind::NonConstCopyConstructor => true,
-                                    ExplicitKind::MoveConstructor => true,
-                                    ExplicitKind::OtherConstructor => true,
-                                    ExplicitKind::Destructor => false,
-                                    ExplicitKind::ConstCopyAssignmentOperator => false,
-                                    ExplicitKind::NonConstCopyAssignmentOperator => false,
-                                    ExplicitKind::MoveAssignmentOperator => false,
-                                }
-                        });
+                    // `T() = default;` declares the default constructor no
+                    // matter what other constructors the class has. Only the
+                    // implicit one waits for there to be none at all.
+                    let have_defaulted = is_defaulted(explicit)
+                        || (explicit.is_none()
+                            && !explicits.iter().any(|(ExplicitType { ty, kind }, _)| {
+                                ty == &name.name
+                                    && match *kind {
+                                        ExplicitKind::DefaultConstructor => false,
+                                        ExplicitKind::ConstCopyConstructor => true,
+                                        ExplicitKind::NonConstCopyConstructor => true,
+                                        ExplicitKind::MoveConstructor => true,
+                                        ExplicitKind::OtherConstructor => true,
+                                        ExplicitKind::Destructor => false,
+                                        ExplicitKind::ConstCopyAssignmentOperator => false,
+                                        ExplicitKind::NonConstCopyAssignmentOperator => false,
+                                        ExplicitKind::MoveAssignmentOperator => false,
+                                    }
+                            }));
                     if have_defaulted {
                         let bases_allow = bases_items_found.iter().all(|items_found| {
                             items_found.destructor.callable_subclass()
@@ -397,16 +458,12 @@ pub(super) fn find_constructors_present(
                                 && items_found.default_constructor.callable_any()
                         });
                         if !has_rvalue_reference_fields && bases_allow && members_allow {
-                            // TODO: For https://github.com/google/autocxx/issues/815, grab the
-                            // visibility from an explicit default if present.
-                            SpecialMemberFound::Implicit
+                            found_as_declared(explicit)
                         } else {
                             SpecialMemberFound::NotPresent
                         }
-                    } else if let Some(ExplicitFound::UserDefined(visibility)) = explicit {
-                        SpecialMemberFound::Explicit(*visibility)
                     } else {
-                        SpecialMemberFound::NotPresent
+                        found_if_user_defined(explicit)
                     }
                 };
 
@@ -419,9 +476,7 @@ pub(super) fn find_constructors_present(
                 // The implicitly-declared destructor is virtual (because the base class has a virtual destructor) and the lookup for the deallocation function (operator delete()) results in a call to ambiguous, deleted, or inaccessible function.
                 let destructor = {
                     let explicit = find_explicit(ExplicitKind::Destructor);
-                    // TODO: For https://github.com/google/autocxx/issues/815, replace the condition with:
-                    //   explicit.map_or(true, |explicit_found| matches!(explicit_found, ExplicitFound::Defaulted(_)))
-                    if explicit.is_none() {
+                    if explicit.is_none() || is_defaulted(explicit) {
                         let bases_allow = bases_items_found
                             .iter()
                             .all(|items_found| items_found.destructor.callable_subclass());
@@ -429,16 +484,12 @@ pub(super) fn find_constructors_present(
                             .iter()
                             .all(|items_found| items_found.destructor.callable_any());
                         if bases_allow && members_allow {
-                            // TODO: For https://github.com/google/autocxx/issues/815, grab the
-                            // visibility from an explicit default if present.
-                            SpecialMemberFound::Implicit
+                            found_as_declared(explicit)
                         } else {
                             SpecialMemberFound::NotPresent
                         }
-                    } else if let Some(ExplicitFound::UserDefined(visibility)) = explicit {
-                        SpecialMemberFound::Explicit(*visibility)
                     } else {
-                        SpecialMemberFound::NotPresent
+                        found_if_user_defined(explicit)
                     }
                 };
 
@@ -460,13 +511,16 @@ pub(super) fn find_constructors_present(
                     let explicit_non_const = find_explicit(ExplicitKind::NonConstCopyConstructor);
                     let explicit_move = find_explicit(ExplicitKind::MoveConstructor);
 
-                    // TODO: For https://github.com/google/autocxx/issues/815, replace both terms with something like:
-                    //   explicit.map_or(true, |explicit_found| matches!(explicit_found, ExplicitFound::Defaulted(_)))
-                    let have_defaulted = explicit_const.is_none() && explicit_non_const.is_none();
+                    let copy_is_defaulted =
+                        is_defaulted(explicit_const) || is_defaulted(explicit_non_const);
+                    let have_defaulted = (explicit_const.is_none() || is_defaulted(explicit_const))
+                        && (explicit_non_const.is_none() || is_defaulted(explicit_non_const));
                     if have_defaulted {
-                        // TODO: For https://github.com/google/autocxx/issues/815, ignore this if
-                        // the relevant (based on bases_are_const) copy constructor is explicitly defaulted.
-                        let class_allows = explicit_move.is_none() && !has_rvalue_reference_fields;
+                        // A user-declared move constructor deletes the
+                        // *implicitly declared* copy constructor, but not one
+                        // the user asked for with `= default`.
+                        let class_allows = (copy_is_defaulted || explicit_move.is_none())
+                            && !has_rvalue_reference_fields;
                         let bases_allow = bases_items_found.iter().all(|items_found| {
                             items_found.destructor.callable_subclass()
                                 && (items_found.const_copy_constructor.callable_subclass()
@@ -478,16 +532,26 @@ pub(super) fn find_constructors_present(
                                     || items_found.non_const_copy_constructor.callable_any())
                         });
                         if class_allows && bases_allow && members_allow {
-                            // TODO: For https://github.com/google/autocxx/issues/815, grab the
-                            // visibility and existence of const and non-const from an explicit default if present.
-                            let dependencies_are_const = bases_items_found
-                                .iter()
-                                .chain(fields_items_found.iter())
-                                .all(|items_found| items_found.const_copy_constructor.exists());
-                            if dependencies_are_const {
-                                (SpecialMemberFound::Implicit, SpecialMemberFound::NotPresent)
+                            if copy_is_defaulted {
+                                // The user wrote the signature out, so it
+                                // decides which of the two the class has, and
+                                // how visible each is - not the bases and
+                                // members, which only get to choose for the
+                                // implicitly declared one below.
+                                (
+                                    found_only_if_defaulted(explicit_const),
+                                    found_only_if_defaulted(explicit_non_const),
+                                )
                             } else {
-                                (SpecialMemberFound::NotPresent, SpecialMemberFound::Implicit)
+                                let dependencies_are_const = bases_items_found
+                                    .iter()
+                                    .chain(fields_items_found.iter())
+                                    .all(|items_found| items_found.const_copy_constructor.exists());
+                                if dependencies_are_const {
+                                    (SpecialMemberFound::Implicit, SpecialMemberFound::NotPresent)
+                                } else {
+                                    (SpecialMemberFound::NotPresent, SpecialMemberFound::Implicit)
+                                }
                             }
                         } else {
                             (
@@ -497,17 +561,8 @@ pub(super) fn find_constructors_present(
                         }
                     } else {
                         (
-                            if let Some(ExplicitFound::UserDefined(visibility)) = explicit_const {
-                                SpecialMemberFound::Explicit(*visibility)
-                            } else {
-                                SpecialMemberFound::NotPresent
-                            },
-                            if let Some(ExplicitFound::UserDefined(visibility)) = explicit_non_const
-                            {
-                                SpecialMemberFound::Explicit(*visibility)
-                            } else {
-                                SpecialMemberFound::NotPresent
-                            },
+                            found_if_user_defined(explicit_const),
+                            found_if_user_defined(explicit_non_const),
                         )
                     }
                 };
@@ -528,15 +583,18 @@ pub(super) fn find_constructors_present(
                 // T is a union-like class and has a variant member with non-trivial move constructor. // we don't support unions anyway
                 let move_constructor = {
                     let explicit = find_explicit(ExplicitKind::MoveConstructor);
-                    // TODO: For https://github.com/google/autocxx/issues/815, replace relevant terms with something like:
-                    //   explicit.map_or(true, |explicit_found| matches!(explicit_found, ExplicitFound::Defaulted(_)))
-                    let have_defaulted = !(explicit.is_some()
-                        || find_explicit(ExplicitKind::ConstCopyConstructor).is_some()
-                        || find_explicit(ExplicitKind::NonConstCopyConstructor).is_some()
-                        || find_explicit(ExplicitKind::ConstCopyAssignmentOperator).is_some()
-                        || find_explicit(ExplicitKind::NonConstCopyAssignmentOperator).is_some()
-                        || find_explicit(ExplicitKind::MoveAssignmentOperator).is_some()
-                        || find_explicit(ExplicitKind::Destructor).is_some());
+                    // As with the default constructor, `T(T&&) = default;`
+                    // declares it whatever else the class declares; the
+                    // implicit one appears only if nothing else does.
+                    let have_defaulted = is_defaulted(explicit)
+                        || !(explicit.is_some()
+                            || find_explicit(ExplicitKind::ConstCopyConstructor).is_some()
+                            || find_explicit(ExplicitKind::NonConstCopyConstructor).is_some()
+                            || find_explicit(ExplicitKind::ConstCopyAssignmentOperator).is_some()
+                            || find_explicit(ExplicitKind::NonConstCopyAssignmentOperator)
+                                .is_some()
+                            || find_explicit(ExplicitKind::MoveAssignmentOperator).is_some()
+                            || find_explicit(ExplicitKind::Destructor).is_some());
                     if have_defaulted {
                         let bases_allow = bases_items_found.iter().all(|items_found| {
                             items_found.destructor.callable_subclass()
@@ -546,16 +604,12 @@ pub(super) fn find_constructors_present(
                             .iter()
                             .all(|items_found| items_found.move_constructor.callable_any());
                         if bases_allow && members_allow {
-                            // TODO: For https://github.com/google/autocxx/issues/815, grab the
-                            // visibility from an explicit default if present.
-                            SpecialMemberFound::Implicit
+                            found_as_declared(explicit)
                         } else {
                             SpecialMemberFound::NotPresent
                         }
-                    } else if let Some(ExplicitFound::UserDefined(visibility)) = explicit {
-                        SpecialMemberFound::Explicit(*visibility)
                     } else {
-                        SpecialMemberFound::NotPresent
+                        found_if_user_defined(explicit)
                     }
                 };
 
@@ -586,6 +640,72 @@ pub(super) fn find_constructors_present(
     all_items_found
 }
 
+/// Withdraws the special member functions which C++ declares because someone
+/// wrote `= default`, but then defines as deleted - a copy constructor on a
+/// class with a non-copyable member, say, or a default constructor on one with
+/// a `const` member and no initializer for it.
+///
+/// bindgen reports these to us as declarations like any other, so without this
+/// we generate a call to one and C++ refuses it: "call to implicitly-deleted
+/// copy constructor". See <https://github.com/google/autocxx/issues/815>.
+///
+/// [`find_constructors_present`] has already applied the same C++ rules to
+/// work out which of these actually exist, so this only has to act on what it
+/// concluded.
+pub(super) fn discard_deleted_defaulted_members(
+    apis: ApiVec<FnPrePhase1>,
+    all_items_found: &HashMap<QualifiedName, ItemsFound>,
+) -> ApiVec<FnPrePhase1> {
+    apis.into_iter()
+        .map(|mut api| {
+            if let Api::Function { fun, analysis, .. } = &mut api {
+                if !matches!(fun.is_deleted, Some(Explicitness::Defaulted))
+                    || analysis.ignore_reason.is_err()
+                {
+                    return api;
+                }
+                // These are the same kinds `find_explicit_items` recognizes.
+                // A non-const copy constructor never reaches us as one, so
+                // there's nothing here for that slot.
+                let (found, ctx) = match &analysis.kind {
+                    FnKind::Method {
+                        impl_for,
+                        method_kind: MethodKind::Constructor { is_default: true },
+                        ..
+                    } => (
+                        all_items_found.get(impl_for).map(|i| i.default_constructor),
+                        // The user writes `ffi::A::new()`, so leave them a
+                        // stub saying where it went.
+                        Some(ErrorContext::new_for_method(
+                            impl_for.get_final_ident(),
+                            make_ident(&analysis.rust_name),
+                        )),
+                    ),
+                    FnKind::TraitMethod { impl_for, kind, .. } => (
+                        all_items_found.get(impl_for).and_then(|i| match kind {
+                            TraitMethodKind::Destructor => Some(i.destructor),
+                            TraitMethodKind::CopyConstructor => Some(i.const_copy_constructor),
+                            TraitMethodKind::MoveConstructor => Some(i.move_constructor),
+                            _ => None,
+                        }),
+                        // Whereas these are trait impls with no name anyone
+                        // could have asked for, so a stub would be noise.
+                        None,
+                    ),
+                    _ => (None, None),
+                };
+                if matches!(found, Some(SpecialMemberFound::NotPresent)) {
+                    analysis.ignore_reason = Err(ConvertErrorWithContext(
+                        ConvertErrorFromCpp::DefaultedButDeleted,
+                        ctx,
+                    ));
+                }
+            }
+            api
+        })
+        .collect()
+}
+
 fn find_explicit_items(
     apis: &ApiVec<FnPrePhase1>,
 ) -> (HashMap<ExplicitType, ExplicitFound>, HashSet<QualifiedName>) {
@@ -594,10 +714,10 @@ fn find_explicit_items(
         .entry(ExplicitType { ty, kind })
     {
         Entry::Vacant(entry) => {
-            entry.insert(if matches!(fun.is_deleted, Some(Explicitness::Deleted)) {
-                ExplicitFound::Deleted
-            } else {
-                ExplicitFound::UserDefined(fun.cpp_vis)
+            entry.insert(match fun.is_deleted {
+                Some(Explicitness::Deleted) => ExplicitFound::Deleted,
+                Some(Explicitness::Defaulted) => ExplicitFound::Defaulted(fun.cpp_vis),
+                None => ExplicitFound::UserDefined(fun.cpp_vis),
             });
         }
         Entry::Occupied(mut entry) => {

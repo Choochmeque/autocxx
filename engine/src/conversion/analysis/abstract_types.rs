@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use autocxx_bindgen::callbacks::Virtualness;
 use indexmap::map::IndexMap as HashMap;
 use syn::{punctuated::Punctuated, token::Comma};
 
@@ -71,25 +72,25 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase2>) -> ApiVec<FnPrePhas
     }
     let mut class_states: HashMap<QualifiedName, ClassAbstractState> = HashMap::new();
     let mut abstract_classes = HashSet::new();
+    let mut pure_virtual_destructors: HashSet<QualifiedName> = HashSet::new();
 
     for api in apis.iter() {
-        if let Api::Function {
-            name,
-            analysis:
-                FnAnalysis {
-                    kind:
-                        FnKind::Method {
-                            impl_for: self_ty_name,
-                            method_kind,
-                            ..
-                        },
-                    params,
-                    ..
-                },
-            ..
-        } = api
-        {
-            match method_kind {
+        match api {
+            Api::Function {
+                name,
+                analysis:
+                    FnAnalysis {
+                        kind:
+                            FnKind::Method {
+                                impl_for: self_ty_name,
+                                method_kind,
+                                ..
+                            },
+                        params,
+                        ..
+                    },
+                ..
+            } => match method_kind {
                 MethodKind::PureVirtual(constness) => {
                     class_states
                         .entry(self_ty_name.clone())
@@ -105,7 +106,31 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase2>) -> ApiVec<FnPrePhas
                         .insert(Signature::new(name, params, *constness));
                 }
                 _ => {}
+            },
+            // A destructor never becomes a [`FnKind::Method`] - it's routed
+            // to a `Drop` trait impl instead - so its virtualness never
+            // reaches [`MethodKind`] and the arm above can't see it. Read it
+            // off the original C++ function, which carries it for everything
+            // bindgen hands us. Destructors we synthesize ourselves have no
+            // virtualness, which is right: we only synthesize one when C++
+            // didn't declare one, and an undeclared destructor is never pure.
+            Api::Function {
+                fun,
+                analysis:
+                    FnAnalysis {
+                        kind:
+                            FnKind::TraitMethod {
+                                kind: TraitMethodKind::Destructor,
+                                impl_for: self_ty_name,
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            } if matches!(fun.virtualness, Some(Virtualness::PureVirtual)) => {
+                pure_virtual_destructors.insert(self_ty_name.clone());
             }
+            _ => {}
         }
     }
 
@@ -141,7 +166,16 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase2>) -> ApiVec<FnPrePhas
                 .retain(|und| !self_cs.defined.contains(und));
 
             // if there are undefined functions, mark as virtual
-            if !self_cs.undefined.is_empty() {
+            //
+            // A pure virtual destructor is counted here rather than in the
+            // signature sets above, because it doesn't inherit the way other
+            // pure virtual methods do. `~Base` and `~Derived` are different
+            // signatures, so a base's pure destructor could never be cancelled
+            // out by a derived class's `defined` set - yet every derived class
+            // does override it, explicitly or implicitly, and so is concrete.
+            // Only the class which declares `= 0` on its own destructor is
+            // abstract because of it.
+            if !self_cs.undefined.is_empty() || pure_virtual_destructors.contains(&name.name) {
                 abstract_classes.insert(name.name.clone());
             }
 

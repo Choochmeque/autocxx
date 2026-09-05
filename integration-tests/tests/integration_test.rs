@@ -12,8 +12,8 @@ use crate::{
         SetSuppressSystemHeaders,
     },
     code_checkers::{
-        make_error_finder, make_rust_code_finder, make_string_finder, CppMatcher,
-        NoSystemHeadersChecker,
+        make_checks_without_building, make_error_finder, make_rust_code_finder, make_string_finder,
+        CppMatcher, NoSystemHeadersChecker,
     },
 };
 use autocxx_integration_tests::{
@@ -12625,9 +12625,10 @@ fn test_virtual_methods_additional() {
 ///   * Implicitly defaulted
 ///   * User declared
 ///   * Explicitly defaulted
-///     Not handled yet: https://github.com/google/autocxx/issues/815.
-///     Once this is handled, add equivalents of all the implicitly defaulted cases, at all
-///     visibility levels.
+///     Put through the same deletion rules as the implicit version, so it can
+///     come out deleted (https://github.com/google/autocxx/issues/815). The
+///     cases here cover it at public visibility only; the `test_defaulted_*`
+///     tests cover deletion, and non-public visibility.
 /// applied to each of these:
 ///   * Default constructor
 ///   * Copy constructor
@@ -14675,23 +14676,21 @@ fn test_virtual_methods() {
             int c() { return 2; }
         };
 
-        // TODO: currently this class cannot be detected as virtual as there
-        // is no metadata captured to show that this destructor is virtual
-        // uncommenting this (as well as corresponding sections below) gives a 
-        // 'instantiation of abstract class' error.
-        // class Partial5 : public Base {
-        // public:
-        //     ~Partial5() = 0;
+        // Abstract because of its own destructor, not because of anything it
+        // left unimplemented.
+        class Partial5 : public Base {
+        public:
+            ~Partial5() = 0;
 
-        //     int a() { return 0; }
+            int a() { return 0; }
 
-        //     void b(int) { }
-        //     void b(bool) { }
+            void b(int) { }
+            void b(bool) { }
 
-        //     int c() const { return 1; }
-        //     int c() { return 2; }
-        // };
-
+            int c() const { return 1; }
+            int c() { return 2; }
+        };
+        inline Partial5::~Partial5() {}
     "};
     let rs = quote! {
         static_assertions::assert_impl_all!(ffi::FullyDefined: moveit::CopyNew);
@@ -14699,7 +14698,7 @@ fn test_virtual_methods() {
         static_assertions::assert_not_impl_any!(ffi::Partial2: moveit::CopyNew);
         static_assertions::assert_not_impl_any!(ffi::Partial3: moveit::CopyNew);
         static_assertions::assert_not_impl_any!(ffi::Partial4: moveit::CopyNew);
-        // static_assertions::assert_not_impl_any!(ffi::Partial5: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::Partial5: moveit::CopyNew);
         let _c1 = ffi::FullyDefined::new().within_unique_ptr();
     };
     run_test(
@@ -14712,7 +14711,7 @@ fn test_virtual_methods() {
             "Partial2",
             "Partial3",
             "Partial4",
-            // "Partial5"
+            "Partial5",
         ],
         &[],
     );
@@ -15875,4 +15874,432 @@ fn test_elab_shadowed_type_via_unique_ptr() {
         &["make_filedata", "read_filedata", "filedata"],
         &[],
     );
+}
+
+#[test]
+fn test_pure_virtual_destructor_makes_class_abstract() {
+    // A pure virtual destructor is the whole of what makes this class
+    // abstract - it has no other pure virtual method - so nothing may
+    // construct one. The test passes if the generated bindings compile:
+    // before, we emitted a placement-new of a `PureDtorOnly` and C++ rejected
+    // it.
+    let hdr = indoc! {"
+        class PureDtorOnly {
+        public:
+            virtual ~PureDtorOnly() = 0;
+            int a() const { return 1; }
+        };
+        inline PureDtorOnly::~PureDtorOnly() {}
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::PureDtorOnly: moveit::CopyNew);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["PureDtorOnly"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["PureDtorOnly"],
+            &["new (autocxx_gen_this) PureDtorOnly"],
+        ))),
+        None,
+    );
+}
+
+#[test]
+fn test_pure_virtual_destructor_no_make_unique() {
+    let hdr = indoc! {"
+        class PureDtorNoNew {
+        public:
+            virtual ~PureDtorNoNew() = 0;
+            int a() const { return 1; }
+        };
+        inline PureDtorNoNew::~PureDtorNoNew() {}
+    "};
+    let rs = quote! {
+        let _ = ffi::PureDtorNoNew::new().within_unique_ptr();
+    };
+    run_test_expect_fail("", hdr, rs, &["PureDtorNoNew"], &[]);
+}
+
+#[test]
+fn test_impure_virtual_destructor_stays_concrete() {
+    // The other half of the rule: `virtual` alone doesn't make a destructor
+    // pure, and this class stays constructible.
+    let hdr = indoc! {"
+        class VirtualDtorOnly {
+        public:
+            virtual ~VirtualDtorOnly() {}
+            int a() const { return 1; }
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::VirtualDtorOnly: moveit::CopyNew);
+        let obj = ffi::VirtualDtorOnly::new().within_unique_ptr();
+        assert_eq!(obj.a(), autocxx::c_int(1));
+    };
+    run_test("", hdr, rs, &["VirtualDtorOnly"], &[]);
+}
+
+#[test]
+fn test_pure_virtual_destructor_derived_stays_concrete() {
+    // A pure virtual destructor doesn't make derived classes abstract the way
+    // any other pure virtual method would: every class gets a destructor of
+    // its own, so every derived class overrides it.
+    let hdr = indoc! {"
+        class PureDtorBase {
+        public:
+            virtual ~PureDtorBase() = 0;
+            virtual int a() const { return 1; }
+        };
+        inline PureDtorBase::~PureDtorBase() {}
+        class ConcreteDerived : public PureDtorBase {
+        public:
+            int a() const { return 2; }
+        };
+    "};
+    let rs = quote! {
+        let obj = ffi::ConcreteDerived::new().within_unique_ptr();
+        assert_eq!(obj.a(), autocxx::c_int(2));
+    };
+    run_test("", hdr, rs, &["PureDtorBase", "ConcreteDerived"], &[]);
+}
+
+#[test]
+fn test_subclass_of_class_with_pure_virtual_destructor() {
+    let hdr = indoc! {"
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+        virtual ~Observer() = 0;
+    };
+    inline Observer::~Observer() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            obs.borrow().foo();
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
+}
+
+/// A superclass whose own method is named like the `_super` helper autocxx
+/// generates for another of its methods. Both orders, because the collision
+/// is between a generated name and a C++ one and either may be seen first.
+fn subclass_super_name_clash_test(hdr: &str) {
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            // `foo` is overridden below and calls the superclass itself.
+            assert_eq!(obs.borrow().foo(), 11);
+            // `foo_super` is a method of the superclass in its own right, and
+            // is left to the trait's default body, which calls through to the
+            // superclass implementation in C++.
+            assert_eq!(obs.borrow().foo_super(), 2);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    // The peer class method keeps the plain name whatever the
+                    // superclass calls its own methods.
+                    self.peer().foo_super() + 10
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_method_named_like_super_helper() {
+    subclass_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual uint32_t foo_super() const { return 2; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+#[test]
+fn test_subclass_method_named_like_super_helper_reverse_order() {
+    subclass_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo_super() const { return 2; }
+        virtual uint32_t foo() const { return 1; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+#[test]
+fn test_two_superclasses_with_same_method_name() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class ObserverA {
+    public:
+        ObserverA() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual ~ObserverA() {}
+    };
+    class ObserverB {
+    public:
+        ObserverB() {}
+        virtual uint32_t foo() const { return 2; }
+        virtual ~ObserverB() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = MyObserverA::new_rust_owned(MyObserverA { cpp_peer: Default::default() });
+            assert_eq!(a.borrow().foo(), 1);
+            let b = MyObserverB::new_rust_owned(MyObserverB { cpp_peer: Default::default() });
+            assert_eq!(b.borrow().foo(), 2);
+        },
+        quote! {
+            subclass!("ObserverA",MyObserverA)
+            subclass!("ObserverB",MyObserverB)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::ObserverA_methods;
+            use ffi::ObserverB_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserverA {
+            }
+            impl ObserverA_methods for MyObserverA {
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserverB {
+            }
+            impl ObserverB_methods for MyObserverB {
+            }
+        }),
+    );
+}
+
+/// C++ diagnoses writing `= default` on a member it then deletes
+/// (-Wdefaulted-function-deleted), and it is right to: the declaration says
+/// nothing the class doesn't already say. That's exactly the shape
+/// google/autocxx#815 is about, though, so these fixtures check what autocxx
+/// generates for it and stop before the harness compiles them, rather than
+/// telling the compiler to keep quiet about an accurate warning.
+#[test]
+fn test_defaulted_copy_constructor_which_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NonCopyable {
+            NonCopyable() = default;
+            NonCopyable(const NonCopyable&) = delete;
+            uint32_t a;
+        };
+        struct DefaultedButDeletedCopy {
+            DefaultedButDeletedCopy() = default;
+            DefaultedButDeletedCopy(const DefaultedButDeletedCopy&) = default;
+            NonCopyable m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["NonCopyable", "DefaultedButDeletedCopy"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(
+                // The default constructor is fine and stays...
+                &["::new (autocxx_gen_this) DefaultedButDeletedCopy()"],
+                // ...whereas the copy constructor C++ deleted must not be called.
+                &["::new (autocxx_gen_this) DefaultedButDeletedCopy(arg1)"],
+            ),
+        )])),
+        None,
+    );
+}
+
+#[test]
+fn test_defaulted_default_constructor_which_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NoDefaultConstructor {
+            NoDefaultConstructor(uint32_t x) : a(x) {}
+            uint32_t a;
+        };
+        struct DefaultedButDeletedDefault {
+            DefaultedButDeletedDefault() = default;
+            NoDefaultConstructor m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(
+            &["NoDefaultConstructor", "DefaultedButDeletedDefault"],
+            &[],
+            None,
+        ),
+        None,
+        Some(make_checks_without_building(vec![
+            Box::new(CppMatcher::new(
+                &[],
+                &["::new (autocxx_gen_this) DefaultedButDeletedDefault()"],
+            )),
+            // `new()` is a name the user would have reached for, so it leaves
+            // a documented stub rather than vanishing.
+            make_string_finder(vec![
+                "This special member function was declared =default".to_string()
+            ]),
+        ])),
+        None,
+    );
+}
+
+#[test]
+fn test_defaulted_destructor_which_is_deleted() {
+    // A destructor C++ deletes takes the whole ownership surface with it, by
+    // the route google/autocxx#829 established: the member's destructor is
+    // inaccessible, so this class's `= default`ed one is deleted, so nothing
+    // may allocate, construct or drop one of these.
+    let hdr = indoc! {"
+        class PrivateDtor {
+        public:
+            PrivateDtor() {}
+        private:
+            ~PrivateDtor() {}
+        };
+        struct DefaultedButDeletedDtor {
+            ~DefaultedButDeletedDtor() = default;
+            PrivateDtor m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["PrivateDtor", "DefaultedButDeletedDtor"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            Box::new(CppMatcher::new(
+                &[],
+                &[
+                    "arg0->DefaultedButDeletedDtor::~DefaultedButDeletedDtor()",
+                    "new_appropriately<DefaultedButDeletedDtor>()",
+                ],
+            )),
+            make_string_finder(vec![
+                "autocxx has not generated any way for Rust to own one of these".to_string(),
+            ]),
+        ])),
+        None,
+    );
+}
+
+#[test]
+fn test_defaulted_special_members_which_survive() {
+    // The other half of the rule: `= default` on members C++ keeps must go on
+    // meaning exactly what it did before.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct AllDefaulted {
+            AllDefaulted() = default;
+            AllDefaulted(const AllDefaulted&) = default;
+            AllDefaulted(AllDefaulted&&) = default;
+            ~AllDefaulted() = default;
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::AllDefaulted: moveit::CopyNew);
+        static_assertions::assert_impl_all!(ffi::AllDefaulted: moveit::MoveNew);
+        let obj = ffi::AllDefaulted::new().within_unique_ptr();
+        let copy = autocxx::moveit::new::copy(obj.as_ref().unwrap()).within_unique_ptr();
+        assert_eq!(copy.a, obj.a);
+    };
+    run_test("", hdr, rs, &[], &["AllDefaulted"]);
+}
+
+#[test]
+fn test_defaulted_copy_constructor_survives_user_move_constructor() {
+    // A user-declared move constructor deletes the implicitly declared copy
+    // constructor, but not one the user asked for with `= default`.
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct MoveAndDefaultedCopy {
+            MoveAndDefaultedCopy() : a(1) {}
+            MoveAndDefaultedCopy(MoveAndDefaultedCopy&& other) : a(other.a) {}
+            MoveAndDefaultedCopy(const MoveAndDefaultedCopy&) = default;
+            uint32_t get() const { return a; }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::MoveAndDefaultedCopy: moveit::CopyNew);
+        let obj = ffi::MoveAndDefaultedCopy::new().within_unique_ptr();
+        let copy = autocxx::moveit::new::copy(obj.as_ref().unwrap()).within_unique_ptr();
+        assert_eq!(copy.get(), 1);
+    };
+    run_test("", hdr, rs, &["MoveAndDefaultedCopy"], &[]);
+}
+
+#[test]
+fn test_defaulted_special_members_keep_their_visibility() {
+    // `= default` says which members exist; it doesn't say who may call them.
+    let hdr = indoc! {"
+        #include <cstdint>
+        class PrivateDefaultedCopy {
+        public:
+            PrivateDefaultedCopy() = default;
+            uint32_t get() const { return 1; }
+        private:
+            PrivateDefaultedCopy(const PrivateDefaultedCopy&) = default;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::PrivateDefaultedCopy: moveit::CopyNew);
+        let obj = ffi::PrivateDefaultedCopy::new().within_unique_ptr();
+        assert_eq!(obj.get(), 1);
+    };
+    run_test("", hdr, rs, &["PrivateDefaultedCopy"], &[]);
 }

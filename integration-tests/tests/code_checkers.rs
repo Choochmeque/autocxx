@@ -159,6 +159,42 @@ impl CodeCheckerFns for CppMatcher<'_> {
     }
 }
 
+/// Runs several checkers over the generated code, and stops there rather than
+/// letting the harness build it.
+///
+/// For fixtures whose C++ is the thing under test - because writing it is
+/// exactly what a compiler diagnoses, or because it can't be compiled here for
+/// some other reason - what autocxx generated is the whole answer, so check
+/// that and go no further. Suppressing the compiler's diagnostic to get the
+/// build through would be hiding a warning that is telling the truth.
+struct WithoutBuilding(Vec<CodeChecker>);
+
+impl CodeCheckerFns for WithoutBuilding {
+    fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        for checker in &self.0 {
+            checker.check_rust(rs.clone())?;
+        }
+        Ok(())
+    }
+
+    fn check_cpp(&self, cpp: &[PathBuf]) -> Result<(), TestError> {
+        for checker in &self.0 {
+            checker.check_cpp(cpp)?;
+        }
+        Ok(())
+    }
+
+    fn skip_build(&self) -> bool {
+        true
+    }
+}
+
+/// Returns a code checker which applies all of `checkers` to the generated
+/// code and then skips the build. See [`WithoutBuilding`].
+pub(crate) fn make_checks_without_building(checkers: Vec<CodeChecker>) -> CodeChecker {
+    Box::new(WithoutBuilding(checkers))
+}
+
 pub(crate) struct NoSystemHeadersChecker;
 
 impl CodeCheckerFns for NoSystemHeadersChecker {
