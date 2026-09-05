@@ -8182,17 +8182,18 @@ fn test_extern_cpp_type_namespace() {
 }
 
 #[test]
-#[ignore] // because we currently require UniquePtrTarget which this can't implement
+/// Tests `extern_cpp_type!` pointing at an `ExternType` the user wrote out by
+/// hand, rather than one another `include_cpp!` generated.
 fn test_extern_cpp_type_manual() {
     let hdr = indoc! {"
         #include <cstdint>
         struct A {
             int a;
         };
-        inline void handle_a(const A& a) {
+        inline void handle_a(const A&) {
         }
         inline A create_a() {
-            A a;
+            A a { 3 };
             return a;
         }
     "};
@@ -8209,7 +8210,7 @@ fn test_extern_cpp_type_manual() {
             use autocxx::cxx::{type_id, ExternType};
             #[repr(C)]
             pub struct A {
-                a: std::os::raw::c_int
+                pub a: std::os::raw::c_int
             }
             unsafe impl ExternType for A {
                 type Kind = autocxx::cxx::kind::Opaque;
@@ -8220,6 +8221,11 @@ fn test_extern_cpp_type_manual() {
         fn main() {
             let a = ffi2::A { a: 3 };
             ffi::handle_a(&a);
+            // `create_a` returns `A` by value, so it is the half of this test
+            // which needs autocxx to own an `A` it did not itself declare.
+            autocxx::moveit::moveit! { let b = ffi::create_a(); }
+            assert_eq!(b.a, 3);
+            ffi::handle_a(&b);
         }
     };
     do_run_test_manual("", hdr, rs, None, None).unwrap();
