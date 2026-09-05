@@ -283,7 +283,7 @@ impl TypeDatabase {
     /// comment surviving would be a good deal more fragile than this.
     /// Namespaced types are unaffected - `mine::string` is nobody's
     /// substitute. See `test_global_type_named_like_known_type_is_rejected`.
-    pub(crate) fn is_known_subtitute_type(&self, ty: &QualifiedName) -> bool {
+    pub(crate) fn is_known_substitute_type(&self, ty: &QualifiedName) -> bool {
         if ty.get_namespace().is_empty() {
             self.all_names()
                 .any(|n| n.get_final_item() == ty.get_final_item())
