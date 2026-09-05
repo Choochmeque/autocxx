@@ -113,6 +113,16 @@ pub(crate) struct SuperclassMethod {
     pub(crate) superclass_binding: SuperclassBinding,
 }
 
+/// Why a typedef ended up as an [`Api::OpaqueTypedef`]: which of the things it
+/// was defined in terms of autocxx could not generate, and that thing's own
+/// reason. Kept so that the failure a user reads about is the one that
+/// actually happened, rather than the fact that a stand-in type was used.
+#[derive(Clone, Debug)]
+pub(crate) struct OpaqueTypedefReason {
+    pub(crate) culprit: QualifiedName,
+    pub(crate) reason: Box<ConvertErrorFromCpp>,
+}
+
 /// How the superclass's own binding for a virtual method differs from the
 /// shape its `_methods` trait uses. The two are generated from the same
 /// C++ method, so the parameters always line up - a `UniquePtr<T>` is
@@ -435,6 +445,11 @@ pub(crate) enum Api<T: AnalysisPhase> {
         /// If so we can't allow it to live in a UniquePtr, just like a regular
         /// Api::ForwardDeclaration.
         forward_declaration: bool,
+        /// What was wrong with the thing this typedef named, where we know.
+        /// Anything which goes on to use the typedef has to be refused, and
+        /// this is what it gets told - see
+        /// [`ConvertErrorFromCpp::TypeContainingUngeneratableTypedef`].
+        reason: Option<OpaqueTypedefReason>,
     },
     /// A synthetic type we've manufactured in order to
     /// concretize some templated C++ type.

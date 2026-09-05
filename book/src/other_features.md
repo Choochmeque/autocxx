@@ -110,12 +110,13 @@ writes those as `Option<extern "C" fn(..)>` and `autocxx` has no binding for
 class from Rust or hand C++ a named Rust function; both are described under
 [callbacks into Rust](rust_calls.md).
 
-Where the explanation appears depends on your standard library, because the two
-put `std::function` beyond `bindgen` differently. With libstdc++ and libc++ it
-is reduced to an opaque blob of bytes, and the doc comment of the stub standing
-in for that blob carries the explanation - as it does for any other type
-`bindgen` reduces the same way, which in practice means templated types whose
-parameters it cannot model. With MSVC's standard library the type keeps its
-name, and the explanation is attached to `std::function` itself; a
-class-scoped `using` alias of it is reported less precisely, as a forward
-declaration whose target could not be generated.
+The explanation reaches you through the doc comment of the stub standing in for
+whatever could not be generated, whichever standard library you build against,
+though the two put `std::function` beyond `bindgen` differently. With libstdc++
+and libc++ it is reduced to an opaque blob of bytes, and the stub stands in for
+that blob - as it does for any other type `bindgen` reduces the same way, which
+in practice means templated types whose parameters it cannot model. With MSVC's
+standard library the type keeps its name, and the explanation is attached to
+`std::function` itself; a class-scoped `using` alias of it is reported as an
+alias to something which could not be generated, and repeats that thing's own
+explanation.

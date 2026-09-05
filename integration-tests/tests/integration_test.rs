@@ -18883,40 +18883,66 @@ fn test_std_function_method_costs_only_that_method() {
         assert_eq!(requester.answer(), 42);
     };
     // The explanation reaches the user through the doc comment of the stub
-    // standing in for the type autocxx could not generate - but only where the
-    // typedef is what failed. On MSVC it is not: bindgen keeps std::function as
-    // a named class with a discarded template parameter, the typedef to it
-    // becomes an `OpaqueTypedef { forward_declaration: true }`, and the method
-    // is then refused with `TypeContainingForwardDeclaration`, whose message
-    // talks about UniquePtr and CxxVector and never mentions std::function.
-    // Carrying the reason across that hop needs it threaded through
-    // `OpaqueTypedef`, `TypeConverter::find_incomplete_types` and
-    // `TypeContainingForwardDeclaration`, the way `IgnoredDependent` now
-    // carries it - a change to core analysis which should be made by someone
-    // who can run it on MSVC.
-    if cfg!(target_env = "msvc") {
-        run_test_ex(
-            "",
-            hdr,
-            rs,
-            directives_from_lists(&["Requester"], &[], None),
-            None,
-            None,
-            None,
-        );
-    } else {
-        run_test_ex(
-            "",
-            hdr,
-            rs,
-            directives_from_lists(&["Requester"], &[], None),
-            None,
-            Some(make_string_finder(vec![
-                "std::function is not supported by bindgen or cxx".to_string(),
-            ])),
-            None,
-        );
-    }
+    // standing in for the method autocxx could not generate. It gets there by
+    // two different routes: with libstdc++ and libc++ the typedef itself is
+    // what fails, while on MSVC the typedef is left standing in for a
+    // `std::function` which failed, and the reason travels across that hop -
+    // see `test_class_scoped_alias_reports_the_targets_own_problem`. Either
+    // way the wording is the same, which is the part a user acts on.
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Requester"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "std::function is not supported by bindgen or cxx".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A class-scoped `using` alias of a type autocxx has a precise complaint
+/// about. autocxx can't generate the method taking that alias, and what it
+/// tells the user has to be the complaint about the target - not the generic
+/// "you used a forward declaration inside a UniquePtr" left behind by the hop
+/// through the alias, whose advice (try `instantiable!`) cannot help here.
+///
+/// This is the shape MSVC produces for `using F = std::function<...>` inside a
+/// class, which no other standard library can be made to produce: they hide
+/// std::function behind reserved names and bindgen erases it entirely. What
+/// matters is not std::function but that the alias names something which
+/// failed for a reason worth repeating, so this reaches the same shape with a
+/// private nested class, and runs everywhere.
+#[test]
+fn test_class_scoped_alias_reports_the_targets_own_problem() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Requester {
+            class Impl {};
+        public:
+            Requester() {}
+            using Handler = Impl;
+            void sendRequest(Handler h) { (void) h; }
+            uint32_t answer() const { return 42; }
+        };
+    "};
+    let rs = quote! {
+        let requester = ffi::Requester::new().within_unique_ptr();
+        assert_eq!(requester.answer(), 42);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Requester"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "This type is nested within another struct/class with protected or private visibility"
+                .to_string(),
+        ])),
+        None,
+    );
 }
 
 /// A class nested inside the class which holds it by value. bindgen hoists

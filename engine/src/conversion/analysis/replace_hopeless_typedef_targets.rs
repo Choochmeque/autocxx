@@ -7,12 +7,13 @@
 // except according to those terms.
 
 use autocxx_parser::IncludeCppConfig;
+use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
 use crate::{
     conversion::{
         analysis::tdef::TypedefAnalysis,
-        api::Api,
+        api::{Api, OpaqueTypedefReason},
         apivec::ApiVec,
         convert_error::{ConvertErrorWithContext, ErrorContext},
         ConvertErrorFromCpp,
@@ -28,21 +29,25 @@ pub(crate) fn replace_hopeless_typedef_targets(
     config: &IncludeCppConfig,
     apis: ApiVec<PodPhase>,
 ) -> ApiVec<PodPhase> {
-    let ignored_types: HashSet<QualifiedName> = apis
+    // Both maps keep each item's own reason alongside its name, so that a
+    // typedef which loses its target can say what was wrong with it rather
+    // than only that something was.
+    let ignored_types: HashMap<QualifiedName, ConvertErrorFromCpp> = apis
         .iter()
         .filter_map(|api| match api {
-            Api::IgnoredItem { .. } => Some(api.name()),
+            Api::IgnoredItem { err, .. } => Some((api.name().clone(), err.clone())),
             _ => None,
         })
-        .cloned()
         .collect();
-    let ignored_forward_declarations: HashSet<QualifiedName> = apis
+    let ignored_forward_declarations: HashMap<QualifiedName, ConvertErrorFromCpp> = apis
         .iter()
         .filter_map(|api| match api {
-            Api::ForwardDeclaration { err: Some(_), .. } => Some(api.name()),
+            Api::ForwardDeclaration {
+                err: Some(ConvertErrorWithContext(err, _)),
+                ..
+            } => Some((api.name().clone(), err.clone())),
             _ => None,
         })
-        .cloned()
         .collect();
     // Convert any Typedefs which depend on these things into OpaqueTypedefs
     // instead.
@@ -54,7 +59,7 @@ pub(crate) fn replace_hopeless_typedef_targets(
                 ref name,
                 analysis: TypedefAnalysis { ref deps, .. },
                 ..
-            } if !ignored_types.is_disjoint(deps) =>
+            } if blames_any_of(deps, &ignored_types).is_some() =>
             // This typedef depended on something we ignored.
             // Ideally, we'd turn it into an opaque item.
             // We can't do that if this is an inner type,
@@ -75,30 +80,20 @@ pub(crate) fn replace_hopeless_typedef_targets(
                         forward_declaration: !config
                             .instantiable
                             .contains(&name.name.to_cpp_name()),
+                        reason: blames_any_of(deps, &ignored_types),
                     }
                 }
             }
-            // Unlike the arm above, this one drops the reason on the floor:
-            // `OpaqueTypedef` has nowhere to put it. Anything which then uses
-            // this typedef is refused with
-            // `TypeContainingForwardDeclaration`, whose message talks about
-            // UniquePtr and CxxVector and says nothing about what was actually
-            // wrong with the target. That is what a user sees on MSVC for a
-            // class-scoped typedef of `std::function`
-            // (`test_std_function_method_costs_only_that_method`), where the
-            // real explanation - `UnsupportedStdFunction` - belongs to the
-            // forward declaration and never travels. Fixing it means carrying
-            // the error through `OpaqueTypedef`,
-            // `TypeConverter::find_incomplete_types` and
-            // `TypeContainingForwardDeclaration`, the way `IgnoredDependent`
-            // now carries it.
             Api::Typedef {
                 analysis: TypedefAnalysis { ref deps, .. },
                 ..
-            } if !ignored_forward_declarations.is_disjoint(deps) => Api::OpaqueTypedef {
-                name: api.name_info().clone(),
-                forward_declaration: true,
-            },
+            } if blames_any_of(deps, &ignored_forward_declarations).is_some() => {
+                Api::OpaqueTypedef {
+                    name: api.name_info().clone(),
+                    forward_declaration: true,
+                    reason: blames_any_of(deps, &ignored_forward_declarations),
+                }
+            }
             Api::ForwardDeclaration {
                 name,
                 err: Some(ConvertErrorWithContext(err, ctx)),
@@ -106,4 +101,22 @@ pub(crate) fn replace_hopeless_typedef_targets(
             _ => api,
         })
         .collect()
+}
+
+/// The first of `deps` which `failures` says could not be generated, together
+/// with why, or `None` if none of them is in there.
+///
+/// A typedef usually has exactly one dependency that failed; where it has
+/// several, any of them explains why the typedef had to become opaque, so
+/// naming the first is as good as naming all of them and reads far better.
+fn blames_any_of(
+    deps: &HashSet<QualifiedName>,
+    failures: &HashMap<QualifiedName, ConvertErrorFromCpp>,
+) -> Option<OpaqueTypedefReason> {
+    deps.iter().find_map(|dep| {
+        failures.get(dep).map(|reason| OpaqueTypedefReason {
+            culprit: dep.clone(),
+            reason: Box::new(reason.clone()),
+        })
+    })
 }
