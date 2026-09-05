@@ -36,7 +36,7 @@ autocxx-macro = { path="macro", version="0.30.0" }
 # resolve picks a cxx this crate cannot build against. Raising it to "1.0.136"
 # is the fix, but that narrows the supported range, so it wants a deliberate
 # call rather than a drive-by bump.
-cxx = "1.0.78" # ... also needed because expansion of type_id refers to ::cxx
+cxx = "1.0.136" # ... also needed because expansion of type_id refers to ::cxx
 aquamarine = "0.1" # docs
 moveit = { version = "0.6", features = [ "cxx" ] }
 
