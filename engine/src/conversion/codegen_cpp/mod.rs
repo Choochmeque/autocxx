@@ -121,12 +121,12 @@ impl<'a> CppCodeGenerator<'a> {
         config: &'a IncludeCppConfig,
         cpp_codegen_options: &CppCodegenOptions,
         cxxgen_header_name: &str,
-        shadowed_by_variables: &HashSet<QualifiedName>,
+        shadowed_types: &HashSet<QualifiedName>,
     ) -> Result<Option<CppFilePair>, ConvertErrorFromCpp> {
         let mut gen = CppCodeGenerator {
             additional_functions: Vec::new(),
             inclusions,
-            original_name_map: CppNameMap::new_from_apis(apis, shadowed_by_variables),
+            original_name_map: CppNameMap::new_from_apis(apis, shadowed_types),
             config,
             cpp_codegen_options,
             cxxgen_header_name,

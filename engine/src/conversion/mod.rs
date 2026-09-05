@@ -55,7 +55,7 @@ use self::{
     api::{AnalysisPhase, Api, NullPhase},
     apivec::ApiVec,
     codegen_rs::RsCodeGenerator,
-    parse::{find_types_shadowed_by_variables, ParseBindgen},
+    parse::{find_shadowed_types, ParseBindgen},
 };
 
 const LOG_APIS: bool = true;
@@ -124,9 +124,9 @@ impl<'a> BridgeConverter<'a> {
             None => Err(ConvertError::NoContent),
             Some((_, items)) => {
                 // Note which type names C++ won't look up unqualified because a
-                // variable of the same name hides them. This has to happen
-                // before parsing, which discards the variables.
-                let shadowed_by_variables = find_types_shadowed_by_variables(items);
+                // variable or function of the same name hides them. This has to
+                // happen before parsing, which discards the hiding declaration.
+                let shadowed_types = find_shadowed_types(items);
                 // Parse the bindgen mod.
                 let parser = ParseBindgen::new(self.config, &parse_callback_results);
                 let apis = parser.parse_items(items, source_file_contents)?;
@@ -137,7 +137,7 @@ impl<'a> BridgeConverter<'a> {
                 // Rust codegen needs it to repair the bindgen mod.
                 let names_duplicated_by_bindgen = find_names_duplicated_by_bindgen(&apis);
                 let parse_observations = ParseObservations {
-                    shadowed_by_variables,
+                    shadowed_types,
                     names_duplicated_by_bindgen,
                 };
                 // Inside parse_results, we now have a list of APIs.
@@ -233,7 +233,7 @@ impl<'a> BridgeConverter<'a> {
                     self.config,
                     &codegen_options.cpp_codegen_options,
                     &cxxgen_header_name,
-                    &parse_observations.shadowed_by_variables,
+                    &parse_observations.shadowed_types,
                 )
                 .map_err(ConvertError::Cpp)?;
                 let rs = RsCodeGenerator::generate_rs_code(
@@ -260,9 +260,9 @@ impl<'a> BridgeConverter<'a> {
 /// and the garbage collector discard the items these are derived from, so they
 /// have to be gathered up front and carried along.
 pub(crate) struct ParseObservations {
-    /// The type names C++ won't look up unqualified because a variable of the
-    /// same name hides them, per [`find_types_shadowed_by_variables`].
-    pub(crate) shadowed_by_variables: HashSet<QualifiedName>,
+    /// The type names C++ won't look up unqualified because a variable or
+    /// function of the same name hides them, per [`find_shadowed_types`].
+    pub(crate) shadowed_types: HashSet<QualifiedName>,
     /// The names bindgen defined more than once, per
     /// [`find_names_duplicated_by_bindgen`].
     pub(crate) names_duplicated_by_bindgen: HashSet<QualifiedName>,

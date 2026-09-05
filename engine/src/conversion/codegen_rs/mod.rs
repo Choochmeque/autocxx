@@ -149,7 +149,7 @@ impl<'a> RsCodeGenerator<'a> {
             bindgen_mod,
             original_name_map: CppNameMap::new_from_apis(
                 &all_apis,
-                &parse_observations.shadowed_by_variables,
+                &parse_observations.shadowed_types,
             ),
             config,
             header_name,

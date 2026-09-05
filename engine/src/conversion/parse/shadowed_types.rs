@@ -9,10 +9,10 @@
 use indexmap::set::IndexSet as HashSet;
 use syn::{ForeignItem, Item};
 
-use crate::types::{Namespace, QualifiedName};
+use crate::types::{strip_bindgen_original_suffix_from_ident, Namespace, QualifiedName};
 
 /// Find the names of types which C++ will refuse to look up by their plain
-/// name, because a variable of the same name is declared in the same scope.
+/// name, because something else of the same name is declared in the same scope.
 ///
 /// This is legal, and common, C++:
 ///
@@ -28,13 +28,29 @@ use crate::types::{Namespace, QualifiedName};
 /// See [`crate::conversion::codegen_cpp::type_to_cpp::CppNameMap`] for what we
 /// do about it.
 ///
-/// We spot the shadowing declaration in `bindgen`'s output, where it appears as
-/// a `static` in an `extern "C"` block alongside the `struct` of the same name.
-/// The rest of the engine never sees it: [`crate::conversion::apivec::ApiVec`]
-/// requires each API to have a unique name, so the `IgnoredItem` which the
-/// variable would otherwise become is discarded in favour of the type. That's
-/// why this scan runs over the raw `bindgen` output rather than over `Api`s.
-pub(crate) fn find_types_shadowed_by_variables(items: &[Item]) -> HashSet<QualifiedName> {
+/// A function hides a type in exactly the same way and for the same reason -
+/// [basic.scope.hiding] lets "the name of a variable, data member, function, or
+/// enumerator" hide a class or enumeration name - so
+///
+/// ```cpp
+/// struct foo { ... };
+/// void foo();
+/// ```
+///
+/// needs the same treatment.
+///
+/// We spot the hiding declaration in `bindgen`'s output, where it appears
+/// alongside the `struct` of the same name: a variable as a `static` in an
+/// `extern "C"` block, a function as a `fn` in one. The rest of the engine
+/// never sees either of them, because [`crate::conversion::apivec::ApiVec`]
+/// requires each API to have a unique name and resolves the clash in favour of
+/// the type. That's why this scan runs over the raw `bindgen` output rather
+/// than over `Api`s.
+///
+/// A name recorded here which turns out not to belong to a type is simply
+/// never looked up: the alias map is built by intersecting this set with the
+/// types we actually found.
+pub(crate) fn find_shadowed_types(items: &[Item]) -> HashSet<QualifiedName> {
     let mut shadowed = HashSet::new();
     // With namespaces enabled, bindgen puts everything inside a mod called
     // 'root', which corresponds to the global namespace.
@@ -53,8 +69,23 @@ fn scan_mod(items: &[Item], ns: &Namespace, shadowed: &mut HashSet<QualifiedName
         match item {
             Item::ForeignMod(fm) => {
                 for foreign_item in &fm.items {
-                    if let ForeignItem::Static(s) = foreign_item {
-                        shadowed.insert(QualifiedName::new(ns, s.ident.clone().into()));
+                    match foreign_item {
+                        ForeignItem::Static(s) => {
+                            shadowed.insert(QualifiedName::new(ns, s.ident.clone().into()));
+                        }
+                        ForeignItem::Fn(f) => {
+                            // `bindgen` renames the functions it declares so
+                            // that we can generate wrappers of our own beside
+                            // them; the C++ name is what does the hiding.
+                            // Methods arrive here too, but with their class
+                            // name flattened into them (`Bob_get`), so they
+                            // can't be confused with a namespace-scope type.
+                            shadowed.insert(QualifiedName::new(
+                                ns,
+                                strip_bindgen_original_suffix_from_ident(&f.sig.ident).into(),
+                            ));
+                        }
+                        _ => {}
                     }
                 }
             }

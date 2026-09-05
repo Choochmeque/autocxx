@@ -15360,15 +15360,10 @@ fn test_elab_struct_shadowed_by_variable_nonpod() {
 }
 
 #[test]
-#[ignore] // a function hiding a type is a Rust naming collision, not just a C++ one
 fn test_elab_struct_shadowed_by_function() {
     // A function hides a type of the same name in C++ exactly as a variable
-    // does, so this header needs the same unshadowing treatment. But it never
-    // gets as far as C++ codegen: `struct foo` and `void foo()` are separate
-    // entities in C++ and both want to be called `foo` in the generated Rust,
-    // so `ApiVec` throws both away as duplicates and the type is lost before
-    // we could rename it. Fixing that means giving one of them a different
-    // Rust name, which is a different job from spelling C++ types correctly.
+    // does, so this header needs the same unshadowing treatment - and, like a
+    // variable, the function has to give up the name it shares with the type.
     let hdr = indoc! {"
         struct foo { int y; };
         inline void foo() {}
@@ -15379,6 +15374,122 @@ fn test_elab_struct_shadowed_by_function() {
         assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
     };
     run_test("", hdr, rs, &["take_foo"], &["foo"]);
+}
+
+/// The function which lost the name is not silently forgotten: the output mod
+/// carries a documented stub saying what became of it.
+///
+/// There is deliberately no companion test asserting that a directive naming
+/// the *function* fails, because no such directive can be written: `foo` is
+/// the only name either of them has, and asking for it gets you the type. This
+/// stub is the whole of what we can say about the function, so it is what this
+/// pins.
+#[test]
+fn test_function_hidden_by_type_is_documented() {
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let f = ffi::foo { y: 7 };
+            assert_eq!(f.y, 7);
+        },
+        quote! { generate_pod!("foo") },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden")),
+        None,
+    );
+}
+
+/// `foo_autocxx_hidden` is a name a C++ author may perfectly well have used
+/// themselves. Here they got there first - `bindgen` reports types before the
+/// functions of the same mod - so the stub has to take the next name along
+/// rather than either of them being lost.
+#[test]
+fn test_function_hidden_by_type_yields_stub_name_to_real_type() {
+    let hdr = indoc! {"
+        struct foo_autocxx_hidden { int z; };
+        struct foo { int y; };
+        inline void foo() {}
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let f = ffi::foo { y: 7 };
+            assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
+            // The C++ author's own type kept the name it asked for.
+            let h = ffi::foo_autocxx_hidden { z: 8 };
+            assert_eq!(h.z, 8);
+        },
+        quote! {
+            generate!("take_foo")
+            generate_pod!("foo")
+            generate_pod!("foo_autocxx_hidden")
+        },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden1")),
+        None,
+    );
+}
+
+/// The same clash the other way round: the stub is filed first, and the C++
+/// author's own `foo_autocxx_hidden` - a function, so that it arrives after
+/// `foo` does - turns up afterwards. The stub is documentation under a name we
+/// invented, so it is the one that moves.
+#[test]
+fn test_function_hidden_by_type_yields_stub_name_to_later_real_fn() {
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+        inline int foo_autocxx_hidden(int a) { return a + 1; }
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let f = ffi::foo { y: 7 };
+            assert_eq!(ffi::take_foo(&f), autocxx::c_int(7));
+            // The C++ author's own function is still callable.
+            assert_eq!(ffi::foo_autocxx_hidden(autocxx::c_int(1)), autocxx::c_int(2));
+        },
+        quote! {
+            generate!("take_foo")
+            generate!("foo_autocxx_hidden")
+            generate_pod!("foo")
+        },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden1")),
+        None,
+    );
+}
+
+/// As above under blanket generation, where nothing was asked for by name.
+/// `foo` is not POD here - `generate_all!` makes nothing POD - so all the Rust
+/// side does is prove the type arrived; what is being pinned is the stub.
+#[test]
+fn test_function_hidden_by_type_is_documented_in_generate_all() {
+    let hdr = indoc! {"
+        struct foo { int y; };
+        inline void foo() {}
+        inline int take_foo(const struct foo& f) { return f.y; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _: *const ffi::foo = std::ptr::null();
+        },
+        quote! { generate_all!() },
+        None,
+        Some(make_error_finder("foo_autocxx_hidden")),
+        None,
+    );
 }
 
 #[test]
