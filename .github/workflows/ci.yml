@@ -63,13 +63,22 @@ jobs:
       # The `{ sharedKey: ... }` allows different actions to share the cache.
       - uses: Swatinem/rust-cache@v1
         with: { sharedKey: fullBuild }
-      # For operating systems that have it packaged, install creduce
+      # For operating systems that have it packaged, install creduce.
+      # AUTOCXX_RUN_REDUCTION_TESTS is what makes autocxx-reduce's end-to-end
+      # reductions run at all: they take minutes to hours, so they are opt-in
+      # rather than part of everyone's `cargo test --workspace`. Setting it
+      # here, in the step that installs creduce, keeps the two together - the
+      # legs which have creduce run the reductions, and no others.
       - name: Install creduce (Linux)
         if: matrix.os == ''
-        run: sudo apt-get install creduce
+        run: |
+          sudo apt-get install creduce
+          echo AUTOCXX_RUN_REDUCTION_TESTS=1 >> "$GITHUB_ENV"
       - name: Install creduce (MacOS)
         if: matrix.os == 'macOS'
-        run: brew install creduce
+        run: |
+          brew install creduce
+          echo AUTOCXX_RUN_REDUCTION_TESTS=1 >> "$GITHUB_ENV"
       - name: Set LIBCLANG_PATH (Windows)
         # Windows github action doesn't set the path for clang, so set it
         # See https://github.com/rust-lang/rust-bindgen/issues/1797

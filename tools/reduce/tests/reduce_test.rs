@@ -47,6 +47,7 @@ enum Input {
     ReproCase(PathBuf),
 }
 
+/// Runs only when [`RUN_REDUCTIONS`] is set, as do all the reductions here.
 #[test]
 fn test_reduce_direct_header() -> Result<(), Box<dyn std::error::Error>> {
     do_reduce(
@@ -56,6 +57,7 @@ fn test_reduce_direct_header() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// Runs only when [`RUN_REDUCTIONS`] is set, as do all the reductions here.
 #[test]
 fn test_reduce_direct_repro_case() -> Result<(), Box<dyn std::error::Error>> {
     do_reduce(
@@ -78,8 +80,11 @@ fn test_reduce_direct_repro_case() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// Takes absolutely ages - far longer than the reductions CI runs, which is
+/// why this one is `#[ignore]`d on top of needing [`RUN_REDUCTIONS`]:
+///   `AUTOCXX_RUN_REDUCTION_TESTS=1 cargo test -p autocxx-reduce -- --ignored`
 #[test]
-#[ignore] // takes absolutely ages but you can run using cargo test -- --ignored
+#[ignore]
 fn test_reduce_preprocessed_repro_case() -> Result<(), Box<dyn std::error::Error>> {
     do_reduce(
         "reduce_preprocessed_repro_case",
@@ -103,8 +108,11 @@ fn test_reduce_preprocessed_repro_case() -> Result<(), Box<dyn std::error::Error
     )
 }
 
+/// Takes absolutely ages - far longer than the reductions CI runs, which is
+/// why this one is `#[ignore]`d on top of needing [`RUN_REDUCTIONS`]:
+///   `AUTOCXX_RUN_REDUCTION_TESTS=1 cargo test -p autocxx-reduce -- --ignored`
 #[test]
-#[ignore] // takes absolutely ages but you can run using cargo test -- --ignored
+#[ignore]
 fn test_reduce_preprocessed() -> Result<(), Box<dyn std::error::Error>> {
     do_reduce(
         "reduce_preprocessed",
@@ -128,8 +136,11 @@ fn test_reduce_preprocessed() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// Takes absolutely ages - far longer than the reductions CI runs, which is
+/// why this one is `#[ignore]`d on top of needing [`RUN_REDUCTIONS`]:
+///   `AUTOCXX_RUN_REDUCTION_TESTS=1 cargo test -p autocxx-reduce -- --ignored`
 #[test]
-#[ignore] // takes absolutely ages but you can run using cargo test -- --ignored
+#[ignore]
 fn test_reduce_preprocessed_include_cxx_h() -> Result<(), Box<dyn std::error::Error>> {
     do_reduce(
         "reduce_preprocessed_include_cxx_h",
@@ -171,6 +182,16 @@ fn write_minimal_rs_code(header: &str, demo_code_dir: &Path) {
     );
 }
 
+/// The environment variable which turns the reductions on.
+///
+/// A reduction takes minutes at best and hours at worst, and `cargo test
+/// --workspace` gives no sign of which test it is sitting in, so on any machine
+/// that happens to have creduce installed the two reductions below added a
+/// minute and a half of apparent hang to every workspace run, and the
+/// `#[ignore]`d ones would add far more. They are opt-in instead. CI sets this
+/// in the same step that installs creduce, so the coverage is unchanged there.
+const RUN_REDUCTIONS: &str = "AUTOCXX_RUN_REDUCTION_TESTS";
+
 /// Runs a reduction end to end. `label` names the test, and prefixes every
 /// line the reduction prints: these tests run in parallel and stream their
 /// output as it arrives, so without it nobody could tell whose it was.
@@ -182,9 +203,16 @@ fn do_reduce<F>(
 where
     F: FnOnce(&str, &Path) -> Result<Input, Box<dyn std::error::Error>>,
 {
-    // Without creduce there is nothing to test, so we skip rather than fail.
-    // Say so loudly: a silent `Ok(())` here reports as a passing test that
+    // Say every skip loudly: a silent `Ok(())` reports as a passing test that
     // actually ran no assertions at all, which is worse than no test.
+    if std::env::var_os(RUN_REDUCTIONS).is_none() {
+        eprintln!(
+            "SKIPPED: this test ran no assertions, because reductions take minutes to hours. \
+             Set {RUN_REDUCTIONS}=1 to run it."
+        );
+        return Ok(());
+    }
+    // Without creduce there is nothing to test, so we skip rather than fail.
     if creduce_is_broken() {
         eprintln!(
             "SKIPPED: creduce is missing or broken, so this test ran no assertions. \
