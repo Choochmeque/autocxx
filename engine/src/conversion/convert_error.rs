@@ -95,8 +95,19 @@ pub enum ConvertErrorFromCpp {
     UnusedTemplateParam,
     #[error("This item relies on a type not known to autocxx ({})", .0.to_cpp_name())]
     UnknownDependentType(QualifiedName),
-    #[error("This item depends on some other type(s) which autocxx could not generate, some of them are: {}", .0.iter().join(", "))]
-    IgnoredDependent(HashSet<QualifiedName>),
+    #[error("This item depends on some other type(s) which autocxx could not generate, some of them are: {}. {} could not be generated because: {}", .deps.iter().join(", "), .culprit, .reason)]
+    IgnoredDependent {
+        deps: HashSet<QualifiedName>,
+        /// The one of `deps` whose own failure `reason` explains. Naming it
+        /// matters when there are several: the reason belongs to this one.
+        culprit: QualifiedName,
+        /// Why `culprit` could not be generated. This is the original problem,
+        /// not another `IgnoredDependent`: an item discarded for depending on
+        /// something already discarded inherits that item's reason, so the
+        /// message a user reads always names the thing that actually went
+        /// wrong rather than a chain of items which merely depended on it.
+        reason: Box<ConvertErrorFromCpp>,
+    },
     #[error(transparent)]
     InvalidIdent(InvalidIdentError),
     #[error("This item name is used in multiple namespaces. At present, autocxx and cxx allow only one type of a given name. This limitation will be fixed in future. (Items found with this name: {})", .0.iter().join(", "))]

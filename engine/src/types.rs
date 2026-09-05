@@ -242,6 +242,8 @@ pub enum InvalidIdentError {
     Bitfield,
     #[error("Names containing __ are reserved by C++ so not acceptable to cxx")]
     TooManyUnderscores,
+    #[error("bindgen could not represent this C++ type, and replaced it with an opaque blob of bytes, so autocxx has nothing it can pass across the language boundary. std::function is the usual cause; neither bindgen nor cxx supports it. For C++ to call back into Rust, subclass a C++ observer class from Rust or use extern_rust_function - a C++ shim taking a plain function pointer will not work either. See https://github.com/google/autocxx/issues/1279.")]
+    BindgenOpaqueType,
     #[error("bindgen decided to call this type _bindgen_ty_N because it couldn't deduce the correct name for it. That means we can't generate C++ bindings to it.")]
     BindgenTy,
     #[error("The item name '{0}' is a reserved word in Rust.")]
@@ -260,6 +262,13 @@ pub fn validate_ident_ok_for_cxx(id: &str) -> Result<(), InvalidIdentError> {
         Err(InvalidIdentError::Bitfield)
     } else if id.starts_with("__BindgenUnionField") {
         Err(InvalidIdentError::Union)
+    } else if id.starts_with("__BindgenOpaqueArray") {
+        // bindgen's stand-in for a type it could not model: an array of bytes
+        // of the right size and alignment. It reaches us as a parameter type,
+        // a typedef target or a type in its own right, and in each case the
+        // only thing wrong with it that the caller would otherwise hear about
+        // is the `__` in its name, which explains nothing at all.
+        Err(InvalidIdentError::BindgenOpaqueType)
     } else if id.contains("__") && !id.starts_with("__bindgen_marker") {
         Err(InvalidIdentError::TooManyUnderscores)
     } else if id.starts_with("_bindgen_ty_") {

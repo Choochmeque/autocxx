@@ -16470,3 +16470,55 @@ fn test_dropping_an_impl_new_is_diagnosed_with_instructions() {
     };
     run_test_expect_fail_with_error("", hdr, rs, &["Bob"], &[], ".within_unique_ptr()");
 }
+
+#[test]
+fn test_std_function_parameter_says_what_went_wrong() {
+    // bindgen cannot model std::function, so it substitutes an opaque blob of
+    // bytes called __BindgenOpaqueArray. The only thing wrong with that which
+    // autocxx used to report was the `__` in the name, which told the user
+    // nothing about their own code. See google/autocxx#1279.
+    let hdr = indoc! {"
+        #include <functional>
+        inline void takes_callback(std::function<void(int)> f) { (void) f; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["takes_callback"],
+        &[],
+        "Argument { arg: \"f\", err: InvalidIdent(BindgenOpaqueType)",
+    );
+}
+
+#[test]
+fn test_std_function_method_costs_only_that_method() {
+    // The rest of a class whose method takes a std::function must survive, and
+    // the explanation has to reach the user: it goes in the doc comment of the
+    // stub which stands in for the type autocxx could not generate.
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <functional>
+        class Requester {
+        public:
+            Requester() {}
+            using RespHandler = std::function<void(int)>;
+            void sendRequest(RespHandler handler) { (void) handler; }
+            uint32_t answer() const { return 42; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let requester = ffi::Requester::new().within_unique_ptr();
+            assert_eq!(requester.answer(), 42);
+        },
+        directives_from_lists(&["Requester"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "std::function is the usual cause".to_string(),
+        ])),
+        None,
+    );
+}

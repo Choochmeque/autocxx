@@ -6,12 +6,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
 use super::deps::HasDependencies;
 use super::fun::{FnAnalysis, FnKind, FnPhase};
 use crate::conversion::apivec::ApiVec;
 use crate::conversion::{convert_error::ErrorContext, ConvertErrorFromCpp};
+use crate::types::QualifiedName;
 use crate::{conversion::api::Api, known_types, types::make_ident};
 
 /// Remove any APIs which depend on other items which have been ignored.
@@ -22,9 +24,19 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
     let (ignored_items, valid_items): (Vec<&Api<_>>, Vec<&Api<_>>) = apis
         .iter()
         .partition(|api| matches!(api, Api::IgnoredItem { .. }));
-    let mut ignored_items: HashSet<_> = ignored_items
+    // Why each ignored item was ignored, so that anything we discard for
+    // depending on it can say so. Without this the user is told only that some
+    // named item could not be generated - and that item's own explanation is
+    // usually garbage collected before it reaches the output, since by then
+    // nothing reachable from the allowlist refers to it.
+    let mut ignored_items: HashMap<QualifiedName, ConvertErrorFromCpp> = ignored_items
         .into_iter()
-        .map(|api| api.name().clone())
+        .map(|api| match api {
+            Api::IgnoredItem { err, .. } => (api.name().clone(), err.clone()),
+            // Skipping such an item would leave its dependents alive and
+            // uncompilable, so say so rather than dropping it quietly.
+            _ => unreachable!("partitioned on Api::IgnoredItem"),
+        })
         .collect();
     let valid_types: HashSet<_> = valid_items
         .into_iter()
@@ -38,15 +50,30 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
             .map(|api| {
                 let ignored_dependents: HashSet<_> = api
                     .deps()
-                    .filter(|dep| ignored_items.contains(*dep))
+                    .filter(|dep| ignored_items.contains_key(*dep))
                     .cloned()
                     .collect();
                 if !ignored_dependents.is_empty() {
                     iterate_again = true;
-                    ignored_items.insert(api.name().clone());
+                    let culprit = ignored_dependents
+                        .get_index(0)
+                        .expect("just checked it is not empty")
+                        .clone();
+                    let reason = ignored_items
+                        .get(&culprit)
+                        .expect("culprit came from the ignored items")
+                        .clone();
+                    // The reason this item inherits is the culprit's own, so
+                    // that a chain of items which merely depended on each other
+                    // does not bury the original problem.
+                    ignored_items.insert(api.name().clone(), reason.clone());
                     create_ignore_item(
                         api,
-                        ConvertErrorFromCpp::IgnoredDependent(ignored_dependents),
+                        ConvertErrorFromCpp::IgnoredDependent {
+                            deps: ignored_dependents,
+                            culprit,
+                            reason: Box::new(reason),
+                        },
                     )
                 } else {
                     let mut missing_deps = api.deps().filter(|dep| {
