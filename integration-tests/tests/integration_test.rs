@@ -17110,6 +17110,43 @@ fn test_defaulted_copy_constructor_which_is_deleted() {
     );
 }
 
+/// The `T(T&)` form of the same thing: a non-const copy constructor written
+/// `= default` on a class whose members make it deleted. Same rules, same
+/// answer - we must not generate a call to it.
+#[test]
+fn test_defaulted_non_const_copy_constructor_which_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct NonCopyable {
+            NonCopyable() = default;
+            NonCopyable(const NonCopyable&) = delete;
+            uint32_t a;
+        };
+        struct DefaultedButDeletedCopy {
+            DefaultedButDeletedCopy() = default;
+            DefaultedButDeletedCopy(DefaultedButDeletedCopy&) = default;
+            NonCopyable m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["NonCopyable", "DefaultedButDeletedCopy"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(
+                // The default constructor is fine and stays...
+                &["DefaultedButDeletedCopy_new_autocxx"],
+                // ...whereas the copy constructor C++ deleted must not be
+                // bound, under the name an ordinary constructor would get.
+                &["DefaultedButDeletedCopy_new1"],
+            ),
+        )])),
+        None,
+    );
+}
+
 #[test]
 fn test_defaulted_default_constructor_which_is_deleted() {
     let hdr = indoc! {"

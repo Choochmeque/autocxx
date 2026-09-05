@@ -1017,8 +1017,6 @@ pub(super) fn discard_deleted_defaulted_members(
                     return api;
                 }
                 // These are the same kinds `find_explicit_items` recognizes.
-                // A non-const copy constructor never reaches us as one, so
-                // there's nothing here for that slot.
                 let (found, ctx) = match &analysis.kind {
                     FnKind::Method {
                         impl_for,
@@ -1033,6 +1031,24 @@ pub(super) fn discard_deleted_defaulted_members(
                             make_ident(&analysis.rust_name),
                         )),
                     ),
+                    // A copy constructor taking `T&` is bound as an ordinary
+                    // constructor, since it can't implement `CopyNew`, and so
+                    // gets a name of its own which the user may call.
+                    FnKind::Method {
+                        impl_for,
+                        method_kind: MethodKind::Constructor { is_default: false },
+                        ..
+                    } if matches!(fun.special_member, Some(SpecialMemberKind::CopyConstructor)) => {
+                        (
+                            all_items_found
+                                .get(impl_for)
+                                .map(|i| i.non_const_copy_constructor),
+                            Some(ErrorContext::new_for_method(
+                                impl_for.get_final_ident(),
+                                make_ident(&analysis.rust_name),
+                            )),
+                        )
+                    }
                     FnKind::TraitMethod { impl_for, kind, .. } => (
                         all_items_found.get(impl_for).and_then(|i| match kind {
                             TraitMethodKind::Destructor => Some(i.destructor),
