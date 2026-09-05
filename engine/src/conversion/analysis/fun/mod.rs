@@ -343,6 +343,7 @@ pub(crate) struct FnAnalyzer<'a> {
     generic_types: HashSet<QualifiedName>,
     types_in_anonymous_namespace: HashSet<QualifiedName>,
     existing_superclass_trait_api_names: HashSet<QualifiedName>,
+    cpp_names_taken_on_peer_classes: HashSet<String>,
     force_wrapper_generation: bool,
 }
 
@@ -366,6 +367,7 @@ impl<'a> FnAnalyzer<'a> {
             nested_type_name_map: Self::build_nested_type_map(&apis),
             generic_types: Self::build_generic_type_set(&apis),
             existing_superclass_trait_api_names: HashSet::new(),
+            cpp_names_taken_on_peer_classes: Self::build_virtual_method_cpp_names(&apis),
             types_in_anonymous_namespace: Self::build_types_in_anonymous_namespace(&apis),
             force_wrapper_generation,
         };
@@ -384,6 +386,28 @@ impl<'a> FnAnalyzer<'a> {
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
         results
+    }
+
+    /// The C++ names of every virtual method we've been given.
+    ///
+    /// A Rust subclass's peer class declares an override for each of its
+    /// superclass's virtual methods, under that method's own C++ name, so
+    /// these are the names its `_super` helpers must steer clear of.
+    ///
+    /// Gathered across every class rather than per superclass, because which
+    /// receiver a method belongs to isn't settled until its parameters have
+    /// been converted, and that happens long after this. Erring wide only ever
+    /// costs an unrelated helper an extra `autocxx` in a name nobody was going
+    /// to collide with; erring narrow would let a real collision through.
+    fn build_virtual_method_cpp_names(apis: &ApiVec<PodPhase>) -> HashSet<String> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Function { name, fun, .. } if fun.virtualness.is_some() => {
+                    Some(name.cpp_name().to_string_for_cpp_generation().to_string())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn build_pod_safe_type_set(apis: &ApiVec<PodPhase>) -> HashSet<QualifiedName> {
@@ -680,36 +704,54 @@ impl<'a> FnAnalyzer<'a> {
                 TypeConversionSophistication::SimpleForSubclasses,
                 Some(analysis.rust_name.clone()),
             );
+            let is_pure_virtual = matches!(
+                &simpler_analysis.kind,
+                FnKind::Method {
+                    method_kind: MethodKind::PureVirtual(..),
+                    ..
+                }
+            );
+            // Whether the peer class can offer a `foo_super` helper which
+            // calls the superclass's own implementation. A pure virtual
+            // method has no such implementation; a `private` one has one
+            // the peer isn't allowed to call, even though C++ does let it
+            // override the method. `protected` is fine - access from a
+            // derived class is precisely what it permits.
+            let has_super_helper = !is_pure_virtual
+                && !matches!(fun.cpp_vis, CppVisibility::Private)
+                // Nobody subclasses this in Rust, so there is no peer class to
+                // put a helper on - and naming one anyway would move every
+                // later helper's name along for nothing.
+                && self.subclasses_by_superclass(sup).next().is_some();
+
+            // The peer class's method keeps its plain `foo_super` name in
+            // Rust - that's what subclass authors write - but in C++ it
+            // needs a name which can't collide with the superclass's own
+            // virtual methods, which the peer must declare under their
+            // real names in order to override them. So the two differ, and
+            // cxx bridges them with a #[cxx_name].
+            //
+            // Named once for all the subclasses of this superclass, not once
+            // per subclass: each peer class is a class of its own, so they can
+            // share the name, and minting it repeatedly would walk the escape
+            // in `get_cpp_super_fn_name` further along every time.
+            let super_fn_cpp_name = has_super_helper.then(|| {
+                let name = SubclassName::get_cpp_super_fn_name(
+                    &Namespace::new(),
+                    &analysis.rust_name,
+                    |candidate| self.cpp_names_taken_on_peer_classes.contains(candidate),
+                );
+                self.cpp_names_taken_on_peer_classes
+                    .insert(name.get_final_item().to_string());
+                name
+            });
+
             for sub in self.subclasses_by_superclass(sup) {
                 // For each subclass, we need to create a plain-C++ method to call its superclass
                 // and a Rust/C++ bridge API to call _that_.
                 // What we're generating here is entirely about the subclass, so the
                 // superclass's namespace is irrelevant. We generate
                 // all subclasses in the root namespace.
-                let is_pure_virtual = matches!(
-                    &simpler_analysis.kind,
-                    FnKind::Method {
-                        method_kind: MethodKind::PureVirtual(..),
-                        ..
-                    }
-                );
-                // Whether the peer class can offer a `foo_super` helper which
-                // calls the superclass's own implementation. A pure virtual
-                // method has no such implementation; a `private` one has one
-                // the peer isn't allowed to call, even though C++ does let it
-                // override the method. `protected` is fine - access from a
-                // derived class is precisely what it permits.
-                let has_super_helper =
-                    !is_pure_virtual && !matches!(fun.cpp_vis, CppVisibility::Private);
-
-                // The peer class's method keeps its plain `foo_super` name in
-                // Rust - that's what subclass authors write - but in C++ it
-                // needs a name which can't collide with the superclass's own
-                // virtual methods, which the peer must declare under their
-                // real names in order to override them. So the two differ, and
-                // cxx bridges them with a #[cxx_name].
-                let super_fn_cpp_name =
-                    SubclassName::get_cpp_super_fn_name(&Namespace::new(), &analysis.rust_name);
                 let super_fn_rust_name =
                     SubclassName::get_super_fn_name(&Namespace::new(), &analysis.rust_name);
                 let super_fn_api_name = SubclassName::get_super_fn_name(
@@ -719,10 +761,10 @@ impl<'a> FnAnalyzer<'a> {
                 let trait_api_name = SubclassName::get_trait_api_name(sup, &analysis.rust_name);
 
                 let mut subclass_fn_deps = vec![trait_api_name.clone()];
-                if has_super_helper {
+                if let Some(super_fn_cpp_name) = &super_fn_cpp_name {
                     // Create a C++ API representing the superclass implementation (allowing
                     // calls from Rust->C++)
-                    let maybe_wrap = create_subclass_fn_wrapper(&sub, &super_fn_cpp_name, &fun);
+                    let maybe_wrap = create_subclass_fn_wrapper(&sub, super_fn_cpp_name, &fun);
                     let super_fn_name = ApiName::new_from_qualified_name_and_cpp_name(
                         super_fn_api_name,
                         Some(CppOriginalName::from_rust_name(
@@ -751,7 +793,9 @@ impl<'a> FnAnalyzer<'a> {
                     subclass_fn_deps,
                     self.unsafe_policy,
                     fun.ref_qualifier,
-                    has_super_helper,
+                    super_fn_cpp_name
+                        .as_ref()
+                        .map(QualifiedName::get_final_ident),
                 ));
 
                 // Create the trait item for the <superclass>_methods and <superclass>_supers

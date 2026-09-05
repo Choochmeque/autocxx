@@ -18077,6 +18077,72 @@ fn test_subclass_method_named_like_super_helper_reverse_order() {
     "});
 }
 
+/// The same clash one level down: a superclass method named like the *C++*
+/// spelling of the `_super` helper, which carries an `autocxx` marker to keep
+/// it clear of names like `foo_super`. The peer class declares an override for
+/// every superclass virtual method under its real C++ name, so a superclass
+/// method called `foo_autocxx_super` and the helper generated for `foo` would
+/// both want that one name.
+fn subclass_cpp_super_name_clash_test(hdr: &str) {
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            // Overridden below, and calls the superclass through the helper.
+            assert_eq!(obs.borrow().foo(), 11);
+            // A superclass method in its own right, left to the trait's
+            // default body, which calls through to C++.
+            assert_eq!(obs.borrow().foo_autocxx_super(), 2);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    self.peer().foo_super() + 10
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_method_named_like_cpp_super_helper() {
+    subclass_cpp_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual uint32_t foo_autocxx_super() const { return 2; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+#[test]
+fn test_subclass_method_named_like_cpp_super_helper_reverse_order() {
+    subclass_cpp_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo_autocxx_super() const { return 2; }
+        virtual uint32_t foo() const { return 1; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
 /// A `private` virtual method can be overridden by a derived class, but not
 /// called by one, so the peer class must not get a `_super` helper for it.
 /// The Rust subclass overrides it, and C++ dispatches to that override from

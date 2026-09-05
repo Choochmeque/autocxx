@@ -362,21 +362,30 @@ impl SubclassName {
     /// The C++ name of that same method, which has to differ: the peer class
     /// declares each of the superclass's virtual methods under its real C++
     /// name in order to override it, and one of those may well be called
-    /// `foo_super` already. We can't tell here - this name is minted while we
-    /// analyze a single function, with no list of the superclass's methods to
-    /// check against - so it always carries the `autocxx` marker, and cxx
+    /// `foo_super` already. So this name carries an `autocxx` marker, and cxx
     /// bridges the two names with a `#[cxx_name]`.
     ///
-    /// TODO: a superclass with virtual methods named `foo` and
-    /// `foo_autocxx_super` would still collide here. Nothing short of the full
-    /// method name list can rule that out, and this name has to be settled
-    /// before we have it.
+    /// One marker is not by itself enough - a superclass is free to have a
+    /// method called `foo_autocxx_super` too, and then the peer class would
+    /// declare that name twice. So keep adding markers until `is_taken` says
+    /// the name is free, which is what the Rust `_supers` trait does with the
+    /// plain `foo_super` spelling. The caller owns that judgement because only
+    /// it knows which names the peer class has already spoken for.
     pub(crate) fn get_cpp_super_fn_name(
         superclass_namespace: &Namespace,
         id: &str,
+        mut is_taken: impl FnMut(&str) -> bool,
     ) -> QualifiedName {
-        let id = make_ident(format!("{id}_autocxx{SUPER_FN_SUFFIX}"));
-        QualifiedName::new(superclass_namespace, id)
+        let mut marks = String::new();
+        let mut candidate;
+        loop {
+            marks.push_str("_autocxx");
+            candidate = format!("{id}{marks}{SUPER_FN_SUFFIX}");
+            if !is_taken(&candidate) {
+                break;
+            }
+        }
+        QualifiedName::new(superclass_namespace, make_ident(candidate))
     }
     pub(crate) fn get_methods_trait_name(superclass_name: &QualifiedName) -> QualifiedName {
         Self::with_qualified_name_suffix(superclass_name, "methods")
@@ -539,8 +548,15 @@ pub(crate) struct RustSubclassFnDetails {
     pub(crate) receiver_mutability: ReceiverMutability,
     pub(crate) dependencies: Vec<QualifiedName>,
     pub(crate) requires_unsafe: UnsafetyNeeded,
-    /// See [`SuperclassMethod::has_super_helper`].
-    pub(crate) has_super_helper: bool,
+    /// The C++ name of the peer class's `_super` helper for this method, or
+    /// `None` if it doesn't get one - see
+    /// [`SuperclassMethod::has_super_helper`].
+    ///
+    /// Settled during analysis rather than recomputed at codegen, because the
+    /// same name also has to appear in the cxx bridge as a `#[cxx_name]`: two
+    /// derivations of it could disagree, and then Rust would call a C++
+    /// function which doesn't exist.
+    pub(crate) cpp_super_fn_name: Option<Ident>,
 }
 
 #[derive(Clone, Debug)]
@@ -710,5 +726,30 @@ impl<T: AnalysisPhase> Api<T> {
             superclass,
             analysis,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubclassName;
+    use crate::types::Namespace;
+    use std::collections::HashSet;
+
+    /// The escape which keeps a peer class's `_super` helper clear of the
+    /// superclass method names the peer also has to declare.
+    #[test]
+    fn cpp_super_fn_name_dodges_names_already_spoken_for() {
+        let taken: HashSet<&str> = ["foo_autocxx_super", "foo_autocxx_autocxx_super"]
+            .into_iter()
+            .collect();
+        let name = |id| {
+            SubclassName::get_cpp_super_fn_name(&Namespace::new(), id, |c| taken.contains(c))
+                .get_final_item()
+                .to_string()
+        };
+        // Nothing in the way: one marker is enough.
+        assert_eq!(name("bar"), "bar_autocxx_super");
+        // Two names in the way, so it takes three markers to get clear.
+        assert_eq!(name("foo"), "foo_autocxx_autocxx_autocxx_super");
     }
 }

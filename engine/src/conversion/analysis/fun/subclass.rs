@@ -21,7 +21,7 @@ use crate::conversion::api::{
 use crate::conversion::apivec::ApiVec;
 use crate::conversion::parse::CppRefQualifier;
 use crate::conversion::CppEffectiveName;
-use crate::minisyn::minisynize_punctuated;
+use crate::minisyn::{minisynize_punctuated, Ident};
 use crate::parse_callbacks::CppOriginalName;
 use crate::{
     conversion::{
@@ -150,7 +150,7 @@ pub(super) fn create_subclass_function(
     dependencies: Vec<QualifiedName>,
     unsafe_policy: &UnsafePolicy,
     ref_qualifier: CppRefQualifier,
-    has_super_helper: bool,
+    cpp_super_fn_name: Option<Ident>,
 ) -> Api<FnPrePhase1> {
     let cpp = sub.cpp();
     let holder_name = sub.holder();
@@ -207,7 +207,7 @@ pub(super) fn create_subclass_function(
             receiver_mutability: *receiver_mutability,
             dependencies,
             requires_unsafe,
-            has_super_helper,
+            cpp_super_fn_name,
         }),
     }
 }
