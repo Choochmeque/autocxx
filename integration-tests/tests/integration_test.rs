@@ -7876,6 +7876,62 @@ fn test_take_nonpod_rvalue_from_stack() {
     run_test("", hdr, rs, &["A", "take_a"], &[]);
 }
 
+/// Upstream #770 asked us to test against `std::pin::pin!`, the official
+/// pin macro stabilized in Rust 1.68, once it existed, as a possible
+/// replacement for the `moveit!` macro when emplacing a non-POD object on
+/// the stack.
+///
+/// It does not work, and the reason is architectural rather than a bug we
+/// could fix: `moveit::New::new` (what `ffi::A::new()` returns something
+/// implementing) is `unsafe fn new(self, this: Pin<&mut MaybeUninit<Output>>)`
+/// - it only ever *writes into* a place the caller already supplied. There is
+/// no method that hands back an owned `A` by value, because a non-POD C++
+/// object can only be brought into existence via a C++ constructor running
+/// directly at its final address (see the top of this file's module docs on
+/// POD vs non-POD). `std::pin::pin!($expr)`, by contrast, is sugar for
+/// "evaluate `$expr` to an owned, already-constructed value, move it once
+/// into a local, and pin a reference to that local" - it has nothing to
+/// write a constructor's output into, so it cannot drive construction at
+/// all.
+///
+/// Concretely, `std::pin::pin!(ffi::A::new())` still type-checks, but not
+/// usefully: `$expr`'s type is the `New` recipe itself
+/// (`impl New<Output = A>`), which is `Unpin`, so `pin!` happily pins *that*
+/// rather than ever constructing an `A`. The resulting
+/// `Pin<&mut impl New<Output = A>>` has no path to the constructed object:
+/// this test pins the diagnostic (`Pin::deref`/`Pin::get_mut` don't apply to
+/// `New`, and `New` has no method of its own besides the unsafe, place-taking
+/// `new`), which is what a user attempting this will see. `moveit!` avoids
+/// all of this by allocating the destination `MaybeUninit` slot itself and
+/// driving `New::new` to write into it directly, never producing a bare `A`
+/// value at all.
+#[test]
+fn test_issue_770_std_pin_macro_does_not_replace_moveit() {
+    let cxx = "void A::set(uint32_t val) { a = val; } uint32_t A::get() const { return a; }";
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct A {
+            A() {}
+            void set(uint32_t val);
+            uint32_t get() const;
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let mut stack_obj = std::pin::pin!(ffi::A::new());
+        stack_obj.as_mut().set(42);
+        assert_eq!(stack_obj.get(), 42);
+    };
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        rs,
+        &["A"],
+        &[],
+        "no method named `get` found for struct `Pin<&mut impl autocxx::prelude::New<Output = ffi::A>>`",
+    );
+}
+
 #[test]
 fn test_overloaded_ignored_function() {
     // When overloaded functions are ignored during import, the placeholder

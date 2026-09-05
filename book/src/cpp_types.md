@@ -54,6 +54,10 @@ Constructing a non-POD object requires two steps.
 
 For heap construction, the prefix (`emplace`) and postfix (`.within_...`) forms are exactly identical. Choose whichever suits your needs best.
 
+Rust's own [`std::pin::pin!`](https://doc.rust-lang.org/std/pin/macro.pin.html) macro is *not* a substitute for `moveit!` here, even though both produce a pinned stack value. `pin!` pins a value you already own; `moveit::New::new` only ever writes into a place you hand it, and there's no way to obtain a non-POD object as a plain Rust value to hand to `pin!` in the first place - that's precisely the point of non-POD types. Writing `std::pin::pin!(ffi::Goldfish::new())` compiles, but pins the `New` recipe itself rather than a `Goldfish`, and the object never gets constructed.
+
+
+
 ### Should you construct on the Rust heap or the C++ heap?
 
 Use `.within_unique_ptr()` to create objects on the C++ heap. This gives you a [`cxx::UniquePtr<T>`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html) which works well with other autocxx and cxx APIs.
