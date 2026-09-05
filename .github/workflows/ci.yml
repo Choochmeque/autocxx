@@ -20,6 +20,7 @@ jobs:
   test:
     name: Test ${{matrix.name || format('Rust {0}', matrix.rust)}}
     runs-on: ${{matrix.os || 'ubuntu'}}-latest
+    continue-on-error: ${{matrix.allow-fail || false}}
 
     strategy:
       fail-fast: false
@@ -32,10 +33,15 @@ jobs:
           - name: macOS
             rust: nightly
             os: macos
-          # Windows GNU disabled due to https://github.com/google/autocxx/issues/1134
-          # - name: Windows (gnu)
-          #    rust: nightly-x86_64-pc-windows-gnu
-          #    os: windows
+          # Advisory only (continue-on-error below): disabled upstream in 2022
+          # for never-diagnosed failures (google/autocxx#1134), and the
+          # skip_windows_gnu_failing_tests list predates most of today's
+          # suite. Runs to surface the real failure set; make it blocking
+          # once that set is triaged.
+          - name: Windows (gnu)
+            rust: nightly-x86_64-pc-windows-gnu
+            os: windows
+            allow-fail: true
           - name: Windows (msvc)
             rust: nightly-x86_64-pc-windows-msvc
             os: windows
