@@ -232,6 +232,28 @@ impl std::fmt::Debug for QualifiedName {
     }
 }
 
+/// What to tell a user who has run into `std::function`.
+///
+/// Two different failures lead here, because the two standard libraries put
+/// `std::function` beyond bindgen in two different ways, so the advice is
+/// shared rather than written twice. See
+/// [`crate::conversion::ConvertErrorFromCpp::UnsupportedStdFunction`] and
+/// [`InvalidIdentError::BindgenOpaqueType`].
+pub(crate) const STD_FUNCTION_ADVICE: &str = "std::function is not supported by bindgen or cxx, so autocxx cannot bind it. For C++ to call back into Rust, subclass a C++ observer class from Rust or use extern_rust_function - a C++ shim taking a plain function pointer will not work either. See https://github.com/google/autocxx/issues/1279.";
+
+/// Whether this is `std::function`, by name.
+///
+/// libstdc++ and libc++ hide it behind reserved implementation-detail names,
+/// so bindgen erases it to an opaque blob and this never gets the chance to
+/// fire; MSVC's standard library spells it as a partial specialization over a
+/// function type, which bindgen keeps as a named class whose template parameter
+/// it has discarded. That is the case this recognises: the name is right there
+/// to be read, so the diagnostic should say what the user wrote rather than
+/// which of bindgen's limits it landed on.
+pub(crate) fn is_std_function(name: &QualifiedName) -> bool {
+    name.get_final_item() == "function" && name.ns_segment_iter().eq(std::iter::once("std"))
+}
+
 /// Problems representing C++ identifiers in a way which is compatible with
 /// cxx.
 #[derive(Error, Clone, Debug)]
@@ -242,7 +264,7 @@ pub enum InvalidIdentError {
     Bitfield,
     #[error("Names containing __ are reserved by C++ so not acceptable to cxx")]
     TooManyUnderscores,
-    #[error("bindgen could not represent this C++ type, and replaced it with an opaque blob of bytes, so autocxx has nothing it can pass across the language boundary. std::function is the usual cause; neither bindgen nor cxx supports it. For C++ to call back into Rust, subclass a C++ observer class from Rust or use extern_rust_function - a C++ shim taking a plain function pointer will not work either. See https://github.com/google/autocxx/issues/1279.")]
+    #[error("bindgen could not represent this C++ type, and replaced it with an opaque blob of bytes, so autocxx has nothing it can pass across the language boundary. std::function is the usual cause. {}", STD_FUNCTION_ADVICE)]
     BindgenOpaqueType,
     #[error("bindgen decided to call this type _bindgen_ty_N because it couldn't deduce the correct name for it. That means we can't generate C++ bindings to it.")]
     BindgenTy,
@@ -343,9 +365,39 @@ pub(crate) fn strip_bindgen_original_suffix_from_ident(
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{dedup_name_stem, strip_bindgen_original_suffix};
+    use crate::types::{dedup_name_stem, is_std_function, strip_bindgen_original_suffix};
 
     use super::QualifiedName;
+
+    /// The name recognition behind the MSVC half of google/autocxx#1279. It
+    /// cannot be reached from an integration test on a libstdc++ or libc++
+    /// host, where bindgen erases `std::function` before autocxx ever sees the
+    /// name, so this is what pins it.
+    #[test]
+    fn std_function_is_recognised_by_name() {
+        assert!(is_std_function(&QualifiedName::new_from_cpp_name(
+            "std::function"
+        )));
+        // Somebody else's `function` is not std::function.
+        assert!(!is_std_function(&QualifiedName::new_from_cpp_name(
+            "function"
+        )));
+        assert!(!is_std_function(&QualifiedName::new_from_cpp_name(
+            "mylib::function"
+        )));
+        assert!(!is_std_function(&QualifiedName::new_from_cpp_name(
+            "std::inner::function"
+        )));
+        // Nor are its neighbours in std.
+        assert!(!is_std_function(&QualifiedName::new_from_cpp_name(
+            "std::string"
+        )));
+        // Nor the MSVC base class it inherits from, which fails for its own
+        // reasons and should keep saying so.
+        assert!(!is_std_function(&QualifiedName::new_from_cpp_name(
+            "std::_Get_function_impl"
+        )));
+    }
 
     #[test]
     fn test_ints() {

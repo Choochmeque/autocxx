@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     known_types, proc_macro_span_to_miette_span,
-    types::{make_ident, InvalidIdentError, Namespace, QualifiedName},
+    types::{make_ident, InvalidIdentError, Namespace, QualifiedName, STD_FUNCTION_ADVICE},
 };
 
 /// Errors which can occur during conversion
@@ -93,6 +93,8 @@ pub enum ConvertErrorFromCpp {
     Blocked(QualifiedName),
     #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]
     UnusedTemplateParam,
+    #[error("{}", STD_FUNCTION_ADVICE)]
+    UnsupportedStdFunction,
     #[error("This item relies on a type not known to autocxx ({})", .0.to_cpp_name())]
     UnknownDependentType(QualifiedName),
     #[error("This item depends on some other type(s) which autocxx could not generate, some of them are: {}. {} could not be generated because: {}", .deps.iter().join(", "), .culprit, .reason)]
@@ -354,5 +356,45 @@ impl std::fmt::Debug for ConvertErrorWithContext {
 impl std::fmt::Display for ConvertErrorWithContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConvertErrorFromCpp;
+    use crate::types::QualifiedName;
+    use indexmap::set::IndexSet as HashSet;
+
+    /// The chain a user reads on MSVC when a function takes a `std::function`,
+    /// as observed in CI:
+    ///
+    /// ```text
+    /// DidNotGenerateAnythingUsable("takes_callback", IgnoredDependent {
+    ///     deps: {std::function}, culprit: std::function,
+    ///     reason: UnsupportedStdFunction })
+    /// ```
+    ///
+    /// No test on a libstdc++ or libc++ host can produce that - there
+    /// std::function is erased before autocxx sees the name - so this assembles
+    /// it by hand and checks the advice survives both wrappers, which is what
+    /// `test_std_function_parameter_says_what_went_wrong` asserts.
+    #[test]
+    fn the_std_function_advice_survives_the_msvc_error_chain() {
+        let std_function = QualifiedName::new_from_cpp_name("std::function");
+        let mut deps = HashSet::new();
+        deps.insert(std_function.clone());
+        let err = ConvertErrorFromCpp::DidNotGenerateAnythingUsable(
+            "takes_callback".to_string(),
+            Box::new(ConvertErrorFromCpp::IgnoredDependent {
+                deps,
+                culprit: std_function,
+                reason: Box::new(ConvertErrorFromCpp::UnsupportedStdFunction),
+            }),
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("std::function is not supported by bindgen or cxx"),
+            "the advice did not reach the top of the chain: {rendered}"
+        );
     }
 }

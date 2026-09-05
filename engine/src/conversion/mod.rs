@@ -33,7 +33,8 @@ use itertools::Itertools;
 use syn::{Item, ItemMod};
 
 use crate::{
-    types::QualifiedName, CodegenOptions, CppFilePair, ParseCallbackResults, UnsafePolicy,
+    types::{is_std_function, QualifiedName},
+    CodegenOptions, CppFilePair, ParseCallbackResults, UnsafePolicy,
 };
 
 use self::{
@@ -418,7 +419,23 @@ fn check_for_fatal_attrs(
     callback_results: &ParseCallbackResults,
     name: &QualifiedName,
 ) -> Result<(), ConvertErrorWithContext> {
-    if callback_results.discards_template_param(name) {
+    if is_std_function(name) {
+        // Checked before the general template-parameter case below, which is
+        // how MSVC's std::function arrives here: its standard library spells
+        // the type as a partial specialization over a function type, which
+        // bindgen keeps as a named class whose template parameter it has
+        // discarded. "One of the template parameters was incomprehensible"
+        // is true but tells the user nothing about the type they wrote, and
+        // the name is right here to be read. (libstdc++ and libc++ never
+        // reach this: they hide std::function behind reserved
+        // implementation-detail names, so bindgen erases the whole thing to
+        // an opaque blob and `InvalidIdentError::BindgenOpaqueType` speaks
+        // for it instead.)
+        Err(ConvertErrorWithContext(
+            ConvertErrorFromCpp::UnsupportedStdFunction,
+            Some(ErrorContext::new_for_item(name.get_final_ident())),
+        ))
+    } else if callback_results.discards_template_param(name) {
         Err(ConvertErrorWithContext(
             ConvertErrorFromCpp::UnusedTemplateParam,
             Some(ErrorContext::new_for_item(name.get_final_ident())),

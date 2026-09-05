@@ -647,7 +647,15 @@ pub fn run_test_expect_fail_with_error(
         None,
     )
     .expect_err("Unexpected success");
-    let reported = format!("{err:?}");
+    // Both renderings, because a test may want to pin either: the `Debug` form
+    // names the error variants, which is what a test about *classification*
+    // cares about, while the `Display` form is the prose a user actually reads,
+    // which is what a test about the *wording* has to look at. `Debug` alone
+    // shows only variant names, so the wording would be untestable.
+    let reported = match &err {
+        TestError::AutoCxx(err) => format!("{err:?}\n{err}"),
+        err => format!("{err:?}"),
+    };
     assert!(
         reported.contains(expected),
         "expected the failure to mention {expected:?}, but it was: {reported}"
