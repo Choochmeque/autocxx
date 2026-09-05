@@ -6241,6 +6241,35 @@ fn test_derived_abstract_class_no_make_unique() {
     run_test("", hdr, rs, &["A", "B"], &[]);
 }
 
+/// Upstream #1326's own reduced repro: `B` inherits `A` *virtually*, and
+/// only overrides `A`'s pure virtual `f()` implicitly (i.e. not at all), so
+/// `B` remains abstract. bindgen does not surface the virtual-base link from
+/// `B` to `A` at all (confirmed via the issue's bindgen-output excerpt in
+/// its own thread, and unchanged here), so autocxx has no way to know `B` is
+/// still abstract and generates constructor/destructor wrapper code for it
+/// as though it were concrete. Retested 2026-09-05 against
+/// `abstract_types.rs` after fork PR #36 (which fixed pure-virtual
+/// *destructor* propagation, a different code path in the same file): still
+/// fails, now with real-clang diagnostics rather than the bindgen dump the
+/// issue was originally filed with -
+/// `error: allocating an object of abstract class type 'B'` from the
+/// generated `autocxxgen_ffi.h` wrapper, plus several
+/// `-Wdelete-abstract-non-virtual-dtor` errors. Root cause unchanged from
+/// the issue: needs bindgen to expose virtual inheritance (see #124/#1461).
+#[test]
+#[ignore] // https://github.com/google/autocxx/issues/1326
+fn test_issue_1326() {
+    let hdr = indoc! {"
+        struct A {
+            virtual int f() = 0;
+        };
+        struct B : virtual public A {
+            static void i_want_this_function();
+        };
+    "};
+    run_test("", hdr, quote! {}, &["B"], &[]);
+}
+
 #[test]
 fn test_recursive_derived_abstract_class_no_make_unique() {
     let hdr = indoc! {"
@@ -14807,6 +14836,62 @@ fn test_issue_1229() {
         fn main() {
             let _thing = thing::Thing::new(15.).within_unique_ptr();
             let _item = item::Item::new(15.).within_unique_ptr();
+        }
+    };
+
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+/// Upstream #1239, following on from #1229/#1235: two separate
+/// `include_cpp!` bridges (mods) in the same crate, each generating a class
+/// with an identically-named ordinary method, here `foo()`. #1229/#1235 was
+/// about the *constructor* wrapper symbol colliding, because that wrapper's
+/// name didn't depend on which type it constructed - literally
+/// `cxxbridge1$new_autocxx_autocxx_wrapper` in both bridges, so the linker
+/// saw a duplicate definition. This test pins that the same is not true of
+/// ordinary methods: their `extern "C"` wrapper names are already derived
+/// from bindgen's per-class mangled name (`Thing_foo`/`Item_foo` here), so
+/// two same-named methods on differently-named classes were never at risk of
+/// colliding, and this now builds and links cleanly.
+#[test]
+fn test_issue_1239() {
+    let hdr = indoc! {"
+    struct Thing {
+        float id;
+
+        Thing(float id) : id(id) {}
+        float foo() const { return id; }
+    };
+
+    struct Item {
+        float id;
+
+        Item(float id) : id(id) {}
+        float foo() const { return id; }
+    };
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::WithinUniquePtr;
+
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            name!(thing)
+            safety!(unsafe)
+            generate!("Thing")
+        }
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            name!(item)
+            safety!(unsafe)
+            generate!("Item")
+        }
+
+        fn main() {
+            let thing = thing::Thing::new(15.).within_unique_ptr();
+            let item = item::Item::new(16.).within_unique_ptr();
+            assert_eq!(thing.foo(), 15.);
+            assert_eq!(item.foo(), 16.);
         }
     };
 
