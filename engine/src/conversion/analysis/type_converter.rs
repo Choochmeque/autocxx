@@ -174,7 +174,7 @@ impl<'a> TypeConverter<'a> {
                     TypeKind::Regular,
                 )
             }
-            Type::Ptr(ptr) => self.convert_ptr(ptr, ns)?,
+            Type::Ptr(ptr) => self.convert_ptr(ptr, ns, ctx)?,
             _ => {
                 return Err(ConvertErrorFromCpp::UnknownType(
                     ty.to_token_stream().to_string(),
@@ -239,7 +239,7 @@ impl<'a> TypeConverter<'a> {
             Ok(outer)
         } else if let Some(ptr) = unwrap_reference(&typ, true) {
             // RValue reference
-            Self::ensure_pointee_is_valid(ptr)?;
+            Self::ensure_pointee_is_valid(ptr, ctx)?;
             let innerty = self.convert_boxed_type(
                 ptr.elem.clone(),
                 ns,
@@ -344,7 +344,7 @@ impl<'a> TypeConverter<'a> {
                 // verbatim — otherwise the unresolved pointee name
                 // reaches cxx and generation fails with
                 // "unsupported type". See google/autocxx#1368.
-                let mut annotated = self.convert_ptr(resolved_tp.clone(), ns)?;
+                let mut annotated = self.convert_ptr(resolved_tp.clone(), ns, ctx)?;
                 annotated.types_encountered.extend(deps);
                 return Ok(annotated);
             }
@@ -536,8 +536,9 @@ impl<'a> TypeConverter<'a> {
         &mut self,
         mut ptr: TypePtr,
         ns: &Namespace,
+        ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
-        Self::ensure_pointee_is_valid(&ptr)?;
+        Self::ensure_pointee_is_valid(&ptr, ctx)?;
         let innerty =
             self.convert_boxed_type(ptr.elem, ns, &TypeConversionContext::WithinReference)?;
         ptr.elem = innerty.ty;
@@ -549,10 +550,34 @@ impl<'a> TypeConverter<'a> {
         ))
     }
 
-    fn ensure_pointee_is_valid(ptr: &TypePtr) -> Result<(), ConvertErrorFromCpp> {
+    fn ensure_pointee_is_valid(
+        ptr: &TypePtr,
+        ctx: &TypeConversionContext,
+    ) -> Result<(), ConvertErrorFromCpp> {
         match *ptr.elem {
             Type::Path(..) => Ok(()),
             Type::Array(..) => Err(ConvertErrorFromCpp::InvalidArrayPointee),
+            // A pointer to a pointer is refused nearly everywhere because
+            // there is no good way to hand one across the bridge: autocxx
+            // would have to decide what the outer pointer's referent means
+            // in Rust, and it has no way to know. Inside a struct field it
+            // never has to decide - the field is data whose layout we copy
+            // and whose contents Rust only ever sees as a raw pointer - so
+            // the rejection would only stop the whole struct being generated
+            // over a field nobody was going to dereference. See
+            // https://github.com/google/autocxx/issues/1278. This permits one
+            // level of nesting: the pointee is converted as
+            // `WithinReference`, so `float***` is still refused.
+            //
+            // TODO: this only reaches fields whose pointer-to-pointer type is
+            // written out. `typedef float** M; struct S { M data; };` still
+            // fails, because `tdef.rs` converts every typedef as
+            // `WithinReference` - the typedef is one API, with no single place
+            // of use to take a context from - so `M` is discarded before the
+            // field is ever looked at, and `S` then cannot be POD.
+            Type::Ptr(..) if matches!(ctx, TypeConversionContext::WithinStructField { .. }) => {
+                Ok(())
+            }
             Type::Ptr(..) => Err(ConvertErrorFromCpp::InvalidPointerPointee),
             _ => Err(ConvertErrorFromCpp::InvalidPointee(
                 ptr.elem.to_token_stream().to_string(),
