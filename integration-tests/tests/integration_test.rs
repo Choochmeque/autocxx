@@ -8730,9 +8730,9 @@ fn test_rust_reference_no_autodiscover_no_usage() {
 //   2. `__cplusplus`. MSVC reports 199711L whatever `/std` says unless
 //      `/Zc:__cplusplus` is also passed, so the static_assert below fails
 //      anyway. cc never adds it - the string appears nowhere in cc 1.2.15.
-//   3. `configure_builder` in integration-tests/src/lib.rs hardcodes
-//      `.flag("-std=c++14") // For clang` for every test, unconditionally and
-//      not via `flag_if_supported`, so MSVC gets that too.
+//   3. (fixed) `configure_builder` now uses `cc::Build::std("c++14")`, which
+//      spells the flag per tool family and lets per-test `-std=c++17`
+//      modifiers override it, so only items 1-2 remain.
 // Needs verifying on a real MSVC runner once done.
 fn test_cpp17() {
     let hdr = indoc! {"
