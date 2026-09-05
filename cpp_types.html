@@ -266,6 +266,73 @@ fn main() {
     assert_eq!(another_heap_obj.get(), 42);
 }
 </code></pre>
+<h2 id="enums"><a class="header" href="#enums">Enums</a></h2>
+<p>A C++ <code>enum</code> becomes a native Rust <code>enum</code> by default. That's the right shape
+for an enumeration whose values are a closed set - a colour, a state, an error
+code - and it lets you <code>match</code> on it exhaustively.</p>
+<p>It is the wrong shape for a flag enum. Writing <code>FLAG_A | FLAG_B</code> in C++ gives
+you an <code>int</code> - the operands are promoted, unless the enum has an overloaded
+<code>operator|</code> - but converting that back to the enum type is ordinary, deliberate
+C++, and the result is a perfectly good enum object. A C++ enum object may hold
+values no enumerator names: for an enum with a fixed underlying type, such as
+<code>enum Flags : int</code>, every value that type can represent; for one without, every
+value in the bit range its enumerators span. A Rust <code>enum</code> may not - a value
+which is none of its variants is instant undefined behaviour - so the
+combination has no representation at all.</p>
+<p>Use <a href="https://docs.rs/autocxx/latest/autocxx/macro.enum_style.html"><code>enum_style!</code></a>
+to pick a different representation for particular enums:</p>
+<div class="table-wrapper"><table><thead><tr><th>Style</th><th>What you get</th><th>Good for</th></tr></thead><tbody>
+<tr><td><code>RustifiedEnum</code></td><td>A native Rust <code>enum</code>. This is the default.</td><td>Closed sets of values</td></tr>
+<tr><td><code>RustifiedNonExhaustiveEnum</code></td><td>The same, marked <code>#[non_exhaustive]</code>, so your <code>match</code>es need a catch-all arm</td><td>Closed sets which C++ may extend later</td></tr>
+<tr><td><code>NewtypeEnum</code></td><td>An integer newtype whose enumerators are associated constants</td><td>Values which may be arbitrary integers</td></tr>
+<tr><td><code>BitfieldEnum</code></td><td>The same newtype, plus <code>&amp;</code>, `</td><td><code>, </code>^<code>and</code>!`</td></tr>
+</tbody></table>
+</div>
+<p>The directive takes the style first, then any number of enum names, and may be
+repeated to give different styles to different enums:</p>
+<pre><code class="language-rust ignore">enum_style!(BitfieldEnum, "FileFlags", "WindowFlags")
+enum_style!(RustifiedNonExhaustiveEnum, "ErrorCode")</code></pre>
+<p>Name each enum exactly as you would in <code>generate!</code> - so a namespaced enum is
+<code>ns::Thing</code>, and an enum nested inside a class is <code>Outer_Inner</code>, because that
+is the name <code>bindgen</code> gives it. Asking for two different styles for the same
+enum is an error, as is anything that isn't a plain name.</p>
+<h3 id="newtypeenum-and-bitfieldenum-need-generate_pod"><a class="header" href="#newtypeenum-and-bitfieldenum-need-generate_pod"><code>NewtypeEnum</code> and <code>BitfieldEnum</code> need <code>generate_pod!</code></a></h3>
+<p>These two styles reach Rust as a <code>struct</code>, not an <code>enum</code>, and their
+enumerators are associated constants on it. <code>autocxx</code> only re-exports the
+generated type - constants and all - for types it holds by value, so those two
+styles have to be asked for with
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>.
+A plain <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate.html"><code>generate!</code></a>
+gives you an opaque type with no constants on it, which is unlikely to be what
+you wanted. The two rustified styles work with either, since a Rust <code>enum</code> is
+POD regardless.</p>
+<h4 id="c-header-1"><a class="header" href="#c-header-1">C++ header:</a></h4>
+<pre><code class="language-cpp">enum FileFlags {
+    READ = 1 &lt;&lt; 0,
+    WRITE = 1 &lt;&lt; 1,
+    EXECUTE = 1 &lt;&lt; 2,
+};
+inline bool is_writable(FileFlags flags) { return flags &amp; FileFlags::WRITE; }
+
+</code></pre>
+<h4 id="rust-1"><a class="header" href="#rust-1">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    enum_style!(BitfieldEnum, "FileFlags")
+    generate_pod!("FileFlags")
+    generate!("is_writable")
+}
+
+fn main() {
+    let flags = ffi::FileFlags::READ | ffi::FileFlags::WRITE;
+    assert!(ffi::is_writable(flags));
+    assert!(!ffi::is_writable(ffi::FileFlags::READ));
+}
+</code></pre>
 <h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
 <p>A type which is incomplete in the C++ headers (i.e. represented only by a forward
 declaration) can't be held in a <code>UniquePtr</code> within Rust (because Rust can't know
@@ -290,7 +357,7 @@ directive. As noted, though, these types are currently opaque and fairly
 useless without passing them back and forth to C++, so this is not a commonly
 used facility. It does, however, allow you to give a more descriptive name
 to the type in Rust:</p>
-<h4 id="c-header-1"><a class="header" href="#c-header-1">C++ header:</a></h4>
+<h4 id="c-header-2"><a class="header" href="#c-header-2">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;string&gt;
 struct Tapioca {
   std::string yuck;
@@ -308,7 +375,7 @@ inline Tea&lt;Tapioca&gt; prepare() {
 inline void drink(const Tea&lt;Tapioca&gt;&amp;) {}
 
 </code></pre>
-<h4 id="rust-1"><a class="header" href="#rust-1">Rust:</a></h4>
+<h4 id="rust-2"><a class="header" href="#rust-2">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
