@@ -296,9 +296,9 @@ impl TypeDatabase {
         self.get(ty).map(|td| td.to_type_path())
     }
 
-    /// The canonical name of this type if it is one of the ctypes (mostly
-    /// variable length integers, plus `char16_t`) which we need to wrap, and
-    /// `None` if it isn't one of them.
+    /// The canonical name of this type if it is one of the ctypes - the
+    /// variable length integers, `void` and `char16_t` - which we need to
+    /// wrap, and `None` if it isn't one of them.
     ///
     /// The answer is the canonical name rather than the name asked about
     /// because these types reach us under aliases - `char16_t` arrives as

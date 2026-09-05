@@ -489,7 +489,11 @@ pub(crate) enum Api<T: AnalysisPhase> {
         details: Box<StructDetails>,
         analysis: T::StructAnalysis,
     },
-    /// A variable-length C integer type (e.g. int, unsigned long).
+    /// A C type the generated C++ has to typedef for itself, because cxx has
+    /// no spelling of its own for it: the variable-length integers (`int`,
+    /// `unsigned long`), `void`, and `char16_t`. See `KnownTypes::as_ctype`
+    /// for which types those are; `typename` is the canonical name to declare
+    /// it under, which need not be the alias it reached us as.
     CType {
         name: ApiName,
         typename: QualifiedName,
