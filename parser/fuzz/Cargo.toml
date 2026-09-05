@@ -25,7 +25,11 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-autocxx-parser = { path = ".." }
+quote = "1.0"
+# `reproduction_case` is what gates the `ToTokens` impl that renders a
+# config back into directives - one of the accessors the target exercises
+# after parsing, and one of the places the parser can panic.
+autocxx-parser = { path = "..", features = ["reproduction_case"] }
 
 [dependencies.syn]
 version = "2"

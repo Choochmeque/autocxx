@@ -1,8 +1,8 @@
 Fuzz target for `autocxx-parser`, tracking [issue #1244](https://github.com/google/autocxx/issues/1244).
 
 `fuzz_targets/parse_include_cpp.rs` feeds arbitrary strings to
-`autocxx_parser::IncludeCpp`'s `syn::parse::Parse` implementation - the code
-that parses the directives inside `include_cpp! { ... }` (`generate!`,
+`autocxx_parser::IncludeCppConfig`'s `syn::parse::Parse` implementation - the
+code that parses the directives inside `include_cpp! { ... }` (`generate!`,
 `safety!`, `include!`, and so on). That's the first thing arbitrary macro
 input reaches, and it's pure in-process token-tree parsing (no clang/bindgen).
 
@@ -15,6 +15,24 @@ memory errors in `syn`, `proc_macro2`, the allocator and the rest of the
 dependency graph, which is why the CI job leaves cargo-fuzz's default ASan
 on. Safe Rust is no guarantee of no crash either way: OOM, stack overflow
 and hangs are all still reachable from here.
+
+Parsing alone would be a thin target, though: `IncludeCppConfig`'s `Parse`
+impl reports every failure as a `syn::Error` and never panics. The parser's
+panics are all one step later, in the accessors the engine reads the config
+through - `bindgen_allowlist`, `is_on_allowlist` and the `ToTokens` impl each
+`unreachable!()`/`panic!()` when the allowlist is still `Unspecified`, which
+is the state an `include_cpp!` with no `generate!` of any kind parses into.
+`IncludeCppConfig::confirm_complete` is what settles that, and
+`engine/src/parse_file.rs` calls it on every parsed macro before anything
+else looks at the config.
+
+So after a successful parse the target does the same: `confirm_complete`,
+then the accessors the engine really calls, in the order it calls them. That
+ordering is the point. A panic reached that way is one a user could reach by
+writing an `include_cpp!` block; a panic reached by calling those accessors
+without `confirm_complete` first would just be the harness abusing the API,
+and would say nothing about anyone's real code. Following the engine's call
+pattern is what makes a crash here worth acting on.
 
 ## Running it
 
