@@ -14,6 +14,12 @@ class IEngine {
 public:
 	virtual int ConnectToGlobalUser(int) = 0;
     virtual void DisconnectGlobalUser(int user_id) = 0;
+    // The real Steam interfaces have no virtual destructor - you never own one
+    // of these. cxx still emits UniquePtr and Vec drop glue for every opaque
+    // type it generates, and that glue makes clang warn about deleting an
+    // abstract class through a non-virtual destructor even though this example
+    // never runs it. One is cheaper than teaching the reader to ignore it.
+    virtual ~IEngine() {}
 };
 
 void* GetSteamEngine(); // return an IEngine*
