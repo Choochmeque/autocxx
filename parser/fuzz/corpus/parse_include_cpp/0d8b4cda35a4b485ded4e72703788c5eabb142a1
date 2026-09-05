@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("ns::take_bar")
+generate_pod!("ns::bar")

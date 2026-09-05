@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("Tree")
+generate!("View")
+generate!("saw")
+generate!("saw1")

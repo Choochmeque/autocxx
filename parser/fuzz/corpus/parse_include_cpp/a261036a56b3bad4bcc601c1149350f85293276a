@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("take_rust_reference")
+extern_rust_type!(RustType)

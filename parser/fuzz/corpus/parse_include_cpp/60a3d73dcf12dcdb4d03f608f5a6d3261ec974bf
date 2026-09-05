@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+name!(ffi2)
+extern_cpp_type!("A", crate::ffi::A)
+generate!("get_a")

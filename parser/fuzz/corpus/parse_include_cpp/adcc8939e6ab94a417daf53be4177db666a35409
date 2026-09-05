@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("do_risky_thing")
+throws!("do_risky_thing")

@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("bar")
+subclass!("Observer",MyObserver)

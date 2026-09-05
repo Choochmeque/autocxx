@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("take_foo")
+generate_pod!("foo")
+generate_pod!("foo_autocxx_hidden")

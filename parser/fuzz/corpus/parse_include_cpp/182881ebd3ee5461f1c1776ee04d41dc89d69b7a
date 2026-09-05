@@ -1,0 +1,12 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("register_observer")
+generate!("call_a")
+generate!("call_b")
+generate!("call_c")
+generate!("call_d")
+generate!("call_e")
+generate!("call_f")
+generate!("call_g")
+generate!("call_h")
+subclass!("TestObserver",MyTestObserver)

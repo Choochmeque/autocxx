@@ -1,0 +1,7 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("handle_a")
+generate!("create_a")
+extern_cpp_type!("A", crate::base::A)
+extern_cpp_type!("B", super::super::base::B)
+pod!("B")

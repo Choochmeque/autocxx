@@ -1,0 +1,4 @@
+#include "input.h"
+name!(ffi2)
+generate!("give_b")
+generate!("get_b")

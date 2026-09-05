@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate_ns!("A")
+safety!(unsafe_ffi)

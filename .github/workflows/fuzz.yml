@@ -1,0 +1,160 @@
+# Coverage-guided fuzzing of the `include_cpp!` directive parser. This is
+# deliberately not part of CI: a fuzz run is open-ended, so it goes on a
+# schedule (and on demand) rather than gating pull requests. See
+# `parser/fuzz/README.md` and https://github.com/google/autocxx/issues/1244.
+name: Fuzz
+
+on:
+  # Weekly, at a quiet hour, offset from the nightly CI cron.
+  schedule: [cron: "20 3 * * 0"]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: >-
+          Seconds to fuzz for. Use something small (60) for a smoke test that
+          just proves the target still builds and runs.
+        required: false
+        default: "900"
+
+permissions:
+  contents: read
+
+# One fuzz run at a time: they all read and write the same corpus cache.
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fuzz:
+    name: Fuzz the include_cpp! parser
+    runs-on: ubuntu-latest
+    # The fuzzing itself is capped at 3 hours below; the rest is toolchain
+    # install, build and cmin. Past this the job is stuck, not slow, and
+    # should be killed rather than left to the 6h default.
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-fuzz needs nightly: the sanitizer and coverage instrumentation
+      # it builds the target with are nightly-only rustc flags.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: parser/fuzz
+      # Pinned + --locked so the weekly run is reproducible (the Rust Fuzz
+      # Book's CI recommendation); bump deliberately.
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      # Deterministic, and deliberately its own step: `-runs=0` executes
+      # every committed seed exactly once with no mutation, so "a seed we
+      # committed no longer parses" fails here, plainly, instead of showing
+      # up as a crash somewhere in the middle of a campaign. It reads the
+      # checkout and writes nothing (338 inputs in under a second locally).
+      - name: Replay the committed seed corpus
+        working-directory: parser/fuzz
+        run: cargo fuzz run parse_include_cpp corpus/parse_include_cpp -- -runs=0
+
+      # The seed corpus is committed, so a run always has those inputs. This
+      # cache carries forward whatever the *previous* run discovered on top of
+      # them: the key is unique per run so every run saves a fresh entry, and
+      # the prefix restore-key picks up the most recent one.
+      - name: Corpus
+        uses: actions/cache@v4
+        with:
+          path: parser/fuzz/work-corpus/parse_include_cpp
+          key: fuzz-corpus-parse_include_cpp-${{ github.run_id }}
+          restore-keys: fuzz-corpus-parse_include_cpp-
+
+      - name: Fuzz
+        working-directory: parser/fuzz
+        env:
+          # Via the environment, not string interpolation, so that the
+          # dispatch input cannot inject shell.
+          DURATION: ${{ github.event.inputs.duration || '900' }}
+        run: |
+          case "$DURATION" in
+            '' | *[!0-9]*)
+              echo "duration must be a whole number of seconds" >&2
+              exit 1
+              ;;
+          esac
+          # That pattern still admits 0 (and 000), which libFuzzer reads as
+          # "no time limit" - the exact opposite of the quick smoke run
+          # somebody typing a small number is asking for.
+          if [ "$DURATION" -lt 1 ]; then
+            echo "duration must be at least 1 second" >&2
+            exit 1
+          fi
+          # Bound it: a typo'd huge value would otherwise hold the runner
+          # (and the concurrency slot) until the job timeout above.
+          if [ "$DURATION" -gt 10800 ]; then
+            echo "duration is capped at 10800 seconds (3 hours)" >&2
+            exit 1
+          fi
+          # Fuzz a WORK COPY, so the committed seed corpus stays untouched
+          # in the checkout - `cmin` below would otherwise rewrite tracked
+          # files - while the cache carries the work copy between runs.
+          # Seeds committed since the cache was written get added here.
+          # Entries are named by the SHA-1 of their contents, so a name that
+          # already exists is the same input and there is nothing to copy;
+          # anything else `cp` has to say about it is a real error and fails
+          # the step.
+          mkdir -p work-corpus/parse_include_cpp
+          for seed in corpus/parse_include_cpp/*; do
+            dest="work-corpus/parse_include_cpp/${seed##*/}"
+            [ -e "$dest" ] || cp "$seed" "$dest"
+          done
+          # -dict: the grammar is keyword-driven, so hand the mutator the
+          #   directive names rather than making it rediscover them byte by
+          #   byte.
+          # -max_len: the largest committed seed is 479 bytes. Directive
+          #   bodies are small; capping the length keeps mutation on inputs
+          #   that look like real ones.
+          # -timeout/-rss_limit_mb: this target parses a <=1KB string, so
+          #   seconds of CPU or gigabytes of memory mean a hang or runaway
+          #   allocation, which is a bug worth reporting rather than
+          #   something to sit through.
+          cargo fuzz run parse_include_cpp work-corpus/parse_include_cpp -- \
+            -dict=parse_include_cpp.dict \
+            -max_len=1024 \
+            -timeout=25 \
+            -rss_limit_mb=2048 \
+            -max_total_time="$DURATION"
+
+      # Belt and braces on the failure semantics. A single-process libFuzzer
+      # run exits non-zero on the first crash, so the step above already
+      # fails the job - but libFuzzer's fork mode (`-fork=N`, tempting on a
+      # multi-core runner) defaults to `-ignore_crashes=1`: it records the
+      # reproducer, carries on, and can exit 0 with a bug sitting in
+      # `artifacts/`. That is why this job does not use fork mode, and why a
+      # non-empty `artifacts/` fails outright if anyone ever adds it.
+      - name: Fail if any crashing input was recorded
+        working-directory: parser/fuzz
+        run: |
+          if [ -d artifacts/parse_include_cpp ] &&
+             [ -n "$(ls -A artifacts/parse_include_cpp)" ]; then
+            echo "fuzzing recorded crashing inputs:" >&2
+            ls -l artifacts/parse_include_cpp >&2
+            exit 1
+          fi
+
+      # Keep the cached corpus to the inputs that actually pull their weight,
+      # so it doesn't grow without bound from run to run.
+      - name: Minimize the corpus
+        working-directory: parser/fuzz
+        run: cargo fuzz cmin parse_include_cpp work-corpus/parse_include_cpp
+
+      # A crash means cargo-fuzz wrote the offending input to `artifacts/`;
+      # that file is the whole reproducer, so it needs to leave the runner.
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: parser/fuzz/artifacts/parse_include_cpp
+          if-no-files-found: ignore

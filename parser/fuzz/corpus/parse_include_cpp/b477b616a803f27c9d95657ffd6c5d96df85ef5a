@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+concrete!("Container<B>", ContainerOfB)
+generate!("B")

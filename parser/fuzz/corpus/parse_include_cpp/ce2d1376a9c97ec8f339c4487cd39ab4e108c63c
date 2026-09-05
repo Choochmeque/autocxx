@@ -1,0 +1,3 @@
+#include "input2.h"
+safety!(unsafe_ffi)
+generate!("get_hello")

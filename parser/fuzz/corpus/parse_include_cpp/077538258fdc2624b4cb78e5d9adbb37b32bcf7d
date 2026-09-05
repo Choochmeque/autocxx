@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("A::create")
+generate!("B::create")
+generate!("C")

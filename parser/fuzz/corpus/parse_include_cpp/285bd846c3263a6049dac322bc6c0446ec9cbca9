@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("A")
+generate!("B")
+generate!("take_A_B")
+generate!("take_A_C")

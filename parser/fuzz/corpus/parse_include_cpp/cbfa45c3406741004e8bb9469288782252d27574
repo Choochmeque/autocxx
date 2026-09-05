@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("A")
+generate!("reset_flags")
+generate!("was_new_called")
+generate!("was_delete_called")

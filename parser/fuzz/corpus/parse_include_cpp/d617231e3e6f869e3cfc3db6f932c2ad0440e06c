@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("gg")
+generate!("gg1")
+generate!("gg2")

@@ -1,0 +1,3 @@
+#include "input3.h"
+safety!(unsafe_ffi)
+generate!("get_goodbye")

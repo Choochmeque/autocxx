@@ -1,0 +1,2 @@
+#include "my_header.h"
+generate!("MyAPIFunction")

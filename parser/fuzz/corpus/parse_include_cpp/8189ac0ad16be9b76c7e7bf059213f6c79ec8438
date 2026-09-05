@@ -1,0 +1,3 @@
+#include "input.h"
+generate!("do_nothing")
+safety!(unsafe)

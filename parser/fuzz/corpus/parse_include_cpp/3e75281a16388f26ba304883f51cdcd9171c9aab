@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+block_constructors!("Blocked")
+rust_type!(Bar)
+extern_rust_function!(my_mod::my_function, fn my_function(a: i32) -> i32)
+generate!("Foo")

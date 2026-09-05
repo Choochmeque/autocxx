@@ -1,0 +1,9 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("Movable")
+generate!("Unmovable")
+generate!("take_movable")
+generate!("take_unmovable")
+generate!("copy_count")
+generate!("move_count")
+generate!("reset_counts")

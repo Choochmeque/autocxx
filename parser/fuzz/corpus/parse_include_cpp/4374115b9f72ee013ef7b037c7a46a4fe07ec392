@@ -1,0 +1,4 @@
+#include "foo.h"
+safety!(unsafe_ffi)
+generate!("take_A")
+generate!("A")

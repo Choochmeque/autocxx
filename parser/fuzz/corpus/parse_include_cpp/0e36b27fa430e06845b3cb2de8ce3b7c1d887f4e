@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("take_char16")
+generate!("take_char16_ref")

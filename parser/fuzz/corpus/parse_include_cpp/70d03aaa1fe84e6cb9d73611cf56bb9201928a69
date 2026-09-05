@@ -1,0 +1,4 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("make_shared_int")
+generate!("take_shared_int")

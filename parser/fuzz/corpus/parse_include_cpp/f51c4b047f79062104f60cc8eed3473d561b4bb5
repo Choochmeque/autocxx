@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+exclude_impls!()
+exclude_utilities!()
+generate!("A")

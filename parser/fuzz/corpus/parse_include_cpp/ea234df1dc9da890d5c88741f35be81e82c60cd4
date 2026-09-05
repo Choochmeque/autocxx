@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("shady::A")
+generate!("shady::take_a")
+generate!("hijack_count")

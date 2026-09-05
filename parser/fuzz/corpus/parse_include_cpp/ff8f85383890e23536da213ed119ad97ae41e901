@@ -1,0 +1,6 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("take_int")
+generate!("take_uint16")
+generate!("take_uint16_ref")
+generate!("take_us")

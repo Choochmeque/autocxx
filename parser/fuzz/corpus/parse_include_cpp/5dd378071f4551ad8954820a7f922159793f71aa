@@ -1,0 +1,5 @@
+#include "input.h"
+safety!(unsafe_ffi)
+generate!("NonPod")
+generate!("make_non_pod")
+generate!("call_n")
