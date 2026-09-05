@@ -14675,23 +14675,21 @@ fn test_virtual_methods() {
             int c() { return 2; }
         };
 
-        // TODO: currently this class cannot be detected as virtual as there
-        // is no metadata captured to show that this destructor is virtual
-        // uncommenting this (as well as corresponding sections below) gives a 
-        // 'instantiation of abstract class' error.
-        // class Partial5 : public Base {
-        // public:
-        //     ~Partial5() = 0;
+        // Abstract because of its own destructor, not because of anything it
+        // left unimplemented.
+        class Partial5 : public Base {
+        public:
+            ~Partial5() = 0;
 
-        //     int a() { return 0; }
+            int a() { return 0; }
 
-        //     void b(int) { }
-        //     void b(bool) { }
+            void b(int) { }
+            void b(bool) { }
 
-        //     int c() const { return 1; }
-        //     int c() { return 2; }
-        // };
-
+            int c() const { return 1; }
+            int c() { return 2; }
+        };
+        inline Partial5::~Partial5() {}
     "};
     let rs = quote! {
         static_assertions::assert_impl_all!(ffi::FullyDefined: moveit::CopyNew);
@@ -14699,7 +14697,7 @@ fn test_virtual_methods() {
         static_assertions::assert_not_impl_any!(ffi::Partial2: moveit::CopyNew);
         static_assertions::assert_not_impl_any!(ffi::Partial3: moveit::CopyNew);
         static_assertions::assert_not_impl_any!(ffi::Partial4: moveit::CopyNew);
-        // static_assertions::assert_not_impl_any!(ffi::Partial5: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::Partial5: moveit::CopyNew);
         let _c1 = ffi::FullyDefined::new().within_unique_ptr();
     };
     run_test(
@@ -14712,7 +14710,7 @@ fn test_virtual_methods() {
             "Partial2",
             "Partial3",
             "Partial4",
-            // "Partial5"
+            "Partial5",
         ],
         &[],
     );
@@ -15874,5 +15872,132 @@ fn test_elab_shadowed_type_via_unique_ptr() {
         rs,
         &["make_filedata", "read_filedata", "filedata"],
         &[],
+    );
+}
+
+#[test]
+fn test_pure_virtual_destructor_makes_class_abstract() {
+    // A pure virtual destructor is the whole of what makes this class
+    // abstract - it has no other pure virtual method - so nothing may
+    // construct one. The test passes if the generated bindings compile:
+    // before, we emitted a placement-new of a `PureDtorOnly` and C++ rejected
+    // it.
+    let hdr = indoc! {"
+        class PureDtorOnly {
+        public:
+            virtual ~PureDtorOnly() = 0;
+            int a() const { return 1; }
+        };
+        inline PureDtorOnly::~PureDtorOnly() {}
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::PureDtorOnly: moveit::CopyNew);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["PureDtorOnly"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["PureDtorOnly"],
+            &["new (autocxx_gen_this) PureDtorOnly"],
+        ))),
+        None,
+    );
+}
+
+#[test]
+fn test_pure_virtual_destructor_no_make_unique() {
+    let hdr = indoc! {"
+        class PureDtorNoNew {
+        public:
+            virtual ~PureDtorNoNew() = 0;
+            int a() const { return 1; }
+        };
+        inline PureDtorNoNew::~PureDtorNoNew() {}
+    "};
+    let rs = quote! {
+        let _ = ffi::PureDtorNoNew::new().within_unique_ptr();
+    };
+    run_test_expect_fail("", hdr, rs, &["PureDtorNoNew"], &[]);
+}
+
+#[test]
+fn test_impure_virtual_destructor_stays_concrete() {
+    // The other half of the rule: `virtual` alone doesn't make a destructor
+    // pure, and this class stays constructible.
+    let hdr = indoc! {"
+        class VirtualDtorOnly {
+        public:
+            virtual ~VirtualDtorOnly() {}
+            int a() const { return 1; }
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::VirtualDtorOnly: moveit::CopyNew);
+        let obj = ffi::VirtualDtorOnly::new().within_unique_ptr();
+        assert_eq!(obj.a(), autocxx::c_int(1));
+    };
+    run_test("", hdr, rs, &["VirtualDtorOnly"], &[]);
+}
+
+#[test]
+fn test_pure_virtual_destructor_derived_stays_concrete() {
+    // A pure virtual destructor doesn't make derived classes abstract the way
+    // any other pure virtual method would: every class gets a destructor of
+    // its own, so every derived class overrides it.
+    let hdr = indoc! {"
+        class PureDtorBase {
+        public:
+            virtual ~PureDtorBase() = 0;
+            virtual int a() const { return 1; }
+        };
+        inline PureDtorBase::~PureDtorBase() {}
+        class ConcreteDerived : public PureDtorBase {
+        public:
+            int a() const { return 2; }
+        };
+    "};
+    let rs = quote! {
+        let obj = ffi::ConcreteDerived::new().within_unique_ptr();
+        assert_eq!(obj.a(), autocxx::c_int(2));
+    };
+    run_test("", hdr, rs, &["PureDtorBase", "ConcreteDerived"], &[]);
+}
+
+#[test]
+fn test_subclass_of_class_with_pure_virtual_destructor() {
+    let hdr = indoc! {"
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+        virtual ~Observer() = 0;
+    };
+    inline Observer::~Observer() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            obs.borrow().foo();
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
     );
 }
