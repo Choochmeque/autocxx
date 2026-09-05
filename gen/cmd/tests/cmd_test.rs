@@ -280,6 +280,51 @@ fn test_gen_fixed_num() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The Rust we write out has to announce itself as machine-written to the tools
+/// which look for that, rustfmt among them. rustfmt only scans the first five
+/// lines for the `@generated` token and only honours it in a comment, so the
+/// marker has to open the file. It also has to name the autocxx which produced
+/// the file, so that a stale generated file can be recognised as stale.
+#[test]
+fn test_gen_rs_has_generated_marker() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    base_test(&tmp_dir, RsGenMode::Single, |_| {})?;
+    let rs = std::fs::read_to_string(tmp_dir.path().join("autocxx-ffi-default-gen.rs"))?;
+    let first_line = rs.lines().next().unwrap_or_default();
+    // The rest of the file is one enormous line of tokens, so quote only enough
+    // of it to see what went wrong.
+    let opening: String = first_line.chars().take(120).collect();
+    assert!(
+        first_line.starts_with("// ") && first_line.contains("@generated"),
+        "the generated Rust does not open with an @generated comment; it starts: {opening}"
+    );
+    // autocxx-gen pins autocxx-engine to its own version exactly, so our
+    // version is the version of the engine which wrote that file.
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        first_line.contains(version),
+        "the @generated marker does not name the autocxx version {version}; it starts: {opening}"
+    );
+    Ok(())
+}
+
+/// The marker must not smuggle a timestamp (or anything else which varies run
+/// to run) into the output: content-addressed build systems rebuild everything
+/// downstream of a generated file whose bytes changed, even if only a comment
+/// moved.
+#[test]
+fn test_gen_rs_is_reproducible() -> Result<(), Box<dyn std::error::Error>> {
+    let read_generated_rs = || -> Result<String, Box<dyn std::error::Error>> {
+        let tmp_dir = tempdir()?;
+        base_test(&tmp_dir, RsGenMode::Single, |_| {})?;
+        Ok(std::fs::read_to_string(
+            tmp_dir.path().join("autocxx-ffi-default-gen.rs"),
+        )?)
+    };
+    assert_eq!(read_generated_rs()?, read_generated_rs()?);
+    Ok(())
+}
+
 #[test]
 fn test_gen_preprocess() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_dir = tempdir()?;
