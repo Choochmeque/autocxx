@@ -48,7 +48,7 @@ use super::{
         fun::{FnPhase, PodAndDepAnalysis, ReceiverMutability},
         pod::PodAnalysis,
     },
-    api::{AnalysisPhase, Api, SubclassName, TypeKind},
+    api::{AnalysisPhase, Api, SubclassName, TypeKind, SUPER_FN_SUFFIX},
     convert_error::ErrorContextType,
     doc_attr::get_doc_attrs,
 };
@@ -69,6 +69,35 @@ struct ImplBlockDetails {
 struct TraitImplBlockDetails {
     item: TraitItem,
     key: TraitImplSignature,
+}
+
+/// Names the `_supers` trait item by which a subclass calls each of these
+/// methods' superclass implementations, in the same order as `methods`.
+///
+/// Ordinarily that's `foo_super` for `foo`, matching the peer class method it
+/// forwards to. But a superclass may perfectly well have a method called
+/// `foo_super` of its own, and then the `_methods` trait - which inherits from
+/// `_supers` - would carry two items of that name and neither could be called.
+/// So keep marking the name with `autocxx` until it's free of the superclass's
+/// own methods and of the names we've already handed out.
+///
+/// Both places which generate these names work from the same list of methods
+/// for a superclass, so they agree on the answer.
+fn super_fn_names(methods: &[SuperclassMethod]) -> Vec<Ident> {
+    let mut taken: HashSet<String> = methods.iter().map(|m| m.name.to_string()).collect();
+    methods
+        .iter()
+        .map(|m| {
+            let mut marks = String::new();
+            let mut candidate = format!("{}{}{}", m.name, marks, SUPER_FN_SUFFIX);
+            while taken.contains(&candidate) {
+                marks.push_str("_autocxx");
+                candidate = format!("{}{}{}", m.name, marks, SUPER_FN_SUFFIX);
+            }
+            taken.insert(candidate.clone());
+            make_ident(candidate).0
+        })
+        .collect()
 }
 
 fn get_string_items() -> Vec<Item> {
@@ -628,9 +657,10 @@ impl<'a> RsCodeGenerator<'a> {
             let supers = SubclassName::get_supers_trait_name(superclass).to_type_path();
             let methods_impls: Vec<ImplItem> = methods
                 .iter()
-                .filter(|m| !m.is_pure_virtual)
-                .map(|m| {
-                    let cpp_super_method_name =
+                .zip(super_fn_names(methods))
+                .filter(|(m, _)| !m.is_pure_virtual)
+                .map(|(m, trait_super_method_name)| {
+                    let peer_super_method_name =
                         SubclassName::get_super_fn_name(&Namespace::new(), &m.name.to_string())
                             .get_final_ident();
                     let mut params = m.params.clone();
@@ -644,9 +674,9 @@ impl<'a> RsCodeGenerator<'a> {
                     let param_names = m.param_names.iter().skip(1);
                     let unsafe_token = m.requires_unsafe.wrapper_token();
                     parse_quote! {
-                        #unsafe_token fn #cpp_super_method_name(#params) #ret {
+                        #unsafe_token fn #trait_super_method_name(#params) #ret {
                             use autocxx::subclass::CppSubclass;
-                            self.#peer_fn().#cpp_super_method_name(#(#param_names),*)
+                            self.#peer_fn().#peer_super_method_name(#(#param_names),*)
                         }
                     }
                 })
@@ -918,13 +948,12 @@ impl<'a> RsCodeGenerator<'a> {
         methods: Option<&Vec<SuperclassMethod>>,
     ) {
         if let Some(methods) = methods {
+            let supers_name = SubclassName::get_supers_trait_name(name).get_final_ident();
             let (supers, mains): (Vec<_>, Vec<_>) = methods
                 .iter()
-                .map(|method| {
+                .zip(super_fn_names(methods))
+                .map(|(method, super_id)| {
                     let id = &method.name;
-                    let super_id =
-                        SubclassName::get_super_fn_name(&Namespace::new(), &id.to_string())
-                            .get_final_ident();
                     let params = minisynize_punctuated(method.params.clone());
                     let param_names: Punctuated<Expr, Comma> =
                         Self::args_from_sig(&params).collect();
@@ -946,9 +975,13 @@ impl<'a> RsCodeGenerator<'a> {
                         let a: Option<TraitItem> = Some(parse_quote!(
                             #unsafe_token fn #super_id(#params) #ret_type;
                         ));
+                        // Spell out which trait's item this is. The `_methods`
+                        // trait inherits from the `_supers` one, so if the
+                        // superclass happens to have a method of its own by
+                        // this name, both would be in scope on `self` here.
                         let b: TraitItem = parse_quote!(
                             #unsafe_token fn #id(#params) #ret_type {
-                                self.#super_id(#param_names)
+                                #supers_name::#super_id(self, #param_names)
                             }
                         );
                         (a, b)
@@ -956,7 +989,6 @@ impl<'a> RsCodeGenerator<'a> {
                 })
                 .unzip();
             let supers: Vec<_> = supers.into_iter().flatten().collect();
-            let supers_name = SubclassName::get_supers_trait_name(name).get_final_ident();
             let methods_name = SubclassName::get_methods_trait_name(name).get_final_ident();
             if !supers.is_empty() {
                 output_mod_items.push(parse_quote! {

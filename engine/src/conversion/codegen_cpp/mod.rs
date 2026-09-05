@@ -769,7 +769,7 @@ impl<'a> CppCodeGenerator<'a> {
                 // from Rust on an ordinary lvalue, so it doesn't inherit the
                 // superclass method's ref-qualifier.
                 super_method.ref_qualifier = CppRefQualifier::None;
-                super_method.wrapper_function_name = SubclassName::get_super_fn_name(
+                super_method.wrapper_function_name = SubclassName::get_cpp_super_fn_name(
                     superclass.get_namespace(),
                     &method.fun.wrapper_function_name.to_string(),
                 )

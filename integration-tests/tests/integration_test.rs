@@ -16001,3 +16001,119 @@ fn test_subclass_of_class_with_pure_virtual_destructor() {
         }),
     );
 }
+
+/// A superclass whose own method is named like the `_super` helper autocxx
+/// generates for another of its methods. Both orders, because the collision
+/// is between a generated name and a C++ one and either may be seen first.
+fn subclass_super_name_clash_test(hdr: &str) {
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            // `foo` is overridden below and calls the superclass itself.
+            assert_eq!(obs.borrow().foo(), 11);
+            // `foo_super` is a method of the superclass in its own right, and
+            // is left to the trait's default body, which calls through to the
+            // superclass implementation in C++.
+            assert_eq!(obs.borrow().foo_super(), 2);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    // The peer class method keeps the plain name whatever the
+                    // superclass calls its own methods.
+                    self.peer().foo_super() + 10
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_method_named_like_super_helper() {
+    subclass_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual uint32_t foo_super() const { return 2; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+#[test]
+fn test_subclass_method_named_like_super_helper_reverse_order() {
+    subclass_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo_super() const { return 2; }
+        virtual uint32_t foo() const { return 1; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+#[test]
+fn test_two_superclasses_with_same_method_name() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class ObserverA {
+    public:
+        ObserverA() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual ~ObserverA() {}
+    };
+    class ObserverB {
+    public:
+        ObserverB() {}
+        virtual uint32_t foo() const { return 2; }
+        virtual ~ObserverB() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = MyObserverA::new_rust_owned(MyObserverA { cpp_peer: Default::default() });
+            assert_eq!(a.borrow().foo(), 1);
+            let b = MyObserverB::new_rust_owned(MyObserverB { cpp_peer: Default::default() });
+            assert_eq!(b.borrow().foo(), 2);
+        },
+        quote! {
+            subclass!("ObserverA",MyObserverA)
+            subclass!("ObserverB",MyObserverB)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::ObserverA_methods;
+            use ffi::ObserverB_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserverA {
+            }
+            impl ObserverA_methods for MyObserverA {
+            }
+            #[autocxx::subclass::subclass]
+            pub struct MyObserverB {
+            }
+            impl ObserverB_methods for MyObserverB {
+            }
+        }),
+    );
+}
