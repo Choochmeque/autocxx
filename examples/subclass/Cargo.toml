@@ -17,9 +17,14 @@ edition = "2021"
 [dependencies]
 cxx = "1.0.136"
 autocxx = { path = "../..", version = "0.30.0" }
-uwuify = "0.2.2"
 textwrap = "0.15"
 fastrand = "1.5.0"
+
+# src/uwu.rs only calls into uwuify on x86, where its SSE implementation
+# exists; every other architecture gets a stub. Keep the dependency itself
+# gated the same way so those builds don't drag it in.
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+uwuify = "0.2.2"
 
 [build-dependencies]
 autocxx-build = { path = "../../gen/build", version = "0.30.0" }
