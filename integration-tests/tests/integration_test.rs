@@ -19989,3 +19989,44 @@ fn test_reference_return_with_several_reference_parameters_declined() {
         "MultipleMutableInputReferences",
     );
 }
+
+/// The shape google/autocxx#1192 was reported in: a *namespaced* type autocxx
+/// cannot make sense of (there, `Eigen::Vector2d`), replaced by a Rust type of
+/// the user's own, declared POD, and held by value inside a struct the user
+/// asks to be POD. `test_issue_1192` covers the same thing without a
+/// namespace; the namespace is what makes the `pod!` name and the
+/// `extern_cpp_type!` name have to agree about a type nobody generated.
+#[test]
+fn test_extern_cpp_type_pod_in_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_eigen {
+            template <typename T, int N> struct fx_Matrix { T data[N]; };
+            typedef fx_Matrix<double, 2> fx_Vector2d;
+        }
+        struct fx_MyStruct {
+            fx_eigen::fx_Vector2d vec;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            extern_cpp_type!("fx_eigen::fx_Vector2d", crate::FxVector2d)
+            pod!("fx_eigen::fx_Vector2d")
+            generate_pod!("fx_MyStruct")
+        },
+        None,
+        None,
+        Some(quote! {
+            #[repr(transparent)]
+            pub struct FxVector2d(pub [f64; 2]);
+
+            unsafe impl cxx::ExternType for FxVector2d {
+                type Id = cxx::type_id!("fx_eigen::fx_Vector2d");
+                type Kind = cxx::kind::Trivial;
+            }
+        }),
+    );
+}
