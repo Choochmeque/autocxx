@@ -80,7 +80,28 @@ pub(crate) enum TraitSynthesis {
 }
 
 /// Details of a subclass constructor.
-/// TODO: zap this; replace with an extra API.
+///
+/// One synthesized [`Api::Function`] carries two separate things: the
+/// bridge-visible wrapper Rust calls, and - in `cpp_impl` - the peer class's
+/// own C++ constructor. The two are consumed independently: the C++ codegen's
+/// `add_needs` collects `cpp_impl` into the constructors it writes into the
+/// peer class, and generates the wrapper separately, while the Rust codegen's
+/// `find_trivially_constructed_subclasses` reads `is_trivial` to decide which
+/// subclasses get a `CppPeerConstructor` impl. Neither uses what the other
+/// does.
+///
+/// The tidier shape is a separate [`Api`] variant for the peer's constructor.
+/// The cost of one is not in the variant itself. Some of it the compiler
+/// asks for, at every exhaustive match over [`Api`] - `Api::name_info`,
+/// `error_reporter::convert_apis`, `check_names`,
+/// `RsCodeGenerator::generate_rs_for_api`. The rest it doesn't: both
+/// `HasDependencies::deps` impls and `needs_cpp_codegen` fall through to a
+/// default, so a variant nobody remembered to add there is silently one with
+/// no dependencies and no C++ to generate. That is worth paying once, as part
+/// of a broader cleanup of how synthesized APIs are represented, rather than
+/// for this one struct.
+///
+/// Decision: this stays as it is until that cleanup happens.
 #[derive(Clone, Debug)]
 pub(crate) struct SubclassConstructorDetails {
     pub(crate) subclass: SubclassName,

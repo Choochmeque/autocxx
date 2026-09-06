@@ -305,7 +305,7 @@ pub fn validate_ident_ok_for_rust(label: &CppOriginalName) -> Result<(), Invalid
     validate_str_ok_for_rust(label.for_validation())
 }
 
-fn validate_str_ok_for_rust(label: &str) -> Result<(), InvalidIdentError> {
+pub(crate) fn validate_str_ok_for_rust(label: &str) -> Result<(), InvalidIdentError> {
     let id = make_ident(label);
     syn::parse2::<syn::Ident>(id.into_token_stream())
         .map_err(|_| InvalidIdentError::ReservedName(label.to_string()))

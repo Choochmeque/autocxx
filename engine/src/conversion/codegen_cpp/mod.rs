@@ -29,7 +29,7 @@ use crate::minisyn::Ident;
 use super::{
     analysis::{
         fun::{
-            function_wrapper::{CppFunction, CppFunctionBody},
+            function_wrapper::{CppFunction, CppFunctionBody, RECEIVER_ARG_NAME},
             FnPhase, PodAndDepAnalysis, SubclassAnalysis,
         },
         pod::PodAnalysis,
@@ -466,14 +466,9 @@ impl<'a> CppCodeGenerator<'a> {
         };
         let get_arg_name = |counter: usize| -> String {
             if is_a_method && counter == 0 {
-                // For method calls that we generate, the first
-                // argument name needs to be such that we recognize
-                // it as a method in the second invocation of
-                // bridge_converter after it's flowed again through
-                // bindgen.
-                // TODO this may not be the case any longer. We
-                // may be able to remove this.
-                "autocxx_gen_this".to_string()
+                // The receiver, under the name the `cxx::bridge` declaration
+                // of this same function gives it - see `RECEIVER_ARG_NAME`.
+                RECEIVER_ARG_NAME.to_string()
             } else {
                 format!("arg{counter}")
             }

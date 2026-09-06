@@ -407,13 +407,52 @@ impl IncludeCppEngine {
             .raw_line(raw_line)
             .every_module_raw_line(all_module_raw_line)
             .generate_private_functions(true)
-            .layout_tests(false); // TODO revisit later
+            // Off, and staying off. Turning them on was tried in fork PR #72
+            // (CI run 34049300179), where every test and examples leg failed,
+            // for two reasons.
+            //
+            // bindgen writes each assertion as `const _: () = { ... }`, and an
+            // item named `_` used to crash the error-stub generator. That part
+            // is fixed - see `ErrorContextType::is_declarable` - but it was
+            // never the interesting failure.
+            //
+            // The interesting one is that the assertions are correct and fire
+            // anyway, on the types autocxx hands bindgen a substitute for.
+            // `known_types` feeds bindgen a `replaces=` prelude in which
+            // `std::vector` and `std::string` are one pointer each; bindgen
+            // measures the real C++ type - 24 bytes for a `std::vector<int>` -
+            // and Rust is left holding the 8-byte stand-in, as is every type
+            // with such a member. The assertions worth having are the ones on
+            // everything else, because a non-POD type's Rust representation is
+            // `#[repr(transparent)]` around the bindgen struct, so bindgen's
+            // layout is the layout Rust uses for it and a wrong one is the
+            // unsoundness `codegen_rs::non_pod_struct` warns about. bindgen
+            // skips an assertion only for types it decided were opaque itself,
+            // and `layout_tests` is one global switch, so there is no asking
+            // for the second set without the first.
+            .layout_tests(false);
 
         // 3. Passes allowlist and other options to the bindgen::Builder equivalent
         //    to --output-style=cxx --allowlist=<as passed in>
         if let Some(allowlist) = self.config.bindgen_allowlist() {
             for a in allowlist {
-                // TODO - allowlist type/functions/separately
+                // One name, every kind of item bearing it. That is what
+                // `generate!` means: the book tells users to write one for
+                // "every *type* or *function*" they want, and never to say
+                // which. Nor could they - `AllowlistEntry` distinguishes an
+                // item from a namespace and nothing else, so the kind of an
+                // item is not something the directive language can carry.
+                // Saying it would take new syntax (`generate_type!`,
+                // `generate_function!`) or a discovery pass to tell the user
+                // what kinds exist under a name before they choose.
+                //
+                // Decision: allowlisting stays coarse. What that costs is that
+                // where C++ really does declare more than one thing under one
+                // name - `struct stat` and a `stat` variable, say - the
+                // directive asks for all of them, and the user has no way to
+                // say which they meant. `ApiVec::push` settles it instead: the
+                // type keeps the name, a function of that name is refiled as a
+                // stub under an invented one, and a variable of it is dropped.
                 builder = builder
                     .allowlist_type(&a)
                     .allowlist_function(&a)

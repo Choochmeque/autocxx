@@ -22667,3 +22667,40 @@ fn test_subclass_virtual_returning_const_rvalue_reference() {
         }),
     );
 }
+
+#[test]
+fn test_generated_method_names_its_receiver_the_same_in_cpp_and_rust() {
+    // A method needing a C++ wrapper - here because it returns a non-POD by
+    // value - is written twice: once as the C++ function autocxx generates,
+    // and once as the `cxx::bridge` declaration of that same function. Both
+    // name the receiver from `RECEIVER_ARG_NAME`, which is what stops the two
+    // drifting apart into separate literals again. The spelling below is that
+    // constant's value, so change them together.
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Bob {
+        public:
+            Bob() : a(0) {}
+            Bob(const Bob&) = default;
+            Bob plus(uint32_t b) const { Bob r; r.a = a + b; return r; }
+            uint32_t get() const { return a; }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob::new().within_unique_ptr();
+        assert_eq!(b.plus(3).within_unique_ptr().get(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Bob"], &[], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(&["autocxx_gen_this"], &[])),
+            make_string_finder(vec!["autocxx_gen_this :".to_string()]),
+        ])),
+        None,
+    );
+}
