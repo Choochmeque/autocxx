@@ -16276,6 +16276,54 @@ fn test_issue_1239() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
+/// Upstream #1239 again, for the kind of method whose wrapper symbol really
+/// could collide. An ordinary method needs no wrapper, so the test above
+/// exercises a name cxx derives per class; a static method does need one, and
+/// its name is minted by the same code that minted the constructor wrapper
+/// #1229 was about.
+///
+/// The first time a bridge sees a given short name it uses it bare, so both
+/// bridges here call their static method `foo` at that stage - exactly the
+/// situation which gave #1229 two definitions of
+/// `cxxbridge1$new_autocxx_autocxx_wrapper`. What separates them now is the
+/// per-bridge hash `IncludeCppConfig::uniquify_name_per_mod` appends, which
+/// every wrapper-needing function goes through, not just constructors.
+#[test]
+fn test_issue_1239_static_methods() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    struct fx_Thing2 {
+        static uint32_t foo() { return 15; }
+    };
+
+    struct fx_Item2 {
+        static uint32_t foo() { return 16; }
+    };
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            name!(thing2)
+            safety!(unsafe)
+            generate!("fx_Thing2")
+        }
+        autocxx::include_cpp! {
+            #hexathorpe include "input.h"
+            name!(item2)
+            safety!(unsafe)
+            generate!("fx_Item2")
+        }
+
+        fn main() {
+            assert_eq!(thing2::fx_Thing2::foo(), 15);
+            assert_eq!(item2::fx_Item2::foo(), 16);
+        }
+    };
+
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
 /// The C++ side of upstream #1265: a class whose only member is a
 /// `std::string`, i.e. a type that is emphatically not trivially relocatable.
 fn issue_1265_header() -> &'static str {
