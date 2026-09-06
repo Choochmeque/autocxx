@@ -12,7 +12,10 @@ use crate::{
     conversion::{
         analysis::tdef::TypedefPhase,
         api::{Api, TypedefKind},
-        type_helpers::{is_pointer_like, unwrap_bitfield, unwrap_function_pointer},
+        type_helpers::{
+            array_element_type, is_pointer_like, unwrap_bitfield, unwrap_function_pointer,
+            unwrap_has_opaque,
+        },
     },
     types::{Namespace, QualifiedName},
 };
@@ -405,8 +408,9 @@ impl ByValueChecker {
 
     /// This is a miniature version of the analysis in `super::get_struct_field_types`.
     /// It would be nice to unify them. However, this version only cares about spotting
-    /// fields which may be non-POD, so can largely concern itself with just `Type::Path`
-    /// fields.
+    /// fields which may be non-POD, so can largely concern itself with the type a
+    /// field names - through any number of array dimensions, since an array holds
+    /// its elements by value.
     fn get_field_types(def: &ItemStruct) -> Vec<QualifiedName> {
         let mut results = Vec::new();
         for f in &def.fields {
@@ -416,30 +420,73 @@ impl ByValueChecker {
             {
                 // Bytes bindgen inserted to reproduce the C++ layout. They
                 // hold nothing, so they neither block POD-ness nor depend on
-                // any type we'd have to settle first - which matters, because
-                // their type is a blob wrapped in `__bindgen_marker_Opaque`
-                // and we'd otherwise report it as an unknown dependency.
+                // any type we'd have to settle first. Say so by name rather
+                // than by type: what the field is for does not depend on which
+                // shape bindgen chose to write the padding out in, and it has
+                // written it as a blob and as a plain byte array at different
+                // times.
                 continue;
             }
-            let fty = &f.ty;
-            if let Type::Path(p) = fty {
-                if unwrap_bitfield(p).is_some() {
-                    // A bitfield allocation unit is a byte array with
-                    // accessors, so likewise.
-                    continue;
+            // `T arr[N]` holds N of `T` by value, so `T` decides whether the
+            // field can be POD exactly as it would for a plain field of it -
+            // with one exception, below.
+            let field_is_array = matches!(f.ty, Type::Array(_));
+            match array_element_type(&f.ty) {
+                Type::Path(p) => {
+                    if unwrap_bitfield(p).is_some() {
+                        // A bitfield allocation unit is a byte array with
+                        // accessors, so likewise.
+                        continue;
+                    }
+                    if unwrap_function_pointer(p).is_some() {
+                        // A C function pointer, which bindgen writes as
+                        // `Option<unsafe extern "C" fn(..)>`. Copying the field
+                        // copies a pointer, so it neither blocks POD-ness nor
+                        // names a type we have to settle first - and the name it
+                        // does bear, `std::option::Option`, is one we know nothing
+                        // about. See google/autocxx#1494.
+                        continue;
+                    }
+                    if field_is_array && unwrap_has_opaque(p).is_some() {
+                        // An array of a type bindgen could not name, and so
+                        // replaced by a blob of bytes of the right size and
+                        // alignment. Arrays were invisible to this walk
+                        // altogether until it learned to follow them, so an
+                        // array of a blob has always been accepted here, and
+                        // `test_array_of_hidden_type_is_still_allowed_in_a_struct_field`
+                        // pins that. A blob written as a plain field has always
+                        // been refused, because the marker's name is one this
+                        // knows nothing about.
+                        //
+                        // Those two answers disagree, and reconciling them is
+                        // not a question about arrays. A small blob is unwrapped
+                        // to the integer of the same width, so making a POD of
+                        // one hands safe Rust a writable field of a type whose
+                        // C++ original may accept fewer values than the integer
+                        // does - `bool` being the sharp case. Deciding whether
+                        // to refuse both forms is therefore a soundness question
+                        // about blobs, and is left exactly as it was rather than
+                        // being settled as a side effect of following arrays.
+                        continue;
+                    }
+                    results.push(QualifiedName::from_type_path(p));
                 }
-                if unwrap_function_pointer(p).is_some() {
-                    // A C function pointer, which bindgen writes as
-                    // `Option<unsafe extern "C" fn(..)>`. Copying the field
-                    // copies a pointer, so it neither blocks POD-ness nor
-                    // names a type we have to settle first - and the name it
-                    // does bear, `std::option::Option`, is one we know nothing
-                    // about. See google/autocxx#1494.
-                    continue;
-                }
-                results.push(QualifiedName::from_type_path(p));
+                // A pointer. Copying the field copies the pointer, whatever it
+                // points at, so it neither blocks POD-ness nor names a type we
+                // have to settle first. A C++ reference reaches us as a pointer
+                // wrapped in `__bindgen_marker_Reference`, which is a path and
+                // so goes through the arm above.
+                Type::Ptr(_) => {}
+                // Anything else contributes nothing. The only other shape
+                // `TypeConverter::convert_type` accepts is a Rust reference,
+                // which bindgen does not write for a field - it writes a
+                // pointer inside `__bindgen_marker_Reference`, which is a path
+                // and goes through the arm above - so in practice nothing
+                // reaches here. A shape that did would be permitted into a POD
+                // rather than refused, which is why the two arms above are
+                // written out rather than folded into this one.
+                _ => {}
             }
-            // TODO handle anything else which bindgen might spit out, e.g. arrays?
         }
         results
     }
@@ -715,6 +762,94 @@ mod tests {
         let mut order = ingest_order(&apis);
         order.sort();
         assert_eq!(order, vec!["A", "B"]);
+    }
+
+    /// An array of a POD struct is as POD as one of it, and asking for the
+    /// holder makes the element type POD in turn - otherwise the holder would
+    /// have a field of a type cxx treats as opaque.
+    #[test]
+    fn test_array_of_struct_makes_element_pod() {
+        let mut bvc = ByValueChecker::new();
+        let inner: ItemStruct = parse_quote! {
+            struct Inner {
+                a: u32,
+            }
+        };
+        let inner_id = ty_from_ident(&inner.ident);
+        bvc.ingest_struct(&inner, &Namespace::new());
+        let outer: ItemStruct = parse_quote! {
+            struct Outer {
+                arr: [Inner; 4],
+                b: i64,
+            }
+        };
+        let outer_id = ty_from_ident(&outer.ident);
+        bvc.ingest_struct(&outer, &Namespace::new());
+        bvc.satisfy_requests(vec![outer_id.clone()]).unwrap();
+        assert!(bvc.is_pod(&outer_id));
+        assert!(bvc.is_pod(&inner_id));
+    }
+
+    /// An array of something which can't be held by value in Rust makes the
+    /// struct holding it just as unsafe as a plain field of it would. The
+    /// element type has to be spelled the way the known-types database does,
+    /// or the refusal would come from not recognising the name at all and the
+    /// test would pass for any element type whatsoever.
+    #[test]
+    fn test_array_of_cxxstring() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                a: [cxx::CxxString; 4],
+                b: i64,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("isn't safe to be POD"),
+            "should be refused for being unsafe, not for being unknown, was: {err}"
+        );
+    }
+
+    /// C++ nests arrays for `T arr[2][3]`, so the walk has to peel off however
+    /// many dimensions there are rather than just the one.
+    #[test]
+    fn test_array_of_arrays_of_cxxstring() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                a: [[cxx::CxxString; 3]; 2],
+                b: i64,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("isn't safe to be POD"),
+            "should be refused for being unsafe, not for being unknown, was: {err}"
+        );
+    }
+
+    /// The element type of an array is a dependency for ordering purposes too,
+    /// so a struct holding an array of one defined after it still has to be
+    /// ingested second.
+    #[test]
+    fn test_struct_holding_array_of_one_defined_after_it() {
+        let mut apis = ApiVec::<TypedefPhase>::new();
+        apis.push(struct_api(parse_quote! {
+            struct Outer {
+                inner: [Inner; 4],
+            }
+        }));
+        apis.push(struct_api(parse_quote! {
+            struct Inner {
+                a: u32,
+            }
+        }));
+        assert_eq!(ingest_order(&apis), vec!["Inner", "Outer"]);
     }
 
     /// A bitfield allocation unit is a byte array with accessors, so it
