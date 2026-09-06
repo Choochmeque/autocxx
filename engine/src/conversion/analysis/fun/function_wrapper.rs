@@ -294,4 +294,17 @@ pub(crate) struct CppFunction {
     /// [`CppRefQualifier::None`] in every other case; autocxx never introduces
     /// a ref-qualifier which wasn't in the original C++.
     pub(crate) ref_qualifier: CppRefQualifier,
+    /// Whether this is a subclass peer's override of a superclass virtual
+    /// method, and so is declared `override`.
+    ///
+    /// Every part of the signature is worked out from conversions rather than
+    /// copied from the superclass, so a mistake in any of them yields a
+    /// well-formed method which simply overrides nothing - it compiles, it is
+    /// never called, and the superclass's own implementation runs instead.
+    /// `override` turns that silence into a compile error. It goes only on the
+    /// in-class declaration; C++ forbids it on an out-of-line definition.
+    ///
+    /// False for the peer's `_super` helper, which is a new method of its own
+    /// rather than an override, and for every function outside a peer class.
+    pub(crate) is_virtual_override: bool,
 }

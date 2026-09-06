@@ -535,7 +535,17 @@ impl<'a> CppCodeGenerator<'a> {
             CppRefQualifier::LValue => " &",
             CppRefQualifier::RValue => " &&",
         };
-        let declaration = format!("{ret_type} {name}({args}){constness}{ref_qualifier}");
+        // Only ever non-empty for a subclass peer's override of a superclass
+        // virtual method - see `CppFunction::is_virtual_override`. It belongs
+        // on the declaration alone; C++ rejects it on the out-of-line
+        // definition below.
+        let override_keyword = if details.is_virtual_override {
+            " override"
+        } else {
+            ""
+        };
+        let declaration =
+            format!("{ret_type} {name}({args}){constness}{ref_qualifier}{override_keyword}");
         let qualification = if let Some(qualification) = &details.qualification {
             format!("{}::", qualification.to_cpp_name())
         } else {
@@ -824,8 +834,11 @@ impl<'a> CppCodeGenerator<'a> {
                 super_method.pass_obs_field = false;
                 // `super_foo` is a new method on the subclass which we call
                 // from Rust on an ordinary lvalue, so it doesn't inherit the
-                // superclass method's ref-qualifier.
+                // superclass method's ref-qualifier - nor its `override`, since
+                // it overrides nothing and only shares a shape with the method
+                // that does.
                 super_method.ref_qualifier = CppRefQualifier::None;
+                super_method.is_virtual_override = false;
                 // Named during analysis, where the cxx bridge was given the
                 // same name to call it by.
                 super_method.wrapper_function_name = super_fn_name.clone();

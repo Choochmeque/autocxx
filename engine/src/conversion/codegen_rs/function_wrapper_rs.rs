@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use proc_macro2::TokenStream;
-use syn::{Expr, Type, TypePtr};
+use syn::{Expr, Path, Type, TypePtr};
 
 use crate::{
     conversion::analysis::fun::function_wrapper::{RustConversionType, TypeConversionPolicy},
@@ -32,6 +32,50 @@ pub(super) enum RustParamConversion {
 }
 
 impl TypeConversionPolicy {
+    /// How this parameter crosses in the direction opposite to the one
+    /// [`Self::rust_conversion`] describes - from C++ into Rust, which is what
+    /// a `subclass!` override is called in.
+    ///
+    /// `None` means the parameter arrives in Rust as whatever the bridge says,
+    /// and there is nothing to undo. That is every conversion but the
+    /// reference wrappers of `ReferencesWrappedAllFunctionsSafe`: those turn a
+    /// C++ reference into a pointer on the way out, so on the way in the
+    /// pointer has to become a wrapper again, or the Rust which implements the
+    /// override would be handed a raw pointer by a mode whose whole purpose is
+    /// not to.
+    ///
+    /// The wrapper is the lifetime-free `autocxx::CppRef` rather than a
+    /// `CppLtRef`: there is no Rust value here for a borrow to be tied to, only
+    /// a reference C++ chose to pass, and its validity is C++'s promise for the
+    /// duration of the call.
+    ///
+    /// Returns the type the parameter arrives as, and the path whose `from_ptr`
+    /// makes one out of what the bridge hands over.
+    pub(super) fn inverse_rust_conversion(&self) -> Option<(Type, Path)> {
+        match self.rust_conversion {
+            RustConversionType::FromReferenceWrapperToPointer => {
+                let (is_mut, ty) = match self.cxxbridge_type() {
+                    Type::Ptr(TypePtr {
+                        mutability, elem, ..
+                    }) => (mutability.is_some(), elem.as_ref()),
+                    _ => panic!("Not a pointer"),
+                };
+                Some(if is_mut {
+                    (
+                        parse_quote! { autocxx::CppMutRef<#ty> },
+                        parse_quote! { autocxx::CppMutRef },
+                    )
+                } else {
+                    (
+                        parse_quote! { autocxx::CppRef<#ty> },
+                        parse_quote! { autocxx::CppRef },
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn rust_conversion(&self, var: Expr, counter: &mut usize) -> RustParamConversion {
         match self.rust_conversion {
             RustConversionType::None => RustParamConversion::Param {

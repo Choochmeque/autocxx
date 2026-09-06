@@ -1652,6 +1652,7 @@ impl<'a> FnAnalyzer<'a> {
                 // Our wrapper is a free function which calls the method on an
                 // lvalue, so it never needs a ref-qualifier of its own.
                 ref_qualifier: CppRefQualifier::None,
+                is_virtual_override: false,
             })
         } else {
             None

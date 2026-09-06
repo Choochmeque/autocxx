@@ -16,7 +16,7 @@ use syn::{
 use crate::types::{make_ident, Namespace, QualifiedName};
 use crate::{
     minisyn::{
-        Attribute, FnArg, Ident, ItemConst, ItemEnum, ItemStruct, ItemType, Pat, ReturnType, Type,
+        Attribute, FnArg, Ident, ItemConst, ItemEnum, ItemStruct, ItemType, ReturnType, Type,
         Visibility,
     },
     parse_callbacks::CppOriginalName,
@@ -30,7 +30,7 @@ pub(crate) use autocxx_bindgen::callbacks::Visibility as CppVisibility;
 
 use super::{
     analysis::fun::{
-        function_wrapper::{CppFunction, CppFunctionBody, CppFunctionKind},
+        function_wrapper::{CppFunction, CppFunctionBody, CppFunctionKind, TypeConversionPolicy},
         ReceiverMutability,
     },
     convert_error::{ConvertErrorWithContext, ErrorContext},
@@ -97,7 +97,11 @@ pub(crate) struct SuperclassMethod {
     pub(crate) name: Ident,
     pub(crate) receiver: QualifiedName,
     pub(crate) params: Punctuated<FnArg, Comma>,
-    pub(crate) param_names: Vec<Pat>,
+    /// How each of `params` was converted for the Rust-calls-C++ direction,
+    /// receiver included, so that codegen can undo the conversion for the
+    /// direction a `subclass!` override is really called in. See
+    /// [`TypeConversionPolicy::inverse_rust_conversion`].
+    pub(crate) param_conversions: Vec<TypeConversionPolicy>,
     pub(crate) ret_type: ReturnType,
     pub(crate) receiver_mutability: ReceiverMutability,
     pub(crate) requires_unsafe: UnsafetyNeeded,
