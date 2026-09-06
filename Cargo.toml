@@ -28,17 +28,20 @@ resolver = "2"
 [features]
 default = ["c-type-vectors"]
 arbitrary_self_types = []
-# Declares `std::vector` glue for the `autocxx::c_*` newtypes, so that a
-# `std::vector<int>` (or `long`, `short`, `long long`, signed or unsigned) can
-# cross a bridge - see google/autocxx#422. cxx implements `VectorElement` only
-# for the widths it knows natively, and the orphan rule stops a generated
-# bridge implementing it for our types, so this crate has to.
+# Declares `std::vector`, `std::unique_ptr`, `std::shared_ptr` and
+# `std::weak_ptr` glue for the `autocxx::c_*` newtypes, so that a
+# `std::vector<int>` or `std::unique_ptr<int>` (or `long`, `short`,
+# `long long`, signed or unsigned) can cross a bridge - see google/autocxx#422.
+# cxx implements `VectorElement` and `UniquePtrTarget` only for the widths it
+# knows natively, and the orphan rule stops a generated bridge implementing
+# them for our types, so this crate has to. The name predates the smart
+# pointers and is kept for compatibility.
 #
 # It is what makes this crate compile C++ of its own, which is why it can be
 # turned off: without it nothing here needs `cxx-build`, which suits a
 # parse-only, pre-generated or non-Cargo consumer. Turning it off breaks
-# nothing that doesn't use such a vector; a binding that does fails to compile
-# with cxx's own "the trait `VectorElement` is not implemented for
+# nothing that doesn't use such a container; a binding that does fails to
+# compile with cxx's own "the trait `VectorElement` is not implemented for
 # `autocxx::c_int`", which names what to turn back on.
 c-type-vectors = ["dep:cxx-build"]
 

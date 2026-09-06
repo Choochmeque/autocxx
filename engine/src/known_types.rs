@@ -382,12 +382,24 @@ impl TypeDatabase {
             .unwrap_or(true)
     }
 
+    /// Whether cxx can accommodate `ty` inside a `std::unique_ptr`.
+    ///
+    /// cxx implements [`cxx::memory::UniquePtrTarget`] for `CxxString`,
+    /// `CxxVector<T>` and the opaque C++ types a bridge declares - and it
+    /// rejects, in its own macro, any `unique_ptr` whose target is one of its
+    /// built-in atoms, so `UniquePtr<u32>` is out of reach from here.
+    /// [`Behavior::CVariableLengthByValue`] types - the `autocxx::c_int`
+    /// family - are not atoms as far as cxx is concerned, so the explicit shim
+    /// trait impls this crate writes in `autocxx::c_type_vectors` make them
+    /// work like any other named type. See google/autocxx#422.
     pub(crate) fn permissible_within_unique_ptr(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
                 matches!(
                     x.behavior,
-                    Behavior::CxxString | Behavior::CxxContainerVector
+                    Behavior::CxxString
+                        | Behavior::CxxContainerVector
+                        | Behavior::CVariableLengthByValue
                 )
             })
             .unwrap_or(true)

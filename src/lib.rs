@@ -669,7 +669,7 @@ unsafe impl cxx::ExternType for c_void {
     type Kind = cxx::kind::Trivial;
 }
 
-/// The `std::vector` glue for the `c_*` newtypes above.
+/// The `std::vector` and smart pointer glue for the `c_*` newtypes above.
 ///
 /// Lives in its own file because `cxx-build` reads the source to find the
 /// bridge, and honours any `#[cfg]` it finds there - so the feature gate has

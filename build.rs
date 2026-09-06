@@ -18,10 +18,11 @@ fn main() {
     build_c_type_vector_glue();
 }
 
-/// Compile the C++ half of the `std::vector` shims which
-/// `src/c_type_vectors.rs` declares for the `autocxx::c_*` newtypes. See that
-/// module for why this crate, rather than each generated bridge, is the one
-/// that has to do it. See google/autocxx#422.
+/// Compile the C++ half of the `std::vector`, `std::unique_ptr`,
+/// `std::shared_ptr` and `std::weak_ptr` shims which `src/c_type_vectors.rs`
+/// declares for the `autocxx::c_*` newtypes. See that module for why this
+/// crate, rather than each generated bridge, is the one that has to do it.
+/// See google/autocxx#422.
 #[cfg(feature = "c-type-vectors")]
 fn build_c_type_vector_glue() {
     println!("cargo:rerun-if-changed=src/c_type_vectors.rs");

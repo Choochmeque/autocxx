@@ -194,14 +194,17 @@ fn test_return_big_ints() {
 /// Still gated on `cxx`. `cxx::UniquePtr<T>` needs `T: UniquePtrTarget`, and
 /// that trait's methods bottom out in `extern "C"` shims named
 /// `cxxbridge1$unique_ptr$...`, which only the `#[cxx::bridge]` macro can emit.
-/// `cxx` therefore implements it for exactly three things: `CxxString`,
-/// `CxxVector<T>`, and the opaque C++ types a bridge declares. A primitive is
-/// none of those, and no autocxx-side code could implement the trait for one
-/// without those symbols existing.
+///
+/// For a named type - `autocxx::c_int`, say - that macro will emit them on
+/// request, which is how `test_give_up_ctype` below works. It will not do so
+/// for a `u32`: `check_type_unique_ptr` in cxxbridge-macro turns down any
+/// `unique_ptr` whose target is one of cxx's own built-in atoms, and `u32` is
+/// one. There is no request to make and no impl to write, so this one is out
+/// of reach from here however the shims are arranged.
 ///
 /// So we reject the function up front rather than emit a bridge that will not
-/// compile: `known_types::permissible_within_unique_ptr` allows only
-/// `CxxString` and `CxxVector`, and this test dies as
+/// compile: `known_types::permissible_within_unique_ptr` turns down the
+/// built-in widths, and this test dies as
 /// `DidNotGenerateAnythingUsable("give_up", InvalidTypeForCppPtr(u32))`.
 ///
 /// Nobody has filed a `cxx` issue for `UniquePtr` of a primitive; the nearest
@@ -226,17 +229,13 @@ fn test_give_up_int() {
     run_test(cxx, hdr, rs, &["give_up"], &[]);
 }
 
-/// Still gated on `cxx`, for the reason given on `test_give_up_int` directly
-/// above: `UniquePtrTarget` cannot be implemented outside a `#[cxx::bridge]`,
-/// so it doesn't matter that `autocxx::c_int` is ours to write impls for.
-///
-/// The ignore reason this test used to carry - that we don't yet implement
-/// `UniquePtr` for `autocxx::c_int` and friends - read as if the work were on
-/// our side. It isn't. What would remove the whole `c_int` family, and with it
-/// this test and google/autocxx#422, is dtolnay/cxx#874, which teaches `cxx`
-/// the variable-width C numeric types natively. It is open and unmerged.
+/// A `std::unique_ptr<int>`, which is to say of `autocxx::c_int`. Unlike
+/// `test_give_up_int` directly above, this one is ours to make work: `c_int`
+/// is a named type rather than one of cxx's built-in atoms, so cxx's macro
+/// will synthesize `UniquePtrTarget` for it given an explicit
+/// `impl UniquePtr<c_int> {}` - which `autocxx::c_type_vectors` writes, in
+/// this crate, once for everybody. See google/autocxx#422.
 #[test]
-#[ignore]
 fn test_give_up_ctype() {
     let cxx = indoc! {"
         std::unique_ptr<int> give_up() {
@@ -248,9 +247,39 @@ fn test_give_up_ctype() {
         std::unique_ptr<int> give_up();
     "};
     let rs = quote! {
-        assert_eq!(ffi::give_up().as_ref().unwrap(), autocxx::c_int(12));
+        assert_eq!(*ffi::give_up().as_ref().unwrap(), autocxx::c_int(12));
     };
     run_test(cxx, hdr, rs, &["give_up"], &[]);
+}
+
+/// The other two C++ smart pointers of a plain C integer. One check in the
+/// engine decides all three, so all three need the shim trait impls, or
+/// letting `unique_ptr` through would turn a clean rejection of these into a
+/// link error.
+#[test]
+fn test_share_ctype() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<int> share_up() {
+            return std::make_shared<int>(12);
+        }
+        inline int take_shared(std::shared_ptr<int> a) { return *a; }
+        inline std::weak_ptr<int> shared_to_weak(std::shared_ptr<int> a) {
+            return std::weak_ptr<int>(a);
+        }
+    "};
+    let rs = quote! {
+        let a = ffi::share_up();
+        assert_eq!(ffi::take_shared(a.clone()), autocxx::c_int(12));
+        assert_eq!(*ffi::shared_to_weak(a.clone()).upgrade().as_ref().unwrap(), autocxx::c_int(12));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["share_up", "take_shared", "shared_to_weak"],
+        &[],
+    );
 }
 
 #[test]
