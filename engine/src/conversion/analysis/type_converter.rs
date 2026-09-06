@@ -86,15 +86,49 @@ impl<T> Annotated<T> {
 /// we could be more liberal. At the moment though, all outputs
 /// from [TypeConverter] _might_ be used in the [cxx::bridge].
 pub(crate) enum TypeConversionContext {
-    WithinReference,
-    WithinStructField { struct_type_params: HashSet<Ident> },
+    /// Behind a reference, a pointer, or an array element of whatever we were
+    /// asked to convert. `within_struct_field` remembers whether that
+    /// outermost thing was a struct field, because a couple of the things
+    /// bindgen emits - an opaque blob, above all - are fine as field data at
+    /// any depth and are never fine in a signature.
+    WithinReference {
+        within_struct_field: bool,
+    },
+    WithinStructField {
+        struct_type_params: HashSet<Ident>,
+    },
     WithinContainer,
     OuterType,
 }
 
 impl TypeConversionContext {
     fn allow_instantiation_of_forward_declaration(&self) -> bool {
-        matches!(self, Self::WithinReference)
+        matches!(self, Self::WithinReference { .. })
+    }
+
+    /// Whether the type being converted is a struct field, or sits inside one
+    /// behind a reference, a pointer or an array.
+    ///
+    /// Note that a cxx container - `UniquePtr<T>`, `CxxVector<T>` - is *not*
+    /// transparent to this, even when the container itself is a field: cxx
+    /// spells the payload type out in the bridge, so nothing which can only be
+    /// stored as bytes can go there whether or not a field holds the container.
+    fn within_struct_field(&self) -> bool {
+        match self {
+            Self::WithinStructField { .. } => true,
+            Self::WithinReference {
+                within_struct_field,
+            } => *within_struct_field,
+            Self::WithinContainer | Self::OuterType => false,
+        }
+    }
+
+    /// The context for the type behind a reference or pointer, or for the
+    /// element type of an array.
+    fn behind_reference(&self) -> Self {
+        Self::WithinReference {
+            within_struct_field: self.within_struct_field(),
+        }
     }
     fn allowed_generic_type(&self, ident: &Ident) -> bool {
         !matches!(self,
@@ -157,8 +191,7 @@ impl<'a> TypeConverter<'a> {
         let result = match ty {
             Type::Path(p) => self.convert_type_path(p, ns, ctx)?,
             Type::Reference(mut r) => {
-                let innerty =
-                    self.convert_boxed_type(r.elem, ns, &TypeConversionContext::WithinReference)?;
+                let innerty = self.convert_boxed_type(r.elem, ns, &ctx.behind_reference())?;
                 r.elem = innerty.ty;
                 Annotated::new(
                     Type::Reference(r),
@@ -168,8 +201,7 @@ impl<'a> TypeConverter<'a> {
                 )
             }
             Type::Array(mut arr) => {
-                let innerty =
-                    self.convert_type(*arr.elem, ns, &TypeConversionContext::WithinReference)?;
+                let innerty = self.convert_type(*arr.elem, ns, &ctx.behind_reference())?;
                 arr.elem = Box::new(innerty.ty);
                 Annotated::new(
                     Type::Array(arr),
@@ -202,6 +234,21 @@ impl<'a> TypeConverter<'a> {
         // `ParseCallbackResults::discards_template_param`), not by wrapping
         // a type.
         if let Some(ty) = unwrap_has_opaque(&typ) {
+            // bindgen could not name the C++ type here, so it substituted a
+            // blob of bytes of the right size and alignment. As field data
+            // that is exactly what autocxx wants - the layout is all it needs -
+            // and it stays field data however many pointers and arrays nest it.
+            // In a signature the blob is a different type from the one C++
+            // wrote: `void f(Thing)` would become `fn f(u32)` for a four-byte
+            // `Thing`, and the shim would compile. So refuse it there, in each
+            // of the positions a signature can put it: the parameter or return
+            // type itself, behind a reference or a pointer, as an array
+            // element, and as the payload of a cxx container.
+            if !ctx.within_struct_field() {
+                return Err(ConvertErrorFromCpp::BindgenOpaqueBlob(
+                    ty.to_token_stream().to_string(),
+                ));
+            }
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ty) = unwrap_bitfield(&typ) {
             // A bindgen bitfield unit is a `__BindgenBitfieldUnit` wrapping
@@ -213,11 +260,7 @@ impl<'a> TypeConverter<'a> {
         } else if let Some(ptr) = unwrap_reference(&typ, false) {
             // LValue reference
             let mutability = ptr.mutability;
-            let elem = self.convert_boxed_type(
-                ptr.elem.clone(),
-                ns,
-                &TypeConversionContext::WithinReference,
-            )?;
+            let elem = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
             // A `rust::Str` referent has already been turned into `&str` by the
             // `should_dereference_in_cpp` branch below, so a C++ `rust::Str&`
             // gets wrapped again here into `&&str`. That is deliberate and
@@ -251,11 +294,7 @@ impl<'a> TypeConverter<'a> {
         } else if let Some(ptr) = unwrap_reference(&typ, true) {
             // RValue reference
             Self::ensure_pointee_is_valid(ptr, ctx)?;
-            let innerty = self.convert_boxed_type(
-                ptr.elem.clone(),
-                ns,
-                &TypeConversionContext::WithinReference,
-            )?;
+            let innerty = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
             let mut ptr = ptr.clone();
             ptr.elem = innerty.ty;
             Ok(Annotated::new(
@@ -550,8 +589,7 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         Self::ensure_pointee_is_valid(&ptr, ctx)?;
-        let innerty =
-            self.convert_boxed_type(ptr.elem, ns, &TypeConversionContext::WithinReference)?;
+        let innerty = self.convert_boxed_type(ptr.elem, ns, &ctx.behind_reference())?;
         ptr.elem = innerty.ty;
         Ok(Annotated::new(
             Type::Ptr(ptr),

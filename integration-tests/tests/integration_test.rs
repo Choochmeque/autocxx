@@ -19066,3 +19066,205 @@ fn test_empty_base_deletes_default_constructor() {
     "};
     run_test("", hdr, quote! {}, &["fx_DerivedFromEmpty", "read_x"], &[]);
 }
+
+/// bindgen skips `CXCursor_UsingDeclaration`, so a C++ type which is only
+/// reachable through `using outer::Alias;` never enters bindgen's allowlist
+/// and is replaced by an opaque blob of the right size and alignment. For a
+/// four-byte type that blob is plain `u32`, which autocxx used to unwrap and
+/// hand to cxx: `void fx_take_bu(fx_BU)`, taking a struct by value, became
+/// `fn fx_take_bu(b: u32)`. Nothing in either language then complains.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        inline void fx_take_bu(fx_BU b) { (void)b; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_bu"],
+        &[],
+        "replaced it with an opaque blob of bytes",
+    );
+}
+
+/// As above, but the blob is what the function returns. The old bindings said
+/// `fn fx_give_bu() -> u32`.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_as_return_value() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; fx_Box() : contents(0) {} };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        inline fx_BU fx_give_bu() { return fx_BU(); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_give_bu"],
+        &[],
+        "replaced it with an opaque blob of bytes",
+    );
+}
+
+/// The blob reaches a reference and a pointer parameter too, where the old
+/// bindings said `&u32` and `*const u32` for a reference and a pointer to a
+/// struct. A reference is not a safe hiding place for it.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_behind_a_reference() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        inline void fx_take_bu_ref(const fx_BU& b) { (void)b; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_bu_ref"],
+        &[],
+        "replaced it with an opaque blob of bytes",
+    );
+}
+
+/// The blob reaches the payload of a cxx container too. `UniquePtr<T>` and
+/// `CxxVector<T>` name their payload type in the bridge, so a blob is no more
+/// use there than in a bare parameter - and unlike a struct field, a container
+/// is not a place layout alone will do.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_inside_a_container() {
+    let prefix = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        #include <vector>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+    "};
+    for (decl, func) in [
+        (
+            "inline void fx_take_uptr(std::unique_ptr<fx_BU> b) { (void)b; }",
+            "fx_take_uptr",
+        ),
+        (
+            "inline void fx_take_vec(const std::vector<fx_BU>& b) { (void)b; }",
+            "fx_take_vec",
+        ),
+    ] {
+        run_test_expect_fail_with_error(
+            "",
+            &format!("{prefix}{decl}\n"),
+            quote! {},
+            &[func],
+            &[],
+            "replaced it with an opaque blob of bytes",
+        );
+    }
+}
+
+/// An array of the blob, on the other hand, is fine where any blob is fine:
+/// inside a struct, where its layout is the whole of what autocxx wants from
+/// it. The refusal must not follow the array element into a field.
+#[test]
+fn test_array_of_hidden_type_is_still_allowed_in_a_struct_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        struct fx_HoldsArray { fx_BU arr[4]; uint32_t tail; };
+    "};
+    let rs = quote! {
+        let h = ffi::fx_HoldsArray::default();
+        assert_eq!(h.tail, 0);
+    };
+    run_test("", hdr, rs, &[], &["fx_HoldsArray"]);
+}
+
+/// Where bindgen gives us a *typedef* to a blob, the alias has a name of its
+/// own, so it becomes an opaque type rather than an alias for an integer. What
+/// then uses it in a position an opaque type cannot fill has to be refused -
+/// and the refusal must carry the blob explanation, not the generic
+/// forward-declaration message, whose advice (`instantiable!`) would send the
+/// reader somewhere unhelpful.
+#[test]
+fn test_typedef_to_a_blob_explains_itself_when_used() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        template <typename T, T N> struct fx_seq { int x[N ? N : 1]; };
+        template <typename T, T N> using fx_A = fx_seq<T, N>;
+        template <int N> using fx_B = fx_A<int, N>;
+        typedef fx_B<3> fx_Concrete;
+        inline void fx_take_conc(std::unique_ptr<fx_Concrete> c) { (void)c; }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_conc"],
+        &[],
+        &[
+            // The alias is named once, not twice: the blob is what the alias
+            // names, so there is no second type to blame.
+            "using fx_Concrete, which autocxx replaced with an opaque type:",
+            "replaced it with an opaque blob of bytes",
+        ],
+    );
+}
+
+/// The other side of the same rule: a type autocxx was *asked* to treat as
+/// opaque keeps its name, so it still crosses the bridge by reference and by
+/// pointer even though bindgen describes its innards as nothing but a blob.
+/// Refusing bindgen's blobs elsewhere must not cost that.
+#[test]
+fn test_opaque_type_still_works_by_reference_and_pointer() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Opaque { uint32_t a; uint32_t b; };
+        inline const fx_Opaque* fx_the_opaque() {
+            static fx_Opaque o{3, 4};
+            return &o;
+        }
+        inline uint32_t fx_read_ref(const fx_Opaque& o) { return o.a; }
+        inline uint32_t fx_read_ptr(const fx_Opaque* o) { return o->b; }
+    "};
+    let rs = quote! {
+        let o = unsafe { ffi::fx_the_opaque() };
+        assert_eq!(unsafe { ffi::fx_read_ptr(o) }, 4);
+        assert_eq!(ffi::fx_read_ref(unsafe { &*o }), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            opaque!("fx_Opaque")
+            generate!("fx_Opaque")
+            generate!("fx_the_opaque")
+            generate!("fx_read_ref")
+            generate!("fx_read_ptr")
+        },
+        None,
+        None,
+        None,
+    );
+}
