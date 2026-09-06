@@ -19285,6 +19285,99 @@ fn test_opaque_type_still_works_by_reference_and_pointer() {
     );
 }
 
+/// Opacity says nothing about ownership: C++ can still hand one of these over
+/// in a `std::unique_ptr`, and the signature autocxx generates says so, so the
+/// smart pointer has to work rather than naming a type cxx never learned to
+/// hold.
+#[test]
+fn test_opaque_type_works_in_a_unique_ptr() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        struct fx_Opaque { uint32_t a; };
+        inline std::unique_ptr<fx_Opaque> fx_make_opaque() {
+            return std::unique_ptr<fx_Opaque>(new fx_Opaque{7});
+        }
+        inline uint32_t fx_read_opaque(const fx_Opaque& o) { return o.a; }
+    "};
+    let rs = quote! {
+        let o = ffi::fx_make_opaque();
+        assert_eq!(ffi::fx_read_opaque(o.as_ref().unwrap()), 7);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            opaque!("fx_Opaque")
+            generate!("fx_Opaque")
+            generate!("fx_make_opaque")
+            generate!("fx_read_opaque")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The other half of the same rule: presuming an opaque type is destructible
+/// is a presumption, and C++ gets to overrule it. A `private` destructor
+/// survives opacity - it is a declaration, not a member - so a type declared
+/// opaque may still be one nobody outside it can destroy, and none of the
+/// ownership machinery may be generated for it.
+#[test]
+fn test_opaque_type_with_inaccessible_destructor_is_not_owned() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Undestroyable {
+        public:
+            fx_Undestroyable() {}
+            uint32_t get() const { return 42; }
+        private:
+            ~fx_Undestroyable() {}
+        };
+        inline fx_Undestroyable* fx_get_undestroyable() {
+            static fx_Undestroyable* p = new fx_Undestroyable();
+            return p;
+        }
+    "};
+    let directives = quote! {
+        opaque!("fx_Undestroyable")
+        generate!("fx_Undestroyable")
+        generate!("fx_get_undestroyable")
+    };
+    // Borrowing one still works, and the generated C++ contains neither half
+    // of the allocate/free pair, whose free side would `operator delete` one
+    // without ever running `~fx_Undestroyable()`.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = unsafe { &*ffi::fx_get_undestroyable() };
+            assert_eq!(a.get(), 42);
+        },
+        directives.clone(),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &[],
+            &["_autocxx_alloc", "_autocxx_free"],
+        ))),
+        None,
+    );
+    // Owning one does not.
+    run_test_expect_fail_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::fx_Undestroyable::new().within_unique_ptr();
+        },
+        directives,
+        None,
+        None,
+        None,
+    );
+}
+
 /// Every generated type used to get an `impl Drop` calling a C++ destructor,
 /// including types whose destructor does nothing at all. For a type Rust holds
 /// by value that is not free: a type which implements `Drop` may not have a
