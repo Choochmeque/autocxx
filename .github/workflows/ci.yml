@@ -53,16 +53,16 @@ jobs:
       RUSTFLAGS: --cfg deny_warnings -Dwarnings
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{matrix.rust}}
           components: rustfmt
-      # The `{ sharedKey: ... }` allows different actions to share the cache.
-      - uses: Swatinem/rust-cache@v1
-        with: { sharedKey: fullBuild }
+      # The `{ shared-key: ... }` allows different jobs to share the cache.
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: fullBuild }
       # For operating systems that have it packaged, install creduce.
       # AUTOCXX_RUN_REDUCTION_TESTS is what makes autocxx-reduce's end-to-end
       # reductions run at all: they take minutes to hours, so they are opt-in
@@ -105,7 +105,7 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
@@ -114,8 +114,8 @@ jobs:
           toolchain: "1.88"
       # Its own cache: artifacts built by this toolchain are no use to the
       # jobs sharing `fullBuild`, and vice versa.
-      - uses: Swatinem/rust-cache@v1
-        with: { sharedKey: msrv }
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: msrv }
       # `--locked` so that this tests the dependency versions we ship, rather
       # than whatever the resolver picks on the day.
       - run: cargo check --workspace --all-targets --locked
@@ -144,15 +144,15 @@ jobs:
       CXXFLAGS: ${{matrix.flags}}
       RUSTFLAGS: --cfg deny_warnings -Dwarnings
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{matrix.rust}}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v1
-        with: { sharedKey: fullBuild }
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: fullBuild }
       - name: Set LIBCLANG_PATH (Windows)
         # Windows github action doesn't set the path for clang, so set it
         # See https://github.com/rust-lang/rust-bindgen/issues/1797
@@ -207,7 +207,7 @@ jobs:
     name: Address Sanitizer
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       # Need nightly rust.
       - uses: hecrj/setup-rust-action@v1
         with:
@@ -219,7 +219,7 @@ jobs:
       # separate step because the setup action cannot install two
       # components at once.
       - run: rustup component add rustfmt
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Tests with asan
         env:
           AUTOCXX_ASAN: 1
@@ -238,8 +238,8 @@ jobs:
     name: Test forcing wrapper generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v1
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
       - name: Tests generating all possible shims
         env:
           AUTOCXX_FORCE_WRAPPER_GENERATION: 1
@@ -252,11 +252,11 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - uses: hecrj/setup-rust-action@v1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --tests -- -Dclippy::all
 
   # Mention outdated dependencies
@@ -266,7 +266,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - uses: dtolnay/install@cargo-outdated
       - run: cargo outdated -R -w
 
@@ -275,7 +275,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - uses: hecrj/setup-rust-action@v1
         with:
           components: rustfmt
@@ -286,10 +286,10 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - uses: hecrj/setup-rust-action@v1
-      - uses: Swatinem/rust-cache@v1
-        with: { sharedKey: fullBuild }
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: fullBuild }
       - run: |
           for package in $(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | .name'); do
             cargo rustdoc --color always -p "$package" -- -D warnings
