@@ -157,6 +157,9 @@ jobs:
           - name: Windows (msvc)
             rust: nightly-x86_64-pc-windows-msvc
             os: windows
+            # For cxx's build script compiling cxx.cc: it adds no /EH
+            # model, and deny_warnings below makes its C4530 fatal.
+            # autocxx's own Builder passes /EHsc regardless.
             flags: /EHsc
     env:
       CXXFLAGS: ${{matrix.flags}}

@@ -341,3 +341,15 @@ The `cxx::Exception` type provides:
 
 * **Performance**: Exception handling adds minimal runtime overhead - the
   cost is only incurred when an exception actually occurs.
+
+* **MSVC**: an exception model must be selected, or cl.exe emits no
+  unwind tables: exceptions still propagate and get caught, but
+  destructors in intervening frames are skipped, so every throwing call
+  leaks its owning temporaries. The `cc::Build` returned by
+  `autocxx-build`'s `Builder` passes `/EHsc` for the code it compiles.
+  Two things stay outside its reach: C++ you compile separately (via
+  `autocxx-gen`, CMake, or another `cc::Build`) needs a compatible
+  exception model of its own, and the `cxx` crate's own runtime
+  (`cxx.cc`) is compiled by cxx's build script, which currently passes
+  no `/EH` flag — set `CXXFLAGS=/EHsc` in your build environment to
+  cover it until that is fixed upstream.
