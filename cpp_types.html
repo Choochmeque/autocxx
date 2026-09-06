@@ -341,6 +341,51 @@ fn main() {
     assert!(!ffi::is_writable(ffi::FileFlags::READ));
 }
 </code></pre>
+<h2 id="extra-derives"><a class="header" href="#extra-derives">Extra derives</a></h2>
+<p>The Rust types <code>autocxx</code> generates carry only the derives it needs itself, so
+by default you cannot print a generated struct or compare two of them. Use
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.derive.html"><code>derive!</code></a> to ask
+for more:</p>
+<pre><code class="language-rust ignore">derive!("Point", "Debug", "PartialEq")</code></pre>
+<p>Name the type exactly as you would in <code>generate!</code>, and write each trait as you
+would inside <code>#[derive(..)]</code> - a path works too, so a derive macro from another
+crate can be asked for as <code>"num_enum::TryFromPrimitive"</code>. It is then your job
+to have that macro in scope, and to make sure the type can satisfy the trait:
+<code>Clone</code> needs every field to be <code>Clone</code>, and so on. <code>autocxx</code> does not check,
+so an impossible request comes back from <code>rustc</code> rather than from <code>autocxx</code>.</p>
+<p>The trait goes onto the type <code>autocxx</code> re-exports, which means <code>derive!</code> works
+for a <code>generate_pod!</code> type or an enum, and is refused for anything else -
+everything else is an opaque type with no fields, precisely because Rust must
+not look inside it, so there would be nothing for a derive to work from.
+<code>Default</code> on an enum is refused too: nothing makes one enumerator of a C++ enum
+the default, and a derived <code>Default</code> on an enum with no variant marked
+<code>#[default]</code> does not compile.</p>
+<h4 id="c-header-2"><a class="header" href="#c-header-2">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;cstdint&gt;
+struct Point {
+    uint32_t x;
+    uint32_t y;
+};
+
+</code></pre>
+<h4 id="rust-2"><a class="header" href="#rust-2">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate_pod!("Point")
+    derive!("Point", "Debug", "PartialEq")
+}
+
+fn main() {
+    let a = ffi::Point { x: 1, y: 2 };
+    let b = ffi::Point { x: 1, y: 2 };
+    assert_eq!(a, b);
+    assert_eq!(format!("{:?}", a), "Point { x: 1, y: 2 }");
+}
+</code></pre>
 <h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
 <p>A type which is incomplete in the C++ headers (i.e. represented only by a forward
 declaration) can't be held in a <code>UniquePtr</code> within Rust (because Rust can't know
@@ -365,7 +410,7 @@ directive. As noted, though, these types are currently opaque and fairly
 useless without passing them back and forth to C++, so this is not a commonly
 used facility. It does, however, allow you to give a more descriptive name
 to the type in Rust:</p>
-<h4 id="c-header-2"><a class="header" href="#c-header-2">C++ header:</a></h4>
+<h4 id="c-header-3"><a class="header" href="#c-header-3">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;string&gt;
 struct Tapioca {
   std::string yuck;
@@ -383,7 +428,7 @@ inline Tea&lt;Tapioca&gt; prepare() {
 inline void drink(const Tea&lt;Tapioca&gt;&amp;) {}
 
 </code></pre>
-<h4 id="rust-2"><a class="header" href="#rust-2">Rust:</a></h4>
+<h4 id="rust-3"><a class="header" href="#rust-3">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
