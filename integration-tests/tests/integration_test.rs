@@ -5196,14 +5196,13 @@ fn test_ulong() {
     run_test("", hdr, rs, &["daft"], &[]);
 }
 
-// Skipped on Windows since 2022, and still skipped now that autocxx parses
-// headers for the right ABI and the rest of the 2022 list has come off. What
-// makes this one different is that `unsigned long` is 32 bits on Windows and 64
-// bits everywhere this passes - a difference both Windows ABIs share, so
-// nothing the parsing ABI could have caused. Undiagnosed beyond that; note that
-// the same type without the typedef, in `test_ulong` above, passes everywhere.
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
+// Skipped on Windows from 2022 to 2026. The 2022-era theory was the width of
+// `unsigned long` (32 bits on Windows, 64 elsewhere), but the mingw leg
+// passed the moment its skip came off, and both Windows ABIs share that
+// width - so whatever broke in 2022 is gone, most plausibly fixed when
+// autocxx started parsing headers for the right ABI. The msvc skip comes off
+// on the strength of the same evidence; if it fails after all, the failure
+// text this run produces is the diagnosis the last four years never had.
 #[test]
 fn test_typedef_to_ulong() {
     let hdr = indoc! {"
@@ -5278,20 +5277,12 @@ fn test_reserved_name() {
     run_test("", hdr, rs, &["async"], &[]);
 }
 
-// Skipped on Windows since 2022, and still skipped now that autocxx parses
-// headers for the right ABI and the rest of the 2022 list has come off.
-//
-// Why it is not in that list: UNRESOLVED. Nobody has read the failure. Naming
-// no standard library type does not put this beyond the parsing ABI's reach -
-// the mangling of a nested type is ABI-governed too - so the fix might cover
-// it. The competing hypothesis, which would account for both Windows ABIs
-// failing where the parsing ABI does not, is `take_A_B` and `take_A_C`:
-// declared and never defined, so the shims cxx writes for them call functions
-// nothing in the build defines, and the platforms where this passes may simply
-// be the ones whose linker discards those shims rather than reporting them.
-// Deciding between the two needs a run with this skip removed.
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
+// Skipped on Windows from 2022 to 2026, for a reason nobody had read: the
+// mingw run with the skip lifted failed at the link step, undefined
+// references to take_A_B and take_A_C - declared below, and never defined.
+// Every other platform's linker discarded the unused shims before resolving
+// them, so only Windows ever told the truth. Same story as the fake Chromium
+// example's FromFrameTreeNodeId. Bodies supplied; no skip needed anywhere.
 #[test]
 fn test_nested_type() {
     // Test that we can import APIs that use nested types.
@@ -5310,9 +5301,9 @@ fn test_nested_type() {
             B() {}
             void method_on_top_level_type() const {}
         };
-        void take_A_B(A::B);
-        void take_A_C(A::C);
-        void take_A_D(A::D);
+        inline void take_A_B(A::B) {}
+        inline void take_A_C(A::C) {}
+        inline void take_A_D(A::D) {}
     "};
     let rs = quote! {
         let _ = ffi::A::new().within_unique_ptr();

@@ -38,9 +38,14 @@ jobs:
           # clang to parse headers for a GNU target, so it used Microsoft's
           # standard library and ABI while g++ compiled the generated C++
           # against libstdc++. With that fixed (engine/src/clang_target.rs)
-          # the leg ran fully green, the skip_windows_gnu_failing_tests list
-          # is down from twelve entries to two, and the job is blocking like
-          # its msvc sibling.
+          # the leg ran fully green and the job is blocking like its msvc
+          # sibling. The skip list went from twelve entries to two, and the
+          # last two are off for this run as well: both carried a hypothesis
+          # which only a run without the skip could settle, so this leg is
+          # the experiment. Nothing sets skip_windows_gnu_failing_tests to
+          # anything now, though the flag is still passed and still declared
+          # in integration-tests/build.rs, so restoring either skip is a
+          # one-line change.
           - name: Windows (gnu)
             rust: nightly-x86_64-pc-windows-gnu
             os: windows
