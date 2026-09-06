@@ -27,6 +27,48 @@ use tempfile::{tempdir, TempDir};
 
 const KEEP_TEMPDIRS: bool = false;
 
+/// What the suite logs when `RUST_LOG` says nothing - env_logger's
+/// default-filter spec, in env_logger's own syntax, and overridden entirely by
+/// `RUST_LOG` the moment anyone sets it.
+///
+/// The bare `warn` is the level everything gets; the named directives raise or
+/// lower particular crates, longest name winning, so `autocxx` covers
+/// autocxx's own crates - the engine, the parser, this harness - and
+/// `autocxx_bindgen` then overrules it for that one.
+///
+/// Which it has to, because bindgen is where the noise is. Running the suite
+/// produces something like eighty-five thousand WARN lines from it and about
+/// five hundred INFO lines from everything else: "invalid type", "could not
+/// resolve type reference, falling back to opaque blob", "unhandled comp
+/// member (kind FriendDecl)", almost all of it bindgen's running commentary on
+/// parsing the C++ standard library, which autocxx deliberately does not try to
+/// bind. A test which fails is then reported somewhere inside a hundred
+/// thousand lines of that. Nothing is being swept away permanently:
+/// `RUST_LOG=autocxx_bindgen=warn` puts it all back for anyone who wants it,
+/// which is the right way round, because it is worth reading when you are
+/// debugging bindgen and worth nothing when you are not.
+const DEFAULT_LOG_FILTER: &str = "warn,autocxx=info,autocxx_bindgen=error";
+
+/// Installs the logger which the suite's own `info!` output goes through.
+///
+/// Called at each entry point rather than declared on the tests, because
+/// `test_log`'s equivalent - `#[test_log::test(default_log_filter = "...")]` -
+/// is an argument to the attribute, and there are over six hundred of those.
+fn init_logging() {
+    // `try_init`, and the result deliberately dropped: only one logger can be
+    // installed for the process, so all but one call here is going to lose -
+    // to another test running in parallel, which asks for the same thing, or
+    // to the mdbook preprocessor, which installs its own (at env_logger's
+    // stock `error` default) before it ever calls [`doctest`]. That last was
+    // the arrangement before this function existed too, so nothing changes
+    // for the book's tests.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER),
+    )
+    .is_test(true)
+    .try_init();
+}
+
 /// API to run a documentation test. Panics if the test fails.
 /// Guarantees not to emit anything to stdout and so can be run in an mdbook context.
 pub fn doctest(
@@ -124,6 +166,7 @@ pub fn build_from_folder(
     cpp_files: &[&str],
     rs_find_mode: RsFindMode,
 ) -> Result<(), TestError> {
+    init_logging();
     let target_dir = folder.join("target");
     std::fs::create_dir(&target_dir).unwrap();
     let mut b = BuilderBuild::new();
@@ -989,6 +1032,7 @@ pub fn do_run_test_manual(
     builder_modifier: Option<BuilderModifier>,
     rust_code_checker: Option<CodeChecker>,
 ) -> Result<(), TestError> {
+    init_logging();
     let builder_modifier = consider_forcing_wrapper_generation(builder_modifier);
 
     const HEADER_NAME: &str = "input.h";

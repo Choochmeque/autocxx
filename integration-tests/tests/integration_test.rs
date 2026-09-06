@@ -27,7 +27,6 @@ use itertools::Itertools;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{parse_quote, Token};
-use test_log::test;
 
 #[test]
 fn test_return_void() {
