@@ -42,6 +42,24 @@
 //! Pass `--target=` for Windows targets, where the triple says which of the
 //! two ABIs to use and clang has no way to guess.
 //!
+//! Rust and clang spell those triples the same way with one exception, and it
+//! is not a spelling clang tolerates: `*-pc-windows-gnullvm` makes clang stop
+//! with `version 'llvm' in target triple ... is invalid`. `gnullvm` is a
+//! Rust-only name for the mingw-w64 environment built with LLVM's runtime
+//! libraries instead of gcc's; LLVM has no such environment, so its triple
+//! parser reads the `gnu` it recognises and takes the `llvm` after it for an
+//! environment version number, which is not a number. That is not a matter of
+//! being behind: LLVM 21 rejects it exactly as LLVM 19 does, and adding the
+//! environment is still an open request upstream. So there is no
+//! newer-clang spelling to prefer, and one answer serves every clang.
+//!
+//! The answer is `-gnu`, which is what rustc itself hands LLVM for these
+//! targets, and it loses nothing we need: what makes gnullvm gnullvm is which
+//! unwinder and compiler runtime get linked and which C runtime the headers
+//! come from, none of which a C++ ABI depends on or a triple records. The
+//! mangling, the calling convention and the record layout are mingw's either
+//! way.
+//!
 //! This is a fix for the mismatch we have evidence of, not a claim that every
 //! other libclang default is right: a libclang whose default triple differs
 //! from the target's in some other way - a C library, say - would go wrong the
@@ -60,6 +78,12 @@ const COMPILED_TARGET: &str = env!("AUTOCXX_COMPILED_TARGET");
 /// The environment variable bindgen takes extra clang arguments from.
 const BINDGEN_EXTRA_CLANG_ARGS: &str = "BINDGEN_EXTRA_CLANG_ARGS";
 
+/// The tail of the one Rust Windows triple clang refuses to parse, and what to
+/// put in its place. See the module documentation for why these are the same
+/// target as far as clang is concerned.
+const RUST_GNULLVM_TAIL: &str = "-windows-gnullvm";
+const CLANG_GNULLVM_TAIL: &str = "-windows-gnu";
+
 /// The `--target=` argument clang needs in order to parse headers the way the
 /// C++ compiler will compile them, or `None` where clang's own default is
 /// right.
@@ -67,15 +91,25 @@ const BINDGEN_EXTRA_CLANG_ARGS: &str = "BINDGEN_EXTRA_CLANG_ARGS";
 /// `rust_target` is a Rust target triple.
 fn clang_target_arg_for(rust_target: &str) -> Option<String> {
     // Rust spells its Windows targets `<arch>-<vendor>-windows-<env>`, and
-    // clang understands those spellings, so the triple goes through unaltered.
-    // (Other targets need rewriting for clang - `riscv64gc` and `-espidf` are
-    // not things clang has heard of - which is one more reason to leave them
-    // alone.)
-    if rust_target.contains("-windows-") {
-        Some(format!("--target={rust_target}"))
-    } else {
-        None
+    // clang understands those spellings but for the environment `gnullvm`,
+    // which it rejects outright. (Other targets need rewriting for clang -
+    // `riscv64gc` and `-espidf` are not things clang has heard of - which is
+    // one more reason to leave them alone.)
+    if !rust_target.contains("-windows-") {
+        return None;
     }
+    // The vendor field goes through as it stands. `uwp` and `win7` are no more
+    // known to clang than `gnullvm` is, but an unrecognised vendor is a vendor
+    // clang has no opinion about rather than a parse error, and on Windows it
+    // has no opinion to have: the environment is what picks the ABI. Checked -
+    // clang predefines exactly the same macros for `i686-win7-windows-gnu` as
+    // for `i686-pc-windows-gnu`, and for `x86_64-uwp-windows-msvc` as for
+    // `x86_64-pc-windows-msvc`.
+    let clang_target = match rust_target.strip_suffix(RUST_GNULLVM_TAIL) {
+        Some(arch_and_vendor) => format!("{arch_and_vendor}{CLANG_GNULLVM_TAIL}"),
+        None => rust_target.to_owned(),
+    };
+    Some(format!("--target={clang_target}"))
 }
 
 /// Whether any of these clang arguments already says what target to parse for,
@@ -192,7 +226,6 @@ mod tests {
             "aarch64-pc-windows-msvc",
             "arm64ec-pc-windows-msvc",
             "thumbv7a-pc-windows-msvc",
-            "x86_64-pc-windows-gnullvm",
             "x86_64-uwp-windows-msvc",
             "i686-win7-windows-gnu",
         ] {
@@ -200,6 +233,37 @@ mod tests {
                 clang_target_arg_for(target),
                 Some(format!("--target={target}")),
                 "{target} should be passed to clang verbatim"
+            );
+        }
+    }
+
+    /// The one Windows environment whose Rust spelling clang will not parse.
+    /// These are the answers rustc itself gives LLVM for these three targets.
+    #[test]
+    fn the_gnullvm_environment_is_renamed_for_clang() {
+        for (rust_target, llvm_target) in [
+            ("x86_64-pc-windows-gnullvm", "x86_64-pc-windows-gnu"),
+            ("i686-pc-windows-gnullvm", "i686-pc-windows-gnu"),
+            ("aarch64-pc-windows-gnullvm", "aarch64-pc-windows-gnu"),
+        ] {
+            assert_eq!(
+                clang_target_arg_for(rust_target),
+                Some(format!("--target={llvm_target}")),
+                "{rust_target} should reach clang as {llvm_target}"
+            );
+        }
+    }
+
+    /// `gnullvm` is a suffix of nothing else, but the rewrite is a string
+    /// operation, so pin that it does not fire on the environment it is named
+    /// after or on an architecture which happens to contain the letters.
+    #[test]
+    fn only_the_environment_field_is_rewritten() {
+        for target in [GNU, "i686-pc-windows-gnu", "aarch64-pc-windows-msvc"] {
+            assert_eq!(
+                clang_target_arg_for(target),
+                Some(format!("--target={target}")),
+                "{target} has no gnullvm environment to rewrite"
             );
         }
     }
