@@ -27,7 +27,6 @@ use itertools::Itertools;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{parse_quote, Token};
-use test_log::test;
 
 #[test]
 fn test_return_void() {
@@ -295,7 +294,7 @@ fn test_cycle_string_up() {
             return std::make_unique<std::string>(\"Bob\");
         }
         uint32_t take_str_up(std::unique_ptr<std::string> a) {
-            return a->length();
+            return static_cast<uint32_t>(a->length());
         }
     "};
     let hdr = indoc! {"
@@ -319,7 +318,7 @@ fn test_cycle_string() {
             return std::string(\"Bob\");
         }
         uint32_t take_str(std::string a) {
-            return a.length();
+            return static_cast<uint32_t>(a.length());
         }
     "};
     let hdr = indoc! {"
@@ -343,7 +342,7 @@ fn test_cycle_string_by_ref() {
             return std::make_unique<std::string>(\"Bob\");
         }
         uint32_t take_str(const std::string& a) {
-            return a.length();
+            return static_cast<uint32_t>(a.length());
         }
     "};
     let hdr = indoc! {"
@@ -368,7 +367,7 @@ fn test_cycle_string_by_mut_ref() {
             return std::make_unique<std::string>(\"Bob\");
         }
         uint32_t take_str(std::string& a) {
-            return a.length();
+            return static_cast<uint32_t>(a.length());
         }
     "};
     let hdr = indoc! {"
@@ -2201,7 +2200,7 @@ fn test_method_return_nonpod_by_value() {
 fn test_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t measure_string(std::string z) {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
         std::unique_ptr<std::string> get_msg() {
             return std::make_unique<std::string>(\"hello\");
@@ -2226,7 +2225,7 @@ fn test_pass_string_by_value() {
 fn test_ns_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t A::measure_string(std::string z) {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
     "};
     let hdr = indoc! {"
@@ -2248,7 +2247,7 @@ fn test_ns_pass_string_by_value() {
 fn test_ns_deep_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t A::B::C::measure_string(std::string z) {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
     "};
     let hdr = indoc! {"
@@ -2292,7 +2291,7 @@ fn test_return_string_by_value() {
 fn test_method_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t Bob::measure_string(std::string z) const {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
         std::unique_ptr<std::string> get_msg() {
             return std::make_unique<std::string>(\"hello\");
@@ -2348,7 +2347,7 @@ fn test_method_return_string_by_value() {
 fn test_pass_rust_string_by_ref() {
     let cxx = indoc! {"
         uint32_t measure_string(const rust::String& z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2367,7 +2366,7 @@ fn test_pass_rust_string_by_ref() {
 fn test_pass_rust_string_by_value() {
     let cxx = indoc! {"
         uint32_t measure_string(rust::String z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2387,7 +2386,7 @@ fn test_pass_rust_str() {
     // passing by value is the only legal option
     let cxx = indoc! {"
         uint32_t measure_string(rust::Str z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2410,7 +2409,7 @@ fn test_pass_rust_str() {
 fn test_pass_rust_str_by_ref() {
     let cxx = indoc! {"
         uint32_t measure_string(const rust::Str& z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2432,7 +2431,7 @@ fn test_pass_rust_str_by_ref() {
 fn test_pass_rust_str_by_mut_ref() {
     let cxx = indoc! {"
         uint32_t measure_string(rust::Str& z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -3400,7 +3399,7 @@ fn test_class_with_unordered_map_member() {
             map_[key] = value;
         }
         uint32_t MyMapWrapper::count() const {
-            return map_.size();
+            return static_cast<uint32_t>(map_.size());
         }
     "};
     let hdr = indoc! {"
@@ -5434,7 +5433,7 @@ fn test_generic_type() {
             Secondary() {}
             void take_a(const Container<char>) const {}
             void take_b(const Container<uint16_t>) const {}
-            uint16_t take_c(std::string a) const { return 10 + a.size(); }
+            uint16_t take_c(std::string a) const { return static_cast<uint16_t>(10 + a.size()); }
         };
     "};
     let rs = quote! {
@@ -5558,7 +5557,7 @@ fn test_vector_cycle_up() {
             uint32_t a;
         };
         inline uint32_t take_vec(std::unique_ptr<std::vector<A>> many_as) {
-            return many_as->size();
+            return static_cast<uint32_t>(many_as->size());
         }
         inline std::unique_ptr<std::vector<A>> get_vec() {
             auto items = std::make_unique<std::vector<A>>();
@@ -5584,7 +5583,7 @@ fn test_vector_cycle_bare() {
             uint32_t a;
         };
         inline uint32_t take_vec(std::vector<A> many_as) {
-            return many_as.size();
+            return static_cast<uint32_t>(many_as.size());
         }
         inline std::vector<A> get_vec() {
             std::vector<A> items;
@@ -5631,7 +5630,7 @@ fn test_typedef_to_std() {
         #include <cstdint>
         typedef std::string my_string;
         inline uint32_t take_str(my_string a) {
-            return a.size();
+            return static_cast<uint32_t>(a.size());
         }
     "};
     let rs = quote! {
@@ -5649,7 +5648,7 @@ fn test_typedef_to_up_in_fn_call() {
         #include <cstdint>
         typedef std::unique_ptr<std::string> my_string;
         inline uint32_t take_str(my_string a) {
-            return a->size();
+            return static_cast<uint32_t>(a->size());
         }
     "};
     let rs = quote! {
@@ -5717,7 +5716,7 @@ fn test_string_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a.size();
+            return static_cast<uint32_t>(a.a.size());
         }
     "};
     let rs = quote! {
@@ -5742,7 +5741,7 @@ fn test_up_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a->size();
+            return static_cast<uint32_t>(a.a->size());
         }
     "};
     let rs = quote! {
@@ -5768,7 +5767,7 @@ fn test_typedef_to_std_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a.size();
+            return static_cast<uint32_t>(a.a.size());
         }
     "};
     let rs = quote! {
@@ -5794,7 +5793,7 @@ fn test_typedef_to_up_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a->size();
+            return static_cast<uint32_t>(a.a->size());
         }
     "};
     let rs = quote! {
@@ -6843,7 +6842,7 @@ fn test_string_transparent_function() {
     let hdr = indoc! {"
         #include <string>
         #include <cstdint>
-        inline uint32_t take_string(std::string a) { return a.size(); }
+        inline uint32_t take_string(std::string a) { return static_cast<uint32_t>(a.size()); }
     "};
     let rs = quote! {
         assert_eq!(ffi::take_string("hello"), 5);
@@ -6885,7 +6884,7 @@ fn test_string_through_a_using_declaration() {
         #include <string>
         #include <cstdint>
         using std::string;
-        inline uint32_t take_string(string a) { return a.size(); }
+        inline uint32_t take_string(string a) { return static_cast<uint32_t>(a.size()); }
     "};
     let rs = quote! {
         assert_eq!(ffi::take_string("hello"), 5);
@@ -6900,7 +6899,7 @@ fn test_string_transparent_method() {
         #include <cstdint>
         struct A {
             A() {}
-            inline uint32_t take_string(std::string a) const { return a.size(); }
+            inline uint32_t take_string(std::string a) const { return static_cast<uint32_t>(a.size()); }
         };
     "};
     let rs = quote! {
@@ -6917,7 +6916,7 @@ fn test_string_transparent_static_method() {
         #include <cstdint>
         struct A {
             A() {}
-            static inline uint32_t take_string(std::string a) { return a.size(); }
+            static inline uint32_t take_string(std::string a) { return static_cast<uint32_t>(a.size()); }
         };
     "};
     let rs = quote! {
@@ -8250,8 +8249,8 @@ fn test_take_nonpod_rvalue_from_stack() {
 ///
 /// It does not work, and the reason is architectural rather than a bug we
 /// could fix: `moveit::New::new` (what `ffi::A::new()` returns something
-/// implementing) is `unsafe fn new(self, this: Pin<&mut MaybeUninit<Output>>)`
-/// - it only ever *writes into* a place the caller already supplied. There is
+/// implementing) is `unsafe fn new(self, this: Pin<&mut MaybeUninit<Output>>)`,
+/// which only ever *writes into* a place the caller already supplied. There is
 /// no method that hands back an owned `A` by value, because a non-POD C++
 /// object can only be brought into existence via a C++ constructor running
 /// directly at its final address (see the top of this file's module docs on
@@ -12743,8 +12742,8 @@ fn test_only_non_const_copy_constructor() {
 }
 
 /// The helper which hands a value parameter over is called with an argument of
-/// the parameter's own type, so C++ looks for it in that type's namespaces too
-/// - where a function of the same name would be a better match than our
+/// the parameter's own type, so C++ looks for it in that type's namespaces
+/// too, where a function of the same name would be a better match than our
 /// template. The generated call has to name ours from the global namespace.
 /// See <https://github.com/google/autocxx/issues/873>.
 #[test]
@@ -13914,15 +13913,18 @@ fn test_virtual_methods_additional() {
 ///     come out deleted (https://github.com/google/autocxx/issues/815). The
 ///     cases here cover it at public visibility only; the `test_defaulted_*`
 ///     tests cover deletion, and non-public visibility.
+///
 /// applied to each of these:
 ///   * Default constructor
 ///   * Copy constructor
 ///   * Move constructor
+///
 /// in any of these:
 ///   * The class itself
 ///   * A base class
 ///   * A field of the class
 ///   * A field of a base class
+///
 /// with any of these access modifiers:
 ///   * private (impossible for implicitly defaulted)
 ///   * protected (impossible for implicitly defaulted)
@@ -17633,7 +17635,7 @@ fn test_elab_struct_shadowed_by_variable_nonpod() {
         #include <string>
         struct filedata { std::string x; filedata() : x(\"hi\") {} };
         extern struct filedata filedata;
-        inline int take_filedata(const struct filedata& s) { return s.x.length(); }
+        inline int take_filedata(const struct filedata& s) { return static_cast<int>(s.x.length()); }
     "};
     let cxx = "struct filedata filedata;";
     let rs = quote! {
@@ -19279,6 +19281,99 @@ fn test_opaque_type_still_works_by_reference_and_pointer() {
             generate!("fx_read_ref")
             generate!("fx_read_ptr")
         },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Opacity says nothing about ownership: C++ can still hand one of these over
+/// in a `std::unique_ptr`, and the signature autocxx generates says so, so the
+/// smart pointer has to work rather than naming a type cxx never learned to
+/// hold.
+#[test]
+fn test_opaque_type_works_in_a_unique_ptr() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        struct fx_Opaque { uint32_t a; };
+        inline std::unique_ptr<fx_Opaque> fx_make_opaque() {
+            return std::unique_ptr<fx_Opaque>(new fx_Opaque{7});
+        }
+        inline uint32_t fx_read_opaque(const fx_Opaque& o) { return o.a; }
+    "};
+    let rs = quote! {
+        let o = ffi::fx_make_opaque();
+        assert_eq!(ffi::fx_read_opaque(o.as_ref().unwrap()), 7);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            opaque!("fx_Opaque")
+            generate!("fx_Opaque")
+            generate!("fx_make_opaque")
+            generate!("fx_read_opaque")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The other half of the same rule: presuming an opaque type is destructible
+/// is a presumption, and C++ gets to overrule it. A `private` destructor
+/// survives opacity - it is a declaration, not a member - so a type declared
+/// opaque may still be one nobody outside it can destroy, and none of the
+/// ownership machinery may be generated for it.
+#[test]
+fn test_opaque_type_with_inaccessible_destructor_is_not_owned() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Undestroyable {
+        public:
+            fx_Undestroyable() {}
+            uint32_t get() const { return 42; }
+        private:
+            ~fx_Undestroyable() {}
+        };
+        inline fx_Undestroyable* fx_get_undestroyable() {
+            static fx_Undestroyable* p = new fx_Undestroyable();
+            return p;
+        }
+    "};
+    let directives = quote! {
+        opaque!("fx_Undestroyable")
+        generate!("fx_Undestroyable")
+        generate!("fx_get_undestroyable")
+    };
+    // Borrowing one still works, and the generated C++ contains neither half
+    // of the allocate/free pair, whose free side would `operator delete` one
+    // without ever running `~fx_Undestroyable()`.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = unsafe { &*ffi::fx_get_undestroyable() };
+            assert_eq!(a.get(), 42);
+        },
+        directives.clone(),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &[],
+            &["_autocxx_alloc", "_autocxx_free"],
+        ))),
+        None,
+    );
+    // Owning one does not.
+    run_test_expect_fail_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::fx_Undestroyable::new().within_unique_ptr();
+        },
+        directives,
         None,
         None,
         None,

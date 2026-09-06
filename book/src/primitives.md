@@ -52,7 +52,7 @@ autocxx_integration_tests::doctest(
 "",
 "#include <string>
 #include <cstdint>
-inline uint32_t take_string(std::string a) { return a.size(); }",
+inline uint32_t take_string(std::string a) { return static_cast<uint32_t>(a.size()); }",
 {
 use autocxx::prelude::*;
 

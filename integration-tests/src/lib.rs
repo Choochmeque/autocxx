@@ -27,6 +27,48 @@ use tempfile::{tempdir, TempDir};
 
 const KEEP_TEMPDIRS: bool = false;
 
+/// What the suite logs when `RUST_LOG` says nothing - env_logger's
+/// default-filter spec, in env_logger's own syntax, and overridden entirely by
+/// `RUST_LOG` the moment anyone sets it.
+///
+/// The bare `warn` is the level everything gets; the named directives raise or
+/// lower particular crates, longest name winning, so `autocxx` covers
+/// autocxx's own crates - the engine, the parser, this harness - and
+/// `autocxx_bindgen` then overrules it for that one.
+///
+/// Which it has to, because bindgen is where the noise is. Running the suite
+/// produces something like eighty-five thousand WARN lines from it and about
+/// five hundred INFO lines from everything else: "invalid type", "could not
+/// resolve type reference, falling back to opaque blob", "unhandled comp
+/// member (kind FriendDecl)", almost all of it bindgen's running commentary on
+/// parsing the C++ standard library, which autocxx deliberately does not try to
+/// bind. A test which fails is then reported somewhere inside a hundred
+/// thousand lines of that. Nothing is being swept away permanently:
+/// `RUST_LOG=autocxx_bindgen=warn` puts it all back for anyone who wants it,
+/// which is the right way round, because it is worth reading when you are
+/// debugging bindgen and worth nothing when you are not.
+const DEFAULT_LOG_FILTER: &str = "warn,autocxx=info,autocxx_bindgen=error";
+
+/// Installs the logger which the suite's own `info!` output goes through.
+///
+/// Called at each entry point rather than declared on the tests, because
+/// `test_log`'s equivalent - `#[test_log::test(default_log_filter = "...")]` -
+/// is an argument to the attribute, and there are over six hundred of those.
+fn init_logging() {
+    // `try_init`, and the result deliberately dropped: only one logger can be
+    // installed for the process, so all but one call here is going to lose -
+    // to another test running in parallel, which asks for the same thing, or
+    // to the mdbook preprocessor, which installs its own (at env_logger's
+    // stock `error` default) before it ever calls [`doctest`]. That last was
+    // the arrangement before this function existed too, so nothing changes
+    // for the book's tests.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER),
+    )
+    .is_test(true)
+    .try_init();
+}
+
 /// API to run a documentation test. Panics if the test fails.
 /// Guarantees not to emit anything to stdout and so can be run in an mdbook context.
 pub fn doctest(
@@ -51,47 +93,44 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
         // modifier flags, so tests appending -std=c++17 still win.
         .std("c++14")
         .flag_if_supported("/GX"); // Enable C++ exceptions for msvc
+                                   // Ask cc for a warning set rather than leaving it to decide, because its
+                                   // own choice is conditional in a way nobody would guess: it adds one only
+                                   // when CXXFLAGS is absent from the environment. CI sets CXXFLAGS on every
+                                   // leg of the test and examples jobs - to `/EHsc` on MSVC and to the empty
+                                   // string elsewhere, which counts as set - so CI got nothing at all from
+                                   // cc, while someone running the suite locally got cc's full default.
+                                   // `warnings(true).extra_warnings(false)` is the same set whatever CXXFLAGS
+                                   // holds: `-Wall` on gcc and clang, `/W4` on MSVC, and no `-Wextra` (which
+                                   // MSVC has no equivalent of, so leaving it out is part of what makes the
+                                   // two comparable).
+                                   //
+                                   // Asking cc to turn warnings ON, rather than off and then passing the
+                                   // flags ourselves, which looks equivalent and is not: cc 1.4 made
+                                   // `warnings(false)` emit `-w`, and `-w` beats `-Wall -Werror` in either
+                                   // order on clang - an unused variable compiles clean - so a lockfile bump
+                                   // would have silently deleted the coverage this is here to pin down. This
+                                   // direction can only fail the other way: the worst a future cc can do to
+                                   // it is hand us a different set of warnings to obey, never none.
+                                   //
+                                   // What must not be done is to pass `-Wall` by hand. On gcc and clang that
+                                   // names a curated set; cl.exe reads it as `/Wall`, which Microsoft
+                                   // documents as every warning which is off by default - most of them fired
+                                   // by the C++ standard library's own headers - and which put tens of
+                                   // thousands of lines into every Windows CI log. `/W4` is the curated
+                                   // equivalent, and is what `warnings(true)` asks for.
+    b.warnings(true).extra_warnings(false);
     if !target.contains("msvc") {
-        // -Wall is the curated warning set on gcc/clang, but cl.exe maps it
-        // to its audit-mode /Wall, which Microsoft documents as not meant
-        // for routine builds — it floods the log with off-by-default
-        // diagnostics from system headers (tens of thousands of lines per
-        // CI run). -Werror doesn't apply on MSVC either: cl rejects that
-        // spelling.
-        //
-        // Ask cc for a warning set rather than leaving it to decide, because
-        // its own choice is conditional in a way nobody would guess: it adds
-        // `-Wall -Wextra` only when CXXFLAGS is absent from the environment.
-        // CI sets CXXFLAGS on every leg of the test and examples jobs - to
-        // `/EHsc` on MSVC and to the empty string elsewhere, which counts as
-        // set - so CI got `-Wall -Werror` and nothing more, while someone
-        // running the suite locally also got cc's `-Wall -Wextra`, and the
-        // duplicate `-Wall` on the command line was the visible end of that.
-        // `warnings(true).extra_warnings(false)` is `-Wall` and no `-Wextra`
-        // whatever CXXFLAGS holds, so both now get the set CI was already
-        // enforcing.
-        //
-        // Asking cc to turn warnings ON, rather than off and then passing
-        // `-Wall` ourselves, which looks equivalent and is not: cc 1.4 made
-        // `warnings(false)` emit `-w`, and `-w` beats `-Wall -Werror` in
-        // either order on clang - an unused variable compiles clean - so a
-        // lockfile bump would have silently deleted the coverage this is here
-        // to pin down. This direction can only fail the other way: the worst a
-        // future cc can do to it is hand us a different set of warnings to
-        // obey, never none.
-        //
-        // Nothing here runs on MSVC, which is left exactly as it was: cc's
-        // conditional default, and so cl's own /W1 in CI, where CXXFLAGS is
-        // always set.
-        //
-        // TODO: /W4 is the curated equivalent of -Wall and is what MSVC ought
-        // to be getting. Asking for it outright brings back the couple of
-        // dozen C4267s the fixtures produce by narrowing size_t on return, as
-        // in `uint32_t measure_string(std::string z) { return z.length(); }`.
-        // Cast those and MSVC can have /W4, and after that /WX. It is fixture
-        // code and nothing autocxx generates: a sweep of the MSVC CI logs
-        // found no C4267 in the generated C++ or in cxx's glue.
-        b.warnings(true).extra_warnings(false).flag("-Werror");
+        b.flag("-Werror");
+        // TODO: MSVC gets no `/WX`, which is cl's spelling of this (it rejects
+        // `-Werror`). Two kinds of fixture warning survive /W4 which no cast
+        // can remove, both from creduce-reduced repros where the offending
+        // shape is the whole point of the test: C4201, a nameless struct or
+        // union member, as in `test_issue_1125`; and C4643, a forward
+        // declaration inside `namespace std`, as in `test_issue_506`,
+        // `test_issue_470_492` and `test_std_thing`. C4643 is on by default
+        // and so is already in the log at cl's own /W1; C4201 arrives with
+        // /W4. Each needs its own decision - restructure the fixture, or scope
+        // the warning off for the one test - before the switch can be thrown.
     }
     b
 }
@@ -127,6 +166,7 @@ pub fn build_from_folder(
     cpp_files: &[&str],
     rs_find_mode: RsFindMode,
 ) -> Result<(), TestError> {
+    init_logging();
     let target_dir = folder.join("target");
     std::fs::create_dir(&target_dir).unwrap();
     let mut b = BuilderBuild::new();
@@ -992,6 +1032,7 @@ pub fn do_run_test_manual(
     builder_modifier: Option<BuilderModifier>,
     rust_code_checker: Option<CodeChecker>,
 ) -> Result<(), TestError> {
+    init_logging();
     let builder_modifier = consider_forcing_wrapper_generation(builder_modifier);
 
     const HEADER_NAME: &str = "input.h";

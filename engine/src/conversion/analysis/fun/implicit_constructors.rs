@@ -98,6 +98,13 @@ pub(crate) enum WhyNoSpecialMember {
     /// well enough to run C++'s rules, so it declined to guess. Describes the
     /// ones it couldn't work out, where it knows which they were.
     DependenciesNotUnderstood(Vec<String>),
+    /// The class was named in an `opaque!` directive, so bindgen replaced its
+    /// innards with a blob of bytes and there are no members left to run
+    /// C++'s rules over. Told apart from
+    /// [`Self::DependenciesNotUnderstood`] because this is what the user
+    /// asked for, and because the advice attached to that one - name the
+    /// offending type in a `generate!` directive - is no help here.
+    DeclaredOpaque,
     /// A base class or a field has no version of the member which this class
     /// could have called.
     DependencyLacksIt {
@@ -148,6 +155,12 @@ impl WhyNoSpecialMember {
                  directive may be enough to work it out. Any constructor which the C++ source \
                  declares explicitly is still available.",
                 names.iter().join(", ")
+            ),
+            Self::DeclaredOpaque => format!(
+                "autocxx has not given this type a {member}: it was declared opaque, so its \
+                 members are not visible here and C++'s rules for which special member functions \
+                 it declares cannot be run. Any constructor which the C++ source declares \
+                 explicitly is still available."
             ),
             Self::DependencyLacksIt {
                 dependency,
@@ -448,11 +461,21 @@ pub(super) fn find_constructors_present(
             name,
             analysis:
                 PodAnalysis {
-                    // Do not include TypeKind::Opaque here
+                    // `TypeKind::Opaque` belongs here too, even though nothing
+                    // of its fields or bases survived for the C++ rules to run
+                    // over: the explicit declarations are a separate channel
+                    // which opacity leaves alone, and the branch below already
+                    // knows how to work from those alone. Leaving such a type
+                    // out altogether meant `PublicConstructors::default()`,
+                    // which says "no accessible destructor" - and so no
+                    // `impl UniquePtr<T> {}` for cxx to hang `UniquePtrTarget`
+                    // on, while every signature mentioning
+                    // `std::unique_ptr<T>` still said `UniquePtr<T>`.
                     kind:
-                        crate::conversion::api::TypeKind::Abstract
+                        kind @ (crate::conversion::api::TypeKind::Abstract
                         | crate::conversion::api::TypeKind::Pod
-                        | crate::conversion::api::TypeKind::NonPod,
+                        | crate::conversion::api::TypeKind::NonPod
+                        | crate::conversion::api::TypeKind::Opaque),
                     bases,
                     field_info,
                     num_generics: 0usize,
@@ -585,7 +608,16 @@ pub(super) fn find_constructors_present(
             // We need to extend our knowledge to understand the constructor behavior of things in
             // known_types.rs, then we'll be able to cope with types which contain strings,
             // unique_ptrs etc.
-            let items_found = if bases_items_found.len() != bases.len()
+            // An opaque type is the extreme of the same case: bindgen left it
+            // one field, a blob of bytes, and that blob is not the class's
+            // members. Said outright rather than left to the field count to
+            // notice, because the blob's Rust type may well be one this
+            // analysis does understand - a four-byte blob arrives as a `u32` -
+            // in which case the counts would match and the C++ rules would be
+            // run over a fiction.
+            let is_opaque = matches!(kind, crate::conversion::api::TypeKind::Opaque);
+            let items_found = if is_opaque
+                || bases_items_found.len() != bases.len()
                 || fields_items_found.len() != field_info.len()
                 || unknown_types.contains(&name.name)
             {
@@ -662,16 +694,22 @@ pub(super) fn find_constructors_present(
                     // fields we couldn't work out, so that the user can go
                     // and add them to a `generate!` directive.
                     why_no_constructors: {
-                        let unknown = unknown_dependencies(
-                            bases,
-                            field_info,
-                            get_items_found,
-                            field_type_name,
-                        );
+                        let reason = if is_opaque {
+                            // Naming the blob would say nothing, and the
+                            // advice which comes with the other reason -
+                            // `generate!` the type we didn't understand - is
+                            // advice to undo what the user asked for.
+                            WhyNoSpecialMember::DeclaredOpaque
+                        } else {
+                            WhyNoSpecialMember::DependenciesNotUnderstood(unknown_dependencies(
+                                bases,
+                                field_info,
+                                get_items_found,
+                                field_type_name,
+                            ))
+                        };
                         let why = |found| {
-                            matches!(found, SpecialMemberFound::NotPresent).then(|| {
-                                WhyNoSpecialMember::DependenciesNotUnderstood(unknown.clone())
-                            })
+                            matches!(found, SpecialMemberFound::NotPresent).then(|| reason.clone())
                         };
                         WhyNoConstructors {
                             default_constructor: why(is_explicit(ExplicitKind::DefaultConstructor)),

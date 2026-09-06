@@ -24,7 +24,9 @@ proc-macro2 = "1.0.11"
 # https://github.com/dtolnay/trybuild/issues/283
 # There are some workarounds suggested there if needs be.
 trybuild = "=1.0.81"
-test-log = "0.2.2"
+# The suite installs its own logger - see `init_logging` - rather than letting
+# `test-log` put one on each test, because the filter it wants is an argument
+# to that crate's attribute and there are over six hundred of those.
 env_logger = "0.9.0"
 rust_info = "0.3.1"
 # 1.0.89 for `cc::Build::get_files`, which is how a failed C++ build's
