@@ -23,6 +23,7 @@ use crate::{
         check_for_fatal_attrs,
         convert_error::{ConvertErrorWithContext, ErrorContext},
         error_reporter::convert_apis,
+        type_helpers::array_element_type,
         ConvertErrorFromCpp,
     },
     types::{Namespace, QualifiedName},
@@ -255,12 +256,13 @@ fn get_struct_field_types(
                     .unwrap_or(false)
                 {
                     field_deps.extend(r.types_encountered);
-                    if let Type::Path(typ) = &r.ty {
+                    if let Type::Path(typ) = array_element_type(&r.ty) {
                         // Later analyses need to know about the field
                         // types where we need full definitions, as opposed
                         // to just declarations. That means just the outermost
-                        // type path.
-                        // TODO: consider arrays.
+                        // type path - and, for an array, its element type,
+                        // since holding N of something by value needs its
+                        // definition just as much as holding one does.
                         field_definition_deps.insert(QualifiedName::from_type_path(typ));
                     }
                     field_info.push(FieldInfo {

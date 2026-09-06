@@ -22047,3 +22047,136 @@ fn test_throwing_function_taking_a_relocatable_pod_by_value() {
         None,
     );
 }
+
+/// A POD struct holding an array of another struct. Holding four of something
+/// by value needs that something to be POD exactly as holding one of it would,
+/// so `pod!` on the outer struct has to reach the element type through the
+/// array - the user should not have to name it separately.
+#[test]
+fn test_pod_struct_holding_array_of_pod_structs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_ArrInner { uint32_t x; };
+        struct fx_ArrOuter { fx_ArrInner arr[4]; uint32_t y; };
+    "};
+    let rs = quote! {
+        let o = ffi::fx_ArrOuter { arr: [
+            ffi::fx_ArrInner { x: 1 },
+            ffi::fx_ArrInner { x: 2 },
+            ffi::fx_ArrInner { x: 3 },
+            ffi::fx_ArrInner { x: 4 },
+        ], y: 5 };
+        assert_eq!(o.arr[2].x, 3);
+        assert_eq!(o.y, 5);
+    };
+    run_test("", hdr, rs, &[], &["fx_ArrOuter"]);
+}
+
+/// The element type of an array is needed in full - its own constructors
+/// decide which of the holder's are implicitly available - so it has to be
+/// registered as a definition dependency, or the constructor analysis may run
+/// before the element type has been analysed and give up on the holder. That
+/// order goes wrong for a nested class, which bindgen hoists out of its
+/// enclosing class and emits afterwards.
+#[test]
+fn test_pod_struct_holding_array_of_nested_class() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Holder {
+            struct Element { uint32_t x; };
+            Element arr[3];
+            uint32_t y;
+        };
+    "};
+    let rs = quote! {
+        let h = ffi::fx_Holder {
+            arr: [
+                ffi::fx_Holder_Element { x: 7 },
+                ffi::fx_Holder_Element { x: 8 },
+                ffi::fx_Holder_Element { x: 9 },
+            ],
+            y: 10,
+        };
+        assert_eq!(h.arr[1].x, 8);
+        assert_eq!(h.y, 10);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! { generate_pod!("fx_Holder") },
+        None,
+        // The holder used to be handed to the constructor analysis before the
+        // element type, which then blamed the element type for constructors it
+        // could not work out - and told the user to `generate!` a type it had
+        // generated already.
+        Some(make_string_absence_finder(vec![
+            "does not understand".to_string()
+        ])),
+        None,
+    );
+}
+
+/// An array field whose element type can't be held by value in Rust makes the
+/// struct holding it just as unsafe as a plain field of that type would, so
+/// `pod!` on it has to be refused with the reason - not accepted and left for
+/// the C++ compiler to complain about.
+#[test]
+fn test_pod_struct_holding_array_of_non_pod_is_rejected() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        struct fx_HasStr { std::string s; };
+        struct fx_HoldsStrArray { fx_HasStr arr[4]; uint32_t y; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_HoldsStrArray"],
+        &["could not be POD", "fx_HasStr"],
+    );
+}
+
+/// The element type of an array can itself be an array, so the walk has to
+/// peel off however many dimensions there are rather than just the one.
+#[test]
+fn test_pod_struct_holding_array_of_arrays_of_non_pod_is_rejected() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        struct fx_HasStr2 { std::string s; };
+        struct fx_HoldsStrMatrix { fx_HasStr2 arr[2][3]; uint32_t y; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_HoldsStrMatrix"],
+        &["could not be POD", "fx_HasStr2"],
+    );
+}
+
+/// And the element type may be unsafe only because of what it holds by value
+/// in turn, which is the ordinary struct-to-struct walk reached through an
+/// array.
+#[test]
+fn test_pod_struct_holding_array_of_struct_containing_non_pod_is_rejected() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        struct fx_DeepStr { std::string s; };
+        struct fx_DeepHolder { fx_DeepStr d; uint32_t z; };
+        struct fx_HoldsDeepArray { fx_DeepHolder arr[2]; uint32_t y; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_HoldsDeepArray"],
+        &["could not be POD", "fx_DeepHolder"],
+    );
+}

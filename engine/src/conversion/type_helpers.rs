@@ -39,6 +39,21 @@ pub(crate) fn extract_pinned_mutable_reference_type(tp: &TypePath) -> Option<&Ty
     None
 }
 
+/// The innermost element type of `ty` if it is an array, and `ty` itself if it
+/// is not.
+///
+/// C++ can nest arrays - `T arr[2][3]` reaches us as `[[T; 3]; 2]` - and this
+/// peels off every dimension, so it answers `T` rather than `[T; 3]`. Holding
+/// an array by value holds its elements by value however deeply they nest, so
+/// wherever an analysis asks what a field is made of, the answer for an array
+/// is whatever this returns.
+pub(crate) fn array_element_type(mut ty: &Type) -> &Type {
+    while let Type::Array(arr) = ty {
+        ty = &arr.elem;
+    }
+    ty
+}
+
 /// Whether this type path is a `Pin`
 fn is_pin(tp: &TypePath) -> bool {
     if tp.path.segments.len() != 3 {

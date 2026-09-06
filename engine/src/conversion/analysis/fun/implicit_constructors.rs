@@ -11,10 +11,10 @@ use indexmap::map::IndexMap as HashMap;
 use indexmap::{map::Entry, set::IndexSet as HashSet};
 use itertools::Itertools;
 
-use syn::{PatType, Type, TypeArray};
+use syn::{PatType, Type};
 
 use crate::conversion::analysis::type_converter::TypeKind;
-use crate::conversion::type_helpers::type_is_reference;
+use crate::conversion::type_helpers::{array_element_type, type_is_reference};
 use crate::{
     conversion::{
         analysis::{
@@ -515,13 +515,27 @@ pub(super) fn find_constructors_present(
             // The name of the type a field is declared with, where it has one
             // we could look up. Kept alongside each field's analysis so that
             // we can name the culprit if it turns out to block a constructor.
+            //
+            // An array is asked about by its innermost element type, since
+            // holding `T arr[2][3]` runs C++'s rules over `T` just as holding
+            // one `T` would.
+            //
+            // A field whose element type is a pointer therefore answers `None`
+            // and drops out of `fields_items_found` below, which makes the
+            // count mismatch and costs the struct every implicit special member
+            // - even though a pointer element deletes none of them. A plain
+            // pointer field avoids that through `TypeKind::Pointer` in the
+            // match below, which an array cannot reach because
+            // `TypeConverter::convert_type` labels every array
+            // `TypeKind::Regular`. The element is still a `Type::Ptr` here and
+            // could be matched for, so this is a gap that could be closed at
+            // this site alone. It is not new: the hand-written peel this
+            // replaced already followed one-dimensional arrays and already
+            // failed on a pointer element. It is left for a change that can
+            // test it in its own right.
             let field_type_name = |field_info: &FieldInfo| -> Option<QualifiedName> {
-                match field_info.ty {
+                match array_element_type(&field_info.ty) {
                     Type::Path(ref qn) => Some(QualifiedName::from_type_path(qn)),
-                    Type::Array(TypeArray { ref elem, .. }) => match elem.as_ref() {
-                        Type::Path(ref qn) => Some(QualifiedName::from_type_path(qn)),
-                        _ => None,
-                    },
                     _ => None,
                 }
             };
@@ -615,6 +629,17 @@ pub(super) fn find_constructors_present(
             // analysis does understand - a four-byte blob arrives as a `u32` -
             // in which case the counts would match and the C++ rules would be
             // run over a fiction.
+            //
+            // The same fiction is reachable one field at a time, when bindgen
+            // could name the class but not one member's type and substituted a
+            // blob for that member alone. `TypeKind::Opaque` marks only the
+            // whole-struct case, and a per-field blob is indistinguishable here
+            // from a real member of the type it was widened to. The conclusions
+            // drawn are checked in C++ regardless - a constructor claimed in
+            // error emits a placement-new that will not compile, and trivial
+            // destruction is re-asserted by
+            // `codegen_cpp::generate_trivial_destructor_assertion` - so this is
+            // left as it is rather than given a second opacity flag.
             let is_opaque = matches!(kind, crate::conversion::api::TypeKind::Opaque);
             let items_found = if is_opaque
                 || bases_items_found.len() != bases.len()
