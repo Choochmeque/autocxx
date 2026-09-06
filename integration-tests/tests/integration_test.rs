@@ -6758,6 +6758,154 @@ fn test_pod_with_pointer_to_pointer_field() {
 }
 
 #[test]
+fn test_pod_with_typedef_pointer_to_pointer_field() {
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef float** Matrix;
+        struct Bob {
+            uint32_t a;
+            Matrix data;
+        };
+    "};
+    let rs = quote! {
+        let mut cell: f32 = 3.0;
+        let mut row: *mut f32 = &mut cell;
+        let b = ffi::Bob { a: 12, data: &mut row };
+        assert_eq!(b.a, 12);
+        assert_eq!(unsafe { **b.data }, 3.0);
+    };
+    run_test("", hdr, rs, &[], &["Bob"]);
+}
+
+#[test]
+fn test_typedef_pointer_to_pointer_in_signature() {
+    // The alias survives its own definition - which the explicit `generate!`
+    // for it insists on, since a directive yielding nothing usable is an error,
+    // and which the Rust body then uses. A signature still can't take one, so
+    // the method goes, leaving behind the documented stub which says why. That
+    // reason is the point: before, the method went too, but for the second-hand
+    // reason that a type it mentioned had been ignored.
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        typedef float** Matrix;
+        class Bob {
+        public:
+            void take_matrix(Matrix m);
+        };
+    "};
+    let rs = quote! {
+        let m: ffi::Matrix = std::ptr::null_mut();
+        assert!(m.is_null());
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("Bob")
+            generate!("Matrix")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "Pointer pointed to another pointer".to_string(),
+        ])),
+        None,
+    );
+}
+
+#[test]
+fn test_pod_with_typedef_chain_to_pointer_to_pointer_field() {
+    // The alias the field names resolves to the pointer only after a hop.
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef float** Matrix;
+        typedef Matrix Grid;
+        struct Bob {
+            uint32_t a;
+            Grid data;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob { a: 12, data: std::ptr::null_mut() };
+        assert_eq!(b.a, 12);
+        assert!(b.data.is_null());
+    };
+    run_test("", hdr, rs, &[], &["Bob"]);
+}
+
+#[test]
+fn test_pod_with_using_alias_pointer_to_pointer_field() {
+    // A canary rather than a second engine path: bindgen writes `using Matrix
+    // = float**` and `typedef float** Matrix` as the same `pub type`, and this
+    // is what would notice if it ever stopped doing so.
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        #include <cstdint>
+        using Matrix = float**;
+        struct Bob {
+            uint32_t a;
+            Matrix data;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob { a: 12, data: std::ptr::null_mut() };
+        assert_eq!(b.a, 12);
+        assert!(b.data.is_null());
+    };
+    run_test("", hdr, rs, &[], &["Bob"]);
+}
+
+#[test]
+fn test_pod_with_typedef_triple_pointer_field() {
+    // One level of nesting and no more. The outer pointer of a typedef target
+    // is not judged where it is written, but its pointee is converted as
+    // though behind a reference, exactly as a struct field's is, so `Cube` is
+    // still refused with `InvalidPointerPointee` and `Bob` cannot be POD.
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef float*** Cube;
+        struct Bob {
+            uint32_t a;
+            Cube data;
+        };
+    "};
+    let rs = quote! {};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        rs,
+        &[],
+        &["Bob"],
+        "dependent type Cube isn't known",
+    );
+}
+
+#[test]
+fn test_typedef_to_pointer_to_pointer_to_pointer_alias() {
+    // `Deep` is `float***` however it is spelled, and is refused as such.
+    //
+    // It used to depend on the spelling. While `Matrix` was thrown away at its
+    // own definition, `Deep` inherited the failure and became an opaque
+    // stand-in - and `take` generated against that, taking a reference to a
+    // type cxx knew nothing about but could pass along. The same C++ type
+    // written `typedef float*** Deep` got no such treatment: it was refused
+    // outright and `take` was dropped. Now that `Matrix` survives, `Deep`
+    // resolves through it and both spellings are refused alike, which is worth
+    // the one binding the inconsistency was handing out.
+    // https://github.com/google/autocxx/issues/1278
+    let hdr = indoc! {"
+        typedef float** Matrix;
+        typedef Matrix* Deep;
+        inline void take(const Deep& d) { (void)d; }
+    "};
+    let rs = quote! {};
+    run_test_expect_fail_with_error("", hdr, rs, &["take"], &[], "InvalidPointerPointee");
+}
+
+#[test]
 fn test_defines_effective() {
     let hdr = indoc! {"
         #include <cstdint>
