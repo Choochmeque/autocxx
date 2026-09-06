@@ -699,10 +699,14 @@ impl<'a> RsCodeGenerator<'a> {
             } => {
                 let methods = associated_methods.get(&superclass).map(|c| &c.methods);
                 let generate_peer_constructor = subclasses_with_a_single_trivial_constructor.contains(&name.0.name) &&
+                    // `CppPeerConstructor::make_peer` is a safe method, so it
+                    // can only call the generated constructor under a policy
+                    // which makes that constructor safe. Both of the policies
+                    // which do are named for it.
                     // TODO: Create an UnsafeCppPeerConstructor trait for calling an unsafe
                     // constructor instead? Need to create unsafe versions of everything that uses
                     // it too.
-                    matches!(self.unsafe_policy, UnsafePolicy::AllFunctionsSafe);
+                    !matches!(self.unsafe_policy, UnsafePolicy::AllFunctionsUnsafe);
                 self.generate_subclass(
                     name,
                     &superclass,
@@ -773,20 +777,44 @@ impl<'a> RsCodeGenerator<'a> {
                     let peer_super_method_name =
                         SubclassName::get_super_fn_name(&Namespace::new(), &m.name.to_string())
                             .get_final_ident();
-                    let mut params = m.params.clone();
+                    // The same shape as the trait item this implements, so
+                    // that whatever the trait says a parameter is, the peer's
+                    // own `_super` method is handed exactly that.
+                    let (params, param_names) = Self::superclass_trait_method_signature(m);
                     let ret = &m.ret_type.clone();
-                    let (peer_fn, first_param) = match m.receiver_mutability {
-                        ReceiverMutability::Const => ("peer", parse_quote!(&self)),
-                        ReceiverMutability::Mutable => ("peer_mut", parse_quote!(&mut self)),
-                    };
-                    let peer_fn = make_ident(peer_fn);
-                    *(params.iter_mut().next().unwrap()) = first_param;
-                    let param_names = m.param_names.iter().skip(1);
+                    let peer_fn = make_ident(match m.receiver_mutability {
+                        ReceiverMutability::Const => "peer",
+                        ReceiverMutability::Mutable => "peer_mut",
+                    });
                     let unsafe_token = m.requires_unsafe.wrapper_token();
+                    // Under the policy which wraps references the peer's
+                    // methods take their receiver as a wrapper, like any other
+                    // C++ reference.
+                    //
+                    // SAFETY: `Pin::into_inner_unchecked` asks that the peer not
+                    // be moved out of. It isn't: the pointer goes straight to
+                    // C++, which holds the peer as `*this`.
+                    let receiver: Expr = match (self.unsafe_policy, m.receiver_mutability) {
+                        (
+                            UnsafePolicy::ReferencesWrappedAllFunctionsSafe,
+                            ReceiverMutability::Const,
+                        ) => {
+                            parse_quote!(autocxx::CppRef::from_ptr(self.#peer_fn()))
+                        }
+                        (
+                            UnsafePolicy::ReferencesWrappedAllFunctionsSafe,
+                            ReceiverMutability::Mutable,
+                        ) => {
+                            parse_quote!(autocxx::CppMutRef::from_ptr(unsafe {
+                                ::core::pin::Pin::into_inner_unchecked(self.#peer_fn())
+                            } as *mut #cpp_path))
+                        }
+                        _ => parse_quote!(self.#peer_fn()),
+                    };
                     parse_quote! {
                         #unsafe_token fn #trait_super_method_name(#params) #ret {
                             use autocxx::subclass::CppSubclass;
-                            self.#peer_fn().#peer_super_method_name(#(#param_names),*)
+                            #receiver.#peer_super_method_name(#param_names)
                         }
                     }
                 })
@@ -889,15 +917,36 @@ impl<'a> RsCodeGenerator<'a> {
     ) -> RsCodegenResult {
         let params = details.params;
         let ret = details.ret;
-        let unsafe_token = details.requires_unsafe.wrapper_token();
+        // cxx refuses an `extern "Rust"` function with a raw pointer parameter
+        // unless it is declared unsafe, and under
+        // `ReferencesWrappedAllFunctionsSafe` every C++ reference this method
+        // takes is one. The Rust definition has to match the declaration, so
+        // both read from here; the `_methods` trait item this forwards to is
+        // still safe, because by then each pointer is back inside a `CppRef`.
+        let unsafe_token = details.requires_unsafe.wrapper_token().or_else(|| {
+            params
+                .iter()
+                .any(|param| matches!(&param.0, FnArg::Typed(pt) if matches!(*pt.ty, Type::Ptr(_))))
+                .then(|| parse_quote! { unsafe })
+        });
         let global_def = quote! { #unsafe_token fn #api_name(#params) #ret };
         let params = unqualify_params(minisynize_punctuated(params), self.bridge_type_names);
         let ret = unqualify_ret_type(ret.into(), self.bridge_type_names);
         let method_name = details.method_name;
         let cxxbridge_decl: ForeignItemFn =
             parse_quote! { #unsafe_token fn #api_name(#params) #ret; };
-        let args: Punctuated<Expr, Comma> =
-            Self::args_from_sig(&cxxbridge_decl.sig.inputs).collect();
+        // The trait implemented by the Rust subclass sees each parameter the
+        // way Rust would rather have it, so undo whatever the Rust-calls-C++
+        // direction did to it on the way past.
+        let args: Punctuated<Expr, Comma> = Self::args_from_sig(&cxxbridge_decl.sig.inputs)
+            .zip(details.cpp_impl.argument_conversion.iter())
+            .map(
+                |(arg, conversion)| match conversion.inverse_rust_conversion() {
+                    Some((_, wrapper)) => parse_quote! { #wrapper::from_ptr(#arg) },
+                    None => arg,
+                },
+            )
+            .collect();
         let superclass_id = details.superclass.get_final_ident();
         let methods_trait = SubclassName::get_methods_trait_name(&details.superclass);
         let methods_trait = methods_trait.to_type_path();
@@ -966,6 +1015,7 @@ impl<'a> RsCodeGenerator<'a> {
             name,
             &mut output_mod_items,
             associated_methods.get(name),
+            self.unsafe_policy,
         );
         let orig_item = item_creator();
         let doc_attrs = orig_item
@@ -1061,6 +1111,7 @@ impl<'a> RsCodeGenerator<'a> {
         name: &QualifiedName,
         output_mod_items: &mut Vec<Item>,
         contents: Option<&SuperclassTraitContents>,
+        unsafe_policy: &UnsafePolicy,
     ) {
         if let Some(contents) = contents {
             let methods = &contents.methods;
@@ -1129,6 +1180,7 @@ impl<'a> RsCodeGenerator<'a> {
                     output_mod_items,
                     methods,
                     !supers.is_empty(),
+                    unsafe_policy,
                 );
             }
         }
@@ -1138,6 +1190,10 @@ impl<'a> RsCodeGenerator<'a> {
     /// superclass method - the C++ receiver swapped for a plain `self`,
     /// because implementers are Rust types - plus the names by which to pass
     /// the rest of the parameters on to whoever really does the work.
+    ///
+    /// The remaining parameters are the ones the bridge carries, undoing any
+    /// conversion which only makes sense in the Rust-calls-C++ direction: a
+    /// trait a Rust subclass implements is called the other way about.
     fn superclass_trait_method_signature(
         method: &SuperclassMethod,
     ) -> (
@@ -1147,6 +1203,25 @@ impl<'a> RsCodeGenerator<'a> {
         let param_names = Self::args_from_sig(&minisynize_punctuated(method.params.clone()))
             .collect::<Punctuated<Expr, Comma>>();
         let mut params = method.params.clone();
+        for (param, conversion) in params
+            .iter_mut()
+            .zip(method.param_conversions.iter())
+            .skip(1)
+        {
+            if let (syn::FnArg::Typed(pt), Some((ty, _))) =
+                (&mut param.0, conversion.inverse_rust_conversion())
+            {
+                *pt.ty = ty;
+            }
+        }
+        // TODO: the return type gets no such treatment, so under
+        // `ReferencesWrappedAllFunctionsSafe` a virtual method which returns a
+        // C++ reference asks the Rust subclass which overrides it to produce a
+        // `*const T`, even though its parameters are now `CppRef`s. Saying
+        // `CppRef` there too means `generate_subclass_fn` taking the wrapper
+        // apart again on the way out - the mirror of what it does to the
+        // arguments on the way in - and `RustSubclassFnDetails` carries no
+        // return conversion to drive that from.
         *(params
             .iter_mut()
             .next()
@@ -1171,6 +1246,7 @@ impl<'a> RsCodeGenerator<'a> {
         output_mod_items: &mut Vec<Item>,
         methods: &[SuperclassMethod],
         has_supers_trait: bool,
+        unsafe_policy: &UnsafePolicy,
     ) {
         let ty = name.get_final_ident();
         let (supers, mains): (Vec<_>, Vec<_>) = methods
@@ -1181,7 +1257,22 @@ impl<'a> RsCodeGenerator<'a> {
                 let (params, param_names) = Self::superclass_trait_method_signature(method);
                 let ret_type = &method.ret_type;
                 let unsafe_token = method.requires_unsafe.wrapper_token();
+                let wraps_references = matches!(
+                    unsafe_policy,
+                    UnsafePolicy::ReferencesWrappedAllFunctionsSafe
+                );
                 let receiver: Expr = match method.receiver_mutability {
+                    // Under the policy which wraps references, the superclass's
+                    // own binding takes its receiver as a `CppRef` like any
+                    // other C++ reference, so the trait's `&self` has to become
+                    // one. `from_ptr` is safe: a `CppRef` is never dereferenced
+                    // in Rust.
+                    ReceiverMutability::Const if wraps_references => {
+                        parse_quote!(autocxx::CppRef::from_ptr(self))
+                    }
+                    ReceiverMutability::Mutable if wraps_references => {
+                        parse_quote!(autocxx::CppMutRef::from_ptr(self))
+                    }
                     ReceiverMutability::Const => parse_quote!(self),
                     // The trait's mutable methods take `&mut self` - that's
                     // what a Rust subclass wants - whereas the superclass's own
@@ -1448,6 +1539,20 @@ fn find_trivially_constructed_subclasses(apis: &ApiVec<FnPhase>) -> HashSet<Qual
         .collect()
 }
 
+/// The types Rust can only hold behind a pointer, which is what
+/// [`lifetime::add_explicit_lifetime_if_necessary`] wants to know for the
+/// cxx#1024 case.
+///
+/// A `concrete!` template instantiation belongs here as much as a non-POD
+/// struct does - codegen gives it [`TypeKind::Abstract`] - even though no shape
+/// was found in which its membership changes what gets built. It can only flip
+/// the cxx#1024 answer, and that answer only ever decides whether a lifetime is
+/// written out or elided: a function may return a reference only if it takes
+/// exactly one (see `MultipleInputReferences` and `NoInputReference` in
+/// `analysis::fun`), so elision always reaches the same conclusion.
+/// `test_concrete_template_reference_return` and
+/// `test_concrete_template_reference_parameter` are the two shapes, one for
+/// each direction the answer flips.
 fn find_non_pod_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
     apis.iter()
         .filter_map(|api| match api {
@@ -1463,7 +1568,8 @@ fn find_non_pod_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
                         ..
                     },
                 ..
-            } => Some(name.name.clone()),
+            }
+            | Api::ConcreteType { name, .. } => Some(name.name.clone()),
             _ => None,
         })
         .collect()

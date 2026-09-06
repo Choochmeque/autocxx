@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use syn::{Type, TypePtr};
+use syn::{Type, TypePtr, TypeReference};
 
 use crate::conversion::{
     analysis::fun::function_wrapper::{CppConversionType, TypeConversionPolicy},
@@ -25,6 +25,9 @@ impl TypeConversionPolicy {
             CppConversionType::FromPtrToValue => {
                 Ok(format!("{}*", self.unwrapped_type_as_string(cpp_name_map)?))
             }
+            // `&var`. What this conversion is handed is the C++ reference;
+            // the pointer in `cxxbridge_type` is what it produces.
+            CppConversionType::FromReferenceToPointer => self.reference_type(cpp_name_map),
             _ => self.unwrapped_type_as_string(cpp_name_map),
         }
     }
@@ -51,8 +54,30 @@ impl TypeConversionPolicy {
                     cpp_name_map.type_to_cpp(ty)?
                 ))
             }
+            // `(*var)`. What this conversion produces is the C++ reference the
+            // underlying function asked for, not the pointer it was handed.
+            CppConversionType::FromPointerToReference => self.reference_type(cpp_name_map),
             _ => self.unwrapped_type_as_string(cpp_name_map),
         }
+    }
+
+    /// The C++ reference which the pointer in [`Self::cxxbridge_type`] stands
+    /// for, for the two conversions which turn one into the other. Spelled by
+    /// asking for the reference type itself, so that the referents which get a
+    /// name of their own - `str`, which is `rust::Str` - keep it here too.
+    fn reference_type(&self, cpp_name_map: &CppNameMap) -> Result<String, ConvertErrorFromCpp> {
+        let ty = match self.cxxbridge_type() {
+            Type::Ptr(TypePtr {
+                mutability, elem, ..
+            }) => Type::Reference(TypeReference {
+                and_token: Default::default(),
+                lifetime: None,
+                mutability: *mutability,
+                elem: elem.clone(),
+            }),
+            _ => panic!("Not a pointer"),
+        };
+        cpp_name_map.type_to_cpp(&ty)
     }
 
     fn unwrapped_type_as_string(

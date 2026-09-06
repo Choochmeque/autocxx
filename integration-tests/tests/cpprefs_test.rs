@@ -45,6 +45,36 @@ fn run_cpprefs_test(
     .unwrap()
 }
 
+/// As [`run_cpprefs_test`], but for tests which need their own directives
+/// (`subclass!`, say) and their own extra Rust items alongside the generated
+/// bindings.
+fn run_cpprefs_test_ex(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    directives: TokenStream,
+    extra_rust: Option<TokenStream>,
+) {
+    if !arbitrary_self_types_supported() {
+        // "unsafe_references_wrapped" requires arbitrary_self_types, which requires nightly.
+        return;
+    }
+    do_run_test(
+        cxx_code,
+        header_code,
+        rust_code,
+        directives,
+        None,
+        None,
+        extra_rust,
+        "unsafe_references_wrapped",
+        Some(quote! {
+            #![feature(arbitrary_self_types_pointers)]
+        }),
+    )
+    .unwrap()
+}
+
 #[test]
 fn test_method_call_mut() {
     run_cpprefs_test(
@@ -322,4 +352,289 @@ fn test_pass_rust_str_by_mut_ref_cpprefs() {
         assert_eq!(ffi::measure_string(s.as_cpp_mut_ref()), 5);
     };
     run_cpprefs_test(cxx, hdr, rs, &["measure_string"], &[]);
+}
+
+/// The plainest `subclass!` there is: a pure virtual method with no
+/// parameters at all, and a superclass whose only constructor takes none
+/// either. Nothing here is a reference the mode has to wrap, which is the
+/// point - `subclass!` had never generated buildable code in this mode at
+/// all, whether or not a reference was mentioned anywhere.
+#[test]
+fn test_subclass_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Observer {
+        public:
+            fx_Observer() {}
+            virtual uint32_t fx_value() const = 0;
+            virtual ~fx_Observer() {}
+        };
+        inline uint32_t fx_ask(const fx_Observer& o) { return o.fx_value(); }
+    "};
+    let rs = quote! {
+        let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+        let obs = obs.borrow();
+        let sup: &ffi::fx_Observer = obs.as_ref();
+        assert_eq!(ffi::fx_ask(autocxx::CppRef::from_ptr(sup)), 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_ask")
+            subclass!("fx_Observer",MyObserver)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl fx_Observer_methods for MyObserver {
+                fn fx_value(&self) -> u32 { 42 }
+            }
+        }),
+    );
+}
+
+/// A virtual method taking a const reference. C++ calls the override with a
+/// `const fx_Datum&` and the mode says Rust sees a `CppRef`, so the generated
+/// override has to say both things at once - which is the C++-into-Rust
+/// direction the reference wrappers had never had to describe.
+#[test]
+fn test_subclass_const_ref_param_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Datum { uint32_t a; };
+        class fx_Taker {
+        public:
+            fx_Taker() {}
+            virtual void fx_take(const fx_Datum& d) = 0;
+            virtual ~fx_Taker() {}
+        };
+        inline void fx_feed(fx_Taker& t, const fx_Datum& d) { t.fx_take(d); }
+    "};
+    let rs = quote! {
+        let taker = MyTaker::new_rust_owned(MyTaker { seen: 0, cpp_peer: Default::default() });
+        let d = CppPin::new(ffi::fx_Datum { a: 42 });
+        // Take the C++ reference to the peer and let go of the Rust borrow
+        // before calling in: C++ is about to call straight back out again.
+        let sup: *mut ffi::fx_Taker = unsafe { taker.borrow_mut().pin_mut().get_unchecked_mut() };
+        ffi::fx_feed(autocxx::CppMutRef::from_ptr(sup), d.as_cpp_ref());
+        assert_eq!(taker.borrow().seen, 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_feed")
+            generate_pod!("fx_Datum")
+            subclass!("fx_Taker",MyTaker)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Taker_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyTaker {
+                seen: u32,
+            }
+            impl fx_Taker_methods for MyTaker {
+                fn fx_take(&mut self, d: autocxx::CppRef<ffi::fx_Datum>) {
+                    self.seen = unsafe { d.as_ref() }.a;
+                }
+            }
+        }),
+    );
+}
+
+/// The mutable twin of [`test_subclass_const_ref_param_cpprefs`]: the override
+/// is handed a C++ reference it may write through, and writes through it.
+#[test]
+fn test_subclass_mut_ref_param_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Slot { uint32_t a; };
+        class fx_Filler {
+        public:
+            fx_Filler() {}
+            virtual void fx_fill_slot(fx_Slot& s) = 0;
+            virtual ~fx_Filler() {}
+        };
+        inline void fx_run(fx_Filler& f, fx_Slot& s) { f.fx_fill_slot(s); }
+    "};
+    let rs = quote! {
+        let filler = MyFiller::new_rust_owned(MyFiller { cpp_peer: Default::default() });
+        let mut s = CppPin::new(ffi::fx_Slot { a: 0 });
+        let sup: *mut ffi::fx_Filler = unsafe { filler.borrow_mut().pin_mut().get_unchecked_mut() };
+        ffi::fx_run(autocxx::CppMutRef::from_ptr(sup), s.as_cpp_mut_ref());
+        assert_eq!(unsafe { s.as_ref() }.a, 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_run")
+            generate_pod!("fx_Slot")
+            subclass!("fx_Filler",MyFiller)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Filler_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyFiller {}
+            impl fx_Filler_methods for MyFiller {
+                fn fx_fill_slot(&mut self, mut s: autocxx::CppMutRef<ffi::fx_Slot>) {
+                    unsafe { s.as_mut() }.a = 42;
+                }
+            }
+        }),
+    );
+}
+
+/// A superclass whose constructor takes a const reference. The subclass
+/// constructor autocxx synthesizes has to hand that parameter on to the base
+/// class initializer, and in this mode what it was handed is a pointer.
+#[test]
+fn test_subclass_constructor_ref_param_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Seed { uint32_t a; };
+        class fx_Grower {
+        public:
+            fx_Grower(const fx_Seed& s) : v(s.a) {}
+            virtual uint32_t fx_grown() const = 0;
+            uint32_t fx_seeded() const { return v; }
+            virtual ~fx_Grower() {}
+        private:
+            uint32_t v;
+        };
+        inline uint32_t fx_seed_of(const fx_Grower& g) { return g.fx_seeded(); }
+    "};
+    let rs = quote! {
+        let seed = CppPin::new(ffi::fx_Seed { a: 42 });
+        let grower = MyGrower::new_rust_owned(MyGrower {
+            seed: seed.as_cpp_ref(),
+            cpp_peer: Default::default(),
+        });
+        let grower = grower.borrow();
+        let sup: &ffi::fx_Grower = grower.as_ref();
+        assert_eq!(ffi::fx_seed_of(autocxx::CppRef::from_ptr(sup)), 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_seed_of")
+            generate_pod!("fx_Seed")
+            subclass!("fx_Grower",MyGrower)
+        },
+        Some(quote! {
+            use autocxx::subclass::{CppPeerConstructor, CppSubclass, CppSubclassRustPeerHolder};
+            use ffi::fx_Grower_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyGrower {
+                seed: autocxx::CppRef<ffi::fx_Seed>,
+            }
+            impl fx_Grower_methods for MyGrower {
+                fn fx_grown(&self) -> u32 { 1 }
+            }
+            // The superclass constructor takes an argument, so autocxx can't
+            // synthesize this for us.
+            impl CppPeerConstructor<ffi::MyGrowerCpp> for MyGrower {
+                fn make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> cxx::UniquePtr<ffi::MyGrowerCpp> {
+                    ffi::MyGrowerCpp::new(peer_holder, self.seed).within_unique_ptr()
+                }
+            }
+        }),
+    );
+}
+
+/// A virtual method which is not pure, so the peer class gets a `_super`
+/// helper the Rust override can call - the one place where the generated C++
+/// calls C++ and has to spell each converted parameter a third way.
+#[test]
+fn test_subclass_super_call_ref_param_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Note { uint32_t a; };
+        class fx_Ledger {
+        public:
+            fx_Ledger() : total(0) {}
+            virtual void fx_post(const fx_Note& n) { total += n.a; }
+            uint32_t fx_total() const { return total; }
+            virtual ~fx_Ledger() {}
+        private:
+            uint32_t total;
+        };
+        inline void fx_post_to(fx_Ledger& l, const fx_Note& n) { l.fx_post(n); }
+    "};
+    let rs = quote! {
+        let ledger = MyLedger::new_rust_owned(MyLedger { cpp_peer: Default::default() });
+        let n = CppPin::new(ffi::fx_Note { a: 21 });
+        let sup: *mut ffi::fx_Ledger = unsafe { ledger.borrow_mut().pin_mut().get_unchecked_mut() };
+        ffi::fx_post_to(autocxx::CppMutRef::from_ptr(sup), n.as_cpp_ref());
+        assert_eq!(autocxx::CppRef::from_ptr(sup as *const ffi::fx_Ledger).fx_total(), 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_post_to")
+            generate_pod!("fx_Note")
+            subclass!("fx_Ledger",MyLedger)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Ledger_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyLedger {}
+            impl fx_Ledger_methods for MyLedger {
+                fn fx_post(&mut self, n: autocxx::CppRef<ffi::fx_Note>) {
+                    use ffi::fx_Ledger_supers;
+                    // Post it twice, so that the assertion can only pass if
+                    // the superclass really saw what we were given.
+                    self.fx_post_super(n);
+                    self.fx_post_super(n);
+                }
+            }
+        }),
+    );
+}
+
+/// A copy constructor in this mode. Its source is a `const T&`, which the mode
+/// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
+/// `&Self` and that is not negotiable - so the source stays a Rust reference
+/// here as it is under every other policy. Before, the mode's conversion made
+/// the parameter unrecognizable as a reference and the copy constructor became
+/// an ordinary constructor: `CopyNew` went unimplemented and `.clone()` and
+/// `moveit!` had nothing to call.
+#[test]
+fn test_copy_constructor_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        class fx_Copyable {
+        public:
+            fx_Copyable(uint32_t a) : s(std::to_string(a)) {}
+            fx_Copyable(const fx_Copyable& other) : s(other.s) {}
+            uint32_t len() const { return static_cast<uint32_t>(s.length()); }
+        private:
+            std::string s;
+        };
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Copyable::new(12345).within_unique_ptr();
+        let a = autocxx::CppUniquePtrPin::new(a);
+        moveit! { let b = autocxx::moveit::new::copy(unsafe { a.as_cpp_ref().as_ref() }); }
+        let b = autocxx::CppRef::from_ptr(b.as_ref().get_ref() as *const ffi::fx_Copyable);
+        assert_eq!(b.len(), 5);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_Copyable"], &[]);
 }
