@@ -140,6 +140,23 @@ pub(super) fn create_subclass_trait_item(
     }
 }
 
+// TODO: neither this nor `create_subclass_constructor` below works under
+// `UnsafePolicy::ReferencesWrappedAllFunctionsSafe`, and no `subclass!` in
+// that mode has ever generated code which builds. Both reuse the conversions
+// worked out for calls from Rust into C++ - where that mode turns each
+// reference into a pointer - in places written for the other two policies:
+//
+// * the C++ for a subclass constructor is generated in the `CppCallsCpp`
+//   direction, which hands every parameter on by name and converts nothing,
+//   so the base class initializer reads `Super(arg1)` for an `arg1` the mode
+//   declared `const Super*`, which no compiler accepts. That happens for every
+//   subclass, whether or not a reference is mentioned anywhere.
+// * a method which does take a reference reaches cxx as an `extern "Rust"`
+//   function with a pointer parameter, and cxx refuses it: "pointer argument
+//   requires that the function be marked unsafe".
+//
+// Fixing them means saying what a `CppRef`/`CppMutRef` is on the way from C++
+// into Rust, which is the direction the wrappers have never had to describe.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_subclass_function(
     sub: &SubclassName,
