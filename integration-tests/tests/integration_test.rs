@@ -2434,6 +2434,9 @@ fn test_pass_rust_str() {
 /// C++ `const rust::Str&` parameter comes out as `&&str`. That double
 /// reference is right, not a bug: cxx spells `&str` as a `rust::Str` value and
 /// `&T` as `const T&`, and `rust::Str` has `&str`'s (pointer, length) layout.
+/// The const case stays supported precisely because `&&str` gives Rust no way
+/// to write to the slot; the mutable one does, which is why
+/// `test_pass_rust_str_by_mut_ref_refused` exists.
 #[test]
 fn test_pass_rust_str_by_ref() {
     let cxx = indoc! {"
@@ -2453,26 +2456,171 @@ fn test_pass_rust_str_by_ref() {
     run_test(cxx, hdr, rs, &["measure_string"], &[]);
 }
 
-/// As [`test_pass_rust_str_by_ref`], for a mutable `rust::Str&`, which becomes
-/// `Pin<&mut &str>`. See the note in `type_converter.rs`: this works, but
-/// nothing stops C++ writing a fat pointer of its own into the slot.
+/// A *mutable* `rust::Str&` is refused. It would become `Pin<&mut &str>`, and
+/// the slot behind that belongs to C++: C++ may write a fat pointer of its own
+/// into it, after which Rust holds a `&str` whose lifetime nothing checked.
+/// The parameter used to be generated, so the diagnostic has to explain itself
+/// and name the two ways out - by value, or `const rust::Str&`.
 #[test]
-fn test_pass_rust_str_by_mut_ref() {
-    let cxx = indoc! {"
-        uint32_t measure_string(rust::Str& z) {
-            return static_cast<uint32_t>(std::string(z).length());
-        }
-    "};
+fn test_pass_rust_str_by_mut_ref_refused() {
     let hdr = indoc! {"
         #include <cstdint>
         #include <cxx.h>
         uint32_t measure_string(rust::Str& z);
     "};
-    let rs = quote! {
-        let mut s = "hello";
-        assert_eq!(ffi::measure_string(std::pin::Pin::new(&mut s)), 5);
-    };
-    run_test(cxx, hdr, rs, &["measure_string"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["measure_string"],
+        &[],
+        &[
+            "MutableReferenceToRustStr",
+            "A mutable C++ reference to rust::Str appears here",
+            "whose lifetime nothing has checked",
+            "const rust::Str&",
+            "unsafe_references_wrapped",
+        ],
+    );
+}
+
+/// The same shape written through a typedef, which is how C++ often spells it.
+/// The refusal is decided on what the referent converted *to*, so resolving
+/// the alias is what catches this - nothing is keyed on the name `rust::Str`
+/// as written.
+#[test]
+fn test_rust_str_by_mut_ref_refused_through_typedef() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        typedef rust::Str MyStr;
+        uint32_t measure_string(MyStr& z);
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["measure_string"],
+        &[],
+        &["MutableReferenceToRustStr", "rust::Str"],
+    );
+}
+
+/// The same shape again, this time behind an alias for the *reference* rather
+/// than for the referent. That is refused at the alias itself, before any use
+/// of it is in sight, so what the user is told names the alias and carries the
+/// reason across.
+#[test]
+fn test_rust_str_by_mut_ref_refused_through_reference_typedef() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        using StrRef = rust::Str&;
+        uint32_t measure_string(StrRef z);
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["measure_string"],
+        &[],
+        &["MutableReferenceToRustStr", "StrRef"],
+    );
+}
+
+/// A `rust::Str&` *returned* rather than passed. It reaches the type converter
+/// by a different route and gets the same refusal - which is an improvement on
+/// what it used to do, namely generate a `Pin<&mut &str>` return type with no
+/// lifetime rustc could infer, so that the bindings failed to compile with
+/// E0106 and no explanation of what in the C++ had caused it.
+///
+/// The advice a return needs is not a parameter's advice: `rust::Str` by value
+/// and `const rust::Str&` are both turned down here too, with
+/// `NoInputReference`, there being no input reference to give the borrow a
+/// lifetime. So the diagnostic has to offer an owned `rust::String`, and this
+/// insists that it does.
+#[test]
+fn test_rust_str_mut_ref_return_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        inline rust::Str& fx_current() { static rust::Str s(\"hello\"); return s; }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_current"],
+        &[],
+        &[
+            "MutableReferenceToRustStr",
+            "return an owned `rust::String`",
+        ],
+    );
+}
+
+/// A `rust::Str&` as a struct *field*, which is not refused, spelt directly
+/// and through an alias for the reference. Nothing hands Rust a
+/// `Pin<&mut &str>` from a field: a struct with a reference member is never
+/// POD, so it is opaque, and its fields are bytes Rust cannot name. Refusing
+/// the field would also take away autocxx's knowledge that the struct has a
+/// reference member, whereupon it offers a default constructor C++ has
+/// deleted and the generated C++ stops compiling.
+#[test]
+fn test_rust_str_reference_field_is_left_alone() {
+    let direct = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        #include <string>
+        struct Holder { rust::Str& s; };
+        inline uint32_t measure(const Holder& h) {
+            return static_cast<uint32_t>(std::string(h.s).length());
+        }
+    "};
+    let through_alias = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        #include <string>
+        using StrRef = rust::Str&;
+        struct Holder { StrRef s; };
+        inline uint32_t measure(const Holder& h) {
+            return static_cast<uint32_t>(std::string(h.s).length());
+        }
+    "};
+    for hdr in [direct, through_alias] {
+        run_test("", hdr, quote! {}, &["measure", "Holder"], &[]);
+    }
+}
+
+/// `rust::Str` is the only type autocxx represents as a borrowed fat pointer,
+/// so it is the only thing the refusal above has to catch. The obvious sibling
+/// is `rust::Slice<T>`, which is `&[T]`, and that never gets that far: bindgen
+/// discards its template parameter, so autocxx turns it down as
+/// `UnusedTemplateParam` whether it is passed by value or by mutable
+/// reference. This test is here so that anyone who teaches autocxx about
+/// `rust::Slice` finds out that the hazard applies to it too.
+#[test]
+fn test_rust_slice_never_reaches_this() {
+    let by_value = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        uint32_t measure_slice(rust::Slice<const uint8_t> z);
+    "};
+    let by_mut_ref = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        uint32_t measure_slice(rust::Slice<const uint8_t>& z);
+    "};
+    for hdr in [by_value, by_mut_ref] {
+        run_test_expect_fail_with_errors(
+            "",
+            hdr,
+            quote! {},
+            &["measure_slice"],
+            &[],
+            &["UnusedTemplateParam"],
+        );
+    }
 }
 
 #[test]
