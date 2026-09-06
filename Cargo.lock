@@ -271,7 +271,6 @@ name = "autocxx-macro"
 version = "0.30.0"
 dependencies = [
  "autocxx-parser",
- "proc-macro-error",
  "proc-macro2",
  "quote",
  "syn 2.0.98",
