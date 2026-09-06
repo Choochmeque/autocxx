@@ -171,7 +171,6 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
     fn record_header_file_dependency(&self, filename: &str);
 }
 
-#[cfg_attr(doc, aquamarine::aquamarine)]
 /// Core of the autocxx engine.
 ///
 /// The basic idea is this. We will run `bindgen` which will spit
@@ -183,92 +182,112 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
 /// C++ code which we should generate, e.g. wrappers to move things
 /// into and out of `UniquePtr`s.
 ///
-/// ```mermaid
-/// flowchart TB
-///     s[(C++ headers)]
-///     s --> lc
-///     rss[(.rs input)]
-///     rss --> parser
-///     parser --> include_cpp_conf
-///     cpp_output[(C++ output)]
-///     rs_output[(.rs output)]
-///     subgraph autocxx[autocxx_engine]
-///     parser[File parser]
-///     subgraph bindgen[autocxx_bindgen]
-///     lc[libclang parse]
-///     bir(bindgen IR)
-///     lc --> bir
-///     end
-///     bgo(bindgen generated bindings)
-///     bir --> bgo
-///     include_cpp_conf(Config from include_cpp)
-///     syn[Parse with syn]
-///     bgo --> syn
-///     conv[['conversion' mod: see below]]
-///     syn --> conv
-///     rsgen(Generated .rs TokenStream)
-///     conv --> rsgen
-///     subgraph cxx_gen
-///     cxx_codegen[cxx_gen C++ codegen]
-///     end
-///     rsgen --> cxx_codegen
-///     end
-///     conv -- autocxx C++ codegen --> cpp_output
-///     rsgen -- autocxx .rs codegen --> rs_output
-///     cxx_codegen -- cxx C++ codegen --> cpp_output
-///     subgraph rustc [rustc build]
-///     subgraph autocxx_macro
-///     include_cpp[autocxx include_cpp macro]
-///     end
-///     subgraph cxx
-///     cxxm[cxx procedural macro]
-///     end
-///     comprs(Fully expanded Rust code)
-///     end
-///     rs_output-. included .->include_cpp
-///     include_cpp --> cxxm
-///     cxxm --> comprs
-///     rss --> rustc
-///     include_cpp_conf -. used to configure .-> bindgen
-///     include_cpp_conf --> conv
-///     link[linker]
-///     cpp_output --> link
-///     comprs --> link
+/// # Build time
+///
+/// Everything here runs inside `autocxx_engine`, except the `libclang` parse
+/// (which belongs to `autocxx_bindgen`) and the final C++ codegen (which
+/// belongs to `cxx_gen`).
+///
+/// ```text
+///   .rs input (your source, containing include_cpp!)
+///        |
+///        v
+///   File parser --> Config from include_cpp -----------------+
+///                             |                              |
+///                             | configures                   |
+///                             v                              |
+///   C++ headers --> +-- autocxx_bindgen --------------+      |
+///                   |  libclang parse --> bindgen IR  |      |
+///                   +----------------|----------------+      |
+///                                    v                       |
+///                       bindgen generated bindings           |
+///                                    |                       |
+///                                    v                       |
+///                             Parse with syn                 |
+///                                    |                       |
+///                                    v                       |
+///                            'conversion' mod <--------------+
+///                              |         |
+///                              |         +-- autocxx C++ codegen --> C++ output
+///                              v
+///                     Generated .rs TokenStream
+///                              |         |
+///                              |         +-- autocxx .rs codegen --> .rs output
+///                              v
+///                      cxx_gen C++ codegen ------------------> C++ output
 /// ```
 ///
-/// Here's a zoomed-in view of the "conversion" part:
+/// The two arrows marked `C++ output` land in the same place: autocxx's own
+/// C++ and cxx's are compiled and linked together below.
 ///
-/// ```mermaid
-/// flowchart TB
-///     syn[(syn parse)]
-///     apis(Unanalyzed APIs)
-///     subgraph parse
-///     syn ==> parse_bindgen
-///     end
-///     parse_bindgen ==> apis
-///     subgraph analysis
-///     typedef[typedef analysis]
-///     pod[POD analysis]
-///     apis ==> typedef
-///     typedef ==> pod
-///     podapis(APIs with POD analysis)
-///     pod ==> podapis
-///     fun[Function materialization analysis]
-///     podapis ==> fun
-///     funapis(APIs with function analysis)
-///     fun ==> funapis
-///     gc[Garbage collection]
-///     funapis ==> gc
-///     ctypes[C int analysis]
-///     gc ==> ctypes
-///     ctypes ==> finalapis
-///     end
-///     finalapis(Analyzed APIs)
-///     codegenrs(.rs codegen)
-///     codegencpp(.cpp codegen)
-///     finalapis ==> codegenrs
-///     finalapis ==> codegencpp
+/// # `rustc` build time
+///
+/// ```text
+///   .rs input, with the generated .rs output included into it
+///        |
+///        v
+///   autocxx include_cpp! macro (autocxx_macro)
+///        |
+///        v
+///   cxx procedural macro (cxx)
+///        |
+///        v
+///   fully expanded Rust code ---+
+///                               |
+///                               +--> linker
+///                               |
+///   compiled C++ output --------+
 /// ```
+///
+/// # A zoomed-in view of the "conversion" part
+///
+/// Parsing produces a list of APIs; each analysis phase then consumes that
+/// list and emits a new one, parameterized by a richer set of metadata.
+///
+/// 1. Parse the bindgen mod into unanalyzed APIs, noting on the way which
+///    type names a same-named C++ variable hides, and which names bindgen
+///    defined twice. The Rust codegen needs both to repair the bindgen mod,
+///    and this is the last point at which either is knowable.
+/// 2. Typedef analysis: point bindgen-style typedef targets (`root::std::unique_ptr`)
+///    at their cxx-style equivalents (`UniquePtr`).
+/// 3. POD analysis: confirm that the types the user asked to be POD really are,
+///    and mark dependent types. Everything else stays opaque.
+/// 4. Discard static data whose type isn't exposed exactly as bindgen
+///    declared it, since a static is re-exported by `use`ing bindgen's
+///    declaration. POD structs and enums survive; everything else goes.
+/// 5. Break the link on typedefs pointing at something we can't represent, and
+///    use the typedef itself as a first-class type instead.
+/// 6. Add base-class casts, and synthesize allocators and deallocators.
+/// 7. Function materialization analysis: work out which functions are plain
+///    entries in the `cxx::bridge` mod and which need a C++ wrapper function.
+///    This is the most complex part of autocxx.
+/// 8. Mark as abstract any type whose functions turned out to be pure
+///    virtual, take its constructors away, and reject it outright if it is
+///    nested inside another type, which cxx has no way to spell. Then
+///    withdraw the constructors and allocators of any type whose destructor
+///    is inaccessible, since Rust must never own one.
+/// 9. Note which constructors, and which alloc and free functions, each type
+///    depends on, so garbage collection doesn't take them later; and, now
+///    that abstractness and constructors are settled, turn the functions
+///    which can't be generated at all - protected ones, say - into ignored
+///    items.
+/// 10. Name check: confirm the names can be represented in cxx, and settle on
+///     the name each type goes by inside the bridge mod's flat namespace.
+/// 11. Turn any API which depends on an ignored item, or on a type we never
+///     knew about at all, into an ignored item of its own carrying the
+///     reason - rather than removing it silently.
+/// 12. Garbage collection: follow the edges outwards from the allowlist, and
+///     drop everything unreachable.
+/// 13. C int analysis: spot the C types cxx cannot spell - the
+///     variable-length integers, `void` and `char16_t` - and add an API for
+///     each so the generated C++ declares a typedef for it.
+/// 14. Confirm that every `generate!` still names something which survived
+///     all of the above, and that every `derive!` names a type whose Rust
+///     definition the user can actually see - and isn't asking for `Default`
+///     on an enum.
+///
+/// The resulting analyzed APIs then feed both the `.cpp` codegen and the `.rs`
+/// codegen.
 pub struct IncludeCppEngine {
     config: IncludeCppConfig,
     state: State,

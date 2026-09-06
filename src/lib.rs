@@ -28,7 +28,6 @@ pub use reference_wrapper::{
     AsCppMutRef, AsCppRef, CppLtRef, CppMutLtRef, CppMutRef, CppPin, CppRef, CppUniquePtrPin,
 };
 
-#[cfg_attr(doc, aquamarine::aquamarine)]
 /// Include some C++ headers in your Rust project.
 ///
 /// This macro allows you to include one or more C++ headers within

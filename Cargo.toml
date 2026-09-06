@@ -61,17 +61,6 @@ autocxx-macro = { path="macro", version="0.30.0" }
 # `autocxx-build` checks it at build time instead. See
 # `engine/src/cxx_version_parity.rs`.
 cxx = "1.0.136" # ... also needed because expansion of type_id refers to ::cxx
-# TODO: 0.1.12 dates from 2021 and is now the only thing putting
-# `proc-macro-error` (RUSTSEC-2024-0370, unmaintained, dragging a legacy syn
-# 1.x tree with it) into a published autocxx's dependencies - autocxx-macro
-# stopped doing so. Current is 0.6, and the call site here is already spelled
-# the way 0.6 documents it, but nothing about the bump has been tried - and,
-# more to the point, 0.6 would not clear the finding: it swaps
-# proc-macro-error for proc-macro-error2, which is itself unmaintained
-# (RUSTSEC-2026-0173). Clearing this for real means aquamarine dropping both,
-# or autocxx dropping aquamarine.
-# Same pin in `engine/Cargo.toml` - move both together.
-aquamarine = "0.1" # docs
 moveit = { version = "0.6", features = [ "cxx" ] }
 
 [build-dependencies]
