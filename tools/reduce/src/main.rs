@@ -12,7 +12,6 @@ use std::{
     borrow::Cow,
     fs::File,
     io::Write,
-    os::unix::prelude::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -701,9 +700,24 @@ fn create_interestingness_test(
         file.write_all(content.as_bytes())?;
     }
 
+    make_executable(test_path)?;
+    Ok(())
+}
+
+/// Mark the interestingness test executable, where that is a thing. creduce
+/// runs the script through a shell, and on unix the shell demands the
+/// executable bit; Windows has no such bit, and there creduce (via its perl
+/// runtime) executes the script by interpreter, so there is nothing to do.
+#[cfg(unix)]
+fn make_executable(test_path: &Path) -> std::io::Result<()> {
+    use std::os::unix::prelude::PermissionsExt;
     let mut perms = std::fs::metadata(test_path)?.permissions();
     perms.set_mode(0o700);
-    std::fs::set_permissions(test_path, perms)?;
+    std::fs::set_permissions(test_path, perms)
+}
+
+#[cfg(not(unix))]
+fn make_executable(_test_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
