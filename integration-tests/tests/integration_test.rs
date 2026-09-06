@@ -19824,6 +19824,45 @@ fn test_concrete_template_reference_return() {
     );
 }
 
+/// The mirror of [`test_concrete_template_reference_return`]: a `concrete!`
+/// template instantiation as the reference *parameter*, with a reference to a
+/// built-in type coming back. That is the shape cxx once wanted an explicit
+/// lifetime for - a reference to an extern type in, a reference to something
+/// else out - which `add_explicit_lifetime_if_necessary` calls the cxx#1024
+/// case and decides by asking which types are non-POD.
+///
+/// Whether a `concrete!` type counts as non-POD flips that decision here and
+/// in the test above, in opposite directions. Both spellings build, so this
+/// pair pins that the answer does not matter: a function may return a
+/// reference only if it takes exactly one, so Rust elides the same lifetime
+/// the workaround writes out.
+#[test]
+fn test_concrete_template_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> class fx_Cell {
+        public:
+            T held;
+            uint32_t v = 4;
+        };
+        class fx_Payload { public: uint32_t a = 1; };
+        inline const uint32_t& fx_peek(const fx_Cell<fx_Payload>& c) { return c.v; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Payload")
+            concrete!("fx_Cell<fx_Payload>", fx_Cell_fx_Payload)
+            generate!("fx_peek")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
 /// A C++ `[[deprecated]]` function, bound and never called from Rust.
 ///
 /// Both halves of the generated C++ name the function - autocxx's own wrapper

@@ -1539,6 +1539,20 @@ fn find_trivially_constructed_subclasses(apis: &ApiVec<FnPhase>) -> HashSet<Qual
         .collect()
 }
 
+/// The types Rust can only hold behind a pointer, which is what
+/// [`lifetime::add_explicit_lifetime_if_necessary`] wants to know for the
+/// cxx#1024 case.
+///
+/// A `concrete!` template instantiation belongs here as much as a non-POD
+/// struct does - codegen gives it [`TypeKind::Abstract`] - even though no shape
+/// was found in which its membership changes what gets built. It can only flip
+/// the cxx#1024 answer, and that answer only ever decides whether a lifetime is
+/// written out or elided: a function may return a reference only if it takes
+/// exactly one (see `MultipleInputReferences` and `NoInputReference` in
+/// `analysis::fun`), so elision always reaches the same conclusion.
+/// `test_concrete_template_reference_return` and
+/// `test_concrete_template_reference_parameter` are the two shapes, one for
+/// each direction the answer flips.
 fn find_non_pod_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
     apis.iter()
         .filter_map(|api| match api {
@@ -1554,7 +1568,8 @@ fn find_non_pod_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
                         ..
                     },
                 ..
-            } => Some(name.name.clone()),
+            }
+            | Api::ConcreteType { name, .. } => Some(name.name.clone()),
             _ => None,
         })
         .collect()
