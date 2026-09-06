@@ -779,9 +779,9 @@ impl<'a> RsCodeGenerator<'a> {
                             .get_final_ident();
                     // The same shape as the trait item this implements, so
                     // that whatever the trait says a parameter is, the peer's
-                    // own `_super` method is handed exactly that.
-                    let (params, param_names) = Self::superclass_trait_method_signature(m);
-                    let ret = &m.ret_type.clone();
+                    // own `_super` method is handed exactly that - and
+                    // whatever the trait says the result is, this produces.
+                    let (params, param_names, ret) = Self::superclass_trait_method_signature(m);
                     let peer_fn = make_ident(match m.receiver_mutability {
                         ReceiverMutability::Const => "peer",
                         ReceiverMutability::Mutable => "peer_mut",
@@ -811,10 +811,14 @@ impl<'a> RsCodeGenerator<'a> {
                         }
                         _ => parse_quote!(self.#peer_fn()),
                     };
+                    let call = Self::binding_call_as_trait_return(
+                        m,
+                        parse_quote!( #receiver.#peer_super_method_name(#param_names) ),
+                    );
                     parse_quote! {
                         #unsafe_token fn #trait_super_method_name(#params) #ret {
                             use autocxx::subclass::CppSubclass;
-                            #receiver.#peer_super_method_name(#param_names)
+                            #call
                         }
                     }
                 })
@@ -947,6 +951,18 @@ impl<'a> RsCodeGenerator<'a> {
                 },
             )
             .collect();
+        // And the same for what it hands back. The bridge returns the pointer
+        // cxx requires; the trait item speaks in wrappers, so unwrap what it
+        // gives us. `as_ptr`/`as_mut_ptr` are safe: no reference is created,
+        // and the pointer's onward journey is into C++, where the returned
+        // reference has to outlive the call by C++'s own rules for a virtual
+        // method - which this wrapper neither strengthens nor weakens.
+        let return_unwrap = details
+            .cpp_impl
+            .return_conversion
+            .as_ref()
+            .and_then(|conversion| conversion.inverse_rust_return_conversion())
+            .map(|(_, unwrap)| unwrap);
         let superclass_id = details.superclass.get_final_ident();
         let methods_trait = SubclassName::get_methods_trait_name(&details.superclass);
         let methods_trait = methods_trait.to_type_path();
@@ -964,6 +980,13 @@ impl<'a> RsCodeGenerator<'a> {
         let borrow = make_ident(borrow);
         let destroy_panic_msg = format!("Rust subclass API (method {} of subclass {} of superclass {}) called after subclass destroyed", method_name, subclass.0.name, superclass_id);
         let reentrancy_panic_msg = format!("Rust subclass API (method {} of subclass {} of superclass {}) called whilst subclass already borrowed - likely a re-entrant call",  method_name, subclass.0.name, superclass_id);
+        let call: Expr = parse_quote! {
+            #methods_trait :: #method_name (r, #args)
+        };
+        let call: Expr = match return_unwrap {
+            Some(unwrap) => parse_quote!( #call.#unwrap() ),
+            None => call,
+        };
         RsCodegenResult {
             global_items: vec![parse_quote! {
                 #global_def {
@@ -975,9 +998,7 @@ impl<'a> RsCodeGenerator<'a> {
                         .#borrow()
                         .expect(#reentrancy_panic_msg);
                     let r = ::core::ops::#deref_ty::#deref_call(& #mut_token b);
-                    #methods_trait :: #method_name
-                        (r,
-                        #args)
+                    #call
                 }
             }],
             extern_rust_mod_items: vec![ForeignItem::Fn(cxxbridge_decl)],
@@ -1121,8 +1142,8 @@ impl<'a> RsCodeGenerator<'a> {
                 .zip(super_fn_names(methods))
                 .map(|(method, super_id)| {
                     let id = &method.name;
-                    let (params, param_names) = Self::superclass_trait_method_signature(method);
-                    let ret_type = &method.ret_type;
+                    let (params, param_names, ret_type) =
+                        Self::superclass_trait_method_signature(method);
                     let unsafe_token = method.requires_unsafe.wrapper_token();
                     if !method.has_super_helper {
                         // No superclass implementation this subclass could
@@ -1186,19 +1207,22 @@ impl<'a> RsCodeGenerator<'a> {
         }
     }
 
-    /// The parameter list a `_methods`/`_supers` trait item gets for one
-    /// superclass method - the C++ receiver swapped for a plain `self`,
-    /// because implementers are Rust types - plus the names by which to pass
-    /// the rest of the parameters on to whoever really does the work.
+    /// The signature a `_methods`/`_supers` trait item gets for one superclass
+    /// method - the C++ receiver swapped for a plain `self`, because
+    /// implementers are Rust types - plus the names by which to pass the rest
+    /// of the parameters on to whoever really does the work.
     ///
-    /// The remaining parameters are the ones the bridge carries, undoing any
-    /// conversion which only makes sense in the Rust-calls-C++ direction: a
-    /// trait a Rust subclass implements is called the other way about.
+    /// Parameters and return value alike are the ones the bridge carries,
+    /// undoing any conversion which only makes sense in the Rust-calls-C++
+    /// direction: a trait a Rust subclass implements is called the other way
+    /// about, so the override receives what C++ passes and produces what C++
+    /// will receive.
     fn superclass_trait_method_signature(
         method: &SuperclassMethod,
     ) -> (
         Punctuated<crate::minisyn::FnArg, Comma>,
         Punctuated<Expr, Comma>,
+        crate::minisyn::ReturnType,
     ) {
         let param_names = Self::args_from_sig(&minisynize_punctuated(method.params.clone()))
             .collect::<Punctuated<Expr, Comma>>();
@@ -1214,14 +1238,10 @@ impl<'a> RsCodeGenerator<'a> {
                 *pt.ty = ty;
             }
         }
-        // TODO: the return type gets no such treatment, so under
-        // `ReferencesWrappedAllFunctionsSafe` a virtual method which returns a
-        // C++ reference asks the Rust subclass which overrides it to produce a
-        // `*const T`, even though its parameters are now `CppRef`s. Saying
-        // `CppRef` there too means `generate_subclass_fn` taking the wrapper
-        // apart again on the way out - the mirror of what it does to the
-        // arguments on the way in - and `RustSubclassFnDetails` carries no
-        // return conversion to drive that from.
+        let ret_type = match Self::superclass_trait_return_conversion(method) {
+            Some((ty, _)) => parse_quote! { -> #ty },
+            None => method.ret_type.clone(),
+        };
         *(params
             .iter_mut()
             .next()
@@ -1229,7 +1249,43 @@ impl<'a> RsCodeGenerator<'a> {
             ReceiverMutability::Const => parse_quote!(&self),
             ReceiverMutability::Mutable => parse_quote!(&mut self),
         };
-        (params, param_names)
+        (params, param_names, ret_type)
+    }
+
+    /// How the return value of one `_methods`/`_supers` trait item differs from
+    /// the one the bridge carries, or `None` when it doesn't.
+    ///
+    /// Under `ReferencesWrappedAllFunctionsSafe` a virtual method returning a
+    /// C++ reference reaches the bridge as a raw pointer, and the trait says
+    /// `CppRef`/`CppMutRef` instead, just as it does for such a method's
+    /// parameters. The second element is the method which gets the pointer
+    /// back out of the wrapper, for whoever has to hand one to the bridge.
+    fn superclass_trait_return_conversion(method: &SuperclassMethod) -> Option<(Type, Ident)> {
+        method
+            .ret_conversion
+            .as_ref()
+            .and_then(|conversion| conversion.inverse_rust_return_conversion())
+    }
+
+    /// Adapts a call to one of autocxx's own Rust-calls-C++ bindings for a
+    /// superclass method so that it yields what the matching
+    /// `_methods`/`_supers` trait item promises.
+    ///
+    /// The two differ only under `ReferencesWrappedAllFunctionsSafe`, and only
+    /// for a method returning a C++ reference: such a binding hands back a
+    /// `CppLtRef`/`CppMutLtRef` whose lifetime parameter it invented - the
+    /// lifetime appears nowhere among the binding's own arguments, so its
+    /// caller already picks it freely - whereas the trait says the
+    /// lifetime-free `CppRef`/`CppMutRef` that a Rust subclass's override
+    /// returns. `lifetime_cast` is the documented way across, and is safe for
+    /// the reason those wrappers exist at all: a `CppRef` is never
+    /// dereferenced in Rust, so how long the referent must live is C++'s
+    /// business, exactly as it is for the C++ method being wrapped.
+    fn binding_call_as_trait_return(method: &SuperclassMethod, call: Expr) -> Expr {
+        match Self::superclass_trait_return_conversion(method) {
+            Some(_) => parse_quote!( #call.lifetime_cast() ),
+            None => call,
+        }
     }
 
     /// Implements a superclass's own `_methods` (and `_supers`) trait for the
@@ -1254,8 +1310,8 @@ impl<'a> RsCodeGenerator<'a> {
             .zip(super_fn_names(methods))
             .map(|(method, super_id)| {
                 let id = &method.name;
-                let (params, param_names) = Self::superclass_trait_method_signature(method);
-                let ret_type = &method.ret_type;
+                let (params, param_names, ret_type) =
+                    Self::superclass_trait_method_signature(method);
                 let unsafe_token = method.requires_unsafe.wrapper_token();
                 let wraps_references = matches!(
                     unsafe_policy,
@@ -1295,14 +1351,15 @@ impl<'a> RsCodeGenerator<'a> {
                 let call: Expr = parse_quote!( #ty::#id(#receiver, #param_names) );
                 // A method returning a non-POD value by value hands the
                 // superclass's caller an `impl New`, whereas the trait
-                // promises a `UniquePtr`.
+                // promises a `UniquePtr`. That can't also be a returned
+                // reference, so the two adaptations never both apply.
                 let body: Expr = if method.superclass_binding.returns_new {
                     parse_quote!({
                         use autocxx::moveit::Emplace;
                         cxx::UniquePtr::emplace(#call)
                     })
                 } else {
-                    call
+                    Self::binding_call_as_trait_return(method, call)
                 };
                 if !method.has_super_helper {
                     // There's no `_super` item for a pure virtual method, so

@@ -2360,6 +2360,19 @@ impl<'a> FnAnalyzer<'a> {
                         );
                         let was_reference = was_mutable_reference
                             || matches!(annotated_type.kind, type_converter::TypeKind::Reference);
+                        // TODO: a returned *rvalue* reference is neither of
+                        // those kinds, so it takes the unconverted branch below
+                        // and its C++ type stays the `T*` the type converter
+                        // made of it - there is no `FromPointerToRValueReference`
+                        // to ask for. That is harmless for a free function,
+                        // whose shim is free to return `T*`, but wrong for a
+                        // subclass peer's override, which must repeat the
+                        // superclass's `T&&` exactly: the generated `T* f()
+                        // override` does not compile. Reproduced under both
+                        // `unsafe` and `unsafe_references_wrapped`, so this is
+                        // not a reference-wrapping matter; a fix belongs with
+                        // the conversion machinery, which would need to learn
+                        // the rvalue direction on both sides.
                         let conversion = Some(
                             if was_reference
                                 && matches!(

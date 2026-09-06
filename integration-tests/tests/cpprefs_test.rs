@@ -608,6 +608,218 @@ fn test_subclass_super_call_ref_param_cpprefs() {
     );
 }
 
+/// A virtual method which *returns* a const reference. The mirror of
+/// [`test_subclass_const_ref_param_cpprefs`]: this time the Rust override is
+/// the one which has to produce a reference, and the mode says it speaks
+/// `CppRef` rather than a raw pointer.
+///
+/// The reference the override hands back must outlive the call, exactly as a
+/// hand-written C++ override's would - here it refers to a `CppPin` which
+/// outlives the whole test.
+#[test]
+fn test_subclass_const_ref_return_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Reading { uint32_t a; };
+        class fx_Gauge {
+        public:
+            fx_Gauge() {}
+            virtual const fx_Reading& fx_latest() const = 0;
+            virtual ~fx_Gauge() {}
+        };
+        inline uint32_t fx_read(const fx_Gauge& g) { return g.fx_latest().a; }
+    "};
+    let rs = quote! {
+        let reading = CppPin::new(ffi::fx_Reading { a: 42 });
+        let gauge = MyGauge::new_rust_owned(MyGauge {
+            reading: reading.as_cpp_ref(),
+            cpp_peer: Default::default(),
+        });
+        let gauge = gauge.borrow();
+        let sup: &ffi::fx_Gauge = gauge.as_ref();
+        assert_eq!(ffi::fx_read(autocxx::CppRef::from_ptr(sup)), 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_read")
+            generate_pod!("fx_Reading")
+            subclass!("fx_Gauge",MyGauge)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Gauge_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyGauge {
+                reading: autocxx::CppRef<ffi::fx_Reading>,
+            }
+            impl fx_Gauge_methods for MyGauge {
+                fn fx_latest(&self) -> autocxx::CppRef<ffi::fx_Reading> {
+                    self.reading
+                }
+            }
+        }),
+    );
+}
+
+/// The mutable twin of [`test_subclass_const_ref_return_cpprefs`]: the
+/// override hands back a reference C++ then writes through.
+#[test]
+fn test_subclass_mut_ref_return_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Dial { uint32_t a; };
+        class fx_Knob {
+        public:
+            fx_Knob() {}
+            virtual fx_Dial& fx_dial() = 0;
+            virtual ~fx_Knob() {}
+        };
+        inline void fx_turn(fx_Knob& k) { k.fx_dial().a = 42; }
+    "};
+    let rs = quote! {
+        let mut dial = CppPin::new(ffi::fx_Dial { a: 0 });
+        let knob = MyKnob::new_rust_owned(MyKnob {
+            dial: dial.as_cpp_mut_ref(),
+            cpp_peer: Default::default(),
+        });
+        let sup: *mut ffi::fx_Knob = unsafe { knob.borrow_mut().pin_mut().get_unchecked_mut() };
+        ffi::fx_turn(autocxx::CppMutRef::from_ptr(sup));
+        assert_eq!(unsafe { dial.as_ref() }.a, 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_turn")
+            generate_pod!("fx_Dial")
+            subclass!("fx_Knob",MyKnob)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Knob_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyKnob {
+                dial: autocxx::CppMutRef<ffi::fx_Dial>,
+            }
+            impl fx_Knob_methods for MyKnob {
+                fn fx_dial(&mut self) -> autocxx::CppMutRef<ffi::fx_Dial> {
+                    self.dial
+                }
+            }
+        }),
+    );
+}
+
+/// A non-pure virtual method returning a const reference, so the peer gets a
+/// `_super` helper the Rust override can call. The `_supers` trait item
+/// returns the same `CppRef` the `_methods` one does, so the override passes
+/// the superclass's answer straight back out with no conversion of its own -
+/// which is the point: the two trait items describe one C++ signature and
+/// have to agree about it.
+#[test]
+fn test_subclass_super_call_ref_return_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Tally { uint32_t a; };
+        class fx_Counter {
+        public:
+            fx_Counter() : held{7} {}
+            virtual const fx_Tally& fx_held() const { return held; }
+            virtual ~fx_Counter() {}
+        private:
+            fx_Tally held;
+        };
+        inline uint32_t fx_held_of(const fx_Counter& c) { return c.fx_held().a; }
+    "};
+    let rs = quote! {
+        let counter = MyCounter::new_rust_owned(MyCounter { cpp_peer: Default::default() });
+        let counter = counter.borrow();
+        let sup: &ffi::fx_Counter = counter.as_ref();
+        assert_eq!(ffi::fx_held_of(autocxx::CppRef::from_ptr(sup)), 7);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_held_of")
+            generate_pod!("fx_Tally")
+            subclass!("fx_Counter",MyCounter)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Counter_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyCounter {}
+            impl fx_Counter_methods for MyCounter {
+                fn fx_held(&self) -> autocxx::CppRef<ffi::fx_Tally> {
+                    use ffi::fx_Counter_supers;
+                    self.fx_held_super()
+                }
+            }
+        }),
+    );
+}
+
+/// The mutable twin of [`test_subclass_super_call_ref_return_cpprefs`], which
+/// is a different path and not only a different type: the peer's `_super`
+/// binding hands back a `CppMutLtRef`, whose `lifetime_cast` wants `&mut
+/// self`, so the generated `_supers` impl has to be able to take a mutable
+/// borrow of the value it just received. Nothing else in the suite puts a
+/// mutable reference return and a `_super` helper together.
+#[test]
+fn test_subclass_super_call_mut_ref_return_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Meter { uint32_t a; };
+        class fx_Panel {
+        public:
+            fx_Panel() : gauge{1} {}
+            virtual fx_Meter& fx_gauge() { return gauge; }
+            uint32_t fx_reading() const { return gauge.a; }
+            virtual ~fx_Panel() {}
+        private:
+            fx_Meter gauge;
+        };
+        inline void fx_bump(fx_Panel& p) { p.fx_gauge().a += 41; }
+    "};
+    let rs = quote! {
+        let panel = MyPanel::new_rust_owned(MyPanel { cpp_peer: Default::default() });
+        let sup: *mut ffi::fx_Panel = unsafe { panel.borrow_mut().pin_mut().get_unchecked_mut() };
+        ffi::fx_bump(autocxx::CppMutRef::from_ptr(sup));
+        assert_eq!(
+            autocxx::CppRef::from_ptr(sup as *const ffi::fx_Panel).fx_reading(),
+            42
+        );
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_bump")
+            generate_pod!("fx_Meter")
+            subclass!("fx_Panel",MyPanel)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Panel_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyPanel {}
+            impl fx_Panel_methods for MyPanel {
+                fn fx_gauge(&mut self) -> autocxx::CppMutRef<ffi::fx_Meter> {
+                    use ffi::fx_Panel_supers;
+                    self.fx_gauge_super()
+                }
+            }
+        }),
+    );
+}
+
 /// A copy constructor in this mode. Its source is a `const T&`, which the mode
 /// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
 /// `&Self` and that is not negotiable - so the source stays a Rust reference

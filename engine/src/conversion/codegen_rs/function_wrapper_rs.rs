@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use proc_macro2::TokenStream;
-use syn::{Expr, Path, Type, TypePtr};
+use syn::{Expr, Ident, Path, Type, TypePtr};
 
 use crate::{
     conversion::analysis::fun::function_wrapper::{RustConversionType, TypeConversionPolicy},
@@ -69,6 +69,55 @@ impl TypeConversionPolicy {
                     (
                         parse_quote! { autocxx::CppRef<#ty> },
                         parse_quote! { autocxx::CppRef },
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// As [`Self::inverse_rust_conversion`], but for the value a function
+    /// hands back rather than one it is given, so the two directions are the
+    /// other way round: [`Self::rust_conversion`] describes C++ returning to
+    /// Rust, and this describes Rust returning to C++, which is what a
+    /// `subclass!` override does.
+    ///
+    /// `None` for every conversion but the reference wrappers of
+    /// `ReferencesWrappedAllFunctionsSafe`. Those turn the pointer the bridge
+    /// returns into a wrapper for Rust to receive; here the override produces
+    /// the wrapper and the bridge has to be handed the pointer back out of it,
+    /// or a mode whose whole purpose is to keep raw pointers out of Rust would
+    /// be asking the override to conjure one.
+    ///
+    /// The wrapper is the lifetime-free `autocxx::CppRef` rather than a
+    /// `CppLtRef`, for the same reason as in the parameter direction and one
+    /// more: what the override hands back goes straight to C++, which is under
+    /// no obligation to a Rust lifetime, so a borrow of `&self` here would
+    /// constrain the Rust which implements the override without protecting
+    /// anything. The contract is C++'s own, and unchanged by the wrapper: as
+    /// for any C++ virtual method, the reference returned must outlive the
+    /// call.
+    ///
+    /// Returns the type the override hands back, and the method which gets the
+    /// pointer the bridge must return out of one.
+    pub(super) fn inverse_rust_return_conversion(&self) -> Option<(Type, Ident)> {
+        match self.rust_conversion {
+            RustConversionType::FromPointerToReferenceWrapper => {
+                let (is_mut, ty) = match self.cxxbridge_type() {
+                    Type::Ptr(TypePtr {
+                        mutability, elem, ..
+                    }) => (mutability.is_some(), elem.as_ref()),
+                    _ => panic!("Not a pointer"),
+                };
+                Some(if is_mut {
+                    (
+                        parse_quote! { autocxx::CppMutRef<#ty> },
+                        make_ident("as_mut_ptr").into(),
+                    )
+                } else {
+                    (
+                        parse_quote! { autocxx::CppRef<#ty> },
+                        make_ident("as_ptr").into(),
                     )
                 })
             }
