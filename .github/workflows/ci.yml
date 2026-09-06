@@ -90,10 +90,14 @@ jobs:
         if: matrix.os == 'windows'
         run: echo "LIBCLANG_PATH=$((gcm clang).source -replace "clang.exe")" >> $env:GITHUB_ENV
       - name: Exclude failing targets and tests
-        # no creduce on Windows, so exclude tests needing creduce there
+        # Reconnaissance: autocxx-reduce and autocxx-gen have been excluded
+        # on Windows since 2022 ("autocxx-gen also fails on Windows" -
+        # never diagnosed). The creduce-needing reduce tests are env-gated
+        # behind AUTOCXX_RUN_REDUCTION_TESTS these days, so both packages'
+        # remaining tests may simply work; running to find out.
         run: |
           echo RUSTFLAGS=$RUSTFLAGS >> $GITHUB_ENV
-          echo exclude=${{runner.os == 'Windows' && '--exclude autocxx-reduce --exclude autocxx-gen' || ''}} >> "$GITHUB_OUTPUT"
+          echo exclude= >> "$GITHUB_OUTPUT"
         env:
           # non-linux failures https://github.com/google/autocxx/issues/819
           # beta failing tests https://github.com/google/autocxx/issues/818
