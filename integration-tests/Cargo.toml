@@ -29,13 +29,15 @@ proc-macro2 = "1.0.11"
 # so `$RUSTFLAGS` still reaches that child build by ordinary process-env
 # inheritance.
 #
-# What breaks on a bump is invisible: the Address Sanitizer CI leg sets its
+# What breaks on a bump: the Address Sanitizer CI leg sets its
 # instrumentation through `$RUSTFLAGS`, and every test here compiles its Rust
 # through trybuild. Drop the propagation and those fixtures build *fine* -
-# unsanitized. Nothing fails, no warning is printed, the leg stays green, and
-# it has silently stopped checking anything. Hold at 1.0.81 until #283 is
-# fixed upstream, or until a workaround from that thread is in place here and
-# a deliberately-faulty fixture has been shown to still trip ASAN.
+# unsanitized - and the leg goes red, not dark: the two asan canary tests
+# (`perform_asan_doom_test`) assert that deliberate corruption is CAUGHT, so
+# unsanitized fixtures fail them loudly. A noisy red leg blaming the canaries
+# is still a bad way to rediscover this, hence the pin. Hold at 1.0.81 until
+# #283 is fixed upstream, or until a workaround from that thread is in place
+# here and the canaries have been shown to still trip.
 trybuild = "=1.0.81"
 # The suite installs its own logger - see `init_logging` - rather than letting
 # `test-log` put one on each test, because the filter it wants is an argument
