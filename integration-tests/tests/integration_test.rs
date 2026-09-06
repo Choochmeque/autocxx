@@ -20568,3 +20568,34 @@ fn test_typedef_to_pointer_parameter_is_still_a_pointer() {
     };
     run_test("", hdr, rs, &["fx_read_ptr"], &["fx_Held"]);
 }
+
+/// A method on a class bindgen could not name. bindgen tracks a class
+/// template's *type* parameters and not its non-type ones, so for
+/// `template <int N> struct S` it has no name to write and substitutes an
+/// opaque blob of the right size - while still generating the class's methods,
+/// whose receiver is then that blob. There is no receiver to be had from a
+/// blob: the Rust type it is spelled with (`u8` here) names no C++ type, so
+/// the method has to be refused, and refused saying what went wrong.
+#[test]
+fn test_method_on_a_type_bindgen_could_not_name_is_refused() {
+    let hdr = indoc! {"
+        template <int N> struct fx_Sized {
+            int x[N];
+            int fx_first() const { return x[0]; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_all!()
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fx_first".to_string(),
+            "replaced it with an opaque blob of bytes".to_string(),
+        ])),
+        None,
+    );
+}

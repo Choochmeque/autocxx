@@ -42,7 +42,7 @@ use autocxx_parser::{ExternCppType, IncludeCppConfig, UnsafePolicy};
 use function_wrapper::{CppFunction, CppFunctionBody, TypeConversionPolicy};
 use itertools::Itertools;
 use proc_macro2::Span;
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, Ident, Pat, PatType, ReturnType, Type,
     TypePath, TypePtr, TypeReference, Visibility,
@@ -1919,35 +1919,54 @@ impl<'a> FnAnalyzer<'a> {
                             Type::Ptr(TypePtr {
                                 elem, mutability, ..
                             }) => match elem.as_ref() {
-                                Type::Path(typ) => {
-                                    let typ = unwrap_has_opaque(typ)
-                                        .and_then(|ty| match ty {
-                                            Type::Path(typ) => Some(typ),
-                                            _ => None,
-                                        })
-                                        .unwrap_or(typ);
-                                    let receiver_mutability = if mutability.is_some() {
-                                        ReceiverMutability::Mutable
-                                    } else {
-                                        ReceiverMutability::Const
-                                    };
-
-                                    let this_type = if let Some(virtual_this) = virtual_this {
-                                        let this_type_path = virtual_this.to_type_path();
-                                        let const_token = if mutability.is_some() {
-                                            None
+                                // bindgen could not name the type this method
+                                // belongs to and put an opaque blob of the
+                                // right size and alignment in its place. A
+                                // class with a non-type template parameter is
+                                // one way to arrive here: bindgen tracks only
+                                // type parameters, so it generates the methods
+                                // and then has no name to write for the
+                                // receiver.
+                                //
+                                // There is no receiver to be had from a blob.
+                                // What it is spelled with in Rust - `u8` for a
+                                // one-byte class - names no C++ type, so
+                                // reading a name out of it would say the
+                                // method belongs to `u8`, and everything
+                                // derived from that name (the impl block, the
+                                // overload name, the dependencies) would be
+                                // worked out from a fiction. Converting the
+                                // `this` parameter refuses the blob a moment
+                                // later, which is what saves us today; say it
+                                // here, where the pretense would start.
+                                Type::Path(typ) => match unwrap_has_opaque(typ) {
+                                    Some(blob) => Err(ConvertErrorFromCpp::BindgenOpaqueBlob(
+                                        blob.to_token_stream().to_string(),
+                                    )),
+                                    None => {
+                                        let receiver_mutability = if mutability.is_some() {
+                                            ReceiverMutability::Mutable
                                         } else {
-                                            Some(syn::Token![const](Span::call_site()))
+                                            ReceiverMutability::Const
                                         };
-                                        pt.ty = Box::new(parse_quote! {
-                                            * #mutability #const_token #this_type_path
-                                        });
-                                        virtual_this.clone()
-                                    } else {
-                                        QualifiedName::from_type_path(typ)
-                                    };
-                                    Ok((this_type, receiver_mutability))
-                                }
+
+                                        let this_type = if let Some(virtual_this) = virtual_this {
+                                            let this_type_path = virtual_this.to_type_path();
+                                            let const_token = if mutability.is_some() {
+                                                None
+                                            } else {
+                                                Some(syn::Token![const](Span::call_site()))
+                                            };
+                                            pt.ty = Box::new(parse_quote! {
+                                                * #mutability #const_token #this_type_path
+                                            });
+                                            virtual_this.clone()
+                                        } else {
+                                            QualifiedName::from_type_path(typ)
+                                        };
+                                        Ok((this_type, receiver_mutability))
+                                    }
+                                },
                                 _ => Err(ConvertErrorFromCpp::UnexpectedThisType(
                                     diagnostic_name.clone(),
                                 )),
