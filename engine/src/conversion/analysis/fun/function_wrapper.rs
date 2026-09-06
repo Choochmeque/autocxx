@@ -20,6 +20,15 @@ use syn::{parse_quote, Type, TypeReference};
 pub(crate) enum CppConversionType {
     None,
     Move,
+    /// Hand a by-value parameter on to the real function with
+    /// `autocxx_move_or_copy`, which prefers a move and settles for a copy.
+    ///
+    /// Unlike every other variant this changes no type - the wrapper's
+    /// parameter and the function's are the same - so it is not by itself a
+    /// reason to generate a wrapper at all (see [`Self::cpp_work_needed`]).
+    /// It only says how a wrapper which exists anyway should spell the
+    /// hand-over. See google/autocxx#1252.
+    MoveOrCopy,
     FromUniquePtrToValue,
     FromPtrToValue,
     FromValueToUniquePtr,
@@ -37,7 +46,9 @@ impl CppConversionType {
     /// from Rust to C++ might also involve calls from C++ to Rust.
     fn inverse(&self) -> Self {
         match self {
-            CppConversionType::None => CppConversionType::None,
+            // Neither changes any type, so neither has an opposite to
+            // perform on the way back.
+            CppConversionType::None | CppConversionType::MoveOrCopy => CppConversionType::None,
             CppConversionType::FromUniquePtrToValue | CppConversionType::FromPtrToValue => {
                 CppConversionType::FromValueToUniquePtr
             }
@@ -161,8 +172,16 @@ impl TypeConversionPolicy {
         }
     }
 
+    /// Whether this conversion is a reason to generate a C++ wrapper function.
+    ///
+    /// [`CppConversionType::MoveOrCopy`] is not: it changes no type, so cxx
+    /// can hand the parameter over by itself perfectly well. It only has
+    /// something to say once a wrapper exists for some other reason.
     pub(crate) fn cpp_work_needed(&self) -> bool {
-        !matches!(self.cpp_conversion, CppConversionType::None)
+        !matches!(
+            self.cpp_conversion,
+            CppConversionType::None | CppConversionType::MoveOrCopy
+        )
     }
 
     pub(crate) fn unconverted_rust_type(&self) -> Type {

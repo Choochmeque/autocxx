@@ -86,6 +86,21 @@ impl BuilderModifierFns for SetSuppressSystemHeaders {
     }
 }
 
+/// Generate a C++ wrapper function for every call, as the
+/// `AUTOCXX_FORCE_WRAPPER_GENERATION` CI job does for the whole suite. A test
+/// which is *about* what a wrapper contains wants this whatever the
+/// environment says.
+pub(crate) struct ForceWrapperGeneration;
+
+impl BuilderModifierFns for ForceWrapperGeneration {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        builder.force_wrapper_generation(true)
+    }
+}
+
 pub(crate) struct EnableAutodiscover;
 
 impl BuilderModifierFns for EnableAutodiscover {

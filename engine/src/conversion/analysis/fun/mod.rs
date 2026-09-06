@@ -19,8 +19,8 @@ use crate::{
             type_converter::{self, add_analysis, TypeConversionContext, TypeConverter},
         },
         api::{
-            ApiName, CastMutability, FuncToConvert, NullPhase, Provenance, SubclassName,
-            TraitImplSignature, TraitSynthesis, UnsafetyNeeded,
+            ApiName, CastMutability, FuncToConvert, NestedCppNames, NullPhase, Provenance,
+            SubclassName, TraitImplSignature, TraitSynthesis, UnsafetyNeeded,
         },
         apivec::ApiVec,
         convert_error::{ConvertErrorWithContext, ErrorContext, ErrorContextType},
@@ -346,6 +346,7 @@ pub(crate) struct FnAnalyzer<'a> {
     overload_trackers_by_mod: HashMap<Namespace, OverloadTracker>,
     subclasses_by_superclass: HashMap<QualifiedName, Vec<SubclassName>>,
     nested_type_name_map: HashMap<QualifiedName, String>,
+    nested_cpp_names: NestedCppNames<'a>,
     generic_types: HashSet<QualifiedName>,
     types_in_anonymous_namespace: HashSet<QualifiedName>,
     existing_superclass_trait_api_names: HashSet<QualifiedName>,
@@ -371,6 +372,7 @@ impl<'a> FnAnalyzer<'a> {
             moveit_safe_types: Self::build_correctly_sized_type_set(&apis),
             subclasses_by_superclass: subclass::subclasses_by_superclass(&apis),
             nested_type_name_map: Self::build_nested_type_map(&apis),
+            nested_cpp_names: NestedCppNames::new(config, apis.iter().map(|api| api.name_info())),
             generic_types: Self::build_generic_type_set(&apis),
             existing_superclass_trait_api_names: HashSet::new(),
             cpp_names_taken_on_peer_classes: Self::build_virtual_method_cpp_names(&apis),
@@ -531,7 +533,7 @@ impl<'a> FnAnalyzer<'a> {
     }
 
     fn is_on_allowlist(&self, type_name: &QualifiedName) -> bool {
-        self.config.is_on_allowlist(&type_name.to_cpp_name())
+        self.nested_cpp_names.is_on_allowlist(type_name)
     }
 
     fn is_generic_type(&self, type_name: &QualifiedName) -> bool {
@@ -2097,8 +2099,27 @@ impl<'a> FnAnalyzer<'a> {
                             CppConversionType::Move,
                             RustConversionType::None,
                         )
-                    } else {
+                    } else if is_reference || known_types().is_known_type(&tn) {
+                        // A reference parameter - a `Pin<&mut T>` reaches us
+                        // as a path, and `Pin` is itself POD-safe - is handed
+                        // straight on: there is no value of ours to move, and
+                        // the callee may want an lvalue. A built-in scalar is
+                        // handed straight on too, being always copyable.
                         TypeConversionPolicy::new_unconverted(ty)
+                    } else {
+                        // A POD out of the user's own headers, by value. The
+                        // Rust side owns it and destroys it after the call, so
+                        // a wrapper should hand it over by move where C++
+                        // allows one. Passing it bare asks for a copy
+                        // constructor, which a type that opts into
+                        // relocatability by declaring its own move constructor
+                        // no longer has - and forcing wrapper generation then
+                        // failed to compile. See google/autocxx#1252.
+                        TypeConversionPolicy::new(
+                            ty,
+                            CppConversionType::MoveOrCopy,
+                            RustConversionType::None,
+                        )
                     }
                 } else if known_types().convertible_from_strs(&tn)
                     && !self.config.exclude_utilities()
@@ -2566,11 +2587,19 @@ impl Api<FnPhase> {
     /// * its C++ name, which all its overloads share, so that
     ///   `generate!("daft")` pulls in the whole family without the user
     ///   having to name each overload.
-    pub(crate) fn allowlist_names(&self) -> impl Iterator<Item = String> {
-        let mut names = vec![
-            self.name().to_cpp_name(),
-            self.name_for_allowlist().to_cpp_name(),
-        ];
+    pub(crate) fn allowlist_names(
+        &self,
+        nested_cpp_names: &NestedCppNames,
+    ) -> impl Iterator<Item = String> {
+        // Both of these may be nested types, and so answer to the name C++
+        // knows them by as well as to the `Outer_Inner` bindgen flattened them
+        // into. `name_for_allowlist` in particular is the type a method hangs
+        // off, which is how `generate!("ns::Outer::Inner")` reaches the
+        // methods of a nested class. See google/autocxx#1422.
+        let mut names: Vec<String> = nested_cpp_names
+            .spellings(self.name())
+            .chain(nested_cpp_names.spellings(&self.name_for_allowlist()))
+            .collect();
         let ns = self.name().get_namespace();
         // Assembled by hand rather than via QualifiedName because a
         // C++ name need not be a legal Rust identifier (`operator==`).

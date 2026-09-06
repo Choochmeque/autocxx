@@ -150,6 +150,7 @@ dependencies = [
  "aquamarine",
  "autocxx-macro",
  "cxx",
+ "cxx-build",
  "moveit",
 ]
 

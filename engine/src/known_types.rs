@@ -361,9 +361,24 @@ impl TypeDatabase {
                                // methods attached.
     }
 
+    /// Whether `std::vector<ty>` is something we can hand to cxx as a
+    /// `CxxVector<ty>`.
+    ///
+    /// [`Behavior::CByValueVecSafe`] types are cxx's own built-in vector
+    /// elements. [`Behavior::CVariableLengthByValue`] types - the
+    /// `autocxx::c_int` family - are not, but we ask cxx to make them so by
+    /// emitting `impl CxxVector<c_int> {}` into the generated bridge alongside
+    /// the `type c_int = autocxx::c_int;` alias. See google/autocxx#422.
     pub(crate) fn permissible_within_vector(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
-            .map(|x| matches!(x.behavior, Behavior::CxxString | Behavior::CByValueVecSafe))
+            .map(|x| {
+                matches!(
+                    x.behavior,
+                    Behavior::CxxString
+                        | Behavior::CByValueVecSafe
+                        | Behavior::CVariableLengthByValue
+                )
+            })
             .unwrap_or(true)
     }
 

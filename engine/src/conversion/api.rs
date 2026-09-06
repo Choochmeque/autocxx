@@ -21,7 +21,9 @@ use crate::{
     },
     parse_callbacks::CppOriginalName,
 };
-use autocxx_parser::{ExternCppType, RustFun, RustPath};
+use autocxx_parser::{ExternCppType, IncludeCppConfig, RustFun, RustPath};
+use indexmap::map::IndexMap as HashMap;
+use itertools::Itertools;
 use quote::ToTokens;
 
 pub(crate) use autocxx_bindgen::callbacks::Visibility as CppVisibility;
@@ -298,6 +300,79 @@ impl ApiName {
 
     pub(crate) fn cpp_name_if_present(&self) -> Option<&CppOriginalName> {
         self.cpp_name.as_ref()
+    }
+
+    /// Every C++ spelling by which one of the user's directives might name
+    /// this API.
+    ///
+    /// Usually there is just the one. A *nested* type has two, because bindgen
+    /// flattens the nesting: a `struct Inner` inside a `struct Outer` in
+    /// namespace `ns` reaches us as `ns::Outer_Inner`, which is what we call it
+    /// everywhere in Rust, while C++ itself calls it `ns::Outer::Inner`. Nobody
+    /// writing `generate!`, `pod!` or `extern_cpp_type!` has any reason to know
+    /// about the flattened spelling, so we accept either.
+    /// See google/autocxx#1422.
+    /// The spelling C++ itself uses, when that differs from the flattened one
+    /// [`QualifiedName::to_cpp_name`] produces - that is, for a nested type.
+    pub(crate) fn nested_cpp_spelling(&self) -> Option<String> {
+        self.cpp_name
+            .as_ref()
+            .filter(|cpp_name| cpp_name.is_nested())
+            .map(|cpp_name| {
+                self.name
+                    .get_namespace()
+                    .iter()
+                    .chain(std::iter::once(cpp_name.for_original_name_map()))
+                    .join("::")
+            })
+    }
+
+    pub(crate) fn cpp_spellings(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::once(self.name.to_cpp_name()).chain(self.nested_cpp_spelling())
+    }
+}
+
+/// The spelling C++ uses for each nested type, so that a directive naming one
+/// that way can be matched against the flattened name we know it by.
+///
+/// Only nested types appear here: everything else answers to
+/// [`QualifiedName::to_cpp_name`] alone, which is what
+/// [`Self::is_on_allowlist`] falls back on.
+pub(crate) struct NestedCppNames<'a> {
+    config: &'a IncludeCppConfig,
+    spellings: HashMap<QualifiedName, String>,
+}
+
+impl<'a> NestedCppNames<'a> {
+    pub(crate) fn new<'n>(
+        config: &'a IncludeCppConfig,
+        names: impl Iterator<Item = &'n ApiName>,
+    ) -> Self {
+        Self {
+            config,
+            spellings: names
+                .filter_map(|name| {
+                    name.nested_cpp_spelling()
+                        .map(|spelling| (name.name.clone(), spelling))
+                })
+                .collect(),
+        }
+    }
+
+    /// Every C++ spelling this type answers to: the flattened name always,
+    /// and the one C++ uses as well if the two differ.
+    pub(crate) fn spellings<'s>(
+        &'s self,
+        name: &QualifiedName,
+    ) -> impl Iterator<Item = String> + 's {
+        std::iter::once(name.to_cpp_name()).chain(self.spellings.get(name).cloned())
+    }
+
+    /// Whether one of the user's allowlist directives names this type, by
+    /// either of the spellings it answers to. See google/autocxx#1422.
+    pub(crate) fn is_on_allowlist(&self, name: &QualifiedName) -> bool {
+        self.spellings(name)
+            .any(|spelling| self.config.is_on_allowlist(&spelling))
     }
 }
 

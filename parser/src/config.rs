@@ -94,12 +94,41 @@ pub enum AllowlistEntry {
 }
 
 impl AllowlistEntry {
-    fn to_bindgen_item(&self) -> String {
+    /// The names to give bindgen for this entry. A namespace has just the one;
+    /// a named item may have several, because we can't tell which `::` in what
+    /// the user wrote separates namespaces from nesting - see
+    /// [`bindgen_spellings`].
+    fn to_bindgen_items(&self) -> Box<dyn Iterator<Item = String>> {
         match self {
-            AllowlistEntry::Item(i) => i.clone(),
-            AllowlistEntry::Namespace(ns) => format!("{ns}::.*"),
+            AllowlistEntry::Item(i) => Box::new(bindgen_spellings(i.clone())),
+            AllowlistEntry::Namespace(ns) => Box::new(std::iter::once(format!("{ns}::.*"))),
         }
     }
+}
+
+/// Every name bindgen might know an item by, given the name the user wrote.
+///
+/// bindgen flattens nesting, so a `struct Inner` inside a `struct Outer` in
+/// namespace `ns` is `ns::Outer_Inner` to bindgen but `ns::Outer::Inner` to
+/// C++ and to the person writing the directive. We can't tell which `::` in
+/// what they wrote separates namespaces from nesting, so we offer bindgen
+/// every split: for `a::b::c` that is `a::b::c`, `a::b_c` and `a_b_c`. Only
+/// one can match anything, and an allowlist entry which matches nothing costs
+/// nothing. See google/autocxx#1422.
+fn bindgen_spellings(item: String) -> impl Iterator<Item = String> {
+    let segments: Vec<String> = item.split("::").map(|s| s.to_string()).collect();
+    // Split point `k` treats everything from segment `k` on as one nested
+    // type name, so those segments join with `_` and the namespaces before
+    // them keep their `::`. `k == segments.len() - 1` reproduces what the
+    // user wrote.
+    (0..segments.len()).rev().map(move |k| {
+        let nested = segments[k..].join("_");
+        if k == 0 {
+            nested
+        } else {
+            format!("{}::{}", segments[..k].join("::"), nested)
+        }
+    })
 }
 
 /// Allowlist configuration.
@@ -313,8 +342,13 @@ impl IncludeCppConfig {
             Allowlist::Specific(items) => Some(Box::new(
                 items
                     .iter()
-                    .map(AllowlistEntry::to_bindgen_item)
-                    .chain(self.pod_requests.iter().cloned())
+                    .flat_map(AllowlistEntry::to_bindgen_items)
+                    .chain(
+                        self.pod_requests
+                            .iter()
+                            .cloned()
+                            .flat_map(bindgen_spellings),
+                    )
                     .chain(self.active_utilities())
                     // A subclass needs the C++ peer class autocxx generates for
                     // it, plus the superclass it derives from. The plain

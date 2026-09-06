@@ -9,7 +9,7 @@
 use crate::{
     builder_modifiers::{
         make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
-        EnableAutodiscover, SetSuppressSystemHeaders,
+        EnableAutodiscover, ForceWrapperGeneration, SetSuppressSystemHeaders,
     },
     code_checkers::{
         make_checks_without_building, make_error_finder, make_rust_code_finder,
@@ -528,7 +528,6 @@ fn test_negative_take_as_pod_with_move_constructor() {
     run_test_expect_fail(cxx, hdr, rs, &["take_bob"], &["Bob"]);
 }
 
-#[ignore] // https://github.com/google/autocxx/issues/1252
 #[test]
 fn test_take_as_pod_with_is_relocatable() {
     let cxx = indoc! {"
@@ -8128,7 +8127,6 @@ fn test_cint_vector() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/422
 fn test_int_vector() {
     let hdr = indoc! {"
         #include <vector>
@@ -19526,5 +19524,468 @@ fn test_trivially_destructible_non_pod_keeps_drop_impl() {
             "impl Drop for output :: fx_Plain".to_string()
         ])),
         None,
+    );
+}
+
+/// A `std::vector<int>` reached by reference and read element by element.
+/// `int` is not one of the widths cxx knows natively, so this only works
+/// because the `autocxx` crate declares the `std::vector` glue for the
+/// `autocxx::c_*` newtypes on every bridge's behalf. See google/autocxx#422.
+#[test]
+fn test_c_int_vector_by_reference() {
+    let hdr = indoc! {"
+        #include <vector>
+        class fx_Holder {
+        public:
+            fx_Holder() : v{1, 2, 3} {}
+            const std::vector<int>& ints() const { return v; }
+        private:
+            std::vector<int> v;
+        };
+    "};
+    let rs = quote! {
+        let h = ffi::fx_Holder::new().within_unique_ptr();
+        let v = h.ints();
+        assert_eq!(v.len(), 3);
+        let total: i32 = v.iter().map(|i| i.0).sum();
+        assert_eq!(total, 6);
+    };
+    run_test("", hdr, rs, &["fx_Holder"], &[]);
+}
+
+/// The same for the other variable-width C integers, which reach cxx through
+/// the same mechanism.
+#[test]
+fn test_c_long_and_c_ushort_vectors() {
+    let hdr = indoc! {"
+        #include <vector>
+        inline std::vector<long> fx_give_longs() { return std::vector<long> {1, 2}; }
+        inline std::vector<unsigned short> fx_give_ushorts() {
+            return std::vector<unsigned short> {3, 4};
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            ffi::fx_give_longs().as_ref().unwrap().as_slice(),
+            &[autocxx::c_long(1), autocxx::c_long(2)]
+        );
+        assert_eq!(
+            ffi::fx_give_ushorts().as_ref().unwrap().as_slice(),
+            &[autocxx::c_ushort(3), autocxx::c_ushort(4)]
+        );
+    };
+    run_test("", hdr, rs, &["fx_give_longs", "fx_give_ushorts"], &[]);
+}
+
+/// The C++ used by the two `extern_cpp_type!`-with-a-nested-type tests below.
+const NESTED_EXTERN_TYPE_HDR: &str = indoc! {"
+    #include <cstdint>
+    namespace fx_ns {
+        struct fx_outer {
+            enum fx_inner { A, B };
+        };
+        inline uint32_t fx_take(fx_outer::fx_inner i) {
+            return i == fx_outer::B ? 7 : 1;
+        }
+    }
+"};
+
+/// `extern_cpp_type!` naming a nested type the way C++ spells it. bindgen
+/// flattens the nesting to `fx_outer_fx_inner`, and nobody writing the
+/// directive would know that, so the C++ spelling has to work.
+/// See google/autocxx#1422.
+#[test]
+fn test_extern_cpp_type_nested() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        pub mod base {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_base)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_outer")
+                generate!("fx_ns::fx_outer::fx_inner")
+            }
+            pub use ffi_base::*;
+        }
+        pub mod dependent {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_dep)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_take")
+                extern_cpp_type!("fx_ns::fx_outer::fx_inner", crate::base::fx_ns::fx_outer_fx_inner)
+                pod!("fx_ns::fx_outer::fx_inner")
+            }
+            pub use ffi_dep::*;
+        }
+        fn main() {
+            assert_eq!(
+                crate::dependent::fx_ns::fx_take(crate::base::fx_ns::fx_outer_fx_inner::B),
+                7
+            );
+        }
+    };
+    do_run_test_manual("", NESTED_EXTERN_TYPE_HDR, rs, None, None).unwrap();
+}
+
+/// The same, written with bindgen's flattened spelling. That names the same
+/// type, so it must work too - and must still generate C++ which says
+/// `fx_ns::fx_outer::fx_inner`, the only spelling C++ will accept.
+#[test]
+fn test_extern_cpp_type_nested_flattened_spelling() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        pub mod base {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_base)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_outer")
+                generate!("fx_ns::fx_outer::fx_inner")
+            }
+            pub use ffi_base::*;
+        }
+        pub mod dependent {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_dep)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_take")
+                extern_cpp_type!("fx_ns::fx_outer_fx_inner", crate::base::fx_ns::fx_outer_fx_inner)
+                pod!("fx_ns::fx_outer_fx_inner")
+            }
+            pub use ffi_dep::*;
+        }
+        fn main() {
+            assert_eq!(
+                crate::dependent::fx_ns::fx_take(crate::base::fx_ns::fx_outer_fx_inner::B),
+                7
+            );
+        }
+    };
+    do_run_test_manual("", NESTED_EXTERN_TYPE_HDR, rs, None, None).unwrap();
+}
+
+/// `generate!` naming a nested type the way C++ spells it, rather than by the
+/// `Outer_Inner` bindgen flattened it to. See google/autocxx#1422.
+#[test]
+fn test_generate_nested_type_by_cpp_name() {
+    run_test_ex(
+        "",
+        NESTED_EXTERN_TYPE_HDR,
+        quote! {},
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer::fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The flattened spelling names the same type, so it has to keep working.
+#[test]
+fn test_generate_nested_type_by_flattened_name() {
+    run_test_ex(
+        "",
+        NESTED_EXTERN_TYPE_HDR,
+        quote! {},
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer_fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A generated C++ wrapper hands a POD parameter over with the move-or-copy
+/// helper rather than bare, because the Rust side owns that value and destroys
+/// it after the call. A type which opts into relocatability by declaring its
+/// own move constructor has no copy constructor left, so passing it bare did
+/// not compile at all once wrapper generation was forced.
+/// See google/autocxx#1252.
+#[test]
+fn test_wrapper_moves_pod_argument() {
+    let cxx = indoc! {"
+        uint32_t fx_take_bob(fx_Bob a) {
+            return a.a;
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <type_traits>
+        struct fx_Bob {
+            uint32_t a;
+            uint32_t b;
+            inline fx_Bob() {}
+            inline ~fx_Bob() {}
+            inline fx_Bob(fx_Bob&& other) { a = other.a; b = other.b; }
+            using IsRelocatable = std::true_type;
+        };
+        uint32_t fx_take_bob(fx_Bob a);
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Bob { a: 12, b: 13 };
+        assert_eq!(ffi::fx_take_bob(a), 12);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        directives_from_lists(&["fx_take_bob"], &["fx_Bob"], None),
+        Some(Box::new(ForceWrapperGeneration)),
+        Some(Box::new(CppMatcher::new(
+            &["::autocxx_move_or_copy(arg0)"],
+            &["fx_take_bob(arg0)"],
+        ))),
+        None,
+    );
+}
+
+/// A virtual method taking a `std::vector` of a forward-declared type is
+/// skipped, with the reason recorded where the user will see it, and the rest
+/// of the class stays usable.
+///
+/// cxx would otherwise instantiate `std::vector<T>::size()` for an incomplete
+/// `T`, which is a C++ error deep inside the standard library rather than
+/// anything the user could act on. See google/autocxx#692.
+#[test]
+fn test_vector_of_forward_declaration_in_virtual_method() {
+    let hdr = indoc! {"
+        #include <vector>
+        #include <cstdint>
+        struct fx_Fwd;
+        class fx_Obs {
+        public:
+            virtual void notify(const std::vector<fx_Fwd>& details) { (void)details; }
+            virtual uint32_t ok() const { return 42; }
+            virtual ~fx_Obs() {}
+        };
+    "};
+    let rs = quote! {
+        let o = ffi::fx_Obs::new().within_unique_ptr();
+        assert_eq!(o.ok(), 42);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Obs"], &[], None),
+        None,
+        // Both halves matter: that the method is replaced by a stub, and that
+        // the reason recorded against it names the type which caused it.
+        Some(make_string_finder(vec![
+            "fn notify (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "forward declaration (fx_Fwd)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A function returning a reference to a `concrete!` template instantiation.
+/// The lifetime of the returned reference is elided from the single reference
+/// parameter, exactly as it is for any other type; google/autocxx#1370 reports
+/// that this fails to compile with "missing lifetime specifier".
+///
+/// Generating and building is the whole test: a `concrete!` type is opaque, so
+/// there is nothing to read off the returned reference at run time.
+#[test]
+fn test_concrete_template_reference_return() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> class fx_Inner {
+        public:
+            T held;
+            uint32_t v = 4;
+        };
+        class fx_Held { public: uint32_t a = 1; };
+        class fx_Outer { public: fx_Inner<fx_Held> data; };
+        inline fx_Inner<fx_Held>& fx_get_inner(fx_Outer& outer) { return outer.data; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Outer")
+            generate!("fx_Held")
+            concrete!("fx_Inner<fx_Held>", fx_Inner_fx_Held)
+            generate!("fx_get_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A C++ `[[deprecated]]` function, bound and never called from Rust.
+///
+/// Both halves of the generated C++ name the function - autocxx's own wrapper
+/// in `autocxxgen_ffi.h` and cxx's shim in `gen0.cxx` - so both draw
+/// `-Wdeprecated-declarations`, which this harness compiles with `-Werror`.
+/// The warning fires whether or not any Rust code calls the function, because
+/// the wrapper is emitted for everything `generate!` names.
+///
+/// The signal belongs on the Rust side, as `#[deprecated]` carrying the C++
+/// message. It cannot be put there yet: `autocxx-bindgen` 0.73 has no
+/// deprecation handling at all, so nothing about the attribute reaches this
+/// layer. The two other things this crate recovers behind bindgen's back -
+/// ref-qualifiers and linkage - are both encoded in the mangled name, and
+/// `[[deprecated]]` is not encoded anywhere. Fixing this needs a bindgen
+/// `ParseCallbacks` hook backed by `clang_getCursorPlatformAvailability`.
+#[test]
+#[ignore] // https://github.com/google/autocxx/issues/1403
+fn test_deprecated_cpp_function() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Dep {
+        public:
+            [[deprecated(\"use bar instead\")]] virtual uint32_t foo() { return 1; }
+            virtual ~fx_Dep() {}
+        };
+        [[deprecated(\"gone soon\")]] inline uint32_t fx_old_fn() { return 2; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_Dep", "fx_old_fn"], &[], None),
+        None,
+        None,
+        None,
+    );
+}
+
+/// `generate!` naming a nested *class* the way C++ spells it, where that class
+/// has a constructor and a method. The methods are what the enum-only test
+/// above cannot cover: they are allowlisted through a different code path.
+#[test]
+fn test_generate_nested_class_with_methods_by_cpp_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            struct fx_outer {
+                class fx_inner {
+                public:
+                    fx_inner(uint32_t a) : a_(a) {}
+                    uint32_t get() const { return a_; }
+                private:
+                    uint32_t a_;
+                };
+            };
+        }
+    "};
+    let rs = quote! {
+        let i = ffi::fx_ns::fx_outer_fx_inner::new(3).within_unique_ptr();
+        assert_eq!(i.get(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer::fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same nested class by its flattened spelling, which names the same type
+/// and so must keep working.
+#[test]
+fn test_generate_nested_class_with_methods_by_flattened_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            struct fx_outer {
+                class fx_inner {
+                public:
+                    fx_inner(uint32_t a) : a_(a) {}
+                    uint32_t get() const { return a_; }
+                private:
+                    uint32_t a_;
+                };
+            };
+        }
+    "};
+    let rs = quote! {
+        let i = ffi::fx_ns::fx_outer_fx_inner::new(3).within_unique_ptr();
+        assert_eq!(i.get(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer_fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A reference return whose lifetime can't be elided from any parameter is
+/// declined with a diagnostic, rather than emitted for rustc to reject with
+/// "missing lifetime specifier". This is the guard which keeps
+/// google/autocxx#1370 from arising: with no reference parameter there is
+/// nothing for the returned reference to borrow from.
+#[test]
+fn test_reference_return_with_no_reference_parameter_declined() {
+    let hdr = indoc! {"
+        template <typename T> class fx_Inner1 { public: T held; };
+        class fx_Held1 { public: int a = 1; };
+        inline fx_Inner1<fx_Held1>& fx_get_global1() {
+            static fx_Inner1<fx_Held1> b;
+            return b;
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Held1")
+            concrete!("fx_Inner1<fx_Held1>", fx_Inner1_fx_Held1)
+            generate!("fx_get_global1")
+        },
+        "NoMutableInputReference",
+    );
+}
+
+/// The same when there is more than one candidate: which one the returned
+/// reference borrows from is ambiguous, so we decline that too.
+#[test]
+fn test_reference_return_with_several_reference_parameters_declined() {
+    let hdr = indoc! {"
+        template <typename T> class fx_Inner2 { public: T held; };
+        class fx_Held2 { public: int a = 1; };
+        class fx_Outer2 { public: fx_Inner2<fx_Held2> data; };
+        class fx_Other2 { public: int b = 2; };
+        inline fx_Inner2<fx_Held2>& fx_get_inner2(fx_Outer2& outer, fx_Other2& other) {
+            (void)other;
+            return outer.data;
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Outer2")
+            generate!("fx_Held2")
+            generate!("fx_Other2")
+            concrete!("fx_Inner2<fx_Held2>", fx_Inner2_fx_Held2)
+            generate!("fx_get_inner2")
+        },
+        "MultipleMutableInputReferences",
     );
 }
