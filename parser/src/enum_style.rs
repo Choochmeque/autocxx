@@ -9,6 +9,7 @@
 //! The `enum_style!` directive: per-enum overrides of how `bindgen` renders a
 //! C++ `enum` in Rust.
 
+use crate::cpp_names::is_plain_qualified_name;
 use indexmap::map::IndexMap as HashMap;
 use proc_macro2::{Ident, Span};
 use quote::{quote, ToTokens};
@@ -163,34 +164,5 @@ impl EnumStyleMap {
     /// Every (name, style) pair, in the order the directives were written.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, EnumStyle)> {
         self.0.iter().map(|(name, style)| (name.as_str(), *style))
-    }
-}
-
-/// Whether `name` is a `::`-separated run of plain Rust/C++ identifiers, and
-/// so means only itself when `bindgen` reads it as a regex.
-fn is_plain_qualified_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.split("::").all(|segment| {
-            let mut chars = segment.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_plain_qualified_names() {
-        assert!(is_plain_qualified_name("Flags"));
-        assert!(is_plain_qualified_name("_Flags2"));
-        assert!(is_plain_qualified_name("ns::Flags"));
-        assert!(is_plain_qualified_name("Holder_Inner"));
-        assert!(!is_plain_qualified_name(""));
-        assert!(!is_plain_qualified_name("Flags.*"));
-        assert!(!is_plain_qualified_name(".*"));
-        assert!(!is_plain_qualified_name("ns::"));
-        assert!(!is_plain_qualified_name("2Flags"));
     }
 }

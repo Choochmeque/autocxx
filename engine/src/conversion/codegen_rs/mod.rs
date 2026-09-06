@@ -52,6 +52,7 @@ use super::{
     },
     api::{AnalysisPhase, Api, SubclassName, TypeKind, SUPER_FN_SUFFIX},
     convert_error::ErrorContextType,
+    derives::DeriveRequests,
     doc_attr::get_doc_attrs,
 };
 use super::{
@@ -205,6 +206,7 @@ pub(crate) struct RsCodeGenerator<'a> {
     header_name: Option<String>,
     names_duplicated_by_bindgen: &'a HashSet<QualifiedName>,
     bridge_type_names: &'a BridgeTypeNames,
+    derive_requests: &'a DeriveRequests,
 }
 
 impl<'a> RsCodeGenerator<'a> {
@@ -230,6 +232,7 @@ impl<'a> RsCodeGenerator<'a> {
             header_name,
             names_duplicated_by_bindgen: &inputs.parse_observations.names_duplicated_by_bindgen,
             bridge_type_names: inputs.bridge_type_names,
+            derive_requests: inputs.derive_requests,
         };
         c.rs_codegen(all_apis)
     }
@@ -319,6 +322,7 @@ impl<'a> RsCodeGenerator<'a> {
         bindgen_sanitizer::remove_unbound_type_aliases(&mut self.bindgen_mod);
         bindgen_sanitizer::remove_unwanted_defaults(&mut self.bindgen_mod);
         bindgen_sanitizer::simplify_bitfield_transmutes(&mut self.bindgen_mod);
+        bindgen_sanitizer::add_requested_derives(&mut self.bindgen_mod, self.derive_requests);
         self.bindgen_mod.vis = parse_quote! {};
         // bindgen writes bare unsafe calls into the bodies of the `unsafe fn`s
         // it generates, which RFC 2585 forbids. `bindgen::Builder::

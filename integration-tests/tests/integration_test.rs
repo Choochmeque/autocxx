@@ -20281,3 +20281,182 @@ fn test_reference_return_borrowing_from_a_typedefed_reference_parameter() {
     };
     run_test("", hdr, rs, &["fx_same2"], &["fx_Cell2"]);
 }
+
+/// `derive!` puts extra traits on the Rust type autocxx generates for a POD
+/// C++ one. See google/autocxx#668.
+#[test]
+fn test_derive_on_pod() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Point { uint32_t x; uint32_t y; };
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Point { x: 1, y: 2 };
+        let b = ffi::fx_Point { x: 1, y: 2 };
+        assert_eq!(a, b);
+        assert_eq!(format!("{:?}", a), "fx_Point { x: 1, y: 2 }");
+        let c = a.clone();
+        assert_eq!(c.y, 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate_pod!("fx_Point")
+            derive!("fx_Point", "Debug", "PartialEq")
+            derive!("fx_Point", "Clone")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A derive whose fields have to support it: `Clone` on a POD holding another
+/// POD works only because the inner one is `Clone` too.
+#[test]
+fn test_derive_clone_through_a_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Inner3 { uint32_t a; };
+        struct fx_Outer3 { fx_Inner3 inner; uint32_t b; };
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_Outer3 { inner: ffi::fx_Inner3 { a: 1 }, b: 2 };
+        let copy = outer.clone();
+        assert_eq!(copy.inner.a, 1);
+        assert_eq!(copy.b, 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate_pod!("fx_Outer3")
+            generate_pod!("fx_Inner3")
+            derive!("fx_Inner3", "Clone")
+            derive!("fx_Outer3", "Clone")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same for an enum, where bindgen has already written a derive list of
+/// its own. Asking for one of the traits it put there must not produce a
+/// second, conflicting implementation.
+#[test]
+fn test_derive_on_enum() {
+    let hdr = indoc! {"
+        enum class fx_Colour { Red, Green };
+    "};
+    let rs = quote! {
+        assert_eq!(format!("{:?}", ffi::fx_Colour::Green), "Green");
+        assert_eq!(ffi::fx_Colour::Red.clone(), ffi::fx_Colour::Red);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Colour")
+            derive!("fx_Colour", "Debug", "Clone")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `derive!` names a type the way every other directive does, so the C++
+/// spelling of a nested type has to work as well as the flattened one bindgen
+/// gives it.
+#[test]
+fn test_derive_on_nested_type_by_cpp_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns4 {
+            struct fx_outer4 {
+                struct fx_inner4 { uint32_t a; };
+            };
+        }
+    "};
+    let rs = quote! {
+        let i = ffi::fx_ns4::fx_outer4_fx_inner4 { a: 3 };
+        assert_eq!(format!("{:?}", i), "fx_outer4_fx_inner4 { a: 3 }");
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate_pod!("fx_ns4::fx_outer4::fx_inner4")
+            derive!("fx_ns4::fx_outer4::fx_inner4", "Debug")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `derive!` for something autocxx never generated is a mistake worth
+/// reporting, exactly as an unused `generate!` is.
+#[test]
+fn test_derive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Present { uint32_t a; };
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_pod!("fx_Present")
+            derive!("fx_Absent", "Debug")
+        },
+        "DeriveDirectiveMatchedNothing",
+    );
+}
+
+/// A non-POD type is re-emitted as an opaque wrapper with no fields, so a
+/// derive on the bindgen definition would never reach the user. Say so.
+#[test]
+fn test_derive_on_non_pod_refused() {
+    let hdr = indoc! {"
+        #include <string>
+        struct fx_Stringy { std::string s; };
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Stringy")
+            derive!("fx_Stringy", "Debug")
+        },
+        "DeriveOnTypeWithNoRustDefinition",
+    );
+}
+
+/// `Default` on an enum is refused rather than emitted: nothing makes one
+/// enumerator of a C++ enum the default, which is why bindgen's own `Default`
+/// is stripped from every enum, and a derived one would not compile.
+#[test]
+fn test_derive_default_on_enum_refused() {
+    let hdr = indoc! {"
+        enum class fx_Shade { Light, Dark };
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Shade")
+            derive!("fx_Shade", "Default")
+        },
+        "DeriveDefaultOnEnum",
+    );
+}
