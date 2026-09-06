@@ -12,15 +12,15 @@ use crate::{
         EnableAutodiscover, ForceWrapperGeneration, SetSuppressSystemHeaders,
     },
     code_checkers::{
-        make_checks_without_building, make_error_finder, make_rust_code_finder,
+        make_checks, make_checks_without_building, make_error_finder, make_rust_code_finder,
         make_string_absence_finder, make_string_finder, CppMatcher, NoSystemHeadersChecker,
     },
 };
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
     run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
-    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_errors, BuilderModifier,
-    CodeCheckerFns, TestError,
+    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_errors,
+    run_test_expect_fail_with_errors_ex, BuilderModifier, CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -18881,11 +18881,12 @@ fn test_impl_new_returns_are_must_use() {
         };
         inline Bob make_bob() { return Bob(); }
     "};
-    // The `Result<impl New, cxx::Exception>` a `throws!` function would return
-    // is deliberately absent: that combination does not compile today, for
-    // reasons unrelated to this attribute. See `returns_impl_new` in
-    // `fun_codegen.rs`, which handles the shape anyway, and the unit tests
-    // there which pin it.
+    // A `throws!` function returning a non-POD type by value hands back an
+    // `impl TryNew` rather than an `impl New`, and gets a `#[must_use]` naming
+    // the fallible finishers. That shape is covered by
+    // `test_designated_ctor_generates_a_try_new` and the unit tests beside
+    // `must_use_attr_if_impl_new` in `fun_codegen.rs`; this test is about the
+    // infallible one.
     run_test_ex(
         "",
         hdr,
@@ -20596,6 +20597,1212 @@ fn test_method_on_a_type_bindgen_could_not_name_is_refused() {
             "fx_first".to_string(),
             "replaced it with an opaque blob of bytes".to_string(),
         ])),
+        None,
+    );
+}
+
+/// The C++ half of the throwing-constructor tests: a class whose constructor
+/// throws for one particular argument, with a member whose construction and
+/// destruction are counted so that a test can see what C++ did on the way out.
+const THROWING_CTOR_CXX: &str = indoc! {"
+    static uint32_t member_ctors = 0;
+    static uint32_t member_dtors = 0;
+    static uint32_t outer_dtors = 0;
+    uint32_t fx_member_ctors() { return member_ctors; }
+    uint32_t fx_member_dtors() { return member_dtors; }
+    uint32_t fx_outer_dtors() { return outer_dtors; }
+    void fx_reset_counts() { member_ctors = 0; member_dtors = 0; outer_dtors = 0; }
+    fx_Member::fx_Member() { member_ctors++; }
+    fx_Member::~fx_Member() { member_dtors++; }
+    fx_Risky::fx_Risky(uint32_t x) {
+        if (x == 0) throw std::runtime_error(\"fx no zeroes here\");
+        a = x;
+    }
+    fx_Risky::~fx_Risky() { outer_dtors++; }
+"};
+
+/// The header for [`THROWING_CTOR_CXX`]. `fx_Risky` is non-POD: it has a
+/// user-provided destructor, so autocxx will not treat it as trivial.
+const THROWING_CTOR_HDR: &str = indoc! {"
+    #include <stdexcept>
+    #include <cstdint>
+    uint32_t fx_member_ctors();
+    uint32_t fx_member_dtors();
+    uint32_t fx_outer_dtors();
+    void fx_reset_counts();
+    struct fx_Member {
+        fx_Member();
+        ~fx_Member();
+    };
+    class fx_Risky {
+    public:
+        fx_Risky(uint32_t x);
+        ~fx_Risky();
+        uint32_t get() const { return a; }
+    private:
+        fx_Member m;
+        uint32_t a = 0;
+    };
+"};
+
+/// The directives every throwing-constructor test needs. `fx_Risky::fx_Risky`
+/// is how a constructor is named in C++, and how `throws!` wants to hear about
+/// one.
+fn throwing_ctor_directives() -> TokenStream {
+    quote! {
+        generate!("fx_Risky")
+        generate!("fx_member_ctors")
+        generate!("fx_member_dtors")
+        generate!("fx_outer_dtors")
+        generate!("fx_reset_counts")
+        throws!("fx_Risky::fx_Risky")
+    }
+}
+
+/// The heap path: a constructor which does throw reports the exception rather
+/// than terminating the process, and the message survives the crossing.
+#[test]
+fn test_throwing_ctor_within_unique_ptr_reports_the_exception() {
+    let rs = quote! {
+        ffi::fx_reset_counts();
+        let err = ffi::fx_Risky::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("this constructor throws for 0");
+        assert_eq!(err.what(), "fx no zeroes here");
+    };
+    run_test_ex(
+        THROWING_CTOR_CXX,
+        THROWING_CTOR_HDR,
+        rs,
+        throwing_ctor_directives(),
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same constructor, given an argument it likes, still builds an object.
+/// Designating a constructor as throwing does not stop it working.
+#[test]
+fn test_throwing_ctor_within_unique_ptr_still_constructs() {
+    let rs = quote! {
+        let obj = ffi::fx_Risky::new(7)
+            .try_within_unique_ptr()
+            .ok()
+            .expect("7 is fine");
+        assert_eq!(obj.get(), 7);
+    };
+    run_test_ex(
+        THROWING_CTOR_CXX,
+        THROWING_CTOR_HDR,
+        rs,
+        throwing_ctor_directives(),
+        None,
+        None,
+        None,
+    );
+}
+
+/// What C++ did on the way out of a failed construction, and what we did not
+/// do afterwards. The member had been constructed by the time the exception
+/// was thrown, so C++ destroyed it during unwinding; the object itself was
+/// never constructed, so its destructor must not run - a second destruction of
+/// `fx_Member` would show up here as a count of two.
+#[test]
+fn test_throwing_ctor_destroys_members_once_and_the_object_never() {
+    let rs = quote! {
+        ffi::fx_reset_counts();
+        assert!(ffi::fx_Risky::new(0).try_within_unique_ptr().is_err());
+        assert_eq!(ffi::fx_member_ctors(), 1, "the member was constructed");
+        assert_eq!(ffi::fx_member_dtors(), 1, "and destroyed by C++ unwinding, once");
+        assert_eq!(ffi::fx_outer_dtors(), 0, "the object never existed, so was never destroyed");
+
+        // And for comparison, the successful path destroys everything exactly
+        // once when the UniquePtr goes away.
+        ffi::fx_reset_counts();
+        let obj = ffi::fx_Risky::new(3).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(ffi::fx_member_ctors(), 1);
+        assert_eq!(ffi::fx_member_dtors(), 0);
+        drop(obj);
+        assert_eq!(ffi::fx_member_dtors(), 1);
+        assert_eq!(ffi::fx_outer_dtors(), 1);
+    };
+    run_test_ex(
+        THROWING_CTOR_CXX,
+        THROWING_CTOR_HDR,
+        rs,
+        throwing_ctor_directives(),
+        None,
+        None,
+        None,
+    );
+}
+
+/// The `Box` path, both outcomes. A failed construction frees the box without
+/// destroying anything.
+#[test]
+fn test_throwing_ctor_within_box() {
+    let rs = quote! {
+        ffi::fx_reset_counts();
+        assert!(ffi::fx_Risky::new(0).try_within_box().is_err());
+        assert_eq!(ffi::fx_member_dtors(), 1);
+        assert_eq!(ffi::fx_outer_dtors(), 0);
+
+        ffi::fx_reset_counts();
+        let obj = ffi::fx_Risky::new(11).try_within_box().ok().expect("11 is fine");
+        assert_eq!(obj.get(), 11);
+        drop(obj);
+        assert_eq!(ffi::fx_outer_dtors(), 1);
+    };
+    run_test_ex(
+        THROWING_CTOR_CXX,
+        THROWING_CTOR_HDR,
+        rs,
+        throwing_ctor_directives(),
+        None,
+        None,
+        None,
+    );
+}
+
+/// The `CppPin` path, both outcomes.
+#[test]
+fn test_throwing_ctor_within_cpp_pin() {
+    let rs = quote! {
+        ffi::fx_reset_counts();
+        assert!(ffi::fx_Risky::new(0).try_within_cpp_pin().is_err());
+        assert_eq!(ffi::fx_outer_dtors(), 0);
+
+        let obj = ffi::fx_Risky::new(5).try_within_cpp_pin().ok().expect("5 is fine");
+        // `CppRef`'s own method calls need `cpp_semantics!`, so read the object
+        // through the pin's raw pointer instead - all this test needs to know
+        // is that the object arrived intact.
+        assert_eq!(unsafe { (*obj.as_ptr()).get() }, 5);
+    };
+    run_test_ex(
+        THROWING_CTOR_CXX,
+        THROWING_CTOR_HDR,
+        rs,
+        throwing_ctor_directives(),
+        None,
+        None,
+        None,
+    );
+}
+
+/// The stack path. `moveit!` cannot express a construction which fails, so a
+/// `stack_slot!` reserves the storage and `try_emplace` fills it - or doesn't.
+#[test]
+fn test_throwing_ctor_on_the_stack() {
+    let rs = quote! {
+        ffi::fx_reset_counts();
+        {
+            // Unqualified, to pin that the prelude exports the macro.
+            stack_slot!(storage);
+            let outcome = storage.try_emplace(ffi::fx_Risky::new(0));
+            assert!(outcome.is_err());
+        }
+        assert_eq!(ffi::fx_member_ctors(), 1);
+        assert_eq!(ffi::fx_member_dtors(), 1);
+        assert_eq!(ffi::fx_outer_dtors(), 0, "nothing was constructed to destroy");
+
+        ffi::fx_reset_counts();
+        {
+            autocxx::stack_slot!(storage);
+            let obj = storage.try_emplace(ffi::fx_Risky::new(9)).expect("9 is fine");
+            assert_eq!(obj.get(), 9);
+            assert_eq!(ffi::fx_outer_dtors(), 0, "still alive within its scope");
+        }
+        assert_eq!(ffi::fx_outer_dtors(), 1, "and destroyed when the scope ended");
+    };
+    run_test_ex(
+        THROWING_CTOR_CXX,
+        THROWING_CTOR_HDR,
+        rs,
+        throwing_ctor_directives(),
+        None,
+        None,
+        None,
+    );
+}
+
+/// A constructor which is designated as throwing but never does. The Rust
+/// surface is fallible whether or not the exception ever happens, which is the
+/// point: `throws!` describes what C++ may do, not what it did.
+#[test]
+fn test_designated_ctor_which_never_throws() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        class fx_Calm {
+        public:
+            fx_Calm(uint32_t x) : a(x) {}
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let obj = ffi::fx_Calm::new(4).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(obj.get(), 4);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Calm")
+            throws!("fx_Calm::fx_Calm")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A constructor nobody designated keeps the infallible shape it always had.
+///
+/// The whole generated function is pinned here, not just its return type: the
+/// `#[must_use]` message, the signature, and every statement of the body up to
+/// the call itself, whose name carries a per-mod hash and so cannot be written
+/// down. Nothing about the throwing support reaches an ordinary constructor -
+/// no `TryNew`, no `try_by_raw`, no `Result` - and it still runs.
+#[test]
+fn test_undesignated_ctor_is_unchanged() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Ordinary {
+        public:
+            fx_Ordinary(uint32_t x) : a(x) {}
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let obj = ffi::fx_Ordinary::new(2).within_unique_ptr();
+        assert_eq!(obj.get(), 2);
+        moveit! { let on_stack = ffi::fx_Ordinary::new(3); }
+        assert_eq!(on_stack.get(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Ordinary"], &[], None),
+        None,
+        Some(make_checks(vec![
+            make_string_finder(vec![concat!(
+                "# [must_use = \"this is a recipe for constructing a C++ object, and ",
+                "constructs nothing until it is stored somewhere: finish it with ",
+                ".within_unique_ptr(), .within_box(), or the moveit! macro\"] ",
+                "pub fn new (x : u32) -> impl autocxx :: moveit :: new :: New < Output = Self > ",
+                "{ unsafe { autocxx :: moveit :: new :: by_raw (move | this | ",
+                "{ let this = this . get_unchecked_mut () . as_mut_ptr () ; cxxbridge ::",
+            )
+            .to_string()]),
+            make_string_absence_finder(vec!["TryNew".to_string(), "try_by_raw".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// The shape a designated constructor gets, pinned directly: an `impl TryNew`
+/// rather than an `impl New`, and no `Result` wrapped around it. A
+/// `Result<impl New, _>` would have to decide whether construction failed
+/// before running the constructor, which is not something a C++ exception
+/// allows.
+#[test]
+fn test_designated_ctor_generates_a_try_new() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Shape {
+        public:
+            fx_Shape(uint32_t x) : a(x) {}
+        private:
+            uint32_t a;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Shape")
+            throws!("fx_Shape::fx_Shape")
+        },
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(vec![
+                "impl autocxx :: moveit :: new :: TryNew < Output = Self , Error = cxx :: Exception >"
+                    .to_string(),
+                "autocxx :: moveit :: new :: try_by_raw".to_string(),
+            ]),
+            make_string_absence_finder(vec![
+                "Result < impl autocxx :: moveit :: new :: New".to_string(),
+            ]),
+        ])),
+        None,
+    );
+}
+
+/// A namespaced class's constructor, named the way C++ names it.
+#[test]
+fn test_throwing_ctor_in_a_namespace() {
+    let cxx = indoc! {"
+        namespace fx_ns {
+            fx_Risky::fx_Risky(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"fx namespaced\");
+                a = x;
+            }
+        }
+    "};
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        namespace fx_ns {
+            class fx_Risky {
+            public:
+                fx_Risky(uint32_t x);
+                uint32_t get() const { return a; }
+            private:
+                uint32_t a = 0;
+            };
+        }
+    "};
+    let rs = quote! {
+        let err = ffi::fx_ns::fx_Risky::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("this constructor throws for 0");
+        assert_eq!(err.what(), "fx namespaced");
+        let obj = ffi::fx_ns::fx_Risky::new(6).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(obj.get(), 6);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_ns::fx_Risky")
+            throws!("fx_ns::fx_Risky::fx_Risky")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A POD type's constructor can throw too. `generate_pod!` types get the same
+/// placement-constructing `new` as any other, so they get the same treatment.
+#[test]
+fn test_throwing_ctor_of_a_pod_type() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        struct fx_RiskyPod {
+            fx_RiskyPod(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"fx pod refuses\");
+                a = x;
+            }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let err = ffi::fx_RiskyPod::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("this constructor throws for 0");
+        assert_eq!(err.what(), "fx pod refuses");
+        let obj = ffi::fx_RiskyPod::new(8).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(obj.a, 8);
+        autocxx::stack_slot!(storage);
+        let on_stack = storage.try_emplace(ffi::fx_RiskyPod::new(12)).unwrap();
+        assert_eq!(on_stack.a, 12);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[],
+            &["fx_RiskyPod"],
+            Some(quote! { throws!("fx_RiskyPod::fx_RiskyPod") }),
+        ),
+        None,
+        None,
+        None,
+    );
+}
+
+/// Nested construction: the outer object's own constructor body never runs,
+/// because a member's constructor threw first.
+///
+/// C++ destroys the members which had been constructed by then, and no others,
+/// and never destroys the outer object which was never constructed. Both
+/// orderings matter, so both are here: `fx_Outer` builds a quiet member before
+/// the throwing one, and `fx_OuterThrowsFirst` puts the throwing one first, so
+/// that the sibling never exists at all. Every constructor and destructor
+/// involved is counted, because "the right one ran" and "nothing else did" are
+/// different claims.
+#[test]
+fn test_member_constructor_throwing_during_an_outer_construction() {
+    let cxx = indoc! {"
+        static uint32_t first_ctors = 0;
+        static uint32_t first_dtors = 0;
+        static uint32_t second_entries = 0;
+        static uint32_t second_ctors = 0;
+        static uint32_t second_dtors = 0;
+        static uint32_t outer_dtors = 0;
+        uint32_t fx_first_ctors() { return first_ctors; }
+        uint32_t fx_first_dtors() { return first_dtors; }
+        uint32_t fx_second_entries() { return second_entries; }
+        uint32_t fx_second_ctors() { return second_ctors; }
+        uint32_t fx_second_dtors() { return second_dtors; }
+        uint32_t fx_outer_dtors() { return outer_dtors; }
+        void fx_reset_counts() {
+            first_ctors = 0; first_dtors = 0;
+            second_entries = 0; second_ctors = 0; second_dtors = 0;
+            outer_dtors = 0;
+        }
+        fx_First::fx_First() { first_ctors++; }
+        fx_First::~fx_First() { first_dtors++; }
+        fx_Second::fx_Second(uint32_t x) {
+            second_entries++;
+            if (x == 0) throw std::runtime_error(\"fx member objected\");
+            second_ctors++;
+        }
+        fx_Second::~fx_Second() { second_dtors++; }
+        fx_Outer::fx_Outer(uint32_t x) : first(), second(x) {}
+        fx_Outer::~fx_Outer() { outer_dtors++; }
+        fx_OuterThrowsFirst::fx_OuterThrowsFirst(uint32_t x) : second(x), first() {}
+        fx_OuterThrowsFirst::~fx_OuterThrowsFirst() { outer_dtors++; }
+    "};
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        uint32_t fx_first_ctors();
+        uint32_t fx_first_dtors();
+        uint32_t fx_second_entries();
+        uint32_t fx_second_ctors();
+        uint32_t fx_second_dtors();
+        uint32_t fx_outer_dtors();
+        void fx_reset_counts();
+        struct fx_First { fx_First(); ~fx_First(); };
+        struct fx_Second { fx_Second(uint32_t x); ~fx_Second(); };
+        class fx_Outer {
+        public:
+            fx_Outer(uint32_t x);
+            ~fx_Outer();
+        private:
+            fx_First first;
+            fx_Second second;
+        };
+        class fx_OuterThrowsFirst {
+        public:
+            fx_OuterThrowsFirst(uint32_t x);
+            ~fx_OuterThrowsFirst();
+        private:
+            fx_Second second;
+            fx_First first;
+        };
+    "};
+    let rs = quote! {
+        // The throwing member is constructed second, so its sibling is alive
+        // when the exception is thrown and has to be destroyed on the way out.
+        ffi::fx_reset_counts();
+        let err = ffi::fx_Outer::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("the member constructor throws for 0");
+        assert_eq!(err.what(), "fx member objected");
+        assert_eq!(ffi::fx_first_ctors(), 1, "the quiet member was constructed");
+        assert_eq!(ffi::fx_first_dtors(), 1, "and destroyed by unwinding, once");
+        assert_eq!(ffi::fx_second_entries(), 1, "the throwing member was entered");
+        assert_eq!(ffi::fx_second_ctors(), 0, "but never completed");
+        assert_eq!(
+            ffi::fx_second_dtors(),
+            0,
+            "so it was not destroyed either - destroying a member whose \
+             constructor threw would be a double destruction"
+        );
+        assert_eq!(
+            ffi::fx_outer_dtors(),
+            0,
+            "and the outer object, which never existed, was never destroyed"
+        );
+
+        // The throwing member is constructed first, so nothing else was ever
+        // built and nothing at all should be destroyed.
+        ffi::fx_reset_counts();
+        let err = ffi::fx_OuterThrowsFirst::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("the first member constructor throws for 0");
+        assert_eq!(err.what(), "fx member objected");
+        assert_eq!(ffi::fx_second_entries(), 1);
+        assert_eq!(ffi::fx_second_ctors(), 0);
+        assert_eq!(ffi::fx_second_dtors(), 0);
+        assert_eq!(ffi::fx_first_ctors(), 0, "the sibling was never reached");
+        assert_eq!(ffi::fx_first_dtors(), 0);
+        assert_eq!(ffi::fx_outer_dtors(), 0);
+
+        // And when nothing throws, everything is constructed once and
+        // destroyed once.
+        ffi::fx_reset_counts();
+        {
+            let obj = ffi::fx_Outer::new(2).try_within_unique_ptr().ok().unwrap();
+            assert_eq!(ffi::fx_first_ctors(), 1);
+            assert_eq!(ffi::fx_second_ctors(), 1);
+            assert_eq!(ffi::fx_outer_dtors(), 0);
+            drop(obj);
+        }
+        assert_eq!(ffi::fx_outer_dtors(), 1);
+        assert_eq!(ffi::fx_first_dtors(), 1);
+        assert_eq!(ffi::fx_second_dtors(), 1);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Outer")
+            generate!("fx_OuterThrowsFirst")
+            generate!("fx_first_ctors")
+            generate!("fx_first_dtors")
+            generate!("fx_second_entries")
+            generate!("fx_second_ctors")
+            generate!("fx_second_dtors")
+            generate!("fx_outer_dtors")
+            generate!("fx_reset_counts")
+            throws!("fx_Outer::fx_Outer")
+            throws!("fx_OuterThrowsFirst::fx_OuterThrowsFirst")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `throws!` function which returns a non-POD type by value. This is the
+/// same machinery as a constructor - the C++ builds the result into a place
+/// the caller supplies - and until this change it generated Rust which did not
+/// compile, because the `?` for the exception landed inside a closure returning
+/// `()`.
+#[test]
+fn test_throwing_function_returning_a_non_pod_by_value() {
+    let cxx = indoc! {"
+        fx_Made fx_make(uint32_t x) {
+            if (x == 0) throw std::runtime_error(\"fx will not make one\");
+            fx_Made m;
+            m.a = x;
+            return m;
+        }
+    "};
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        struct fx_Made {
+            ~fx_Made() {}
+            uint32_t a = 0;
+            uint32_t get() const { return a; }
+        };
+        fx_Made fx_make(uint32_t x);
+    "};
+    let rs = quote! {
+        let err = ffi::fx_make(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("0 is refused");
+        assert_eq!(err.what(), "fx will not make one");
+        let made = ffi::fx_make(5).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(made.get(), 5);
+        autocxx::stack_slot!(storage);
+        assert_eq!(storage.try_emplace(ffi::fx_make(6)).unwrap().get(), 6);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Made")
+            generate!("fx_make")
+            throws!("fx_make")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Naming a class rather than its constructor also designates the constructor,
+/// because `throws!` matches a trailing qualified name and a constructor's
+/// final name component is the class's own. `fx_Risky::fx_Risky` says the same
+/// thing less ambiguously, and is what the book recommends.
+#[test]
+fn test_throws_matches_a_ctor_by_bare_class_name() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        struct fx_Bare {
+            fx_Bare(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"fx bare\");
+                a = x;
+            }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        assert!(ffi::fx_Bare::new(0).try_within_unique_ptr().is_err());
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Bare")
+            throws!("fx_Bare")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// One designation covers every overload of a constructor, because all of them
+/// share the C++ name `fx_Many::fx_Many`. There is no spelling which picks out
+/// a single overload; if only one of them throws, the others become fallible
+/// too and their `Result`s are always `Ok`.
+#[test]
+fn test_throws_covers_every_constructor_overload() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        struct fx_Many {
+            fx_Many() : a(1) {}
+            fx_Many(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"fx many\");
+                a = x;
+            }
+            uint32_t get() const { return a; }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let default_made = ffi::fx_Many::new().try_within_unique_ptr().ok().unwrap();
+        assert_eq!(default_made.get(), 1);
+        let four = ffi::fx_Many::new1(4).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(four.get(), 4);
+        assert!(ffi::fx_Many::new1(0).try_within_unique_ptr().is_err());
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Many")
+            throws!("fx_Many::fx_Many")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A throwing constructor alongside a throwing method on the same class: the
+/// two designations are independent and neither shape disturbs the other.
+#[test]
+fn test_throwing_ctor_and_throwing_method_together() {
+    let cxx = indoc! {"
+        fx_Both::fx_Both(uint32_t x) {
+            if (x == 0) throw std::runtime_error(\"fx ctor\");
+            a = x;
+        }
+        uint32_t fx_Both::risky() const {
+            if (a == 1) throw std::runtime_error(\"fx method\");
+            return a;
+        }
+    "};
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        class fx_Both {
+        public:
+            fx_Both(uint32_t x);
+            uint32_t risky() const;
+        private:
+            uint32_t a = 0;
+        };
+    "};
+    let rs = quote! {
+        let ctor_err = ffi::fx_Both::new(0).try_within_unique_ptr().err().unwrap();
+        assert_eq!(ctor_err.what(), "fx ctor");
+        let one = ffi::fx_Both::new(1).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(one.risky().unwrap_err().what(), "fx method");
+        let two = ffi::fx_Both::new(2).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(two.risky().unwrap(), 2);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Both")
+            throws!("fx_Both::fx_Both")
+            throws!("fx_Both::risky")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A subclass whose C++ superclass constructor can throw, across all three
+/// ownership models and both outcomes.
+///
+/// Two things have to be true when the peer's constructor throws, and neither
+/// is visible from the `Result` alone. The C++ peer must never come into
+/// existence - the superclass constructor was entered but never completed, so
+/// no destructor may run for it either - and the Rust half must be dropped
+/// rather than stranded: the peer holder handed to C++ carries a strong or weak
+/// reference to it, and that reference is only released by the `rust::Box`
+/// destructor running as the exception unwinds. An implementation which leaked
+/// the Rust side on failure would still report the exception correctly and
+/// still pass a test which only looked at the `Result`, so this counts drops on
+/// both sides.
+#[test]
+fn test_subclass_with_a_throwing_superclass_constructor() {
+    let cxx = indoc! {"
+        static uint32_t super_entries = 0;
+        static uint32_t super_completions = 0;
+        static uint32_t super_dtors = 0;
+        uint32_t fx_super_entries() { return super_entries; }
+        uint32_t fx_super_completions() { return super_completions; }
+        uint32_t fx_super_dtors() { return super_dtors; }
+        void fx_reset_super_counts() {
+            super_entries = 0; super_completions = 0; super_dtors = 0;
+        }
+        fx_SuperRisky::fx_SuperRisky(uint32_t x) {
+            super_entries++;
+            if (x == 0) throw std::runtime_error(\"fx superclass objected\");
+            a = x;
+            super_completions++;
+        }
+        fx_SuperRisky::~fx_SuperRisky() { super_dtors++; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <stdexcept>
+        uint32_t fx_super_entries();
+        uint32_t fx_super_completions();
+        uint32_t fx_super_dtors();
+        void fx_reset_super_counts();
+        class fx_SuperRisky {
+        public:
+            fx_SuperRisky(uint32_t x);
+            virtual uint32_t foo() const = 0;
+            virtual ~fx_SuperRisky();
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a = 0;
+        };
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            // Each ownership model, given an argument the superclass refuses.
+            // `Sentinel` counts drops of the Rust half; the C++ counters say
+            // whether a peer was ever built.
+            for construct in [
+                |sub| MySub::try_new_rust_owned(sub).map(|_| ()),
+                |sub| MySub::try_new_cpp_owned(sub).map(|_| ()),
+                |sub| MySub::try_new_self_owned(sub).map(|_| ()),
+            ] {
+                ffi::fx_reset_super_counts();
+                let drops_before = sentinel_drops();
+                let err = construct(MySub {
+                    arg: 0,
+                    sentinel: Sentinel,
+                    cpp_peer: Default::default(),
+                })
+                .err()
+                .expect("the superclass constructor throws for 0");
+                assert_eq!(err.what(), "fx superclass objected");
+                assert_eq!(ffi::fx_super_entries(), 1, "the superclass constructor ran");
+                assert_eq!(
+                    ffi::fx_super_completions(),
+                    0,
+                    "but never finished, so no peer exists"
+                );
+                assert_eq!(
+                    ffi::fx_super_dtors(),
+                    0,
+                    "and nothing was destroyed which was never constructed"
+                );
+                assert_eq!(
+                    sentinel_drops(),
+                    drops_before + 1,
+                    "the Rust subclass was dropped exactly once, not stranded in the \
+                     peer holder C++ was given"
+                );
+            }
+
+            // And the same three, given an argument it accepts.
+            ffi::fx_reset_super_counts();
+            let drops_before = sentinel_drops();
+            {
+                let rust_owned = MySub::try_new_rust_owned(MySub {
+                    arg: 5,
+                    sentinel: Sentinel,
+                    cpp_peer: Default::default(),
+                })
+                .ok()
+                .expect("5 is fine");
+                let borrowed = rust_owned.borrow();
+                let superclass: &ffi::fx_SuperRisky = borrowed.as_ref();
+                assert_eq!(superclass.get(), 5);
+                assert_eq!(ffi::fx_super_completions(), 1);
+                assert_eq!(sentinel_drops(), drops_before, "still alive");
+            }
+            assert_eq!(
+                sentinel_drops(),
+                drops_before + 1,
+                "and dropped once when its owner went away"
+            );
+
+            let cpp_owned = MySub::try_new_cpp_owned(MySub {
+                arg: 6,
+                sentinel: Sentinel,
+                cpp_peer: Default::default(),
+            })
+            .ok()
+            .expect("6 is fine");
+            assert_eq!(cpp_owned.As_fx_SuperRisky().get(), 6);
+            drop(cpp_owned);
+
+            let self_owned = MySub::try_new_self_owned(MySub {
+                arg: 7,
+                sentinel: Sentinel,
+                cpp_peer: Default::default(),
+            })
+            .ok()
+            .expect("7 is fine");
+            {
+                let borrowed = self_owned.borrow();
+                let superclass: &ffi::fx_SuperRisky = borrowed.as_ref();
+                assert_eq!(superclass.get(), 7);
+            }
+            // A self-owned subclass stays alive until it says otherwise, which
+            // is what distinguishes it from the other two.
+            let drops_before = sentinel_drops();
+            self_owned.borrow().delete_self();
+            drop(self_owned);
+            assert_eq!(sentinel_drops(), drops_before + 1);
+        },
+        quote! {
+            subclass!("fx_SuperRisky",MySub)
+            generate!("fx_super_entries")
+            generate!("fx_super_completions")
+            generate!("fx_super_dtors")
+            generate!("fx_reset_super_counts")
+            throws!("MySubCpp::MySubCpp")
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::{
+                CppPeerConstructor, CppSubclass, CppSubclassRustPeerHolder, CppSubclassSelfOwned,
+            };
+            use ffi::fx_SuperRisky_methods;
+            use std::cell::Cell;
+
+            thread_local! {
+                static SENTINEL_DROPS: Cell<u32> = const { Cell::new(0) };
+            }
+
+            fn sentinel_drops() -> u32 {
+                SENTINEL_DROPS.with(|c| c.get())
+            }
+
+            /// A field of the Rust subclass whose destruction is observable, so
+            /// that a failed construction which stranded the subclass rather
+            /// than dropping it would be visible.
+            pub struct Sentinel;
+
+            impl Drop for Sentinel {
+                fn drop(&mut self) {
+                    SENTINEL_DROPS.with(|c| c.set(c.get() + 1));
+                }
+            }
+
+            #[autocxx::subclass::subclass(self_owned)]
+            pub struct MySub {
+                arg: u32,
+                sentinel: Sentinel,
+            }
+
+            impl fx_SuperRisky_methods for MySub {
+                fn foo(&self) -> u32 {
+                    self.arg
+                }
+            }
+
+            impl CppPeerConstructor<ffi::MySubCpp> for MySub {
+                fn make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> cxx::UniquePtr<ffi::MySubCpp> {
+                    self.try_make_peer(peer_holder)
+                        .expect("the superclass constructor threw")
+                }
+
+                fn try_make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> Result<cxx::UniquePtr<ffi::MySubCpp>, cxx::Exception> {
+                    ffi::MySubCpp::new(peer_holder, self.arg).try_within_unique_ptr()
+                }
+            }
+        }),
+    );
+}
+
+/// A class with constructors it declares for itself which `moveit` turns into
+/// trait impls - a copy constructor and a move constructor - can still have a
+/// throwing value constructor. `throws!("fx_Copyable::fx_Copyable")` names all
+/// three, because they share one C++ name, but only the value constructor can
+/// carry a `Result`: `moveit::CopyNew` and `moveit::MoveNew` return nothing,
+/// so a copy or move constructor which throws still terminates the process.
+/// See the `designation_can_be_honoured` comment in `analyse_foreign_fn`.
+#[test]
+fn test_throwing_ctor_of_a_class_with_its_own_copy_and_move_ctors() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        class fx_Copyable {
+        public:
+            fx_Copyable(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"fx copyable\");
+                a = x;
+            }
+            fx_Copyable(const fx_Copyable& other) { a = other.a; }
+            fx_Copyable(fx_Copyable&& other) { a = other.a; }
+            ~fx_Copyable() {}
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a = 0;
+        };
+    "};
+    let rs = quote! {
+        let err = ffi::fx_Copyable::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("this constructor throws for 0");
+        assert_eq!(err.what(), "fx copyable");
+        let obj = ffi::fx_Copyable::new(4).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(obj.get(), 4);
+        // The copy constructor is still the infallible `CopyNew` it always
+        // was, and needs no `try_`.
+        let copy = autocxx::moveit::new::copy(obj.as_ref().unwrap()).within_unique_ptr();
+        assert_eq!(copy.get(), 4);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Copyable")
+            throws!("fx_Copyable::fx_Copyable")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A copy constructor which throws kills the process, which is what the book
+/// says and what nothing else here proves.
+///
+/// `throws!("fx_Suicidal::fx_Suicidal")` names every constructor of the class,
+/// but a copy constructor becomes `moveit::CopyNew`, whose `copy_new` returns
+/// nothing - so the designation cannot be honoured for it and the exception has
+/// nowhere to go but `std::terminate`. The value constructor in the same class
+/// is fallible, which is the point of testing them together.
+///
+/// This is a death test, hosted by the harness's existing child process: it
+/// builds the generated Rust and *runs* it, so a run which dies is a `TestError`
+/// carrying the child's own output. The C++ installs a `std::terminate` handler
+/// which prints a marker and calls `std::_Exit`, for two reasons. It lets the
+/// assertion tell "reached `std::terminate`" apart from any other way a process
+/// can die - the wording each standard library prints on its way out differs
+/// between libc++, libstdc++ and the UCRT, so there is no portable string to
+/// match on otherwise - and it means the child leaves without an `abort()`, so
+/// no leg of CI has to cope with a core dump or a crash reporter.
+///
+/// What this pins, then, is that the exception is not caught and the program
+/// does not carry on. What the *default* terminate handler would have done next
+/// is `abort()`, by the standard, and is not this test's business.
+#[test]
+fn test_throwing_copy_constructor_terminates_the_process() {
+    let cxx = indoc! {"
+        void fx_install_terminate_marker() {
+            std::set_terminate([]() {
+                std::fputs(\"FX-TERMINATE-REACHED\\n\", stderr);
+                std::fflush(stderr);
+                std::_Exit(42);
+            });
+        }
+        fx_Suicidal::fx_Suicidal(uint32_t x) {
+            if (x == 0) throw std::runtime_error(\"fx value ctor objected\");
+            a = x;
+        }
+        fx_Suicidal::fx_Suicidal(const fx_Suicidal&) {
+            throw std::runtime_error(\"fx copy ctor objected\");
+        }
+        fx_Suicidal::~fx_Suicidal() {}
+    "};
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <exception>
+        #include <cstdint>
+        #include <cstdio>
+        #include <cstdlib>
+        void fx_install_terminate_marker();
+        class fx_Suicidal {
+        public:
+            fx_Suicidal(uint32_t x);
+            fx_Suicidal(const fx_Suicidal& other);
+            ~fx_Suicidal();
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a = 0;
+        };
+    "};
+    let rs = quote! {
+        ffi::fx_install_terminate_marker();
+        // The value constructor is fallible, and reports rather than dying.
+        let err = ffi::fx_Suicidal::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("the value constructor throws for 0");
+        assert_eq!(err.what(), "fx value ctor objected");
+        let obj = ffi::fx_Suicidal::new(1).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(obj.get(), 1);
+        // The copy constructor is not, and this line does not return.
+        let copy = autocxx::moveit::new::copy(obj.as_ref().unwrap()).within_unique_ptr();
+        // Unreachable. If it were reached, the test would fail by succeeding.
+        assert_eq!(copy.get(), 1);
+    };
+    run_test_expect_fail_with_errors_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Suicidal")
+            generate!("fx_install_terminate_marker")
+            throws!("fx_Suicidal::fx_Suicidal")
+        },
+        &[
+            // Only printed once trybuild has built the code and gone on to run
+            // it, so this also says the generated Rust compiled.
+            "Test case failed at runtime",
+            "FX-TERMINATE-REACHED",
+        ],
+    );
+}
+
+/// `as_new` takes a `New`, so a throwing constructor cannot be handed straight
+/// to a C++ function which takes its argument by value. The book tells people
+/// to construct the object first and pass that; this is that advice, compiled.
+#[test]
+fn test_throwing_ctor_result_passed_by_value_after_construction() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        struct fx_Cargo {
+            fx_Cargo(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"fx no empty cargo\");
+                a = x;
+            }
+            fx_Cargo(fx_Cargo&& other) : a(other.a) {}
+            ~fx_Cargo() {}
+            uint32_t a;
+        };
+        inline uint32_t fx_weigh(fx_Cargo c) { return c.a; }
+    "};
+    let rs = quote! {
+        let cargo = ffi::fx_Cargo::new(3).try_within_unique_ptr().ok().unwrap();
+        assert_eq!(ffi::fx_weigh(as_mov(cargo)), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Cargo")
+            generate!("fx_weigh")
+            throws!("fx_Cargo::fx_Cargo")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `throws!` function taking a by-value POD which has its own move
+/// constructor.
+///
+/// These two features only meet after the fact. A parameter like this is
+/// handed to C++ with `autocxx_move_or_copy`, which is deliberately *not* a
+/// reason to generate a C++ wrapper - it only says how a wrapper which exists
+/// anyway should spell the hand-over (see google/autocxx#1252). A `throws!`
+/// designation is a new reason for such a wrapper to exist, and in plain
+/// codegen it is the only one here, so this is the shape where the two decide
+/// the same wrapper together. `fx_Bob` declares a move constructor and so has
+/// no implicit copy constructor, which is what makes the hand-over observable:
+/// a wrapper which tried to copy the parameter would not compile.
+#[test]
+fn test_throwing_function_taking_a_relocatable_pod_by_value() {
+    let cxx = indoc! {"
+        uint32_t fx_take_bob(fx_Bob a) {
+            if (a.a == 0) throw std::runtime_error(\"fx bob objected\");
+            return a.a;
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <stdexcept>
+        #include <type_traits>
+        struct fx_Bob {
+            uint32_t a;
+            uint32_t b;
+            inline fx_Bob() {}
+            inline ~fx_Bob() {}
+            inline fx_Bob(fx_Bob&& other) { a = other.a; b = other.b; }
+            using IsRelocatable = std::true_type;
+        };
+        uint32_t fx_take_bob(fx_Bob a);
+    "};
+    let rs = quote! {
+        let good = ffi::fx_Bob { a: 12, b: 13 };
+        assert_eq!(ffi::fx_take_bob(good).unwrap(), 12);
+        let bad = ffi::fx_Bob { a: 0, b: 13 };
+        let err = ffi::fx_take_bob(bad).unwrap_err();
+        assert_eq!(err.what(), "fx bob objected");
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_take_bob")
+            pod!("fx_Bob")
+            throws!("fx_take_bob")
+        },
+        None,
+        None,
         None,
     );
 }

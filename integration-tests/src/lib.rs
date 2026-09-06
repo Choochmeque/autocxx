@@ -888,6 +888,24 @@ pub fn run_test_expect_fail_with_error_ex(
     directives: TokenStream,
     expected: &str,
 ) {
+    run_test_expect_fail_with_errors_ex(cxx_code, header_code, rust_code, directives, &[expected])
+}
+
+/// As [`run_test_expect_fail_with_error_ex`], but insisting on several things
+/// at once.
+///
+/// The failure a test pins this way need not be a build failure: the harness
+/// builds the generated Rust in a child process and runs it, so a test whose
+/// C++ is *meant* to kill the process at runtime lands here too, and the
+/// child's own output is part of what `expected` is matched against. See
+/// `test_throwing_copy_constructor_terminates_the_process`.
+pub fn run_test_expect_fail_with_errors_ex(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    directives: TokenStream,
+    expected: &[&str],
+) {
     let err = do_run_test(
         cxx_code,
         header_code,
@@ -900,7 +918,7 @@ pub fn run_test_expect_fail_with_error_ex(
         None,
     )
     .expect_err("Unexpected success");
-    assert_error_mentions(&err, &[expected]);
+    assert_error_mentions(&err, expected);
 }
 
 fn assert_error_mentions(err: &TestError, expected: &[&str]) {

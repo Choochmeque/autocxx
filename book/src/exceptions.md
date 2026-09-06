@@ -3,6 +3,8 @@
 C++ exceptions are supported via the `throws!` directive. When a function is marked
 with `throws!`, its Rust binding returns `Result<T, cxx::Exception>` instead of `T`,
 allowing you to handle C++ exceptions that propagate across the FFI boundary.
+Constructors take a slightly different shape, for reasons the
+[Constructors](#constructors) section explains.
 
 ## Basic usage
 
@@ -135,13 +137,181 @@ fn main() {
 )
 ```
 
+## Constructors
+
+A constructor is named in `throws!` the way C++ names it - `Class::Class`:
+
+```rust,ignore,autocxx,hidecpp
+autocxx_integration_tests::doctest(
+"",
+"
+#include <stdexcept>
+#include <cstdint>
+class Goat {
+public:
+    Goat(uint32_t horns) {
+        if (horns > 2) throw std::runtime_error(\"too many horns\");
+        horns_ = horns;
+    }
+    uint32_t horns() const { return horns_; }
+private:
+    uint32_t horns_;
+};
+",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("Goat")
+    throws!("Goat::Goat")
+}
+
+fn main() {
+    let goat = ffi::Goat::new(2).try_within_unique_ptr().ok().unwrap();
+    assert_eq!(goat.horns(), 2);
+
+    let complaint = ffi::Goat::new(9).try_within_unique_ptr().err().unwrap();
+    assert_eq!(complaint.what(), "too many horns");
+}
+}
+)
+```
+
+An ordinary constructor hands back an `impl New`, a recipe you finish with
+`within_unique_ptr()`, `within_box()` or the `moveit!` macro. One named by
+`throws!` hands back an `impl TryNew` instead, and each of those finishers has
+a fallible counterpart:
+
+| Infallible | Fallible | Gives you |
+|---|---|---|
+| `.within_unique_ptr()` | `.try_within_unique_ptr()` | `Result<UniquePtr<T>, cxx::Exception>` |
+| `.within_box()` | `.try_within_box()` | `Result<Pin<Box<T>>, cxx::Exception>` |
+| `.within_cpp_pin()` | `.try_within_cpp_pin()` | `Result<CppPin<T>, cxx::Exception>` |
+| `moveit! { let x = ...; }` | `stack_slot!(storage);` then `storage.try_emplace(...)` | `Result<Pin<MoveRef<T>>, cxx::Exception>` |
+
+There is deliberately no `Result<impl New, _>`: that would decide whether
+construction failed before the constructor had run, whereas a C++ constructor
+only throws once it is under way. `impl TryNew` says the right thing - the
+place stays uninitialized when construction fails - and it is why the method
+names differ rather than just the return types.
+
+### On the stack
+
+`moveit!` reserves stack storage and constructs into it in a single `let`,
+which leaves nowhere for a failure to go. So the two halves are written
+separately, and the half which can fail is an ordinary expression which takes
+`?`:
+
+```rust,ignore,autocxx,hidecpp
+autocxx_integration_tests::doctest(
+"",
+"
+#include <stdexcept>
+#include <cstdint>
+class Goat {
+public:
+    Goat(uint32_t horns) {
+        if (horns > 2) throw std::runtime_error(\"too many horns\");
+        horns_ = horns;
+    }
+    uint32_t horns() const { return horns_; }
+private:
+    uint32_t horns_;
+};
+",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("Goat")
+    throws!("Goat::Goat")
+}
+
+fn graze() -> Result<u32, cxx::Exception> {
+    autocxx::stack_slot!(storage);
+    let goat = storage.try_emplace(ffi::Goat::new(1))?;
+    Ok(goat.horns())
+}
+
+fn main() {
+    assert_eq!(graze().unwrap(), 1);
+}
+}
+)
+```
+
+When a constructor throws, the storage which had been set aside for the object
+is released without any destructor running on it - the object never existed.
+Whichever of its members had already been constructed are destroyed by C++
+itself as the exception unwinds, exactly as they would be in a C++ program.
+
+### What a designation covers
+
+`throws!("Goat::Goat")` marks every constructor of `Goat`, because all of them
+share that C++ name; there is no spelling which picks out one overload. A
+constructor which is marked but which never actually throws is fallible all the
+same - `throws!` describes what C++ is allowed to do, not what it did - and its
+`Result` is simply always `Ok`. Constructors nobody has named are untouched:
+they keep the infallible `impl New` they always had.
+
+Naming the class alone - `throws!("Goat")` - also marks its constructors, since
+`throws!` matches a trailing qualified name. Prefer `Goat::Goat`: the short form
+would equally match a free function called `Goat`.
+
+One kind of constructor the designation cannot reach is a copy or move
+constructor the class declares for itself. Those become `moveit`'s `CopyNew`
+and `MoveNew`, whose methods return nothing and so have nowhere to put an
+exception; `throws!("Goat::Goat")` names them along with the rest, but leaves
+them as they were, and a copy or move constructor which throws still terminates
+the process. The same goes for a destructor, which becomes `Drop` - and which
+should not throw in C++ either. Only the value constructors of the class become
+fallible.
+
+## Functions which return a class by value
+
+A `throws!` function which returns a non-POD type by value is built the same
+way as a constructor - C++ writes the result into a place Rust provides - so it
+hands back an `impl TryNew` and is finished with the same `try_` methods:
+
+```rust,ignore
+let made = ffi::make_goat(2).try_within_unique_ptr()?;
+```
+
+## Subclasses
+
+If the C++ superclass's constructor can throw, so can the constructor of the
+peer object `autocxx` generates for your subclass, and that peer constructor is
+the one to name: `throws!("MySubclassCpp::MySubclassCpp")`. Implement
+[`CppPeerConstructor::try_make_peer`](https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html)
+as well as `make_peer`, and construct the subclass with `try_new_rust_owned`,
+`try_new_cpp_owned` or `try_new_self_owned`:
+
+```rust,ignore
+impl CppPeerConstructor<ffi::MySubclassCpp> for MySubclass {
+    fn make_peer(&mut self, holder: CppSubclassRustPeerHolder<Self>)
+        -> cxx::UniquePtr<ffi::MySubclassCpp> {
+        self.try_make_peer(holder).expect("the superclass constructor threw")
+    }
+
+    fn try_make_peer(&mut self, holder: CppSubclassRustPeerHolder<Self>)
+        -> Result<cxx::UniquePtr<ffi::MySubclassCpp>, cxx::Exception> {
+        ffi::MySubclassCpp::new(holder, self.arg).try_within_unique_ptr()
+    }
+}
+```
+
 ## How it works
 
 Under the hood, `autocxx` leverages [cxx's native exception handling](https://cxx.rs/binding/result.html).
 When a function is marked with `throws!`, the generated cxx bridge declaration
 uses `Result<T>` as the return type. This causes cxx to automatically wrap
 the C++ call in a try-catch block and convert any caught `std::exception`
-(or derived types) to `cxx::Exception`.
+(or derived types) to `cxx::Exception`. The exception is caught on the C++ side
+of the boundary and never unwinds into Rust.
 
 The `cxx::Exception` type provides:
 - `Display` implementation to get the exception message (`what()`)
@@ -149,13 +319,25 @@ The `cxx::Exception` type provides:
 
 ## Limitations
 
-* **Constructors**: Throwing constructors are not currently supported due to
-  the complexity of `moveit::new::New` return types. If you need to handle
-  constructor failures, consider using a factory function instead.
+* **Non-std::exception types**: only exceptions derived from `std::exception`
+  are caught and converted, because that is what cxx's `catch` clause names.
+  Something else - an `int`, a bare string literal, a class of your own which
+  derives from nothing - passes straight through it and out of the `noexcept`
+  shim around it, which calls `std::terminate`. The process dies; it is not
+  undefined behaviour, but the `Result` never arrives either.
 
-* **Non-std::exception types**: Only exceptions derived from `std::exception`
-  are caught and converted. Other thrown types (like integers or strings)
-  will still cause undefined behavior.
+* **Undesignated throwing functions**: if C++ throws out of a function no
+  `throws!` names, the exception reaches a `noexcept` boundary in the same way
+  and the process terminates. That is true of constructors too, so a
+  constructor which can throw needs designating even if you intend to treat the
+  exception as fatal.
+
+* **`as_new` with a throwing constructor**: `as_new` takes a `New`, so a
+  `throws!` constructor cannot be handed straight to a C++ function which takes
+  its argument by value - the call would have nowhere to report a failure that
+  happened while assembling its arguments. Construct the object first, with
+  `try_within_unique_ptr()` or a `stack_slot!`, and pass what you get with
+  `as_mov` or `as_copy`.
 
 * **Performance**: Exception handling adds minimal runtime overhead - the
   cost is only incurred when an exception actually occurs.
