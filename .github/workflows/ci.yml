@@ -225,12 +225,13 @@ jobs:
           AUTOCXX_ASAN: 1
           RUSTFLAGS: -Zsanitizer=address -Cdebuginfo=0
           RUSTDOCFLAGS: -Zsanitizer=address
-          ASAN_OPTIONS: "detect_stack_use_after_return=1:detect_leaks=0"
-          # Work around https://github.com/rust-lang/rust/issues/59125 by
-          # disabling backtraces. In an ideal world we'd probably suppress the
-          # leak sanitization, but we don't care about backtraces here, so long
-          # as the other tests have them.
-          RUST_BACKTRACE: "0"
+          # Leak detection on: a generated wrapper losing a UniquePtr or Box
+          # on some error path is exactly the bug class this job exists for,
+          # and it was dark while detect_leaks=0. That (and RUST_BACKTRACE=0)
+          # worked around rust-lang/rust#59125, libbacktrace's DWARF cache
+          # reading as a leak - fixed years ago when std moved to gimli.
+          ASAN_OPTIONS: "detect_stack_use_after_return=1:detect_leaks=1"
+          RUST_BACKTRACE: "1"
         run: cargo -Z build-std test --workspace --target x86_64-unknown-linux-gnu --exclude autocxx-macro
 
   force-wrapper-generation:
