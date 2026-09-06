@@ -388,7 +388,12 @@ impl IncludeCppEngine {
             .raw_line(raw_line)
             .every_module_raw_line(all_module_raw_line)
             .generate_private_functions(true)
-            .layout_tests(false); // TODO revisit later
+            // Experiment: turned on to learn whether bindgen's generated
+            // size/align assertions survive autocxx's sanitizer passes and
+            // the second bindgen parse, and what they cost across the CI
+            // matrix. Not for merging as-is - the decision follows the
+            // evidence from this branch's CI runs.
+            .layout_tests(true);
 
         // 3. Passes allowlist and other options to the bindgen::Builder equivalent
         //    to --output-style=cxx --allowlist=<as passed in>
