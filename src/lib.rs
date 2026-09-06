@@ -17,11 +17,13 @@
 // do anything - all the magic is handled entirely by
 // autocxx_macro::include_cpp_impl.
 
+mod fallible;
 mod reference_wrapper;
 mod rvalue_param;
 pub mod subclass;
 mod value_param;
 
+pub use fallible::{StackSlot, TryWithinBox, TryWithinUniquePtr};
 pub use reference_wrapper::{
     AsCppMutRef, AsCppRef, CppLtRef, CppMutLtRef, CppMutRef, CppPin, CppRef, CppUniquePtrPin,
 };
@@ -450,6 +452,24 @@ macro_rules! instantiable {
 /// * `throws!("do_something")` - matches any function named `do_something`
 /// * `throws!("MyClass::do_something")` - matches method `do_something` on `MyClass`
 /// * `throws!("my_namespace::do_something")` - matches `do_something` in `my_namespace`
+///
+/// # Constructors
+///
+/// A constructor is named the way C++ names it - `throws!("MyClass::MyClass")` -
+/// and marking one marks every overload, since they all share that name.
+///
+/// A constructor which can throw cannot hand back a
+/// [`moveit::new::New`], whose contract is to leave the place it was given
+/// initialized. It hands back a [`moveit::new::TryNew`] instead, which is
+/// finished with [`TryWithinUniquePtr::try_within_unique_ptr`],
+/// [`TryWithinBox::try_within_box`], [`TryWithinBox::try_within_cpp_pin`], or
+/// a [`stack_slot!`] and [`StackSlot::try_emplace`] - the fallible spellings
+/// of the ways an ordinary constructor is finished. The same is true of a
+/// `throws!` function which returns a non-POD type by value, which C++ builds
+/// into a caller-provided place in just the same way.
+///
+/// See the book's exceptions chapter for the whole picture, including what to
+/// do about a subclass whose superclass constructor throws.
 ///
 /// A directive to be included inside
 /// [include_cpp] - see [include_cpp] for general information.
@@ -881,6 +901,7 @@ pub mod prelude {
     pub use crate::c_void;
     pub use crate::cpp_semantics;
     pub use crate::include_cpp;
+    pub use crate::stack_slot;
     pub use crate::AsCppMutRef;
     pub use crate::AsCppRef;
     pub use crate::CppMutRef;
@@ -889,6 +910,8 @@ pub mod prelude {
     pub use crate::CppUniquePtrPin;
     pub use crate::PinMut;
     pub use crate::RValueParam;
+    pub use crate::TryWithinBox;
+    pub use crate::TryWithinUniquePtr;
     pub use crate::ValueParam;
     pub use crate::WithinBox;
     pub use crate::WithinBoxTrivial;
@@ -897,6 +920,7 @@ pub mod prelude {
     pub use cxx::UniquePtr;
     pub use moveit::moveit;
     pub use moveit::new::New;
+    pub use moveit::new::TryNew;
     pub use moveit::Emplace;
 }
 

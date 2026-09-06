@@ -217,6 +217,33 @@ pub(crate) fn make_checks_without_building(checkers: Vec<CodeChecker>) -> CodeCh
     Box::new(WithoutBuilding(checkers))
 }
 
+/// Several checkers over the generated code, with the build still happening
+/// afterwards - for a test which wants to say more than one thing about the
+/// generated code *and* watch it run.
+struct AllOf(Vec<CodeChecker>);
+
+impl CodeCheckerFns for AllOf {
+    fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        for checker in &self.0 {
+            checker.check_rust(rs.clone())?;
+        }
+        Ok(())
+    }
+
+    fn check_cpp(&self, cpp: &[PathBuf]) -> Result<(), TestError> {
+        for checker in &self.0 {
+            checker.check_cpp(cpp)?;
+        }
+        Ok(())
+    }
+}
+
+/// Returns a code checker which applies all of `checkers` and then builds. See
+/// [`AllOf`].
+pub(crate) fn make_checks(checkers: Vec<CodeChecker>) -> CodeChecker {
+    Box::new(AllOf(checkers))
+}
+
 pub(crate) struct NoSystemHeadersChecker;
 
 impl CodeCheckerFns for NoSystemHeadersChecker {

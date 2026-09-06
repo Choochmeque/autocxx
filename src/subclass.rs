@@ -11,6 +11,7 @@
 
 use std::{
     cell::RefCell,
+    convert::Infallible,
     pin::Pin,
     rc::{Rc, Weak},
 };
@@ -143,26 +144,53 @@ impl<CppPeer: CppSubclassCppPeer> CppSubclassCppPeerHolder<CppPeer> {
     }
 }
 
-fn make_owning_peer<CppPeer, PeerConstructor, Subclass, PeerBoxer>(
+/// The body of both [`CppSubclass::new_rust_owned`] and its fallible
+/// counterpart, and of the self-owned pair.
+///
+/// If `peer_constructor` fails, `me` and the peer holder are dropped and
+/// nothing is left behind: the holder's own strong or weak reference goes away
+/// with the `rust::Box` C++ destroyed while unwinding, and the `Rc` here is the
+/// last one.
+fn make_owning_peer<CppPeer, PeerConstructor, Subclass, PeerBoxer, E>(
     me: Subclass,
     peer_constructor: PeerConstructor,
     peer_boxer: PeerBoxer,
-) -> Rc<RefCell<Subclass>>
+) -> Result<Rc<RefCell<Subclass>>, E>
 where
     CppPeer: CppSubclassCppPeer,
     Subclass: CppSubclass<CppPeer>,
     PeerConstructor:
-        FnOnce(&mut Subclass, CppSubclassRustPeerHolder<Subclass>) -> UniquePtr<CppPeer>,
+        FnOnce(&mut Subclass, CppSubclassRustPeerHolder<Subclass>) -> Result<UniquePtr<CppPeer>, E>,
     PeerBoxer: FnOnce(Rc<RefCell<Subclass>>) -> CppSubclassRustPeerHolder<Subclass>,
 {
     let me = Rc::new(RefCell::new(me));
     let holder = peer_boxer(me.clone());
-    let cpp_side = peer_constructor(&mut me.as_ref().borrow_mut(), holder);
+    let cpp_side = peer_constructor(&mut me.as_ref().borrow_mut(), holder)?;
     me.as_ref()
         .borrow_mut()
         .peer_holder_mut()
         .set_owned(cpp_side);
-    me
+    Ok(me)
+}
+
+/// The body of both [`CppSubclass::new_cpp_owned`] and its fallible
+/// counterpart.
+fn make_cpp_owned_peer<CppPeer, PeerConstructor, Subclass, E>(
+    me: Subclass,
+    peer_constructor: PeerConstructor,
+) -> Result<UniquePtr<CppPeer>, E>
+where
+    CppPeer: CppSubclassCppPeer,
+    Subclass: CppSubclass<CppPeer>,
+    PeerConstructor:
+        FnOnce(&mut Subclass, CppSubclassRustPeerHolder<Subclass>) -> Result<UniquePtr<CppPeer>, E>,
+{
+    let me = Rc::new(RefCell::new(me));
+    let holder = CppSubclassRustPeerHolder::Owned(me.clone());
+    let mut borrowed = me.as_ref().borrow_mut();
+    let mut cpp_side = peer_constructor(&mut borrowed, holder)?;
+    borrowed.peer_holder_mut().set_unowned(&mut cpp_side);
+    Ok(cpp_side)
 }
 
 /// A trait to be implemented by a subclass which knows how to construct its C++
@@ -179,6 +207,39 @@ pub trait CppPeerConstructor<CppPeer: CppSubclassCppPeer>: Sized {
     /// implement this by calling a `new` method on the `<my subclass name>Cpp`
     /// type, passing `peer_holder` as the first argument.
     fn make_peer(&mut self, peer_holder: CppSubclassRustPeerHolder<Self>) -> UniquePtr<CppPeer>;
+
+    /// Create the C++ peer, reporting an exception thrown by its constructor
+    /// rather than panicking on one.
+    ///
+    /// Override this when the peer's constructor is named by a `throws!`
+    /// directive - which it must be if the C++ superclass's constructor can
+    /// throw, since otherwise the exception reaches an `extern "C"` boundary
+    /// and terminates the process. A peer constructor so named hands back an
+    /// `impl TryNew` rather than an `impl New`, so the implementation reads:
+    ///
+    /// ```ignore
+    /// fn try_make_peer(
+    ///     &mut self,
+    ///     peer_holder: CppSubclassRustPeerHolder<Self>,
+    /// ) -> Result<UniquePtr<MySubclassCpp>, cxx::Exception> {
+    ///     MySubclassCpp::new(peer_holder, self.arg).try_within_unique_ptr()
+    /// }
+    /// ```
+    ///
+    /// `make_peer` is still required, because the infallible constructors are
+    /// defined in terms of it; write it as `self.try_make_peer(peer_holder)`
+    /// followed by whatever this subclass should do about an exception, which
+    /// is usually to panic. Callers who need the exception itself use
+    /// [`CppSubclass::try_new_rust_owned`] and its siblings.
+    ///
+    /// The default implementation is for the overwhelming majority of
+    /// subclasses, whose peer constructor cannot fail.
+    fn try_make_peer(
+        &mut self,
+        peer_holder: CppSubclassRustPeerHolder<Self>,
+    ) -> Result<UniquePtr<CppPeer>, cxx::Exception> {
+        Ok(self.make_peer(peer_holder))
+    }
 }
 
 /// A subclass of a C++ type.
@@ -298,21 +359,41 @@ pub trait CppSubclass<CppPeer: CppSubclassCppPeer>: CppPeerConstructor<CppPeer> 
     /// returned [`cxx::UniquePtr`] and thus would typically be returned immediately
     /// to C++ such that it can be owned on the C++ side.
     fn new_cpp_owned(me: Self) -> UniquePtr<CppPeer> {
-        let me = Rc::new(RefCell::new(me));
-        let holder = CppSubclassRustPeerHolder::Owned(me.clone());
-        let mut borrowed = me.as_ref().borrow_mut();
-        let mut cpp_side = borrowed.make_peer(holder);
-        borrowed.peer_holder_mut().set_unowned(&mut cpp_side);
-        cpp_side
+        match make_cpp_owned_peer(me, |obj, holder| Ok::<_, Infallible>(obj.make_peer(holder))) {
+            Ok(peer) => peer,
+            Err(never) => match never {},
+        }
+    }
+
+    /// As [`CppSubclass::new_cpp_owned`], but for a subclass whose peer
+    /// constructor can throw - see [`CppPeerConstructor::try_make_peer`].
+    ///
+    /// If the C++ constructor throws, no peer is created and this subclass
+    /// instance is dropped; nothing is left registered anywhere.
+    fn try_new_cpp_owned(me: Self) -> Result<UniquePtr<CppPeer>, cxx::Exception> {
+        make_cpp_owned_peer(me, |obj, holder| obj.try_make_peer(holder))
     }
 
     /// Creates a new instance of this subclass. This instance is not owned
     /// by C++, and therefore will be deleted when it goes out of scope in
     /// Rust.
     fn new_rust_owned(me: Self) -> Rc<RefCell<Self>> {
+        match make_owning_peer(
+            me,
+            |obj, holder| Ok::<_, Infallible>(obj.make_peer(holder)),
+            |me| CppSubclassRustPeerHolder::Unowned(Rc::downgrade(&me)),
+        ) {
+            Ok(peer) => peer,
+            Err(never) => match never {},
+        }
+    }
+
+    /// As [`CppSubclass::new_rust_owned`], but for a subclass whose peer
+    /// constructor can throw - see [`CppPeerConstructor::try_make_peer`].
+    fn try_new_rust_owned(me: Self) -> Result<Rc<RefCell<Self>>, cxx::Exception> {
         make_owning_peer(
             me,
-            |obj, holder| obj.make_peer(holder),
+            |obj, holder| obj.try_make_peer(holder),
             |me| CppSubclassRustPeerHolder::Unowned(Rc::downgrade(&me)),
         )
     }
@@ -330,9 +411,23 @@ pub trait CppSubclassSelfOwned<CppPeer: CppSubclassCppPeer>: CppSubclass<CppPeer
     /// The return value may be useful to register this, etc. but can ultimately
     /// be discarded without destroying this object.
     fn new_self_owned(me: Self) -> Rc<RefCell<Self>> {
+        match make_owning_peer(
+            me,
+            |obj, holder| Ok::<_, Infallible>(obj.make_peer(holder)),
+            CppSubclassRustPeerHolder::Owned,
+        ) {
+            Ok(peer) => peer,
+            Err(never) => match never {},
+        }
+    }
+
+    /// As [`CppSubclassSelfOwned::new_self_owned`], but for a subclass whose
+    /// peer constructor can throw - see
+    /// [`CppPeerConstructor::try_make_peer`].
+    fn try_new_self_owned(me: Self) -> Result<Rc<RefCell<Self>>, cxx::Exception> {
         make_owning_peer(
             me,
-            |obj, holder| obj.make_peer(holder),
+            |obj, holder| obj.try_make_peer(holder),
             CppSubclassRustPeerHolder::Owned,
         )
     }

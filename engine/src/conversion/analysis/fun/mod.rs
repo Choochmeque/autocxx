@@ -1460,7 +1460,7 @@ impl<'a> FnAnalyzer<'a> {
 
         // Check if this function is marked as potentially throwing C++ exceptions.
         // For methods, we also check with the class name prepended (e.g., "MyClass::method").
-        let may_throw = self
+        let designated_as_throwing = self
             .config
             .is_on_throws_list(&diagnostic_name.to_cpp_name())
             || match &kind {
@@ -1474,6 +1474,24 @@ impl<'a> FnAnalyzer<'a> {
                 }
                 FnKind::Function => false,
             };
+        // A designation cannot be honoured for a function whose Rust shape is
+        // fixed by a trait we do not own. Every one of these implements a
+        // `moveit` trait, `Drop` or `MakeCppStorage`, and none of those has a
+        // method which returns a `Result`; wrapping the return type in one
+        // anyway produces an impl which does not match its trait.
+        //
+        // This matters because `throws!("MyClass::MyClass")` designates every
+        // constructor sharing that C++ name, which includes a copy or move
+        // constructor the class declares for itself. Those become
+        // `moveit::CopyNew` and `moveit::MoveNew`, whose `copy_new` and
+        // `move_new` return nothing, so the exception has nowhere to go and a
+        // copy or move constructor which throws still terminates the process.
+        // Making them fallible needs fallible counterparts of those traits,
+        // which `moveit` does not have. A destructor is the same story via
+        // `Drop` - and is implicitly `noexcept` in C++ anyway, so throwing from
+        // one calls `std::terminate` before autocxx is involved at all.
+        let designation_can_be_honoured = !matches!(kind, FnKind::TraitMethod { .. });
+        let may_throw = designated_as_throwing && designation_can_be_honoured;
 
         // If possible, we'll put knowledge of the C++ API directly into the cxx::bridge
         // mod. However, there are various circumstances where cxx can't work with the existing
