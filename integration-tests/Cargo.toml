@@ -40,7 +40,7 @@ trybuild = "=1.0.81"
 # The suite installs its own logger - see `init_logging` - rather than letting
 # `test-log` put one on each test, because the filter it wants is an argument
 # to that crate's attribute and there are over six hundred of those.
-env_logger = "0.9.0"
+env_logger = "0.11"
 rust_info = "0.3.1"
 # 1.0.89 for `cc::Build::get_files`, which is how a failed C++ build's
 # diagnostics are recovered - see `build_cpp`.
