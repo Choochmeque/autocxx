@@ -219,7 +219,7 @@ the C++ that we're injecting into your C++ build system.</p>
 <h4 id="c-header-1"><a class="header" href="#c-header-1">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;string&gt;
 #include &lt;cstdint&gt;
-inline uint32_t take_string(std::string a) { return a.size(); }
+inline uint32_t take_string(std::string a) { return static_cast&lt;uint32_t&gt;(a.size()); }
 </code></pre>
 <h4 id="rust-1"><a class="header" href="#rust-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
