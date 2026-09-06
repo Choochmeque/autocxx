@@ -327,46 +327,69 @@ fn find_names_duplicated_by_bindgen(apis: &ApiVec<NullPhase>) -> HashSet<Qualifi
 ///   }
 /// }
 /// ```
-/// At present these various newtype wrappers for kinds of names
-/// (Rust, C++, cxx::bridge) have various conversions between them that
-/// are probably not safe. They're marked with FIXMEs. Over time we should
-/// remove them, or make them safe by doing name validation at the point
-/// of conversion.
+/// As with [`CppOriginalName`], each constructor here is named for where its
+/// string comes from, so that no Rust identifier becomes a C++ name without
+/// something having said why it may. The sources are: a name bindgen reported
+/// ([`CppOriginalName::to_effective_name`], and [`Self::from_api_details`]
+/// where an API is asked for its name); a name in the cxx::bridge mod, which
+/// cxx spells identically in the C++ it generates
+/// ([`Self::from_cxxbridge_name`]); a name autocxx built for C++ out of a
+/// [`QualifiedName`] ([`Self::from_fully_qualified_name_for_subclass`]); and
+/// the name of a function autocxx synthesized, which has no C++ original
+/// ([`Self::from_function_without_a_reported_cpp_name`]).
 #[derive(PartialEq, PartialOrd, Eq, Hash, Clone, Debug)]
 pub struct CppEffectiveName(pub(crate) String);
 impl CppEffectiveName {
-    /// FIXME: document what we're doing here, just as soon as I've figured
-    /// it out
-    fn from_cpp_name_and_rust_name(cpp_name: Option<&CppOriginalName>, rust_name: &str) -> Self {
-        cpp_name
-            .map(|cpp| cpp.to_effective_name())
-            .unwrap_or(Self(rust_name.to_string()))
-    }
-
+    /// The name to use in C++ for an API: the original name bindgen reported
+    /// for it, falling back on the final segment of the name autocxx knows the
+    /// API by.
+    ///
+    /// The fallback is not reached at all across the integration suite, which
+    /// is what bindgen's thoroughness about original names predicts. Reaching
+    /// it takes an API autocxx synthesized, or an item which is itself
+    /// anonymous or enclosed by an anonymous type, that being the one thing
+    /// bindgen reports no name for; and every caller asks about a type or
+    /// about a method, a method always having a name reported for it. So the
+    /// segment a caller would get - the identifier for a type, the cxx::bridge
+    /// name for a function - stays hypothetical. `conversion_tests` is where
+    /// it does not: converting a hand-written bindgen mod records no callback
+    /// results at all, so every item there falls back on its identifier, which
+    /// is the name such a mod stands for C++ using.
     fn from_api_details(original_name: &Option<CppOriginalName>, api_name: &QualifiedName) -> Self {
-        Self::from_cpp_name_and_rust_name(original_name.as_ref(), api_name.get_final_item())
+        match original_name {
+            Some(original_name) => original_name.to_effective_name(),
+            None => Self(api_name.get_final_item().to_string()),
+        }
     }
 
     fn to_string_for_cpp_generation(&self) -> &str {
         &self.0
     }
 
-    /// FIXME: this may not be quite right. It's not quite clear where
-    /// this string comes from or whether it's a Rusty or C++y string.
-    fn from_subclass_function_name(rust_call_name: String) -> CppEffectiveName {
-        Self(rust_call_name)
-    }
-
-    /// It seems as though we record the C++ name that subclasses need
-    /// to call back into. That might be a call into the cxx API (?)
-    /// and that's why we create a CppEffectiveName from a Rust name like this.
-    fn from_cxxbridge_name(cxxbridge_name: &crate::minisyn::Ident) -> CppEffectiveName {
+    /// The C++ name of a function declared in the cxx::bridge mod, which is
+    /// simply the name it has there: cxx spells a bridge entry the same way in
+    /// the C++ it generates unless asked for a `#[cxx_name]`, and neither
+    /// caller asks.
+    ///
+    /// One caller names the `extern "Rust"` function a subclass's C++ peer
+    /// calls to reach the Rust implementation of an overridden method. The
+    /// other hands a generated C++ wrapper its own bridge name, for want of an
+    /// original C++ name that bindgen never reported.
+    fn from_cxxbridge_name(cxxbridge_name: &str) -> CppEffectiveName {
         Self(cxxbridge_name.to_string())
     }
 
-    /// FIXME: work out why we're creating C++ names from Rust names.
-    fn from_rust_name(rust_name: String) -> CppEffectiveName {
-        Self(rust_name)
+    /// The C++ name of a function for which bindgen reported none, which is
+    /// the name autocxx knows it by. See
+    /// [`CppOriginalName::from_function_without_a_reported_cpp_name`], which
+    /// this mirrors, for why such a function has no C++ original and what the
+    /// assertion is for.
+    fn from_function_without_a_reported_cpp_name(name: &str) -> CppEffectiveName {
+        debug_assert!(
+            !name.contains("::"),
+            "`{name}` is qualified, so it is a C++ spelling from somewhere and not a name autocxx gave a function of its own"
+        );
+        Self(name.to_string())
     }
 
     fn from_fully_qualified_name_for_subclass(to_cpp_name: &str) -> CppEffectiveName {

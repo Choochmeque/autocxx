@@ -337,8 +337,10 @@ pub(crate) const RECEIVER_ARG_NAME: &str = "autocxx_gen_this";
 pub(crate) struct CppFunction {
     pub(crate) payload: CppFunctionBody,
     pub(crate) wrapper_function_name: crate::minisyn::Ident,
-    /// The following field is apparently only used for
-    /// subclass calls.
+    /// Read only from the `CppFunction` a subclass method carries:
+    /// `generate_subclass` names the superclass virtual method the peer class
+    /// overrides from here, and the method its `_super` helper calls. The
+    /// wrappers `analyze_foreign_fn` builds fill this in and nothing reads it.
     pub(crate) original_cpp_name: CppEffectiveName,
     pub(crate) return_conversion: Option<TypeConversionPolicy>,
     pub(crate) argument_conversion: Vec<TypeConversionPolicy>,

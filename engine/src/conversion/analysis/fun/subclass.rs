@@ -204,7 +204,7 @@ pub(super) fn create_subclass_function(
             cpp_impl: CppFunction {
                 payload: CppFunctionBody::FunctionCall(
                     Namespace::new(),
-                    CppEffectiveName::from_subclass_function_name(rust_call_name),
+                    CppEffectiveName::from_cxxbridge_name(&rust_call_name),
                 ),
                 wrapper_function_name: make_ident(&analysis.rust_name),
                 original_cpp_name: name.cpp_name(),
@@ -313,7 +313,9 @@ pub(super) fn create_subclass_constructor(
     let subclass_constructor_name = ApiName::new_with_cpp_name(
         &Namespace::new(),
         subclass_constructor_name,
-        Some(CppOriginalName::from_final_item_of_pre_existing_qualified_name(&sub.cpp())),
+        Some(CppOriginalName::from_final_item_of_generated_cpp_name(
+            &sub.cpp(),
+        )),
     );
     (maybe_wrap, subclass_constructor_name)
 }

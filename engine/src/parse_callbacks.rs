@@ -22,11 +22,25 @@ use quote::quote;
 /// Newtype wrapper for a C++ "original name"; that is, an annotation
 /// derived from bindgen that this is the original name of the C++ item.
 ///
-/// At present these various newtype wrappers for kinds of names
-/// (Rust, C++, cxx::bridge) have various conversions between them that
-/// are probably not safe. They're marked with FIXMEs. Over time we should
-/// remove them, or make them safe by doing name validation at the point
-/// of conversion.
+/// Keeping this apart from the Rust and cxx::bridge names is only worth
+/// anything if a Rust identifier cannot become a C++ name without something
+/// saying why it may, so each constructor here is named for where its string
+/// comes from.
+///
+/// The usual source is bindgen's original-name callback
+/// ([`AutocxxParseCallbacks::denote_cpp_name`], the only place a bare string
+/// reaches the tuple field), and it is a thorough one: bindgen reports a name
+/// for every function it emits, whether or not the identifier it chose
+/// differs, and for every struct, union, enum and typedef unless that item or
+/// one enclosing it is anonymous. The rest are autocxx's own names, for items
+/// bindgen did not report: one minted for C++
+/// ([`Self::from_final_item_of_generated_cpp_name`]), the name of a function
+/// autocxx synthesized, which has no C++ original
+/// ([`Self::from_function_without_a_reported_cpp_name`]), and the type name a
+/// synthesized constructor has to be recognisable by
+/// ([`Self::from_type_name_for_constructor`], which is not a C++ spelling at
+/// all and says so). A general "wrap this string" constructor is deliberately
+/// absent: there is no honest thing to call one.
 #[derive(PartialEq, PartialOrd, Eq, Hash, Clone, Debug)]
 pub struct CppOriginalName(String);
 
@@ -41,7 +55,12 @@ impl CppOriginalName {
         self.0.contains("::")
     }
 
-    pub(crate) fn from_final_item_of_pre_existing_qualified_name(name: &QualifiedName) -> Self {
+    /// The C++ name of an item autocxx names for C++ itself: a subclass's peer
+    /// class, or the `_super` helper declared on one. autocxx holds such names
+    /// in a [`QualifiedName`] because that is how it holds every name it
+    /// generates, and the final segment is the part C++ sees - the namespace
+    /// travels separately, in the `ApiName` this ends up in.
+    pub(crate) fn from_final_item_of_generated_cpp_name(name: &QualifiedName) -> Self {
         Self(name.get_final_item().to_string())
     }
 
@@ -66,6 +85,18 @@ impl CppOriginalName {
         self.0.rsplit_once("::").map(|(_, suffix)| suffix)
     }
 
+    /// The name by which a synthesized constructor is recognised as one.
+    ///
+    /// `analyze_foreign_fn` spots a constructor by its name beginning with the
+    /// name of the type it constructs, so `synthesize_special_member` has to
+    /// hand it one that does - which means the very string that check compares
+    /// against: the C++ final segment for a nested type, and otherwise the
+    /// identifier bindgen emitted for the type, which for a type C++ calls
+    /// `type` is `type_`. This is therefore a Rust-side name as often as not,
+    /// and nothing spells C++ from it: a constructor always gets a C++
+    /// wrapper, whose `PlacementNew` body names the type from its
+    /// `QualifiedName`, and needing that wrapper is also what suppresses the
+    /// `#[cxx_name]` this would otherwise produce.
     pub(crate) fn from_type_name_for_constructor(name: String) -> Self {
         Self(name)
     }
@@ -86,9 +117,28 @@ impl CppOriginalName {
         &self.0
     }
 
-    // FIXME - remove
-    pub(crate) fn from_rust_name(string: String) -> Self {
-        Self(string)
+    /// The C++ name of a function for which bindgen reported none, which is
+    /// the name autocxx knows it by.
+    ///
+    /// bindgen's function codegen passes an original name to
+    /// [`ParseCallbacks::denote_cpp_name`] unconditionally, so a function with
+    /// none is one bindgen never saw: across the whole integration suite every
+    /// such function is `Provenance::SynthesizedOther` - a cast, an allocator
+    /// or a special member autocxx filled in - and no such function has a C++
+    /// original for this to be wrong about. Nothing spells C++ out of it for
+    /// one of them either; the call site in `analyze_foreign_fn` says why, and
+    /// says what the other route here, through `conversion_tests`, is.
+    ///
+    /// The assertion is what the newtype can still check: a C++ name may be
+    /// qualified, as [`Self::is_nested`] tests for, and a name from the Rust
+    /// side never is. A qualified one arriving here would mean a C++ spelling
+    /// had been fabricated somewhere rather than reported.
+    pub(crate) fn from_function_without_a_reported_cpp_name(name: &str) -> Self {
+        debug_assert!(
+            !name.contains("::"),
+            "`{name}` is qualified, so it is a C++ spelling from somewhere and not a name autocxx gave a function of its own"
+        );
+        Self(name.to_string())
     }
 
     /// Determines whether we need to generate a cxxbridge::name attribute

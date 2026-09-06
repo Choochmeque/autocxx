@@ -781,8 +781,8 @@ impl<'a> FnAnalyzer<'a> {
                     let maybe_wrap = create_subclass_fn_wrapper(&sub, super_fn_cpp_name, &fun);
                     let super_fn_name = ApiName::new_from_qualified_name_and_cpp_name(
                         super_fn_api_name,
-                        Some(CppOriginalName::from_rust_name(
-                            super_fn_cpp_name.get_final_item().to_string(),
+                        Some(CppOriginalName::from_final_item_of_generated_cpp_name(
+                            super_fn_cpp_name,
                         )),
                     );
                     let super_fn_call_api_name = self.analyze_and_add(
@@ -1396,17 +1396,36 @@ impl<'a> FnAnalyzer<'a> {
             ns,
         );
 
+        // bindgen reports an original C++ name for every function it emits, so
+        // both of the following fall back on `rust_name` only where no such
+        // report reached us. In the ordinary pipeline that means a function
+        // autocxx synthesized: across the whole integration suite, every one
+        // is a cast, an allocator or a special member autocxx filled in, and
+        // none of those has a C++ original for these two to be wrong about.
+        // Nothing carries either value into the output for one of them, at
+        // that: each needs a C++ wrapper, which suppresses the `#[cxx_name]`
+        // `api_name_cpp_override` would otherwise produce (see `gen_function`),
+        // and takes its body from `synthetic_cpp`, as a cast or an allocator
+        // does, or from a kind - constructor, destructor - whose body names a
+        // type rather than a function.
+        //
+        // `conversion_tests` reaches the same fallback by another route: it
+        // converts a hand-written bindgen mod with no callback results
+        // recorded at all, so an ordinary function pasted in there has no
+        // reported name either, and codegen may well call the C++ name from
+        // here. That is right too - such a mod stands for C++ which spells the
+        // function the way bindgen's identifier does.
         let api_name_cpp_override = match cpp_original_name {
             Some(name) => Some(name.clone()),
-            None if cxxbridge_name != rust_name => {
-                Some(CppOriginalName::from_rust_name(rust_name.clone()))
-            }
+            None if cxxbridge_name != rust_name => Some(
+                CppOriginalName::from_function_without_a_reported_cpp_name(&rust_name),
+            ),
             None => None,
         };
-        let underlying_cpp_function_name = cpp_original_name
-            .cloned()
-            .map(|n| n.to_effective_name())
-            .unwrap_or_else(|| CppEffectiveName::from_rust_name(rust_name.clone()));
+        let underlying_cpp_function_name = match cpp_original_name {
+            Some(name) => name.to_effective_name(),
+            None => CppEffectiveName::from_function_without_a_reported_cpp_name(&rust_name),
+        };
         let mut cxxbridge_name = make_ident(&cxxbridge_name);
 
         // Analyze the return type, just as we previously did for the
@@ -1672,10 +1691,15 @@ impl<'a> FnAnalyzer<'a> {
                 ));
             }
 
+            // Nothing reads this for a wrapper - see `CppFunction` - so it
+            // holds the name bindgen gave the function, or, for a synthesized
+            // function which has none, the wrapper's own bridge name.
             let original_cpp_name = cpp_original_name
                 .cloned()
                 .map(|n| n.to_effective_name())
-                .unwrap_or_else(|| CppEffectiveName::from_cxxbridge_name(&cxxbridge_name));
+                .unwrap_or_else(|| {
+                    CppEffectiveName::from_cxxbridge_name(&cxxbridge_name.to_string())
+                });
 
             Some(CppFunction {
                 payload,
