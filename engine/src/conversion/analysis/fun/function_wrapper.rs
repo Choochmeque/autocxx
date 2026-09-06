@@ -7,14 +7,60 @@
 // except according to those terms.
 
 use crate::conversion::parse::CppRefQualifier;
-use crate::conversion::CppEffectiveName;
+use crate::conversion::{ConvertErrorFromCpp, CppEffectiveName};
 use crate::minisyn::Ident;
 use crate::{
     conversion::{api::SubclassName, type_helpers::extract_pinned_mutable_reference_type},
     types::{Namespace, QualifiedName},
 };
 use quote::ToTokens;
-use syn::{parse_quote, Type, TypeReference};
+use syn::{parse_quote, Type, TypePtr, TypeReference};
+
+/// The raw pointer a `cxx::bridge` declaration carries where the C++ it stands
+/// for has a reference, split into the only two things anything asks of it:
+/// what it points at, and whether it is mutable.
+///
+/// Both halves are needed all over the conversion code - to name the C++
+/// reference the pointer stands for, to pick between `CppRef` and `CppMutRef`,
+/// to build the `Pin<&mut MaybeUninit<T>>` a constructor takes. Deriving them
+/// by matching a `syn::Type` at each of those places is what used to make
+/// every one of them a potential panic. Derived once, here, they are ordinary
+/// fields and every reader of them is a total function.
+#[derive(Clone, Debug)]
+pub(crate) struct BridgePointer {
+    pointee: crate::minisyn::Type,
+    mutable: bool,
+}
+
+impl BridgePointer {
+    /// The pointer to `pointee`, mutable or not as `mutable` says.
+    pub(crate) fn to(pointee: Type, mutable: bool) -> Self {
+        Self {
+            pointee: pointee.into(),
+            mutable,
+        }
+    }
+
+    /// The pointer `ty` is, if it is one.
+    pub(crate) fn from_type(ty: &Type) -> Option<Self> {
+        match ty {
+            Type::Ptr(TypePtr {
+                elem, mutability, ..
+            }) => Some(Self::to((**elem).clone(), mutability.is_some())),
+            _ => None,
+        }
+    }
+
+    /// The pointer type itself, as the `cxx::bridge` declares it.
+    pub(crate) fn ty(&self) -> Type {
+        let pointee = &self.pointee;
+        if self.mutable {
+            parse_quote! { *mut #pointee }
+        } else {
+            parse_quote! { *const #pointee }
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum CppConversionType {
@@ -97,6 +143,33 @@ impl RustConversionType {
     }
 }
 
+/// The pointer standing for a C++ reference which a function returns, out of
+/// whatever the type converter made of that reference.
+///
+/// There are three shapes to meet, and which one arrives depends on the
+/// unsafety policy and on whether the reference is mutable: the raw pointer the
+/// converter makes of a `T&` when nothing else claims it, the `&T` it makes of
+/// a const reference, and the `Pin<&mut T>` it makes of a mutable one. All
+/// three name the same C++ reference, and everything downstream wants it as the
+/// pointer the `cxx::bridge` will carry, so this is the one place which knows
+/// how to read each of them.
+///
+/// Nothing else is a C++ reference return, so anything else is an autocxx bug
+/// and says so rather than crashing: the two callers are both building a
+/// conversion inside a fallible analysis, so a refusal reaches the user as the
+/// function being left out with a reason attached.
+fn reference_return_as_pointer(ty: &Type) -> Result<BridgePointer, ConvertErrorFromCpp> {
+    match ty {
+        Type::Reference(TypeReference {
+            elem, mutability, ..
+        }) => Some(BridgePointer::to((**elem).clone(), mutability.is_some())),
+        Type::Path(tp) => extract_pinned_mutable_reference_type(tp)
+            .map(|unwrapped| BridgePointer::to(unwrapped.clone(), true)),
+        _ => BridgePointer::from_type(ty),
+    }
+    .ok_or_else(|| ConvertErrorFromCpp::UnexpectedReferenceReturn(ty.to_token_stream().to_string()))
+}
+
 /// A policy for converting types. Conversion may occur on both the Rust and
 /// C++ side. The most complex example is a C++ function which takes
 /// std::string by value, which might do this:
@@ -141,29 +214,13 @@ impl TypeConversionPolicy {
         &self.unwrapped_type
     }
 
-    pub(crate) fn return_reference_into_wrapper(ty: Type) -> Self {
-        let (unwrapped_type, is_mut) = match ty {
-            Type::Reference(TypeReference {
-                elem, mutability, ..
-            }) => (*elem, mutability.is_some()),
-            Type::Path(ref tp) => {
-                if let Some(unwrapped_type) = extract_pinned_mutable_reference_type(tp) {
-                    (unwrapped_type.clone(), true)
-                } else {
-                    panic!("Path was not a mutable reference: {}", ty.to_token_stream())
-                }
-            }
-            _ => panic!("Not a reference: {}", ty.to_token_stream()),
-        };
-        TypeConversionPolicy {
-            unwrapped_type: if is_mut {
-                parse_quote! { *mut #unwrapped_type }
-            } else {
-                parse_quote! { *const #unwrapped_type }
-            },
+    pub(crate) fn return_reference_into_wrapper(ty: Type) -> Result<Self, ConvertErrorFromCpp> {
+        let pointer = reference_return_as_pointer(&ty)?;
+        Ok(TypeConversionPolicy {
+            unwrapped_type: pointer.ty().into(),
             cpp_conversion: CppConversionType::FromReferenceToPointer,
             rust_conversion: RustConversionType::FromPointerToReferenceWrapper,
-        }
+        })
     }
 
     /// The return value of a C++ function declared `T&&`, which by the time
@@ -180,16 +237,20 @@ impl TypeConversionPolicy {
     /// "a C++ reference to a T" and no more; that C++ may move out of the
     /// referent, which is what the extra `&` means, is between the override
     /// and the header it is implementing, exactly as it is in C++.
-    pub(crate) fn return_rvalue_reference(ty: Type, wrap: bool) -> Self {
-        TypeConversionPolicy {
-            unwrapped_type: ty.into(),
+    pub(crate) fn return_rvalue_reference(
+        ty: Type,
+        wrap: bool,
+    ) -> Result<Self, ConvertErrorFromCpp> {
+        let pointer = reference_return_as_pointer(&ty)?;
+        Ok(TypeConversionPolicy {
+            unwrapped_type: pointer.ty().into(),
             cpp_conversion: CppConversionType::FromRValueReferenceToPointer,
             rust_conversion: if wrap {
                 RustConversionType::FromPointerToReferenceWrapper
             } else {
                 RustConversionType::None
             },
-        }
+        })
     }
 
     pub(crate) fn new_to_unique_ptr(ty: Type) -> Self {

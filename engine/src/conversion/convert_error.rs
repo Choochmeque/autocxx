@@ -211,6 +211,8 @@ pub enum ConvertErrorFromCpp {
         #[source]
         err: Box<ConvertErrorFromCpp>,
     },
+    #[error("autocxx could not tell what C++ reference this function returns. A reference return reaches the code which builds the conversion either as a Rust reference or as the raw pointer the type converter makes of one, and this was neither - it was `{0}`. This is an autocxx bug rather than anything wrong with the C++; please report the header which produced it.")]
+    UnexpectedReferenceReturn(String),
 }
 
 /// Which type a [`ConvertErrorFromCpp::TypeContainingUngeneratableTypedef`]

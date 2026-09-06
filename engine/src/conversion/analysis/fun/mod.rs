@@ -2442,9 +2442,9 @@ impl<'a> FnAnalyzer<'a> {
                             TypeConversionPolicy::return_rvalue_reference(
                                 ty.clone(),
                                 wraps_references,
-                            )
+                            )?
                         } else if was_reference && wraps_references {
-                            TypeConversionPolicy::return_reference_into_wrapper(ty.clone())
+                            TypeConversionPolicy::return_reference_into_wrapper(ty.clone())?
                         } else {
                             TypeConversionPolicy::new_unconverted(ty.clone())
                         });
