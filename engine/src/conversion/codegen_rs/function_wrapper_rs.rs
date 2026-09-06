@@ -7,10 +7,12 @@
 // except according to those terms.
 
 use proc_macro2::TokenStream;
-use syn::{Expr, Ident, Path, Type, TypePtr};
+use syn::{Expr, Ident, Path, Type};
 
 use crate::{
-    conversion::analysis::fun::function_wrapper::{RustConversionType, TypeConversionPolicy},
+    conversion::analysis::fun::function_wrapper::{
+        PointerRustConversion, TypeConversionPolicy, WholeRustConversion,
+    },
     types::make_ident,
 };
 use quote::quote;
@@ -52,15 +54,14 @@ impl TypeConversionPolicy {
     /// Returns the type the parameter arrives as, and the path whose `from_ptr`
     /// makes one out of what the bridge hands over.
     pub(super) fn inverse_rust_conversion(&self) -> Option<(Type, Path)> {
-        match self.rust_conversion {
-            RustConversionType::FromReferenceWrapperToPointer => {
-                let (is_mut, ty) = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr {
-                        mutability, elem, ..
-                    }) => (mutability.is_some(), elem.as_ref()),
-                    _ => panic!("Not a pointer"),
-                };
-                Some(if is_mut {
+        match self {
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromReferenceWrapperToPointer,
+                ..
+            } => {
+                let ty = pointer.pointee();
+                Some(if pointer.is_mut() {
                     (
                         parse_quote! { autocxx::CppMutRef<#ty> },
                         parse_quote! { autocxx::CppMutRef },
@@ -101,15 +102,14 @@ impl TypeConversionPolicy {
     /// Returns the type the override hands back, and the method which gets the
     /// pointer the bridge must return out of one.
     pub(super) fn inverse_rust_return_conversion(&self) -> Option<(Type, Ident)> {
-        match self.rust_conversion {
-            RustConversionType::FromPointerToReferenceWrapper => {
-                let (is_mut, ty) = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr {
-                        mutability, elem, ..
-                    }) => (mutability.is_some(), elem.as_ref()),
-                    _ => panic!("Not a pointer"),
-                };
-                Some(if is_mut {
+        match self {
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromPointerToReferenceWrapper,
+                ..
+            } => {
+                let ty = pointer.pointee();
+                Some(if pointer.is_mut() {
                     (
                         parse_quote! { autocxx::CppMutRef<#ty> },
                         make_ident("as_mut_ptr").into(),
@@ -126,20 +126,33 @@ impl TypeConversionPolicy {
     }
 
     pub(super) fn rust_conversion(&self, var: Expr, counter: &mut usize) -> RustParamConversion {
-        match self.rust_conversion {
-            RustConversionType::None => RustParamConversion::Param {
+        match self {
+            Self::Pointer {
+                rust: PointerRustConversion::None,
+                ..
+            }
+            | Self::Whole {
+                rust: WholeRustConversion::None,
+                ..
+            } => RustParamConversion::Param {
                 ty: self.converted_rust_type(),
                 local_variables: Vec::new(),
                 conversion: quote! { #var },
                 conversion_requires_unsafe: false,
             },
-            RustConversionType::FromStr => RustParamConversion::Param {
+            Self::Whole {
+                rust: WholeRustConversion::FromStr,
+                ..
+            } => RustParamConversion::Param {
                 ty: parse_quote! { impl ToCppString },
                 local_variables: Vec::new(),
                 conversion: quote! ( #var .into_cpp() ),
                 conversion_requires_unsafe: false,
             },
-            RustConversionType::ToBoxedUpHolder(ref sub) => {
+            Self::Whole {
+                rust: WholeRustConversion::ToBoxedUpHolder(sub),
+                ..
+            } => {
                 let holder_type = sub.holder();
                 let id = sub.id();
                 let ty = parse_quote! { autocxx::subclass::CppSubclassRustPeerHolder<
@@ -154,11 +167,12 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: false,
                 }
             }
-            RustConversionType::FromPinMaybeUninitToPtr => {
-                let ty = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr { elem, .. }) => elem,
-                    _ => panic!("Not a ptr"),
-                };
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromPinMaybeUninitToPtr,
+                ..
+            } => {
+                let ty = pointer.pointee();
                 let ty = parse_quote! {
                     ::core::pin::Pin<&mut ::core::mem::MaybeUninit< #ty >>
                 };
@@ -171,11 +185,12 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: true,
                 }
             }
-            RustConversionType::FromPinMoveRefToPtr => {
-                let ty = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr { elem, .. }) => elem,
-                    _ => panic!("Not a ptr"),
-                };
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromPinMoveRefToPtr,
+                ..
+            } => {
+                let ty = pointer.pointee();
                 let ty = parse_quote! {
                     ::core::pin::Pin<autocxx::moveit::MoveRef< '_, #ty >>
                 };
@@ -190,11 +205,12 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: true,
                 }
             }
-            RustConversionType::FromTypeToPtr => {
-                let ty = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr { elem, .. }) => elem,
-                    _ => panic!("Not a ptr"),
-                };
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromTypeToPtr,
+                ..
+            } => {
+                let ty = pointer.pointee();
                 let ty = parse_quote! { &mut #ty };
                 RustParamConversion::Param {
                     ty,
@@ -205,66 +221,31 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: false,
                 }
             }
-            RustConversionType::FromValueParamToPtr | RustConversionType::FromRValueParamToPtr => {
-                let (handler_type, param_trait) = match self.rust_conversion {
-                    RustConversionType::FromValueParamToPtr => ("ValueParamHandler", "ValueParam"),
-                    RustConversionType::FromRValueParamToPtr => {
-                        ("RValueParamHandler", "RValueParam")
-                    }
-                    _ => unreachable!(),
-                };
-                let handler_type = make_ident(handler_type);
-                let param_trait = make_ident(param_trait);
-                let var_counter = *counter;
-                *counter += 1;
-                let space_var_name = format!("space{var_counter}");
-                let space_var_name = make_ident(space_var_name);
-                let ty = self.cxxbridge_type();
-                let ty = parse_quote! { impl autocxx::#param_trait<#ty> };
-                // This is the usual trick to put something on the stack, then
-                // immediately shadow the variable name so it can't be accessed or moved.
-                RustParamConversion::Param {
-                    ty,
-                    local_variables: vec![
-                        MaybeUnsafeStmt::new(
-                            quote! { let mut #space_var_name = autocxx::#handler_type::default(); },
-                        ),
-                        MaybeUnsafeStmt::binary(
-                            quote! { let mut #space_var_name =
-                                unsafe { ::core::pin::Pin::new_unchecked(&mut #space_var_name) };
-                            },
-                            quote! { let mut #space_var_name =
-                                ::core::pin::Pin::new_unchecked(&mut #space_var_name);
-                            },
-                        ),
-                        MaybeUnsafeStmt::needs_unsafe(
-                            quote! { #space_var_name.as_mut().populate(#var); },
-                        ),
-                    ],
-                    conversion: quote! {
-                        #space_var_name.get_ptr()
-                    },
-                    conversion_requires_unsafe: false,
-                }
-            }
+            Self::Whole {
+                rust: WholeRustConversion::FromValueParamToPtr,
+                ..
+            } => self.param_handler(var, counter, "ValueParamHandler", "ValueParam"),
+            Self::Whole {
+                rust: WholeRustConversion::FromRValueParamToPtr,
+                ..
+            } => self.param_handler(var, counter, "RValueParamHandler", "RValueParam"),
             // This type of conversion means that this function parameter appears in the cxx::bridge
             // but not in the arguments for the wrapper function, because instead we return an
             // impl New which uses the cxx::bridge function's pointer parameter.
-            RustConversionType::FromPlacementParamToNewReturn => {
-                let ty = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr { elem, .. }) => *(*elem).clone(),
-                    _ => panic!("Not a ptr"),
-                };
-                RustParamConversion::ReturnValue { ty }
-            }
-            RustConversionType::FromPointerToReferenceWrapper => {
-                let (is_mut, ty) = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr {
-                        mutability, elem, ..
-                    }) => (mutability.is_some(), elem.as_ref()),
-                    _ => panic!("Not a pointer"),
-                };
-                let (ty, wrapper_name) = if is_mut {
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromPlacementParamToNewReturn,
+                ..
+            } => RustParamConversion::ReturnValue {
+                ty: pointer.pointee().clone(),
+            },
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromPointerToReferenceWrapper,
+                ..
+            } => {
+                let ty = pointer.pointee();
+                let (ty, wrapper_name) = if pointer.is_mut() {
                     (
                         parse_quote! { autocxx::CppMutLtRef<'a, #ty> },
                         "CppMutLtRef",
@@ -282,13 +263,13 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: false,
                 }
             }
-            RustConversionType::FromReferenceWrapperToPointer => {
-                let (is_mut, ty) = match self.cxxbridge_type() {
-                    Type::Ptr(TypePtr {
-                        mutability, elem, ..
-                    }) => (mutability.is_some(), elem.as_ref()),
-                    _ => panic!("Not a pointer"),
-                };
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromReferenceWrapperToPointer,
+                ..
+            } => {
+                let is_mut = pointer.is_mut();
+                let ty = pointer.pointee();
                 let ty = if is_mut {
                     parse_quote! { autocxx::CppMutRef<#ty> }
                 } else {
@@ -309,6 +290,49 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: false,
                 }
             }
+        }
+    }
+
+    /// The conversion shared by the two by-value parameter kinds: put a
+    /// handler on the stack, populate it with the caller's value, and hand the
+    /// C++ side the pointer it hands back.
+    fn param_handler(
+        &self,
+        var: Expr,
+        counter: &mut usize,
+        handler_type: &str,
+        param_trait: &str,
+    ) -> RustParamConversion {
+        let handler_type = make_ident(handler_type);
+        let param_trait = make_ident(param_trait);
+        let var_counter = *counter;
+        *counter += 1;
+        let space_var_name = format!("space{var_counter}");
+        let space_var_name = make_ident(space_var_name);
+        let ty = self.cxxbridge_type();
+        let ty = parse_quote! { impl autocxx::#param_trait<#ty> };
+        // This is the usual trick to put something on the stack, then
+        // immediately shadow the variable name so it can't be accessed or moved.
+        RustParamConversion::Param {
+            ty,
+            local_variables: vec![
+                MaybeUnsafeStmt::new(
+                    quote! { let mut #space_var_name = autocxx::#handler_type::default(); },
+                ),
+                MaybeUnsafeStmt::binary(
+                    quote! { let mut #space_var_name =
+                        unsafe { ::core::pin::Pin::new_unchecked(&mut #space_var_name) };
+                    },
+                    quote! { let mut #space_var_name =
+                        ::core::pin::Pin::new_unchecked(&mut #space_var_name);
+                    },
+                ),
+                MaybeUnsafeStmt::needs_unsafe(quote! { #space_var_name.as_mut().populate(#var); }),
+            ],
+            conversion: quote! {
+                #space_var_name.get_ptr()
+            },
+            conversion_requires_unsafe: false,
         }
     }
 }

@@ -7,8 +7,7 @@
 // except according to those terms.
 use crate::{
     conversion::analysis::fun::{
-        function_wrapper::{RustConversionType, TypeConversionPolicy},
-        ArgumentAnalysis, ReceiverMutability,
+        function_wrapper::TypeConversionPolicy, ArgumentAnalysis, ReceiverMutability,
     },
     minisyn::FnArg,
     types::QualifiedName,
@@ -50,28 +49,17 @@ pub(crate) fn add_explicit_lifetime_if_necessary<'r>(
             && !pd.is_placement_return_destination
     });
 
-    let any_param_is_reference = param_details.iter().any(|pd| {
-        pd.has_lifetime
-            || matches!(
-                pd.conversion.rust_conversion,
-                RustConversionType::FromValueParamToPtr
-            )
-    });
+    let any_param_is_reference = param_details
+        .iter()
+        .any(|pd| pd.has_lifetime || pd.conversion.is_value_param());
 
-    let any_param_is_cppref = param_details.iter().any(|pd| {
-        matches!(
-            pd.conversion.rust_conversion,
-            RustConversionType::FromReferenceWrapperToPointer
-        )
-    });
+    let any_param_is_cppref = param_details
+        .iter()
+        .any(|pd| pd.conversion.takes_reference_wrapper());
     let return_type_is_impl = return_type_is_impl(&ret_type);
-    let return_type_is_cppref = matches!(
-        ret_conversion,
-        Some(TypeConversionPolicy {
-            rust_conversion: RustConversionType::FromPointerToReferenceWrapper,
-            ..
-        })
-    );
+    let return_type_is_cppref = ret_conversion
+        .as_ref()
+        .is_some_and(TypeConversionPolicy::returns_reference_wrapper);
     let non_pod_ref_param = reference_parameter_is_non_pod_reference(&params, non_pod_types);
     let ret_type_pod = return_type_is_pod_or_known_type_reference(&ret_type, non_pod_types);
     let returning_impl_with_a_reference_param = return_type_is_impl && any_param_is_reference;

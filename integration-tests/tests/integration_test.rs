@@ -22817,6 +22817,71 @@ fn test_subclass_virtual_returning_const_rvalue_reference() {
 }
 
 #[test]
+fn test_subclass_virtual_method_taking_move_only_type_by_value() {
+    // A virtual method taking, by value, a type with no copy constructor -
+    // `std::unique_ptr` is one - reaches the peer class's override, which has
+    // to hand the value on to Rust with the `std::move` C++ demands. The peer
+    // is built by inverting each conversion the ordinary Rust-to-C++ wrapper
+    // performs, and the conversion for such a parameter is the one which says
+    // "move it"; asking for its opposite used to be a panic, so this shape
+    // brought the whole build down.
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <memory>
+
+    class fy_Widget {
+    public:
+        fy_Widget(uint32_t v) : v(v) {}
+        uint32_t v;
+    };
+
+    class fy_Sink {
+    public:
+        fy_Sink() {}
+        virtual void fy_accept(std::unique_ptr<fy_Widget> w) = 0;
+        virtual ~fy_Sink() {}
+    };
+
+    extern fy_Sink* fy_the_sink;
+    inline void fy_register(fy_Sink& s) { fy_the_sink = &s; }
+    inline void fy_send(uint32_t v) {
+        fy_the_sink->fy_accept(std::make_unique<fy_Widget>(v));
+    }
+    "};
+    run_test_ex(
+        "fy_Sink* fy_the_sink;",
+        hdr,
+        quote! {
+            let sink = MySink::new_rust_owned(MySink { seen: 0, cpp_peer: Default::default() });
+            ffi::fy_register(sink.as_ref().borrow_mut().pin_mut());
+            ffi::fy_send(42);
+            assert_eq!(sink.borrow().seen, 42);
+        },
+        quote! {
+            generate!("fy_register")
+            generate!("fy_send")
+            generate_pod!("fy_Widget")
+            subclass!("fy_Sink",MySink)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fy_Sink_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MySink {
+                seen: u32,
+            }
+            impl fy_Sink_methods for MySink {
+                fn fy_accept(&mut self, w: cxx::UniquePtr<ffi::fy_Widget>) {
+                    self.seen = w.as_ref().unwrap().v;
+                }
+            }
+        }),
+    );
+}
+
+#[test]
 fn test_generated_method_names_its_receiver_the_same_in_cpp_and_rust() {
     // A method needing a C++ wrapper - here because it returns a non-POD by
     // value - is written twice: once as the C++ function autocxx generates,

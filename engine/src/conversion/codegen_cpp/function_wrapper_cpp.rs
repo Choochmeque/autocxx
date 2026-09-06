@@ -6,10 +6,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use syn::{Type, TypePtr, TypeReference};
+use syn::{Type, TypeReference};
 
 use crate::conversion::{
-    analysis::fun::function_wrapper::{CppConversionType, TypeConversionPolicy},
+    analysis::fun::function_wrapper::{
+        BridgePointer, PointerCppConversion, TypeConversionPolicy, WholeCppConversion,
+    },
     ConvertErrorFromCpp,
 };
 
@@ -20,22 +22,32 @@ impl TypeConversionPolicy {
         &self,
         cpp_name_map: &CppNameMap,
     ) -> Result<String, ConvertErrorFromCpp> {
-        match self.cpp_conversion {
-            CppConversionType::FromUniquePtrToValue => self.unique_ptr_wrapped_type(cpp_name_map),
-            CppConversionType::FromPtrToValue => {
-                Ok(format!("{}*", self.unwrapped_type_as_string(cpp_name_map)?))
-            }
+        match self {
+            Self::Whole {
+                cpp: WholeCppConversion::FromUniquePtrToValue,
+                ..
+            } => self.unique_ptr_wrapped_type(cpp_name_map),
+            Self::Whole {
+                cpp: WholeCppConversion::FromPtrToValue,
+                ..
+            } => Ok(format!("{}*", self.unwrapped_type_as_string(cpp_name_map)?)),
             // `&var`. What this conversion is handed is the C++ reference;
             // the pointer in `cxxbridge_type` is what it produces.
-            CppConversionType::FromReferenceToPointer => self.reference_type(cpp_name_map),
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromReferenceToPointer,
+                ..
+            } => reference_type(pointer, cpp_name_map),
             // Likewise, but the reference is an rvalue one. Nothing reaches
             // this today: the only reader of an rvalue return's unconverted
             // type would be a `_super` helper, and a method returning `T&&`
             // never gets one. It is here because it is the answer if one ever
             // does, and `T*` - what the fall-through would say - is not.
-            CppConversionType::FromRValueReferenceToPointer => {
-                self.rvalue_reference_type(cpp_name_map)
-            }
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromRValueReferenceToPointer,
+                ..
+            } => rvalue_reference_type(pointer, cpp_name_map),
             _ => self.unwrapped_type_as_string(cpp_name_map),
         }
     }
@@ -44,84 +56,40 @@ impl TypeConversionPolicy {
         &self,
         cpp_name_map: &CppNameMap,
     ) -> Result<String, ConvertErrorFromCpp> {
-        match self.cpp_conversion {
-            CppConversionType::FromValueToUniquePtr => self.unique_ptr_wrapped_type(cpp_name_map),
-            CppConversionType::FromReferenceToPointer
-            | CppConversionType::FromRValueReferenceToPointer => {
-                self.pointee_type(cpp_name_map, "*")
-            }
+        match self {
+            Self::Whole {
+                cpp: WholeCppConversion::FromValueToUniquePtr,
+                ..
+            } => self.unique_ptr_wrapped_type(cpp_name_map),
+            Self::Pointer {
+                pointer,
+                cpp:
+                    PointerCppConversion::FromReferenceToPointer
+                    | PointerCppConversion::FromRValueReferenceToPointer,
+                ..
+            } => pointee_type(pointer, cpp_name_map, "*"),
             // `(*var)`. What this conversion produces is the C++ reference the
             // underlying function asked for, not the pointer it was handed.
-            CppConversionType::FromPointerToReference => self.reference_type(cpp_name_map),
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromPointerToReference,
+                ..
+            } => reference_type(pointer, cpp_name_map),
             // Likewise, but the reference is an rvalue one.
-            CppConversionType::FromPointerToRValueReference => {
-                self.rvalue_reference_type(cpp_name_map)
-            }
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromPointerToRValueReference,
+                ..
+            } => rvalue_reference_type(pointer, cpp_name_map),
             _ => self.unwrapped_type_as_string(cpp_name_map),
         }
-    }
-
-    /// The C++ reference which the pointer in [`Self::cxxbridge_type`] stands
-    /// for, for the two conversions which turn one into the other. Spelled by
-    /// asking for the reference type itself, so that the referents which get a
-    /// name of their own - `str`, which is `rust::Str` - keep it here too.
-    fn reference_type(&self, cpp_name_map: &CppNameMap) -> Result<String, ConvertErrorFromCpp> {
-        let ty = match self.cxxbridge_type() {
-            Type::Ptr(TypePtr {
-                mutability, elem, ..
-            }) => Type::Reference(TypeReference {
-                and_token: Default::default(),
-                lifetime: None,
-                mutability: *mutability,
-                elem: elem.clone(),
-            }),
-            _ => panic!("Not a pointer"),
-        };
-        cpp_name_map.type_to_cpp(&ty)
-    }
-
-    /// The C++ rvalue reference which the pointer in [`Self::cxxbridge_type`]
-    /// stands for, for the two conversions which turn one into the other.
-    ///
-    /// Not spelled via a `syn` type as [`Self::reference_type`] is, because
-    /// Rust has nothing which means `T&&`: that is the whole reason those two
-    /// conversions exist.
-    fn rvalue_reference_type(
-        &self,
-        cpp_name_map: &CppNameMap,
-    ) -> Result<String, ConvertErrorFromCpp> {
-        self.pointee_type(cpp_name_map, "&&")
-    }
-
-    /// What [`Self::cxxbridge_type`] points at, with its constness restored
-    /// and `suffix` - `*` or `&&` - appended.
-    fn pointee_type(
-        &self,
-        cpp_name_map: &CppNameMap,
-        suffix: &str,
-    ) -> Result<String, ConvertErrorFromCpp> {
-        let (const_string, ty) = match self.cxxbridge_type() {
-            Type::Ptr(TypePtr {
-                mutability: Some(_),
-                elem,
-                ..
-            }) => ("", elem.as_ref()),
-            Type::Ptr(TypePtr { elem, .. }) => ("const ", elem.as_ref()),
-            _ => panic!("Not a pointer"),
-        };
-        Ok(format!(
-            "{}{}{}",
-            const_string,
-            cpp_name_map.type_to_cpp(ty)?,
-            suffix
-        ))
     }
 
     fn unwrapped_type_as_string(
         &self,
         cpp_name_map: &CppNameMap,
     ) -> Result<String, ConvertErrorFromCpp> {
-        cpp_name_map.type_to_cpp(self.cxxbridge_type())
+        cpp_name_map.type_to_cpp(&self.cxxbridge_type())
     }
 
     fn unique_ptr_wrapped_type(
@@ -142,36 +110,60 @@ impl TypeConversionPolicy {
     ) -> Result<Option<String>, ConvertErrorFromCpp> {
         // If is_return we want to avoid unnecessary std::moves because they
         // make RVO less effective
-        Ok(match self.cpp_conversion {
-            CppConversionType::None | CppConversionType::FromReturnValueToPlacementPtr => {
-                Some(var_name.to_string())
+        Ok(match self {
+            Self::Pointer {
+                cpp: PointerCppConversion::None,
+                ..
             }
-            CppConversionType::FromPointerToReference => Some(format!("(*{var_name})")),
-            CppConversionType::Move => Some(format!("std::move({var_name})")),
+            | Self::Whole {
+                cpp: WholeCppConversion::None | WholeCppConversion::FromReturnValueToPlacementPtr,
+                ..
+            } => Some(var_name.to_string()),
+            Self::Pointer {
+                cpp: PointerCppConversion::FromPointerToReference,
+                ..
+            } => Some(format!("(*{var_name})")),
+            Self::Whole {
+                cpp: WholeCppConversion::Move,
+                ..
+            } => Some(format!("std::move({var_name})")),
             // A move constructor has to have a move constructor to call, so
             // `std::move` says exactly what is meant here.
-            CppConversionType::FromPtrToMove => Some(format!("std::move(*{var_name})")),
+            Self::Pointer {
+                cpp: PointerCppConversion::FromPtrToMove,
+                ..
+            } => Some(format!("std::move(*{var_name})")),
             // Whereas these two are handing an ordinary parameter over by
             // value out of storage the Rust side owns and is about to destroy,
             // so a move is merely an optimization and must give way to a copy
             // for types whose move constructor is deleted. Name the helper
             // from the global namespace, or the argument's own namespaces
             // could offer a better-matching function of that name.
-            CppConversionType::FromUniquePtrToValue => {
-                Some(format!("::autocxx_move_or_copy(*{var_name})"))
-            }
+            Self::Whole {
+                cpp: WholeCppConversion::FromUniquePtrToValue,
+                ..
+            } => Some(format!("::autocxx_move_or_copy(*{var_name})")),
             // And this one is the wrapper's own by-value parameter, which is
             // about to be destroyed too, so the same reasoning applies. Passing
             // it bare would ask for a copy constructor, which a POD type that
             // opts into relocatability by writing its own move constructor no
             // longer has. See google/autocxx#1252.
-            CppConversionType::MoveOrCopy => Some(format!("::autocxx_move_or_copy({var_name})")),
-            CppConversionType::FromValueToUniquePtr => Some(format!(
+            Self::Whole {
+                cpp: WholeCppConversion::MoveOrCopy,
+                ..
+            } => Some(format!("::autocxx_move_or_copy({var_name})")),
+            Self::Whole {
+                cpp: WholeCppConversion::FromValueToUniquePtr,
+                ..
+            } => Some(format!(
                 "std::make_unique<{}>({})",
                 self.unconverted_type(cpp_name_map)?,
                 var_name
             )),
-            CppConversionType::FromPtrToValue => {
+            Self::Whole {
+                cpp: WholeCppConversion::FromPtrToValue,
+                ..
+            } => {
                 let dereference = format!("*{var_name}");
                 Some(if is_return {
                     dereference
@@ -179,16 +171,26 @@ impl TypeConversionPolicy {
                     format!("::autocxx_move_or_copy({dereference})")
                 })
             }
-            CppConversionType::IgnoredPlacementPtrParameter => None,
-            CppConversionType::FromReferenceToPointer => Some(format!("&{var_name}")),
+            Self::Pointer {
+                cpp: PointerCppConversion::IgnoredPlacementPtrParameter,
+                ..
+            } => None,
+            Self::Pointer {
+                cpp: PointerCppConversion::FromReferenceToPointer,
+                ..
+            } => Some(format!("&{var_name}")),
             // The rvalue counterpart of `FromPointerToReference`'s `(*var)`.
             // `static_cast` rather than `std::move` because that is precisely
             // what this is - the two are the same operation, and the cast
             // needs no header and spells the resulting type where the reader
             // can see it against the signature it has to match.
-            CppConversionType::FromPointerToRValueReference => Some(format!(
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromPointerToRValueReference,
+                ..
+            } => Some(format!(
                 "static_cast<{}>(*{var_name})",
-                self.rvalue_reference_type(cpp_name_map)?
+                rvalue_reference_type(pointer, cpp_name_map)?
             )),
             // Which leaves the other direction, and there is no expression of
             // this shape for it. `&` wants an lvalue; neither a
@@ -204,9 +206,10 @@ impl TypeConversionPolicy {
             // same refusal rather than assert, so that a route through which
             // neither of those two catches reaches whoever hit it as the
             // limitation it is rather than as a crash.
-            CppConversionType::FromRValueReferenceToPointer => {
-                return Err(ConvertErrorFromCpp::RValueReturn)
-            }
+            Self::Pointer {
+                cpp: PointerCppConversion::FromRValueReferenceToPointer,
+                ..
+            } => return Err(ConvertErrorFromCpp::RValueReturn),
         })
     }
 
@@ -216,10 +219,64 @@ impl TypeConversionPolicy {
     /// an unused template definition, under-reporting fails to compile.
     pub(super) fn may_use_move_or_copy_helper(&self) -> bool {
         matches!(
-            self.cpp_conversion,
-            CppConversionType::FromUniquePtrToValue
-                | CppConversionType::FromPtrToValue
-                | CppConversionType::MoveOrCopy
+            self,
+            Self::Whole {
+                cpp: WholeCppConversion::FromUniquePtrToValue
+                    | WholeCppConversion::FromPtrToValue
+                    | WholeCppConversion::MoveOrCopy,
+                ..
+            }
         )
     }
+}
+
+/// The C++ reference which `pointer` stands for, for the two conversions which
+/// turn one into the other. Spelled by asking for the reference type itself, so
+/// that the referents which get a name of their own - `str`, which is
+/// `rust::Str` - keep it here too.
+fn reference_type(
+    pointer: &BridgePointer,
+    cpp_name_map: &CppNameMap,
+) -> Result<String, ConvertErrorFromCpp> {
+    let ty = Type::Reference(TypeReference {
+        and_token: Default::default(),
+        lifetime: None,
+        mutability: pointer.is_mut().then(Default::default),
+        elem: Box::new(pointer.pointee().clone()),
+    });
+    cpp_name_map.type_to_cpp(&ty)
+}
+
+/// The C++ rvalue reference which `pointer` stands for, for the two conversions
+/// which turn one into the other.
+///
+/// Not spelled via a `syn` type as [`reference_type`] is, because Rust has
+/// nothing which means `T&&`: that is the whole reason those two conversions
+/// exist. That also means this does not inherit the `str` case above, and must
+/// not: a subclass peer overriding a `virtual rust::Str&& f()` has to write
+/// `rust::Str&&`, whereas the reference spelling of the same pointer is the
+/// bare `rust::Str`, because that is how cxx passes a `&str` - by value, the
+/// `&` being part of the Rust type rather than a C++ reference. Both spellings
+/// are generated today and neither would do for the other's job.
+fn rvalue_reference_type(
+    pointer: &BridgePointer,
+    cpp_name_map: &CppNameMap,
+) -> Result<String, ConvertErrorFromCpp> {
+    pointee_type(pointer, cpp_name_map, "&&")
+}
+
+/// What `pointer` points at, with its constness restored and `suffix` - `*` or
+/// `&&` - appended.
+fn pointee_type(
+    pointer: &BridgePointer,
+    cpp_name_map: &CppNameMap,
+    suffix: &str,
+) -> Result<String, ConvertErrorFromCpp> {
+    let const_string = if pointer.is_mut() { "" } else { "const " };
+    Ok(format!(
+        "{}{}{}",
+        const_string,
+        cpp_name_map.type_to_cpp(pointer.pointee())?,
+        suffix
+    ))
 }
