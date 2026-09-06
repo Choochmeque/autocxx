@@ -8,7 +8,9 @@
 
 use crate::{
     conversion::{
-        api::{AnalysisPhase, Api, ApiName, NullPhase, TypedefKind, UnanalyzedApi},
+        api::{
+            AnalysisPhase, Api, ApiName, NullPhase, OpaqueTypedefReason, TypedefKind, UnanalyzedApi,
+        },
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{unwrap_bitfield, unwrap_has_opaque, unwrap_reference},
@@ -113,7 +115,9 @@ pub(crate) struct TypeConverter<'a> {
     types_found: HashSet<QualifiedName>,
     typedefs: HashMap<QualifiedName, Type>,
     concrete_templates: HashMap<String, QualifiedName>,
-    forward_declarations: HashSet<QualifiedName>,
+    /// Types we have only a stand-in for, mapped to why - which is known for
+    /// a typedef whose target failed, and not for a plain forward declaration.
+    forward_declarations: HashMap<QualifiedName, Option<OpaqueTypedefReason>>,
     ignored_types: HashSet<QualifiedName>,
     config: &'a IncludeCppConfig,
     original_name_map: CppNameMap,
@@ -266,9 +270,9 @@ impl<'a> TypeConverter<'a> {
             if let Type::Path(newpp) = &newp.ty {
                 let qn = QualifiedName::from_type_path(newpp);
                 if !ctx.allow_instantiation_of_forward_declaration()
-                    && self.forward_declarations.contains(&qn)
+                    && self.forward_declarations.contains_key(&qn)
                 {
-                    return Err(ConvertErrorFromCpp::TypeContainingForwardDeclaration(qn));
+                    return Err(self.incomplete_type_error(qn));
                 }
                 // Special handling because rust_Str (as emitted by bindgen)
                 // doesn't simply get renamed to a different type _identifier_.
@@ -647,10 +651,9 @@ impl<'a> TypeConverter<'a> {
             match inner {
                 GenericArgument::Type(Type::Path(typ)) => {
                     let inner_qn = QualifiedName::from_type_path(typ);
-                    if !forward_declarations_ok && self.forward_declarations.contains(&inner_qn) {
-                        return Err(ConvertErrorFromCpp::TypeContainingForwardDeclaration(
-                            inner_qn,
-                        ));
+                    if !forward_declarations_ok && self.forward_declarations.contains_key(&inner_qn)
+                    {
+                        return Err(self.incomplete_type_error(inner_qn));
                     }
                     match generic_behavior {
                         CxxGenericType::Rust => {
@@ -731,18 +734,36 @@ impl<'a> TypeConverter<'a> {
             .collect()
     }
 
-    fn find_incomplete_types<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashSet<QualifiedName> {
+    fn find_incomplete_types<A: AnalysisPhase>(
+        apis: &ApiVec<A>,
+    ) -> HashMap<QualifiedName, Option<OpaqueTypedefReason>> {
         apis.iter()
             .filter_map(|api| match api {
-                Api::ForwardDeclaration { .. }
-                | Api::OpaqueTypedef {
+                Api::ForwardDeclaration { .. } => Some((api.name().clone(), None)),
+                Api::OpaqueTypedef {
                     forward_declaration: true,
+                    reason,
                     ..
-                } => Some(api.name()),
+                } => Some((api.name().clone(), reason.clone())),
                 _ => None,
             })
-            .cloned()
             .collect()
+    }
+
+    /// What to tell whoever tried to use `qn`, which we have only a stand-in
+    /// for. Where we know what was wrong with the thing it stands in for, that
+    /// is the useful answer; otherwise all we can say is that it's incomplete.
+    fn incomplete_type_error(&self, qn: QualifiedName) -> ConvertErrorFromCpp {
+        match self.forward_declarations.get(&qn) {
+            Some(Some(OpaqueTypedefReason { culprit, reason })) => {
+                ConvertErrorFromCpp::TypeContainingUngeneratableTypedef {
+                    name: qn,
+                    culprit: culprit.clone(),
+                    reason: reason.clone(),
+                }
+            }
+            _ => ConvertErrorFromCpp::TypeContainingForwardDeclaration(qn),
+        }
     }
 
     fn find_ignored_types<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashSet<QualifiedName> {

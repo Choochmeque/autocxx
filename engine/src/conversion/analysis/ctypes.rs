@@ -18,8 +18,9 @@ use crate::{conversion::api::Api, known_types::known_types, types::QualifiedName
 use super::deps::HasDependencies;
 use super::fun::FnPhase;
 
-/// Spot any variable-length C types (e.g. unsigned long)
-/// used in the [Api]s and append those as extra APIs.
+/// Spot any of the C types cxx cannot spell - the variable-length integers,
+/// `void` and `char16_t` - used in the [Api]s, and append those as extra APIs
+/// so that the generated C++ declares a typedef for each.
 pub(crate) fn append_ctype_information(apis: &mut ApiVec<FnPhase>) {
     let ctypes: HashMap<Ident, QualifiedName> = apis
         .iter()

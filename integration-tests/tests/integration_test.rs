@@ -6854,6 +6854,48 @@ fn test_string_transparent_function() {
     run_test("", hdr, rs, &["take_string"], &[]);
 }
 
+/// The same function, with the parameter named through a namespace-scope
+/// `using std::string;` rather than written out. autocxx should substitute
+/// `CxxString` for it exactly as above, and doesn't:
+///
+/// ```text
+/// DidNotGenerateAnythingUsable("take_string",
+///   Argument { arg: "a", err: InvalidIdent(BindgenOpaqueType) })
+/// ```
+///
+/// Nothing autocxx can do about it, because nothing reaches autocxx to work
+/// with. bindgen lists `CXCursor_UsingDeclaration` among the cursor kinds it
+/// deliberately does not handle (`ir/item.rs`, `Item::from_ty` returning
+/// `ParseError::Continue`), so the alias appears nowhere in its output and the
+/// parameter arrives as an opaque blob of bytes:
+///
+/// ```text
+/// pub fn take_string_bindgen_original(
+///     a: __bindgen_marker_Opaque<root::__BindgenOpaqueArray<u64, 3usize>>,
+/// ) -> u32;
+/// ```
+///
+/// against `a: root::std::string` for the qualified spelling. autocxx's own
+/// handling of `use` items (`parse_bindgen.rs`) and of typedefs is not
+/// implicated: `typedef std::string mystring;`, `using mystring = std::string;`
+/// and `using namespace std;` all work. It is specifically a using-declaration
+/// naming a typedef of a class template instantiation. Fixing it means teaching
+/// autocxx-bindgen that cursor kind.
+#[test]
+#[ignore]
+fn test_string_through_a_using_declaration() {
+    let hdr = indoc! {"
+        #include <string>
+        #include <cstdint>
+        using std::string;
+        inline uint32_t take_string(string a) { return a.size(); }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::take_string("hello"), 5);
+    };
+    run_test("", hdr, rs, &["take_string"], &[]);
+}
+
 #[test]
 fn test_string_transparent_method() {
     let hdr = indoc! {"
@@ -17884,6 +17926,33 @@ fn test_elab_shadowed_type_via_unique_ptr() {
     );
 }
 
+/// A shadowed *union*. The unshadowing alias names the type with an elaborated
+/// type specifier, and the tag in that has to be the one C++ gave the type:
+/// `struct` and `class` are interchangeable, but `union` is neither, and naming
+/// it wrongly is an error rather than a warning. Turned up by running
+/// `generate_all!` over a libc++ header, which reaches `union wait` from
+/// `<sys/wait.h>` past the `wait` function that hides it.
+#[test]
+fn test_elab_shadowed_union() {
+    let hdr = indoc! {"
+        union fx_holder { int as_int; unsigned as_uint; };
+        inline int fx_holder(int x) { return x; }
+        inline int read_holder(const union fx_holder& h) { return h.as_int; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_holder", "read_holder"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["typedef union ::fx_holder fx_holder_autocxx_unshadowed;"],
+            &[],
+        ))),
+        None,
+    );
+}
+
 #[test]
 fn test_pure_virtual_destructor_makes_class_abstract() {
     // A pure virtual destructor is the whole of what makes this class
@@ -18071,6 +18140,72 @@ fn test_subclass_method_named_like_super_helper_reverse_order() {
     public:
         Observer() {}
         virtual uint32_t foo_super() const { return 2; }
+        virtual uint32_t foo() const { return 1; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+/// The same clash one level down: a superclass method named like the *C++*
+/// spelling of the `_super` helper, which carries an `autocxx` marker to keep
+/// it clear of names like `foo_super`. The peer class declares an override for
+/// every superclass virtual method under its real C++ name, so a superclass
+/// method called `foo_autocxx_super` and the helper generated for `foo` would
+/// both want that one name.
+fn subclass_cpp_super_name_clash_test(hdr: &str) {
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            // Overridden below, and calls the superclass through the helper.
+            assert_eq!(obs.borrow().foo(), 11);
+            // A superclass method in its own right, left to the trait's
+            // default body, which calls through to C++.
+            assert_eq!(obs.borrow().foo_autocxx_super(), 2);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    self.peer().foo_super() + 10
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_method_named_like_cpp_super_helper() {
+    subclass_cpp_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const { return 1; }
+        virtual uint32_t foo_autocxx_super() const { return 2; }
+        virtual ~Observer() {}
+    };
+    "});
+}
+
+#[test]
+fn test_subclass_method_named_like_cpp_super_helper_reverse_order() {
+    subclass_cpp_super_name_clash_test(indoc! {"
+    #include <cstdint>
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo_autocxx_super() const { return 2; }
         virtual uint32_t foo() const { return 1; }
         virtual ~Observer() {}
     };
@@ -18817,40 +18952,66 @@ fn test_std_function_method_costs_only_that_method() {
         assert_eq!(requester.answer(), 42);
     };
     // The explanation reaches the user through the doc comment of the stub
-    // standing in for the type autocxx could not generate - but only where the
-    // typedef is what failed. On MSVC it is not: bindgen keeps std::function as
-    // a named class with a discarded template parameter, the typedef to it
-    // becomes an `OpaqueTypedef { forward_declaration: true }`, and the method
-    // is then refused with `TypeContainingForwardDeclaration`, whose message
-    // talks about UniquePtr and CxxVector and never mentions std::function.
-    // Carrying the reason across that hop needs it threaded through
-    // `OpaqueTypedef`, `TypeConverter::find_incomplete_types` and
-    // `TypeContainingForwardDeclaration`, the way `IgnoredDependent` now
-    // carries it - a change to core analysis which should be made by someone
-    // who can run it on MSVC.
-    if cfg!(target_env = "msvc") {
-        run_test_ex(
-            "",
-            hdr,
-            rs,
-            directives_from_lists(&["Requester"], &[], None),
-            None,
-            None,
-            None,
-        );
-    } else {
-        run_test_ex(
-            "",
-            hdr,
-            rs,
-            directives_from_lists(&["Requester"], &[], None),
-            None,
-            Some(make_string_finder(vec![
-                "std::function is not supported by bindgen or cxx".to_string(),
-            ])),
-            None,
-        );
-    }
+    // standing in for the method autocxx could not generate. It gets there by
+    // two different routes: with libstdc++ and libc++ the typedef itself is
+    // what fails, while on MSVC the typedef is left standing in for a
+    // `std::function` which failed, and the reason travels across that hop -
+    // see `test_class_scoped_alias_reports_the_targets_own_problem`. Either
+    // way the wording is the same, which is the part a user acts on.
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Requester"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "std::function is not supported by bindgen or cxx".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A class-scoped `using` alias of a type autocxx has a precise complaint
+/// about. autocxx can't generate the method taking that alias, and what it
+/// tells the user has to be the complaint about the target - not the generic
+/// "you used a forward declaration inside a UniquePtr" left behind by the hop
+/// through the alias, whose advice (try `instantiable!`) cannot help here.
+///
+/// This is the shape MSVC produces for `using F = std::function<...>` inside a
+/// class, which no other standard library can be made to produce: they hide
+/// std::function behind reserved names and bindgen erases it entirely. What
+/// matters is not std::function but that the alias names something which
+/// failed for a reason worth repeating, so this reaches the same shape with a
+/// private nested class, and runs everywhere.
+#[test]
+fn test_class_scoped_alias_reports_the_targets_own_problem() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Requester {
+            class Impl {};
+        public:
+            Requester() {}
+            using Handler = Impl;
+            void sendRequest(Handler h) { (void) h; }
+            uint32_t answer() const { return 42; }
+        };
+    "};
+    let rs = quote! {
+        let requester = ffi::Requester::new().within_unique_ptr();
+        assert_eq!(requester.answer(), 42);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Requester"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "This type is nested within another struct/class with protected or private visibility"
+                .to_string(),
+        ])),
+        None,
+    );
 }
 
 /// A class nested inside the class which holds it by value. bindgen hoists

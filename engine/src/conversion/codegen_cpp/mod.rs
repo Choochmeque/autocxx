@@ -24,6 +24,8 @@ use itertools::Itertools;
 use std::borrow::Cow;
 use type_to_cpp::CppNameMap;
 
+use crate::minisyn::Ident;
+
 use super::{
     analysis::{
         fun::{
@@ -115,7 +117,8 @@ pub(crate) struct CppCodeGenerator<'a> {
 
 struct SubclassFunction<'a> {
     fun: &'a CppFunction,
-    has_super_helper: bool,
+    /// See [`RustSubclassFnDetails::cpp_super_fn_name`].
+    cpp_super_fn_name: Option<&'a Ident>,
 }
 
 impl<'a> CppCodeGenerator<'a> {
@@ -253,7 +256,7 @@ impl<'a> CppCodeGenerator<'a> {
                         .or_default()
                         .push(SubclassFunction {
                             fun: &details.cpp_impl,
-                            has_super_helper: details.has_super_helper,
+                            cpp_super_fn_name: details.cpp_super_fn_name.as_ref(),
                         });
                 }
                 Api::Struct {
@@ -787,18 +790,16 @@ impl<'a> CppCodeGenerator<'a> {
             method_decls.push(fn_impl.declaration.take().unwrap());
             self.additional_functions.push(fn_impl);
             // And now the function to be called from Rust for default implementation (calls superclass in C++)
-            if method.has_super_helper {
+            if let Some(super_fn_name) = method.cpp_super_fn_name {
                 let mut super_method = method.fun.clone();
                 super_method.pass_obs_field = false;
                 // `super_foo` is a new method on the subclass which we call
                 // from Rust on an ordinary lvalue, so it doesn't inherit the
                 // superclass method's ref-qualifier.
                 super_method.ref_qualifier = CppRefQualifier::None;
-                super_method.wrapper_function_name = SubclassName::get_cpp_super_fn_name(
-                    superclass.get_namespace(),
-                    &method.fun.wrapper_function_name.to_string(),
-                )
-                .get_final_ident();
+                // Named during analysis, where the cxx bridge was given the
+                // same name to call it by.
+                super_method.wrapper_function_name = super_fn_name.clone();
                 super_method.payload = CppFunctionBody::StaticMethodCall(
                     superclass.get_namespace().clone(),
                     superclass.get_final_ident(),

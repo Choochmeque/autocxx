@@ -118,9 +118,11 @@ pub(crate) fn convert_apis<FF, SF, EF, TF, SCF, A, B>(
             Api::OpaqueTypedef {
                 name,
                 forward_declaration,
+                reason,
             } => Ok(Box::new(std::iter::once(Api::OpaqueTypedef {
                 name,
                 forward_declaration,
+                reason,
             }))),
             Api::StringConstructor { name } => {
                 Ok(Box::new(std::iter::once(Api::StringConstructor { name })))

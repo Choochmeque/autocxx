@@ -213,7 +213,14 @@ fn main() {
         )
         .arg_required_else_help(true)
         .get_matches();
-    run(matches).unwrap();
+    // Say what went wrong and stop, rather than panicking: these errors are
+    // things the person driving the reduction has to act on - a creduce we
+    // can't run, a reduction which gave up - and a backtrace round them helps
+    // nobody.
+    if let Err(err) = run(matches) {
+        eprintln!("autocxx-reduce: {err}");
+        std::process::exit(1);
+    }
 }
 
 fn run(matches: ArgMatches) -> Result<(), std::io::Error> {
@@ -328,7 +335,7 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
     )?;
     let demo_dir_concat_path = demo_interestingness_test_dir.join("concat.h");
     std::fs::copy(&concat_path, demo_dir_concat_path).unwrap();
-    run_demo_interestingness_test(&demo_interestingness_test_dir, &interestingness_test).unwrap();
+    run_demo_interestingness_test(&demo_interestingness_test_dir, &interestingness_test)?;
 
     // Now the main interestingness test
     let interestingness_test = tmp_dir.path().join("test.sh");
@@ -345,7 +352,7 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
         &interestingness_test,
         &concat_path,
         matches.values_of("creduce-args").unwrap_or_default(),
-    );
+    )?;
     announce_progress("creduce completed");
     let output_path = matches.value_of("output");
     match output_path {
@@ -385,16 +392,42 @@ fn print_minimized_case(concat_path: &Path) -> Result<(), std::io::Error> {
 const REMOVE_PASS_LINE_MARKERS: &[&str] = &["--remove-pass", "pass_line_markers", "*"];
 const SKIP_INITIAL_PASSES: &[&str] = &["--skip-initial-passes"];
 
-fn creduce_supports_remove_pass(creduce_cmd: &str) -> bool {
-    let cmd = std::process::Command::new(creduce_cmd)
+/// Whether this creduce understands `--remove-pass`. Releases up to and
+/// including 2.10 do not, and want [`SKIP_INITIAL_PASSES`] instead.
+///
+/// Asked by reading `creduce --help`, which is more delicate than it looks:
+/// creduce exits non-zero even when the help it prints is perfectly good, so
+/// the exit status tells us nothing, while a creduce which rejects the
+/// question - the wrong binary, a broken install - prints nothing at all on
+/// stdout and complains on stderr. So it's the presence of help text that
+/// distinguishes an answer from a refusal, and a refusal is worth reporting:
+/// a creduce which cannot describe itself is not going to reduce anything
+/// either, and guessing the flags of an old release for it only turns a clear
+/// failure into a confusing one.
+fn creduce_supports_remove_pass(creduce_cmd: &str) -> Result<bool, std::io::Error> {
+    let hint = "hint: autocxx-reduce --creduce /path/to/creduce";
+    let output = std::process::Command::new(creduce_cmd)
         .arg("--help")
-        .output();
-    let msg = match cmd {
-        Err(error) => panic!("failed to run creduce. creduce_cmd = {creduce_cmd}. hint: autocxx-reduce --creduce /path/to/creduce. error = {error}"),
-        Ok(result) => result.stdout
-    };
-    let msg = std::str::from_utf8(&msg).unwrap();
-    msg.contains("--remove-pass")
+        .output()
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to run creduce {creduce_cmd}: {error}. {hint}"),
+            )
+        })?;
+    if output.stdout.is_empty() {
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        let complaint = match complaint.trim() {
+            "" => String::new(),
+            said => format!(" It said: {said}."),
+        };
+        return Err(std::io::Error::other(format!(
+            "{creduce_cmd} --help printed no help and {}, so this is not a creduce we can \
+             drive.{complaint} {hint}",
+            output.status,
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).contains("--remove-pass"))
 }
 
 fn run_creduce<'a>(
@@ -402,13 +435,13 @@ fn run_creduce<'a>(
     interestingness_test: &'a Path,
     concat_path: &'a Path,
     creduce_args: impl Iterator<Item = &'a str>,
-) {
+) -> Result<(), std::io::Error> {
     announce_progress("creduce");
     let args = std::iter::once(interestingness_test.to_str().unwrap())
         .chain(std::iter::once(concat_path.to_str().unwrap()))
         .chain(creduce_args)
         .chain(
-            if creduce_supports_remove_pass(creduce_cmd) {
+            if creduce_supports_remove_pass(creduce_cmd)? {
                 REMOVE_PASS_LINE_MARKERS
             } else {
                 SKIP_INITIAL_PASSES
@@ -418,12 +451,134 @@ fn run_creduce<'a>(
         )
         .collect::<Vec<_>>();
     println!("Command: {} {}", creduce_cmd, args.join(" "));
-    std::process::Command::new(creduce_cmd)
+    let status = std::process::Command::new(creduce_cmd)
         .args(args)
         .status()
-        .expect("failed to creduce");
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to run {creduce_cmd}: {error}"),
+            )
+        })?;
+    match classify_reduction(status.success(), file_len(concat_path)) {
+        ReductionOutcome::Reduced => Ok(()),
+        ReductionOutcome::ReducedToNothing => {
+            // A real reduction, and worth going on to report - but say what
+            // happened, because an empty test case is nearly always a sign
+            // that `--problem` matches something the compiler says about an
+            // empty file too, and so has been matching that all along.
+            announce_progress(
+                "creduce reduced the test case to an empty file. That is a complete \
+                 reduction, but it means the --problem string is matching something \
+                 which does not need any of the input; tighten it and run again.",
+            );
+            Ok(())
+        }
+        // creduce prints its own diagnosis as it goes, and we let it write
+        // straight to the terminal so a reduction can be watched, so there is
+        // nothing to repeat here - just don't go on to present whatever it
+        // left behind as a minimized test case.
+        ReductionOutcome::Failed => Err(std::io::Error::other(format!(
+            "creduce {status}, so there is no reduced test case to report - see its \
+             own output above for why"
+        ))),
+    }
 }
 
+/// How a finished creduce run went.
+#[derive(Debug, PartialEq, Eq)]
+enum ReductionOutcome {
+    /// It finished, and left a reduced test case behind.
+    Reduced,
+    /// It reduced the input away entirely, which is a success with an empty
+    /// answer rather than a failure.
+    ReducedToNothing,
+    /// It gave up.
+    Failed,
+}
+
+/// Judges a finished creduce run from its exit status and the size of the file
+/// it was reducing.
+///
+/// The exit status is not enough on its own, because creduce exits non-zero for
+/// two opposite reasons. One is failure. The other is succeeding so completely
+/// that nothing is left: `check_for_nonzero_size` in creduce 2.10 prints "our
+/// work here is done." and calls `exit(1)` once every file it was given has
+/// reached zero bytes. Treating that as a failure throws away a reduction which
+/// worked.
+///
+/// The file tells the two apart. creduce reduces in place, so a run which gave
+/// up leaves the file with content in it, and a run which reduced it away
+/// leaves it empty. Checked by size rather than by looking for the
+/// announcement, because that goes to creduce's stdout, which it inherits from
+/// us so that a reduction can be watched while it runs - capturing it to read
+/// one sentence would take that away.
+fn classify_reduction(exited_cleanly: bool, reduced_size: Option<u64>) -> ReductionOutcome {
+    match (exited_cleanly, reduced_size) {
+        // Empty means reduced away, whatever creduce made of it.
+        (_, Some(0)) => ReductionOutcome::ReducedToNothing,
+        (true, _) => ReductionOutcome::Reduced,
+        (false, _) => ReductionOutcome::Failed,
+    }
+}
+
+/// The size of `path`, or `None` if that can't be established - which counts
+/// against a file having been reduced away, since we only believe that of a
+/// file we can see is empty.
+fn file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+/// creduce 2.10 exits 1 after reducing every input to zero bytes, which is a
+/// reduction rather than a failure. Verified against the creduce in use: an
+/// interestingness test which always succeeds leaves a 0-byte file and exits 1.
+#[test]
+fn a_file_reduced_away_is_a_reduction_however_creduce_exits() {
+    assert_eq!(
+        classify_reduction(false, Some(0)),
+        ReductionOutcome::ReducedToNothing
+    );
+    assert_eq!(
+        classify_reduction(true, Some(0)),
+        ReductionOutcome::ReducedToNothing
+    );
+}
+
+#[test]
+fn a_clean_exit_leaving_a_file_is_a_reduction() {
+    assert_eq!(
+        classify_reduction(true, Some(42)),
+        ReductionOutcome::Reduced
+    );
+}
+
+/// The failures do leave the file alone: a creduce given an interestingness
+/// test which never succeeds, or a test script which doesn't exist, exits 1
+/// with the input still at its original size.
+#[test]
+fn giving_up_leaves_the_file_as_it_was_and_is_a_failure() {
+    assert_eq!(
+        classify_reduction(false, Some(42)),
+        ReductionOutcome::Failed
+    );
+}
+
+/// A file we can't stat is not evidence that anything was reduced away, so it
+/// only counts as a reduction if creduce also said the run went fine.
+#[test]
+fn a_file_we_cannot_see_is_judged_by_the_exit_status_alone() {
+    assert_eq!(classify_reduction(true, None), ReductionOutcome::Reduced);
+    assert_eq!(classify_reduction(false, None), ReductionOutcome::Failed);
+}
+
+/// Runs autocxx-gen once over the unreduced input, so that whoever is driving
+/// the reduction can see what it says.
+///
+/// A non-zero exit is not a problem here - it is usually the whole point,
+/// since the thing being reduced is generally something autocxx-gen chokes
+/// on - so this reports how it went rather than failing on it. Silence would
+/// be worse than either: the output of this run is where the `--problem`
+/// string to reduce against comes from.
 fn run_sample_gen_cmd(
     gen_cmd: &str,
     rs_file: &Path,
@@ -434,18 +589,26 @@ fn run_sample_gen_cmd(
     let args = args.collect::<Vec<_>>();
     let args_str = args.join(" ");
     announce_progress(&format!("Running sample gen cmd: {gen_cmd} {args_str}"));
-    std::process::Command::new(gen_cmd).args(args).status()?;
+    let status = std::process::Command::new(gen_cmd).args(args).status()?;
+    announce_progress(&format!("Sample gen cmd {status}"));
     Ok(())
 }
 
+/// Runs the interestingness test once without its `grep`, so that whoever is
+/// driving the reduction can see everything it prints.
+///
+/// As with [`run_sample_gen_cmd`], a non-zero exit is expected rather than
+/// exceptional - the script runs under `set -e` and the steps it runs are the
+/// ones being reduced - so this reports the outcome and carries on.
 fn run_demo_interestingness_test(demo_dir: &Path, test: &Path) -> Result<(), std::io::Error> {
     announce_progress(&format!(
         "Running demo interestingness test in {}",
         demo_dir.to_string_lossy()
     ));
-    std::process::Command::new(test)
+    let status = std::process::Command::new(test)
         .current_dir(demo_dir)
         .status()?;
+    announce_progress(&format!("Demo interestingness test {status}"));
     Ok(())
 }
 

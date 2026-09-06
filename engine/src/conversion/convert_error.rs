@@ -89,6 +89,18 @@ pub enum ConvertErrorFromCpp {
     DidNotGenerateAnythingUsable(String, Box<ConvertErrorFromCpp>),
     #[error("Found an attempt at using a forward declaration ({}) inside a templated cxx type such as UniquePtr or CxxVector. If the forward declaration is a typedef, perhaps autocxx wasn't sure whether or not it involved a forward declaration. If you're sure it didn't, then you may be able to solve this by using instantiable!.", .0.to_cpp_name())]
     TypeContainingForwardDeclaration(QualifiedName),
+    /// Reported in place of [`Self::TypeContainingForwardDeclaration`] where we
+    /// know why the stand-in type is standing in. That message suggests
+    /// `instantiable!`, which is the answer when autocxx merely couldn't tell
+    /// whether a typedef reached a forward declaration - and is no help at all
+    /// when the target was, say, a nested type which isn't public. Where
+    /// there's a real reason on file, give that.
+    #[error("Found an attempt at using {}, which autocxx replaced with an opaque type because it could not generate {}: {}", .name.to_cpp_name(), .culprit.to_cpp_name(), .reason)]
+    TypeContainingUngeneratableTypedef {
+        name: QualifiedName,
+        culprit: QualifiedName,
+        reason: Box<ConvertErrorFromCpp>,
+    },
     #[error("Found an attempt at using a type marked as blocked! ({})", .0.to_cpp_name())]
     Blocked(QualifiedName),
     #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]
@@ -395,6 +407,30 @@ mod tests {
         assert!(
             rendered.contains("std::function is not supported by bindgen or cxx"),
             "the advice did not reach the top of the chain: {rendered}"
+        );
+    }
+
+    /// The other chain MSVC produces, when the `std::function` is reached
+    /// through a class-scoped `using` alias rather than named outright. Same
+    /// advice, one more wrapper. Assembled by hand for the same reason as
+    /// above; what exercises it end to end is
+    /// `test_class_scoped_alias_reports_the_targets_own_problem`, which builds
+    /// the same shape out of a private nested class so that it runs anywhere.
+    #[test]
+    fn the_std_function_advice_survives_the_hop_through_an_alias() {
+        let err = ConvertErrorFromCpp::TypeContainingUngeneratableTypedef {
+            name: QualifiedName::new_from_cpp_name("Requester::RespHandler"),
+            culprit: QualifiedName::new_from_cpp_name("std::function"),
+            reason: Box::new(ConvertErrorFromCpp::UnsupportedStdFunction),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("std::function is not supported by bindgen or cxx"),
+            "the advice did not survive the alias: {rendered}"
+        );
+        assert!(
+            rendered.contains("RespHandler"),
+            "the alias the user wrote went unnamed: {rendered}"
         );
     }
 }

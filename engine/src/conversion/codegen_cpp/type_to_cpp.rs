@@ -110,10 +110,12 @@ impl CppNameMap {
             .iter()
             .filter(|api| shadowed_types.contains(api.name()))
             .filter_map(|api| {
-                // Only a class, struct or enum can be named with an elaborated
-                // type specifier, so those are the only kinds we can rescue. A
-                // typedef whose name is shadowed cannot be named at all.
+                // Only a class, struct, union or enum can be named with an
+                // elaborated type specifier, so those are the only kinds we can
+                // rescue. A typedef whose name is shadowed cannot be named at
+                // all.
                 let tag = match api {
+                    Api::Struct { details, .. } if is_union(&details.item) => "union",
                     Api::Struct { .. } | Api::ForwardDeclaration { .. } => "struct",
                     Api::Enum { .. } => "enum",
                     _ => return None,
@@ -275,6 +277,27 @@ impl CppNameMap {
     pub(crate) fn get(&self, name: &QualifiedName) -> Option<&CppOriginalName> {
         self.original_names.get(name)
     }
+}
+
+/// Whether this struct is `bindgen`'s rendering of a C++ union.
+///
+/// `bindgen` gives every member of a union it can't express as a Rust `union`
+/// the type `__BindgenUnionField<T>`, all at offset zero. That marker is the
+/// only sign left that the type was a union rather than a struct, and it
+/// matters here because an elaborated type specifier has to use the tag the
+/// type was declared with: `struct` and `class` are interchangeable, `union` is
+/// not, and getting it wrong is an error rather than a warning.
+///
+/// The same marker is what tells `byvalue_checker` a type can't be POD.
+fn is_union(item: &syn::ItemStruct) -> bool {
+    item.fields.iter().any(|field| match &field.ty {
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "__BindgenUnionField"),
+        _ => false,
+    })
 }
 
 /// The C++ name a type would have if we weren't renaming it to dodge a
