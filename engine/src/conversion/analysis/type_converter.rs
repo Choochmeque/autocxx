@@ -117,12 +117,28 @@ pub(crate) enum TypeConversionContext {
         struct_type_params: HashSet<Ident>,
     },
     WithinContainer,
+    /// The target of a typedef. Unlike every other context here this is a
+    /// definition rather than a use: the alias may go on to be a struct field,
+    /// a parameter, both or neither, and which of those it is decides what its
+    /// target is allowed to be.
+    ///
+    /// Every position-dependent answer is the one `WithinReference { false }`
+    /// gave when it stood in for this. Those are not a by-value parameter's
+    /// answers, which differ in one place: a typedef may name a type only
+    /// forward-declared, where an `OuterType` may not. The single change is
+    /// that the one thing which can go wrong with a pointer target and depends
+    /// on where it is - the target being a pointer to a pointer - is not
+    /// decided here, but wherever the alias is converted, where it can be. The
+    /// rest of what makes a pointee valid still is decided here. See
+    /// `ensure_pointee_is_valid` and the `Type::Ptr` arm of
+    /// `convert_type_path_which_is_not_a_reference`.
+    WithinTypedef,
     OuterType,
 }
 
 impl TypeConversionContext {
     fn allow_instantiation_of_forward_declaration(&self) -> bool {
-        matches!(self, Self::WithinReference { .. })
+        matches!(self, Self::WithinReference { .. } | Self::WithinTypedef)
     }
 
     /// Whether the type being converted is a struct field, or sits inside one
@@ -138,7 +154,13 @@ impl TypeConversionContext {
             Self::WithinReference {
                 within_struct_field,
             } => *within_struct_field,
-            Self::WithinContainer | Self::OuterType => false,
+            // `false` for a typedef target for the reason the doc comment on
+            // `WithinTypedef` gives: this is the answer the context it replaced
+            // gave. It is not an answer deferred to the eventual field - a
+            // target which needs `true`, a bindgen opaque blob, is turned down
+            // here and becomes an opaque type instead, so no field ever gets to
+            // re-ask. Only a pointer target's own question waits for a use.
+            Self::WithinContainer | Self::WithinTypedef | Self::OuterType => false,
         }
     }
 
@@ -736,13 +758,38 @@ impl<'a> TypeConverter<'a> {
             // level of nesting: the pointee is converted as
             // `WithinReference`, so `float***` is still refused.
             //
-            // TODO: this only reaches fields whose pointer-to-pointer type is
-            // written out. `typedef float** M; struct S { M data; };` still
-            // fails, because `tdef.rs` converts every typedef as
-            // `WithinReference` - the typedef is one API, with no single place
-            // of use to take a context from - so `M` is discarded before the
-            // field is ever looked at, and `S` then cannot be POD.
-            Type::Ptr(..) if matches!(ctx, TypeConversionContext::WithinStructField { .. }) => {
+            // A typedef target is let through for a different reason: the
+            // alias has no place of use yet, so there is nothing here to
+            // decide. Whether `typedef float** M` is usable depends on where
+            // `M` turns up, and every position which converts a type asks
+            // again when it does, because the typedef arm of
+            // `convert_type_path_which_is_not_a_reference` re-converts a
+            // pointer target against that position's own context. The readers
+            // which take the stored target without converting it want less
+            // than that: the by-value checker only asks whether the outermost
+            // thing is a pointer, dependency collection and
+            // `replace_hopeless_typedef_targets` read the names it mentions,
+            // and codegen emits a `pub use` of the alias. None of them puts the
+            // pointer type into the [cxx::bridge]: a typedef is not declared
+            // there, and the one route by which an alias reaches it - being
+            // replaced by an opaque type, when a name it depends on was ignored
+            // - carries the name and nothing of the target. Refusing it here
+            // would instead throw the alias away at its definition and take
+            // every use down with it, field or not.
+            //
+            // The other caller is the rvalue-reference arm of
+            // `convert_type_path`, so `typedef float*&& R` is now stored rather
+            // than refused. That is the same layout - one pointer to a `float*`
+            // - which a field written `float*&& x` already gets through the
+            // struct-field arm, and a use of the alias in a signature still
+            // goes through `convert_ptr` and is still turned down.
+            Type::Ptr(..)
+                if matches!(
+                    ctx,
+                    TypeConversionContext::WithinStructField { .. }
+                        | TypeConversionContext::WithinTypedef
+                ) =>
+            {
                 Ok(())
             }
             Type::Ptr(..) => Err(ConvertErrorFromCpp::InvalidPointerPointee),

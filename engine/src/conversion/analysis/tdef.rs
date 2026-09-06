@@ -195,13 +195,12 @@ fn get_replacement_typedef(
         (*ity.ty).clone(),
         name.name.get_namespace(),
         // A typedef is one API with no single place of use, so there is no
-        // context to inherit; `within_struct_field: false` is the safe half of
-        // the choice. It costs a typedef whose target bindgen could only
-        // express as an opaque blob, which the next arm turns into an opaque
-        // type rather than an alias for some unrelated integer.
-        &TypeConversionContext::WithinReference {
-            within_struct_field: false,
-        },
+        // context to inherit. Where the answer has to be given now it is given
+        // conservatively - a typedef whose target bindgen could only express as
+        // an opaque blob is refused here, which the next arm turns into an
+        // opaque type rather than an alias for some unrelated integer - and
+        // where it can wait for a use, it waits.
+        &TypeConversionContext::WithinTypedef,
     );
     match type_conversion_results {
         // bindgen could not name the type this typedef points at, so it gave
