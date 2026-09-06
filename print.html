@@ -1668,10 +1668,16 @@ bind one either; its function support stops at
 <a href="https://cxx.rs/binding/fn.html">function pointers</a>. <code>autocxx</code> therefore
 generates nothing which takes or returns one. Only the members which mention
 <code>std::function</code> are lost: the rest of the enclosing class is generated as usual.</p>
-<p>A shim which takes a plain C function pointer does not help, because <code>bindgen</code>
-writes those as <code>Option&lt;extern "C" fn(..)&gt;</code> and <code>autocxx</code> has no binding for
-<code>Option</code> either. To have C++ call into Rust, either subclass a C++ observer
-class from Rust or hand C++ a named Rust function; both are described under
+<p>A shim which takes a plain C function pointer does not help either: <code>cxx</code> has
+no function pointer type, so <code>autocxx</code> has nothing to declare to it, and a
+function with one in its signature is refused saying so. A <em>struct field</em> of
+function pointer type is a different matter and does work: a field is data
+whose layout <code>autocxx</code> copies rather than a type crossing the language
+boundary, so a struct holding one can even be POD, and Rust can put one of its
+own <code>extern "C"</code> functions there for C++ to call. It is passing or returning
+one that has nowhere to go.</p>
+<p>To have C++ call into Rust without that, either subclass a C++ observer class
+from Rust or hand C++ a named Rust function; both are described under
 <a href="rust_calls.html">callbacks into Rust</a>.</p>
 <p>The explanation reaches you through the doc comment of the stub standing in for
 whatever could not be generated, whichever standard library you build against,
