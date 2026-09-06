@@ -20090,26 +20090,72 @@ fn test_pod_function_pointer_field_written_from_rust() {
 
 /// A function pointer in a *signature* is a different matter: that type has to
 /// go into the `cxx::bridge`, and cxx has no function pointer type. So it stays
-/// refused, and the reason reaches the user rather than cxx complaining about
-/// a type it cannot parse. See google/autocxx#1494.
-///
-/// TODO: the complaint names `std::option::Option`, which is the Rust type
-/// bindgen wrote rather than anything the user's C++ says. Saying "function
-/// pointer" instead would need its own `ConvertErrorFromCpp` variant, raised
-/// where the type converter meets `Option<fn ..>` outside a struct field.
+/// refused - and the complaint says "function pointer" and points at the
+/// documented way to have C++ call into Rust, rather than naming
+/// `std::option::Option`, which is bindgen's Rust spelling of it and appears
+/// nowhere in the user's C++. See google/autocxx#1494.
 #[test]
 fn test_function_pointer_parameter_still_refused() {
     let hdr = indoc! {"
         #include <cstdint>
         inline uint32_t fx_call_it(uint32_t (*fx_f)(uint32_t)) { return fx_f(1); }
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {},
         &["fx_call_it"],
         &[],
-        "UnsupportedBuiltInType",
+        &[
+            "FunctionPointerInSignature",
+            "A function pointer appears in this signature",
+            "rust_calls.html",
+        ],
+    );
+}
+
+/// A function pointer *returned*, which reaches the type converter by a
+/// different route from a parameter, and gets the same explanation.
+#[test]
+fn test_function_pointer_return_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t (*fx_getter)(uint32_t);
+        inline fx_getter fx_which_one(bool) { return nullptr; }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_which_one"],
+        &[],
+        &[
+            "FunctionPointerInSignature",
+            "A function pointer appears in this signature",
+        ],
+    );
+}
+
+/// The same through a typedef, which is how C++ usually spells a callback
+/// parameter. The typedef itself is kept (a struct field may hold one), so the
+/// refusal has to happen where it is used rather than where it is declared.
+#[test]
+fn test_function_pointer_typedef_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t (*fx_cb)(uint32_t);
+        inline uint32_t fx_call_cb(fx_cb f) { return f(1); }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_call_cb"],
+        &[],
+        &[
+            "FunctionPointerInSignature",
+            "A function pointer appears in this signature",
+        ],
     );
 }
 
