@@ -258,6 +258,32 @@ for full details, but you must decide who owns your subclass:</p>
 It's recommended that you wrap any such subclass in some sort of Rust newtype
 wrapper which <a href="rustic.html">enforces any ownership invariants</a> so that users
 of your types literally can't make any mistakes.</p>
+<h2 id="subclasses-without-a-safety-policy"><a class="header" href="#subclasses-without-a-safety-policy">Subclasses without a <code>safety!</code> policy</a></h2>
+<p>Where the C++ superclass has a single trivial constructor, autocxx normally
+implements
+<a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html"><code>CppPeerConstructor</code></a>
+for your subclass. It stops doing so if you leave out the
+<a href="safety.html"><code>safety!</code> directive</a>, because then every generated function is
+<code>unsafe</code> - the peer's constructor included - and <code>make_peer</code> is a safe method,
+so the generated body wouldn't compile.</p>
+<p>Subclasses still work; you write that one impl yourself, putting the <code>unsafe</code>
+block around the call:</p>
+<pre><code class="language-rust ignore">use autocxx::prelude::*;
+use autocxx::subclass::{CppPeerConstructor, CppSubclass, CppSubclassRustPeerHolder};
+use cxx::UniquePtr;
+
+impl CppPeerConstructor&lt;ffi::MyObserverCpp&gt; for MyObserver {
+    fn make_peer(
+        &amp;mut self,
+        peer_holder: CppSubclassRustPeerHolder&lt;Self&gt;,
+    ) -&gt; UniquePtr&lt;ffi::MyObserverCpp&gt; {
+        UniquePtr::emplace(unsafe { ffi::MyObserverCpp::new(peer_holder) })
+    }
+}</code></pre>
+<p>This is the same impl you would write under a <code>safety!</code> policy for a
+superclass with several constructors, or one which takes arguments - see the
+trait's documentation. Nothing else about the subclass changes: the ownership
+constructors, the <code>_methods</code> trait and the casts all behave as they do above.</p>
 <h2 id="calling-superclass-methods"><a class="header" href="#calling-superclass-methods">Calling superclass methods</a></h2>
 <p>Each subclass also implements a trait called <code>&lt;superclass name&gt;_supers</code> which
 includes all superclass methods. You can call methods on that, and if you
