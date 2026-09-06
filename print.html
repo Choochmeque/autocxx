@@ -624,6 +624,14 @@ to pick a different representation for particular enums:</p>
 <tr><td><code>BitfieldEnum</code></td><td>The same newtype, plus <code>&amp;</code>, `</td><td><code>, </code>^<code>and</code>!`</td></tr>
 </tbody></table>
 </div>
+<p>The integer the two newtype styles wrap is the enum's underlying type as the
+C++ compiler sees it, so <code>flags.0</code> is a <code>c_int</code> for <code>enum Flags : int</code> and a
+<code>c_uint</code> for <code>enum Flags : unsigned</code>. An unscoped enum with no fixed underlying
+type has no portable answer: the compiler picks, and it may pick differently
+from one target or set of flags to the next. On the targets autocxx tests, MSVC
+gives it <code>int</code>, while gcc and clang give one whose enumerators are all
+non-negative <code>unsigned int</code>. Name the underlying type in C++ if you intend to
+write <code>.0</code>'s type down.</p>
 <p>The directive takes the style first, then any number of enum names, and may be
 repeated to give different styles to different enums:</p>
 <pre><code class="language-rust ignore">enum_style!(BitfieldEnum, "FileFlags", "WindowFlags")
@@ -643,7 +651,7 @@ gives you an opaque type with no constants on it, which is unlikely to be what
 you wanted. The two rustified styles work with either, since a Rust <code>enum</code> is
 POD regardless.</p>
 <h4 id="c-header-3"><a class="header" href="#c-header-3">C++ header:</a></h4>
-<pre><code class="language-cpp">enum FileFlags {
+<pre><code class="language-cpp">enum FileFlags : int {
     READ = 1 &lt;&lt; 0,
     WRITE = 1 &lt;&lt; 1,
     EXECUTE = 1 &lt;&lt; 2,
