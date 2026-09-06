@@ -1314,7 +1314,9 @@ and the generated code carries an explanation where the method would have been.<
 </ol><div style="break-before: page; page-break-before: always;"></div><h1 id="c-exceptions"><a class="header" href="#c-exceptions">C++ Exceptions</a></h1>
 <p>C++ exceptions are supported via the <code>throws!</code> directive. When a function is marked
 with <code>throws!</code>, its Rust binding returns <code>Result&lt;T, cxx::Exception&gt;</code> instead of <code>T</code>,
-allowing you to handle C++ exceptions that propagate across the FFI boundary.</p>
+allowing you to handle C++ exceptions that propagate across the FFI boundary.
+Constructors take a slightly different shape, for reasons the
+<a href="exceptions.html#constructors">Constructors</a> section explains.</p>
 <h2 id="basic-usage"><a class="header" href="#basic-usage">Basic usage</a></h2>
 <h4 id="c-header-17"><a class="header" href="#c-header-17">C++ header:</a></h4>
 <pre><code class="language-cpp">
@@ -1411,12 +1413,153 @@ fn main() {
     assert!(result.is_err());
 }
 </code></pre>
+<h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
+<p>A constructor is named in <code>throws!</code> the way C++ names it - <code>Class::Class</code>:</p>
+<h4 id="c-header-20"><a class="header" href="#c-header-20">C++ header:</a></h4>
+<pre><code class="language-cpp">
+#include &lt;stdexcept&gt;
+#include &lt;cstdint&gt;
+class Goat {
+public:
+    Goat(uint32_t horns) {
+        if (horns &gt; 2) throw std::runtime_error("too many horns");
+        horns_ = horns;
+    }
+    uint32_t horns() const { return horns_; }
+private:
+    uint32_t horns_;
+};
+
+</code></pre>
+<h4 id="rust-20"><a class="header" href="#rust-20">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("Goat")
+    throws!("Goat::Goat")
+}
+
+fn main() {
+    let goat = ffi::Goat::new(2).try_within_unique_ptr().ok().unwrap();
+    assert_eq!(goat.horns(), 2);
+
+    let complaint = ffi::Goat::new(9).try_within_unique_ptr().err().unwrap();
+    assert_eq!(complaint.what(), "too many horns");
+}
+</code></pre>
+<p>An ordinary constructor hands back an <code>impl New</code>, a recipe you finish with
+<code>within_unique_ptr()</code>, <code>within_box()</code> or the <code>moveit!</code> macro. One named by
+<code>throws!</code> hands back an <code>impl TryNew</code> instead, and each of those finishers has
+a fallible counterpart:</p>
+<div class="table-wrapper"><table><thead><tr><th>Infallible</th><th>Fallible</th><th>Gives you</th></tr></thead><tbody>
+<tr><td><code>.within_unique_ptr()</code></td><td><code>.try_within_unique_ptr()</code></td><td><code>Result&lt;UniquePtr&lt;T&gt;, cxx::Exception&gt;</code></td></tr>
+<tr><td><code>.within_box()</code></td><td><code>.try_within_box()</code></td><td><code>Result&lt;Pin&lt;Box&lt;T&gt;&gt;, cxx::Exception&gt;</code></td></tr>
+<tr><td><code>.within_cpp_pin()</code></td><td><code>.try_within_cpp_pin()</code></td><td><code>Result&lt;CppPin&lt;T&gt;, cxx::Exception&gt;</code></td></tr>
+<tr><td><code>moveit! { let x = ...; }</code></td><td><code>stack_slot!(storage);</code> then <code>storage.try_emplace(...)</code></td><td><code>Result&lt;Pin&lt;MoveRef&lt;T&gt;&gt;, cxx::Exception&gt;</code></td></tr>
+</tbody></table>
+</div>
+<p>There is deliberately no <code>Result&lt;impl New, _&gt;</code>: that would decide whether
+construction failed before the constructor had run, whereas a C++ constructor
+only throws once it is under way. <code>impl TryNew</code> says the right thing - the
+place stays uninitialized when construction fails - and it is why the method
+names differ rather than just the return types.</p>
+<h3 id="on-the-stack"><a class="header" href="#on-the-stack">On the stack</a></h3>
+<p><code>moveit!</code> reserves stack storage and constructs into it in a single <code>let</code>,
+which leaves nowhere for a failure to go. So the two halves are written
+separately, and the half which can fail is an ordinary expression which takes
+<code>?</code>:</p>
+<h4 id="c-header-21"><a class="header" href="#c-header-21">C++ header:</a></h4>
+<pre><code class="language-cpp">
+#include &lt;stdexcept&gt;
+#include &lt;cstdint&gt;
+class Goat {
+public:
+    Goat(uint32_t horns) {
+        if (horns &gt; 2) throw std::runtime_error("too many horns");
+        horns_ = horns;
+    }
+    uint32_t horns() const { return horns_; }
+private:
+    uint32_t horns_;
+};
+
+</code></pre>
+<h4 id="rust-21"><a class="header" href="#rust-21">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("Goat")
+    throws!("Goat::Goat")
+}
+
+fn graze() -&gt; Result&lt;u32, cxx::Exception&gt; {
+    autocxx::stack_slot!(storage);
+    let goat = storage.try_emplace(ffi::Goat::new(1))?;
+    Ok(goat.horns())
+}
+
+fn main() {
+    assert_eq!(graze().unwrap(), 1);
+}
+</code></pre>
+<p>When a constructor throws, the storage which had been set aside for the object
+is released without any destructor running on it - the object never existed.
+Whichever of its members had already been constructed are destroyed by C++
+itself as the exception unwinds, exactly as they would be in a C++ program.</p>
+<h3 id="what-a-designation-covers"><a class="header" href="#what-a-designation-covers">What a designation covers</a></h3>
+<p><code>throws!("Goat::Goat")</code> marks every constructor of <code>Goat</code>, because all of them
+share that C++ name; there is no spelling which picks out one overload. A
+constructor which is marked but which never actually throws is fallible all the
+same - <code>throws!</code> describes what C++ is allowed to do, not what it did - and its
+<code>Result</code> is simply always <code>Ok</code>. Constructors nobody has named are untouched:
+they keep the infallible <code>impl New</code> they always had.</p>
+<p>Naming the class alone - <code>throws!("Goat")</code> - also marks its constructors, since
+<code>throws!</code> matches a trailing qualified name. Prefer <code>Goat::Goat</code>: the short form
+would equally match a free function called <code>Goat</code>.</p>
+<p>One kind of constructor the designation cannot reach is a copy or move
+constructor the class declares for itself. Those become <code>moveit</code>'s <code>CopyNew</code>
+and <code>MoveNew</code>, whose methods return nothing and so have nowhere to put an
+exception; <code>throws!("Goat::Goat")</code> names them along with the rest, but leaves
+them as they were, and a copy or move constructor which throws still terminates
+the process. The same goes for a destructor, which becomes <code>Drop</code> - and which
+should not throw in C++ either. Only the value constructors of the class become
+fallible.</p>
+<h2 id="functions-which-return-a-class-by-value"><a class="header" href="#functions-which-return-a-class-by-value">Functions which return a class by value</a></h2>
+<p>A <code>throws!</code> function which returns a non-POD type by value is built the same
+way as a constructor - C++ writes the result into a place Rust provides - so it
+hands back an <code>impl TryNew</code> and is finished with the same <code>try_</code> methods:</p>
+<pre><code class="language-rust ignore">let made = ffi::make_goat(2).try_within_unique_ptr()?;</code></pre>
+<h2 id="subclasses"><a class="header" href="#subclasses">Subclasses</a></h2>
+<p>If the C++ superclass's constructor can throw, so can the constructor of the
+peer object <code>autocxx</code> generates for your subclass, and that peer constructor is
+the one to name: <code>throws!("MySubclassCpp::MySubclassCpp")</code>. Implement
+<a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html"><code>CppPeerConstructor::try_make_peer</code></a>
+as well as <code>make_peer</code>, and construct the subclass with <code>try_new_rust_owned</code>,
+<code>try_new_cpp_owned</code> or <code>try_new_self_owned</code>:</p>
+<pre><code class="language-rust ignore">impl CppPeerConstructor&lt;ffi::MySubclassCpp&gt; for MySubclass {
+    fn make_peer(&amp;mut self, holder: CppSubclassRustPeerHolder&lt;Self&gt;)
+        -&gt; cxx::UniquePtr&lt;ffi::MySubclassCpp&gt; {
+        self.try_make_peer(holder).expect("the superclass constructor threw")
+    }
+
+    fn try_make_peer(&amp;mut self, holder: CppSubclassRustPeerHolder&lt;Self&gt;)
+        -&gt; Result&lt;cxx::UniquePtr&lt;ffi::MySubclassCpp&gt;, cxx::Exception&gt; {
+        ffi::MySubclassCpp::new(holder, self.arg).try_within_unique_ptr()
+    }
+}</code></pre>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
 <p>Under the hood, <code>autocxx</code> leverages <a href="https://cxx.rs/binding/result.html">cxx's native exception handling</a>.
 When a function is marked with <code>throws!</code>, the generated cxx bridge declaration
 uses <code>Result&lt;T&gt;</code> as the return type. This causes cxx to automatically wrap
 the C++ call in a try-catch block and convert any caught <code>std::exception</code>
-(or derived types) to <code>cxx::Exception</code>.</p>
+(or derived types) to <code>cxx::Exception</code>. The exception is caught on the C++ side
+of the boundary and never unwinds into Rust.</p>
 <p>The <code>cxx::Exception</code> type provides:</p>
 <ul>
 <li><code>Display</code> implementation to get the exception message (<code>what()</code>)</li>
@@ -1425,14 +1568,27 @@ the C++ call in a try-catch block and convert any caught <code>std::exception</c
 <h2 id="limitations"><a class="header" href="#limitations">Limitations</a></h2>
 <ul>
 <li>
-<p><strong>Constructors</strong>: Throwing constructors are not currently supported due to
-the complexity of <code>moveit::new::New</code> return types. If you need to handle
-constructor failures, consider using a factory function instead.</p>
+<p><strong>Non-std::exception types</strong>: only exceptions derived from <code>std::exception</code>
+are caught and converted, because that is what cxx's <code>catch</code> clause names.
+Something else - an <code>int</code>, a bare string literal, a class of your own which
+derives from nothing - passes straight through it and out of the <code>noexcept</code>
+shim around it, which calls <code>std::terminate</code>. The process dies; it is not
+undefined behaviour, but the <code>Result</code> never arrives either.</p>
 </li>
 <li>
-<p><strong>Non-std::exception types</strong>: Only exceptions derived from <code>std::exception</code>
-are caught and converted. Other thrown types (like integers or strings)
-will still cause undefined behavior.</p>
+<p><strong>Undesignated throwing functions</strong>: if C++ throws out of a function no
+<code>throws!</code> names, the exception reaches a <code>noexcept</code> boundary in the same way
+and the process terminates. That is true of constructors too, so a
+constructor which can throw needs designating even if you intend to treat the
+exception as fatal.</p>
+</li>
+<li>
+<p><strong><code>as_new</code> with a throwing constructor</strong>: <code>as_new</code> takes a <code>New</code>, so a
+<code>throws!</code> constructor cannot be handed straight to a C++ function which takes
+its argument by value - the call would have nowhere to report a failure that
+happened while assembling its arguments. Construct the object first, with
+<code>try_within_unique_ptr()</code> or a <code>stack_slot!</code>, and pass what you get with
+<code>as_mov</code> or <code>as_copy</code>.</p>
 </li>
 <li>
 <p><strong>Performance</strong>: Exception handling adds minimal runtime overhead - the
@@ -1448,13 +1604,13 @@ cost is only incurred when an exception actually occurs.</p>
 <li>Allow Rust subclasses of C++ classes.</li>
 </ul>
 <p>This latter option is most commonly used for implementing "listeners" or <a href="https://en.wikipedia.org/wiki/Observer_pattern">"observers"</a>, so is often in practice how C++ will call into Rust. More details below.</p>
-<h2 id="subclasses"><a class="header" href="#subclasses">Subclasses</a></h2>
+<h2 id="subclasses-1"><a class="header" href="#subclasses-1">Subclasses</a></h2>
 <p>There is limited and experimental support for creating Rust subclasses of
 C++ classes. (Yes, even more experimental than all the rest of this!)
 See <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppSubclass.html"><code>subclass::CppSubclass</code></a> for information about how you do this.
 This is useful primarily if you want to listen out for messages broadcast
 using the C++ observer/listener pattern.</p>
-<h4 id="c-header-20"><a class="header" href="#c-header-20">C++ header:</a></h4>
+<h4 id="c-header-22"><a class="header" href="#c-header-22">C++ header:</a></h4>
 <pre><code class="language-cpp">class GoatObserver {
 public:
     virtual void goat_full() const = 0;
@@ -1466,7 +1622,7 @@ void deregister_observer();
 void feed_goat();
 
 </code></pre>
-<h4 id="rust-20"><a class="header" href="#rust-20">Rust:</a></h4>
+<h4 id="rust-22"><a class="header" href="#rust-22">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 use autocxx::subclass::*;
@@ -1523,7 +1679,7 @@ of your types literally can't make any mistakes.</p>
 <p>Each subclass also implements a trait called <code>&lt;superclass name&gt;_supers</code> which
 includes all superclass methods. You can call methods on that, and if you
 don't implement a particular method, that will be used as the default.</p>
-<h4 id="c-header-21"><a class="header" href="#c-header-21">C++ header:</a></h4>
+<h4 id="c-header-23"><a class="header" href="#c-header-23">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;iostream&gt;
 class Dinosaur {
@@ -1537,7 +1693,7 @@ public:
 
 
 </code></pre>
-<h4 id="rust-21"><a class="header" href="#rust-21">Rust:</a></h4>
+<h4 id="rust-23"><a class="header" href="#rust-23">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 use autocxx::subclass::*;
@@ -1603,7 +1759,7 @@ appears as a Rust <code>const</code>, so you can use it anywhere.</p>
 <p>A variable which instead lives at some address, such as one of
 <a href="cpp_types.html">POD</a> struct type, appears as a Rust <code>static</code>. Reading it is
 <code>unsafe</code>, because C++ may be changing it at the same time:</p>
-<h4 id="c-header-22"><a class="header" href="#c-header-22">C++ header:</a></h4>
+<h4 id="c-header-24"><a class="header" href="#c-header-24">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Point {
@@ -1614,7 +1770,7 @@ struct Point {
 extern const Point ORIGIN;
 
 </code></pre>
-<h4 id="rust-22"><a class="header" href="#rust-22">Rust:</a></h4>
+<h4 id="rust-24"><a class="header" href="#rust-24">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1702,11 +1858,11 @@ explanation.</p>
 <p>See <a href="https://docs.rs/autocxx/latest/autocxx/macro.safety.html"><code>safety!</code></a> in the documentation for more details.</p>
 <h2 id="examples-with-and-without-safetyunsafe"><a class="header" href="#examples-with-and-without-safetyunsafe">Examples with and without <code>safety!(unsafe)</code></a></h2>
 <p>Without a <code>safety!</code> directive:</p>
-<h4 id="c-header-23"><a class="header" href="#c-header-23">C++ header:</a></h4>
+<h4 id="c-header-25"><a class="header" href="#c-header-25">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
 </code></pre>
-<h4 id="rust-23"><a class="header" href="#rust-23">Rust:</a></h4>
+<h4 id="rust-25"><a class="header" href="#rust-25">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1720,11 +1876,11 @@ fn main() {
 }
 </code></pre>
 <p>With a <code>safety!</code> directive:</p>
-<h4 id="c-header-24"><a class="header" href="#c-header-24">C++ header:</a></h4>
+<h4 id="c-header-26"><a class="header" href="#c-header-26">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
 </code></pre>
-<h4 id="rust-24"><a class="header" href="#rust-24">Rust:</a></h4>
+<h4 id="rust-26"><a class="header" href="#rust-26">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1781,7 +1937,7 @@ reference:</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="structuring-a-large-codebase"><a class="header" href="#structuring-a-large-codebase">Structuring a large codebase</a></h1>
 <p>If you have multiple modules, it may be inconvenient to generate all bindings in one <code>include_cpp!</code> invocation.
 There is <em>limited</em> support to refer from one set of bindings to another, using the <code>extern_cpp_type!</code> directive.</p>
-<h4 id="c-header-25"><a class="header" href="#c-header-25">C++ header:</a></h4>
+<h4 id="c-header-27"><a class="header" href="#c-header-27">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 struct A {
     A() : a(0) {}
@@ -1794,7 +1950,7 @@ void handle_a(const A&amp; a);
 A create_a(B);
 
 </code></pre>
-<h4 id="rust-25"><a class="header" href="#rust-25">Rust:</a></h4>
+<h4 id="rust-27"><a class="header" href="#rust-27">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
