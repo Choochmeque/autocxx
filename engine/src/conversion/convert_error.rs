@@ -148,6 +148,8 @@ pub enum ConvertErrorFromCpp {
         "This type is nested within another struct/class with protected or private visibility."
     )]
     NonPublicNestedType,
+    #[error("A mutable C++ reference to rust::Str appears here. cxx spells Rust's `&str` as a `rust::Str` value, so `rust::Str&` would become `Pin<&mut &str>` in Rust: C++ owns that slot and may write a (pointer, length) pair of its own into it, leaving Rust holding a `&str` whose lifetime nothing has checked. As a parameter, take the `rust::Str` by value - that is how cxx hands a `&str` across - or write `const rust::Str&` if C++ only reads it; the `safety!(unsafe_references_wrapped)` policy accepts the mutable reference as well, wrapping it in a C++ reference type out of which a `&str` can only be got by an unsafe call the caller vouches for. As a return, a borrowed string needs some input reference for autocxx to give it a lifetime, and without one a `rust::Str` or `const rust::Str&` return is turned down too, so return an owned `rust::String`.")]
+    MutableReferenceToRustStr,
     #[error("This function returns an rvalue reference (&&) which is not yet supported.")]
     RValueReturn,
     #[error("This method is rvalue-reference-qualified (`&&`), so it can only be called on an object which is about to be discarded. autocxx always holds C++ objects behind a reference or a smart pointer, so it has no way to express that; the method is therefore not generated. See https://github.com/google/autocxx/issues/837.")]

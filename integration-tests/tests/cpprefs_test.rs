@@ -363,11 +363,12 @@ fn test_value_parameter_from_wrappers_cpprefs() {
 
 /// `rust::Str&` is a mutable C++ reference like any other, and in this mode it
 /// becomes a wrapper like any other - around the `&str` which is how cxx
-/// spells a `rust::Str`. Plain mode has the same header in
-/// `test_pass_rust_str_by_mut_ref`, where the parameter is `Pin<&mut &str>`:
-/// there Rust holds a mutable reference to the very fat pointer C++ is about
-/// to write to, and here it holds none. What C++ writes there is still
-/// unchecked, so the lifetime half of the note in `type_converter.rs` stands.
+/// spells a `rust::Str`. This is the one mode that keeps the shape: plain mode
+/// refuses it (`test_pass_rust_str_by_mut_ref_refused`) because there the
+/// parameter is a `Pin<&mut &str>`, a mutable reference to the very fat
+/// pointer C++ is about to overwrite. Here Rust holds no reference to it at
+/// all - a `CppMutRef` is never dereferenced except through an unsafe call the
+/// caller vouches for - so what C++ writes there stays C++'s business.
 #[test]
 fn test_pass_rust_str_by_mut_ref_cpprefs() {
     let cxx = indoc! {"

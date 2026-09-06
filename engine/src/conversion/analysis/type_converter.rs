@@ -311,16 +311,55 @@ impl<'a> TypeConverter<'a> {
             // correct: cxx spells `&str` as a `rust::Str` value and `&T` as
             // `const T&`, so `&&str` *is* `const rust::Str&`, and `rust::Str`
             // has the same (pointer, length) layout as Rust's `&str`.
-            // `test_pass_rust_str_by_ref` and `test_pass_rust_str_by_mut_ref`
-            // run both shapes end to end.
+            // `test_pass_rust_str_by_ref` runs that shape end to end, and
+            // `test_pass_rust_str` the plain value it wraps.
             //
-            // TODO: the mutable case is the one worth revisiting. `rust::Str&`
-            // becomes `Pin<&mut &str>`, which lets C++ overwrite the fat
-            // pointer with one it owns; Rust then holds a `&str` whose lifetime
-            // nothing checked. That is a real hazard, but it is a lifetime
-            // problem rather than the layout problem an earlier comment here
-            // assumed, and rejecting `rust::Str&` outright would break the
-            // working const case too.
+            // A *mutable* `rust::Str&` is refused, which is what the check
+            // below does. It would become `Pin<&mut &str>`: the slot belongs
+            // to C++, which is free to write a fat pointer of its own into it,
+            // after which Rust holds a `&str` whose lifetime nothing checked.
+            // Under `ReferencesWrappedAllFunctionsSafe` the same parameter
+            // becomes a `CppMutRef` instead, which Rust never dereferences
+            // except through an unsafe call the caller vouches for, so there
+            // it is kept - `test_pass_rust_str_by_mut_ref_cpprefs` covers it.
+            // The const case is untouched either way, because `&&str` hands
+            // Rust no way to write to the slot.
+            //
+            // `rust::Str` is the only type autocxx represents as a borrowed
+            // fat pointer, so it is the only shape this catches.
+            // `rust::Slice<T>` is not a known type at all: bindgen discards
+            // its template parameter, so any signature mentioning one is
+            // already turned down with `UnusedTemplateParam` before reaching
+            // here, by value and by reference alike
+            // (`test_rust_slice_never_reaches_this`). `rust::String&` is a
+            // different problem, not this one - it owns its contents, so there
+            // is no unchecked borrow, and what goes wrong there is that cxx
+            // wants `&mut String` where autocxx writes `Pin<&mut String>`.
+            //
+            // A struct *field* is exempt, because no `Pin<&mut &str>` reaches
+            // Rust from one. A struct with a reference field is never POD -
+            // `generate_pod!` on one already fails, bindgen's reference marker
+            // not being a type the POD analysis knows - so such a struct is
+            // always opaque, and its fields are bytes Rust cannot name, let
+            // alone write through. Refusing the field instead loses autocxx
+            // the knowledge that the struct has a reference member, and it
+            // then offers a default constructor C++ has deleted; see
+            // `test_rust_str_reference_field_is_left_alone`.
+            //
+            // `using StrRef = rust::Str&` is refused at the alias itself,
+            // where the context is `WithinTypedef` and no use is in sight yet.
+            // A signature mentioning the alias then loses the alias it depends
+            // on, which is the right answer; a struct field of that type stays
+            // fine, because the struct was going to be opaque either way.
+            // `test_rust_str_reference_field_is_left_alone` covers the field
+            // spelt both ways.
+            if mutability.is_some()
+                && !ctx.within_struct_field()
+                && Self::is_rust_str(&elem.ty)
+                && !self.config.unsafe_policy.requires_cpprefs()
+            {
+                return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
+            }
             let mut outer = elem.map(|elem| match mutability {
                 Some(_) => Type::Path(parse_quote! {
                     ::core::pin::Pin < & #mutability #elem >
@@ -377,6 +416,22 @@ impl<'a> TypeConverter<'a> {
                 Ok(newp)
             }
         }
+    }
+
+    /// Whether a converted referent is the `&str` which autocxx uses to
+    /// represent a C++ `rust::Str`.
+    ///
+    /// The question is asked of the *converted* type rather than of the name
+    /// C++ wrote, so that a typedef to `rust::Str` answers it too: resolving
+    /// the alias is exactly what the conversion has just done. Nothing else
+    /// converts to a shared Rust reference at this point - C++ has no
+    /// reference to a reference - so `&str` here means `rust::Str` and
+    /// nothing else.
+    fn is_rust_str(ty: &Type) -> bool {
+        matches!(ty, Type::Reference(r)
+            if r.mutability.is_none()
+                && matches!(&*r.elem, Type::Path(p)
+                    if p.qself.is_none() && p.path.is_ident("str")))
     }
 
     fn convert_type_path_which_is_not_a_reference(
