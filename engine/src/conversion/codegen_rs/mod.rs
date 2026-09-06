@@ -703,9 +703,27 @@ impl<'a> RsCodeGenerator<'a> {
                     // can only call the generated constructor under a policy
                     // which makes that constructor safe. Both of the policies
                     // which do are named for it.
-                    // TODO: Create an UnsafeCppPeerConstructor trait for calling an unsafe
-                    // constructor instead? Need to create unsafe versions of everything that uses
-                    // it too.
+                    //
+                    // What this withholds under `AllFunctionsUnsafe` is the
+                    // automatic impl, not the ability to have subclasses: the
+                    // user writes `make_peer` themselves with the unsafe call
+                    // inside it, which is what `test_subclass_no_safety`
+                    // exercises and what the book's "Callbacks into Rust"
+                    // chapter shows.
+                    // The alternative the old note wondered about, a parallel
+                    // unsafe trait, does not stop at one trait: `CppSubclass`
+                    // requires `CppPeerConstructor`, and
+                    // `CppSubclassSelfOwned`, `CppSubclassDefault` and
+                    // `CppSubclassSelfOwnedDefault` each build on
+                    // `CppSubclass`, so an unsafe peer constructor drags an
+                    // unsafe twin of the ownership constructors behind it.
+                    // Other shapes are available - making those ownership
+                    // constructors unsafe for everybody, say - but each of
+                    // them charges the whole subclass API for something the
+                    // user can write once, in one impl, when they need it.
+                    //
+                    // Decision: no unsafe trait; the manual impl is the
+                    // supported route.
                     !matches!(self.unsafe_policy, UnsafePolicy::AllFunctionsUnsafe);
                 self.generate_subclass(
                     name,
@@ -1419,8 +1437,14 @@ impl<'a> RsCodeGenerator<'a> {
     /// explaining why a given type or function couldn't have bindings
     /// generated.
     fn generate_error_entry(err: ConvertErrorFromCpp, ctx: ErrorContext) -> RsCodegenResult {
+        let ctx = ctx.into_type();
+        if !ctx.is_declarable() {
+            // No name Rust would let us hang the docstring on - see
+            // `ErrorContextType::is_declarable`.
+            return RsCodegenResult::default();
+        }
         let err = format!(" autocxx bindings couldn't be generated: {err}");
-        let (impl_entry, output_mod_items) = match ctx.into_type() {
+        let (impl_entry, output_mod_items) = match ctx {
             ErrorContextType::Item(id) | ErrorContextType::SanitizedItem { display: id, .. } => (
                 None,
                 vec![parse_quote! {

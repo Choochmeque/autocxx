@@ -22,14 +22,16 @@ use super::BridgeConverter;
 // the original C++ in integration_tests.rs if possible.
 // Also, if you're pasting in code from github issues, it's
 // important to make sure that the underlying code has an
-// acceptable license. That's why this file is currently blank.
+// acceptable license. That's why what's here is written by hand.
 
-#[allow(dead_code)]
 fn do_test(input: ItemMod) {
-    let tc = parse_quote! {};
+    // `generate_all!` so that a pasted bindgen mod is converted whole; with
+    // no allowlist directive at all the config is still `Unspecified` and
+    // asking whether anything is allowlisted panics.
+    let tc = parse_quote! { generate_all!() };
     let bc = BridgeConverter::new(&[], &tc);
     let inclusions = "".into();
-    let parse_callback_results = UnindexedParseCallbackResults::default().index();
+    let parse_callback_results = UnindexedParseCallbackResults::with_only_a_root_mod().index();
     bc.convert(
         input,
         parse_callback_results,
@@ -47,3 +49,27 @@ fn do_test(input: ItemMod) {
 // fn test_xyz() {
 //      do_test(parse_quote!{ /* paste bindgen output here */})
 // }
+
+/// bindgen names an item `_` whenever the item exists only for its side
+/// effect and has nothing anybody can refer to - the `const _: () = ...`
+/// blocks holding its layout assertions being the case that reaches us.
+/// `_` is a Rust keyword rather than an identifier, so anything autocxx
+/// generates under that name fails to parse; the engine used to panic
+/// trying.
+#[test]
+fn test_underscore_named_item_does_not_panic() {
+    do_test(parse_quote! {
+        mod bindgen {
+            mod root {
+                #[repr(C)]
+                pub struct A {
+                    pub a: u32,
+                }
+                const _: () = {
+                    ["Size of A"][::std::mem::size_of::<A>() - 4usize];
+                    ["Alignment of A"][::std::mem::align_of::<A>() - 4usize];
+                };
+            }
+        }
+    })
+}

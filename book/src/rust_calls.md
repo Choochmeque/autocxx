@@ -103,6 +103,39 @@ It's recommended that you wrap any such subclass in some sort of Rust newtype
 wrapper which [enforces any ownership invariants](rustic.md) so that users
 of your types literally can't make any mistakes.
 
+## Subclasses without a `safety!` policy
+
+Where the C++ superclass has a single trivial constructor, autocxx normally
+implements
+[`CppPeerConstructor`](https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html)
+for your subclass. It stops doing so if you leave out the
+[`safety!` directive](safety.md), because then every generated function is
+`unsafe` - the peer's constructor included - and `make_peer` is a safe method,
+so the generated body wouldn't compile.
+
+Subclasses still work; you write that one impl yourself, putting the `unsafe`
+block around the call:
+
+```rust,ignore
+use autocxx::prelude::*;
+use autocxx::subclass::{CppPeerConstructor, CppSubclass, CppSubclassRustPeerHolder};
+use cxx::UniquePtr;
+
+impl CppPeerConstructor<ffi::MyObserverCpp> for MyObserver {
+    fn make_peer(
+        &mut self,
+        peer_holder: CppSubclassRustPeerHolder<Self>,
+    ) -> UniquePtr<ffi::MyObserverCpp> {
+        UniquePtr::emplace(unsafe { ffi::MyObserverCpp::new(peer_holder) })
+    }
+}
+```
+
+This is the same impl you would write under a `safety!` policy for a
+superclass with several constructors, or one which takes arguments - see the
+trait's documentation. Nothing else about the subclass changes: the ownership
+constructors, the `_methods` trait and the casts all behave as they do above.
+
 ## Calling superclass methods
 
 Each subclass also implements a trait called `<superclass name>_supers` which

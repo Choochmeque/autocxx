@@ -133,6 +133,19 @@ pub(crate) struct UnindexedParseCallbackResults {
 }
 
 impl UnindexedParseCallbackResults {
+    /// What bindgen would have reported for a mod hand-written in a test.
+    /// Every name lookup starts from the root mod, so a
+    /// [`Default::default()`] instance panics on the first one; nothing else
+    /// is needed, because a lookup which finds no entry answers `None`, which
+    /// is exactly "bindgen told us nothing about this name".
+    #[cfg(test)]
+    pub(crate) fn with_only_a_root_mod() -> Self {
+        Self {
+            root_mod: Some(DiscoveredItemId::new(0)),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn index(self) -> ParseCallbackResults {
         let index = self
             .mods_for_items

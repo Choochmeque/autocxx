@@ -39,7 +39,7 @@ use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
 use autocxx_parser::{ExternCppType, IncludeCppConfig, UnsafePolicy};
-use function_wrapper::{CppFunction, CppFunctionBody, TypeConversionPolicy};
+use function_wrapper::{CppFunction, CppFunctionBody, TypeConversionPolicy, RECEIVER_ARG_NAME};
 use itertools::Itertools;
 use proc_macro2::Span;
 use quote::{quote, ToTokens};
@@ -1662,7 +1662,8 @@ impl<'a> FnAnalyzer<'a> {
             for pd in &param_details {
                 let type_name = pd.conversion.converted_rust_type();
                 let arg_name: syn::Pat = if pd.self_type.is_some() {
-                    parse_quote!(autocxx_gen_this)
+                    let receiver = make_ident(RECEIVER_ARG_NAME);
+                    parse_quote!(#receiver)
                 } else {
                     pd.name.clone().into()
                 };

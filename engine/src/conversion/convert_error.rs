@@ -16,7 +16,10 @@ use thiserror::Error;
 
 use crate::{
     known_types, proc_macro_span_to_miette_span,
-    types::{make_ident, InvalidIdentError, Namespace, QualifiedName, STD_FUNCTION_ADVICE},
+    types::{
+        make_ident, validate_str_ok_for_rust, InvalidIdentError, Namespace, QualifiedName,
+        STD_FUNCTION_ADVICE,
+    },
 };
 
 /// Errors which can occur during conversion
@@ -274,7 +277,10 @@ struct PhantomSanitized;
 #[derive(Clone, Debug)]
 pub(crate) struct ErrorContext(Box<ErrorContextType>, PhantomSanitized);
 
-/// All idents in this structure are guaranteed to be something we can safely codegen for.
+/// The idents in this structure are sanitized against the names autocxx
+/// builds in, but not against Rust itself: a name bindgen gave an item can
+/// still be a word Rust reserves. Ask [`ErrorContextType::is_declarable`]
+/// before generating anything under one of them.
 #[derive(Clone, Debug)]
 pub(crate) enum ErrorContextType {
     Item(Ident),
@@ -293,6 +299,26 @@ pub(crate) enum ErrorContextType {
         self_ty: Ident,
         method: Ident,
     },
+}
+
+impl ErrorContextType {
+    /// Whether Rust would accept the names in here as the names of the items
+    /// a documentation stub is made of.
+    ///
+    /// bindgen names an item `_` when it exists only for its side effect -
+    /// the `const _: () = ...` blocks holding its layout assertions are the
+    /// case which reaches autocxx. `_` is one of the words Rust reserves, and
+    /// a stub declared under a reserved word doesn't parse; the engine used
+    /// to panic building one. `_` in particular can't be rescued by a raw
+    /// identifier either, and nothing in autocxx writes one, so for such an
+    /// item there is no stub to be had and the caller emits nothing at all.
+    pub(crate) fn is_declarable(&self) -> bool {
+        let declarable = |id: &Ident| validate_str_ok_for_rust(&id.to_string()).is_ok();
+        match self {
+            Self::Item(id) | Self::SanitizedItem { display: id, .. } => declarable(id),
+            Self::Method { self_ty, method } => declarable(self_ty) && declarable(method),
+        }
+    }
 }
 
 impl ErrorContext {

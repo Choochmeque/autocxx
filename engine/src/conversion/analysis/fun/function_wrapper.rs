@@ -312,6 +312,27 @@ pub(crate) enum CppFunctionKind {
     SynthesizedConstructor,
 }
 
+/// What the receiver is called in everything autocxx generates for a function
+/// wrapper which is a method: the first parameter of the C++ function
+/// `CppCodeGenerator` writes, and the first parameter of the `cxx::bridge`
+/// declaration the function analysis writes for the same function.
+///
+/// Keeping the two the same is a convention, not a requirement: the C++ name
+/// is local to the function `CppCodeGenerator` writes - its signature and its
+/// body, nothing else reads it - the Rust name is local to the bridge
+/// declaration, and C++ matches parameters by position, so the two can
+/// diverge and everything still builds. It earns the constant anyway, because
+/// a reader who meets `autocxx_gen_this` in a compiler diagnostic about the
+/// generated C++ and then again in the bridge is looking at the same
+/// parameter, and one constant is where to say so.
+///
+/// The name does have to be strange: cxx copies bridge parameter names into
+/// the C++ shim it generates, so a C++ method with a parameter genuinely
+/// called `autocxx_gen_this` produces a shim declaring that name twice, which
+/// C++ rejects with "redefinition of parameter". Nothing detects or renames
+/// around that collision today.
+pub(crate) const RECEIVER_ARG_NAME: &str = "autocxx_gen_this";
+
 #[derive(Clone, Debug)]
 pub(crate) struct CppFunction {
     pub(crate) payload: CppFunctionBody,
