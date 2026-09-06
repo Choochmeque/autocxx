@@ -284,6 +284,11 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         // wrong answer here. cl accepts the flag; gcc and clang fail the
         // probe and need nothing anyway.
         builder.flag_if_supported("/Zc:__cplusplus");
+        // Without an /EH model cl.exe warns (C4530) and gives no standard
+        // unwind guarantees, and the shims generated for throws! contain
+        // try/catch. cc adds no /EH flag itself. A user-supplied /EHa in
+        // CXXFLAGS still wins per MSVC's own override rules.
+        builder.flag_if_supported("/EHsc");
         if std::env::var_os("AUTOCXX_ASAN").is_some() {
             builder.flag_if_supported("-fsanitize=address");
         }
