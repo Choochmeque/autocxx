@@ -1012,6 +1012,26 @@ pub(super) fn find_constructors_present(
                 // too. `bases_items_found` and `fields_items_found` are
                 // complete here: the arm above catches the case where a base or
                 // field was not understood.
+                //
+                // Complete, that is, as far as bindgen tells us. An *empty*
+                // base contributes no field for `get_bases` to find, so a class
+                // deriving from an empty base with a destructor is called
+                // trivially destructible here when C++ would not - the same
+                // bindgen gap `test_empty_base_deletes_default_constructor`
+                // waits on.
+                //
+                // Which is why nothing rests on this answer alone. Wherever it
+                // costs a type its destructor, the generated C++ asserts
+                // `std::is_trivially_destructible` for that type, so a class
+                // in this blind spot fails to build instead of quietly losing
+                // its cleanup - see
+                // `codegen_cpp::generate_trivial_destructor_assertion`. Note
+                // that `generate_pod!`'s existing `IsRelocatable` assertion
+                // would *not* have served: cxx lets a user promise that trait
+                // by hand, so it says nothing the language guarantees about
+                // the destructor. Reporting the blind spot as an autocxx
+                // diagnostic rather than a C++ one is what is left to fix,
+                // once bindgen can report empty bases.
                 let destructor_is_trivial = destructor.exists_implicit()
                     && bases_items_found
                         .iter()

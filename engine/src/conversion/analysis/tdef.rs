@@ -138,7 +138,6 @@ fn ignore_typedefs_to_alias_templates(mut apis: ApiVec<TypedefPhase>) -> ApiVec<
     }
 }
 
-#[allow(clippy::too_many_arguments)] // all of them are wanted here
 fn get_replacement_typedef(
     config: &IncludeCppConfig,
     name: ApiName,
