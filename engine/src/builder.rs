@@ -272,6 +272,18 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         let mut counter = 0;
         let mut builder = cc::Build::new();
         builder.cpp(true);
+        // cl.exe reports __cplusplus as 199711L whatever /std: says unless
+        // this is also passed, so a user's header gating declarations on the
+        // standard macro - the portable idiom - would be parsed by libclang
+        // one way (clang reports it truthfully) and compiled by cl another.
+        // Microsoft's own recommendation is to pass this; it only makes the
+        // macro agree with the standard the build already selected.
+        // flag_if_supported rather than a compiler-family test: the probe
+        // runs with the real compiler once the build is fully configured,
+        // whereas asking the half-built Build which family it is got a quiet
+        // wrong answer here. cl accepts the flag; gcc and clang fail the
+        // probe and need nothing anyway.
+        builder.flag_if_supported("/Zc:__cplusplus");
         if std::env::var_os("AUTOCXX_ASAN").is_some() {
             builder.flag_if_supported("-fsanitize=address");
         }
