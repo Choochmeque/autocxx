@@ -36,7 +36,7 @@ use syn::{
 use super::tdef::TypedefAnalysis;
 
 /// Certain kinds of type may require special handling by callers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum TypeKind {
     Regular,
     Pointer,
@@ -44,6 +44,22 @@ pub(crate) enum TypeKind {
     Reference,
     RValueReference,
     MutableReference,
+}
+
+/// What a typedef was analysed to point at: the type its target was converted
+/// to, and what kind of thing that turned out to be.
+///
+/// The kind is kept because it cannot always be read back off the type. A C++
+/// rvalue reference and a C++ pointer both convert to a Rust pointer, so
+/// `typedef T&& R` and `typedef T* P` are indistinguishable by the time
+/// anything uses the alias; only the analysis which unwrapped bindgen's
+/// reference marker knows which of the two it was, and a parameter of the
+/// first kind has to be passed as a value to move from rather than as a
+/// pointer. See google/autocxx#1363.
+#[derive(Debug, Clone)]
+pub(crate) struct TypedefTargetInfo {
+    ty: Type,
+    kind: TypeKind,
 }
 
 /// Results of some type conversion, annotated with a list of every type encountered,
@@ -150,7 +166,7 @@ impl TypeConversionContext {
 /// inspecting the pre-existing list of APIs.
 pub(crate) struct TypeConverter<'a> {
     types_found: HashSet<QualifiedName>,
-    typedefs: HashMap<QualifiedName, Type>,
+    typedefs: HashMap<QualifiedName, TypedefTargetInfo>,
     concrete_templates: HashMap<String, QualifiedName>,
     /// Types we have only a stand-in for, mapped to why - which is known for
     /// a typedef whose target failed, and not for a plain forward declaration.
@@ -387,7 +403,10 @@ impl<'a> TypeConverter<'a> {
         // First let's see if this is a typedef.
         let (mut typ, tn) = match self.resolve_typedef(&original_tn)? {
             None => (typ, original_tn),
-            Some(Type::Path(resolved_tp)) => {
+            Some(TypedefTargetInfo {
+                ty: Type::Path(resolved_tp),
+                ..
+            }) => {
                 // The typedef may resolve to a C function pointer - see
                 // `function_pointer`, which decides what to do with one and is
                 // the only thing that should: nothing within it needs
@@ -417,7 +436,10 @@ impl<'a> TypeConverter<'a> {
                 deps.insert(resolved_tn.clone());
                 (resolved_tp.clone(), resolved_tn)
             }
-            Some(Type::Ptr(resolved_tp)) => {
+            Some(TypedefTargetInfo {
+                ty: Type::Ptr(resolved_tp),
+                kind,
+            }) => {
                 // The typedef resolves to a pointer. Its pointee may
                 // itself involve typedefs (e.g. typedef char C;
                 // typedef C* S;), so convert it like any directly
@@ -425,24 +447,33 @@ impl<'a> TypeConverter<'a> {
                 // verbatim — otherwise the unresolved pointee name
                 // reaches cxx and generation fails with
                 // "unsupported type". See google/autocxx#1368.
+                let is_rvalue_reference = matches!(kind, TypeKind::RValueReference);
                 let mut annotated = self.convert_ptr(resolved_tp.clone(), ns, ctx)?;
                 annotated.types_encountered.extend(deps);
+                // A C++ rvalue reference converts to a pointer as well, so
+                // which of the two this alias names cannot be read back off
+                // the type; that is why the typedef's analysis recorded it.
+                // Calling `typedef T&& R` a pointer costs the caller the one
+                // fact it needs - the parameter is something to move from -
+                // and the C++ shim it then writes takes `T*` and hands it
+                // straight to a function wanting `T&&`, which no compiler
+                // accepts. See google/autocxx#1363.
+                if is_rvalue_reference {
+                    annotated.kind = TypeKind::RValueReference;
+                }
                 return Ok(annotated);
             }
-            Some(other) => {
+            Some(TypedefTargetInfo { ty: other, .. }) => {
                 // Anything else the typedef resolved to was converted when the
                 // typedef itself was analysed, so take it as it stands - but
                 // say what kind it is. A typedef to a C++ reference lands here
                 // as `&T`, and calling that `Regular` costs the caller the one
                 // fact it needs: whether the value borrows, which decides
                 // lifetimes on a returned reference and how a parameter
-                // crosses the bridge. See google/autocxx#1363.
-                //
-                // TODO: a typedef to an rvalue reference does *not* land here.
-                // Analysing it leaves a `Type::Ptr`, the same as a typedef to
-                // a pointer, so the arm above cannot tell the two apart and
-                // both come out as `TypeKind::Pointer`. Recovering that needs
-                // the typedef's own analysis to record which it was.
+                // crosses the bridge. Here the type says which it is, so read
+                // it; what the typedef recorded is only needed where two
+                // different C++ constructs converge on one Rust type, which is
+                // the pointer arm above. See google/autocxx#1363.
                 let kind = match other {
                     Type::Reference(reference) if reference.mutability.is_some() => {
                         TypeKind::MutableReference
@@ -595,16 +626,18 @@ impl<'a> TypeConverter<'a> {
         ))
     }
 
+    /// Follow a chain of typedefs to what it eventually points at, along with
+    /// what the analysis of the last typedef in the chain made of that target.
     fn resolve_typedef<'b>(
         &'b self,
         tn: &QualifiedName,
-    ) -> Result<Option<&'b Type>, ConvertErrorFromCpp> {
+    ) -> Result<Option<&'b TypedefTargetInfo>, ConvertErrorFromCpp> {
         let mut encountered = HashSet::new();
         let mut tn = tn.clone();
         let mut previous_typ = None;
         loop {
             let r = self.typedefs.get(&tn);
-            match r {
+            match r.map(|target| &target.ty) {
                 Some(Type::Path(typ)) => {
                     previous_typ = r;
                     let new_tn = QualifiedName::from_type_path(typ);
@@ -829,7 +862,9 @@ impl<'a> TypeConverter<'a> {
         Ok(TypeKind::Regular)
     }
 
-    fn find_typedefs<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashMap<QualifiedName, Type>
+    fn find_typedefs<A: AnalysisPhase>(
+        apis: &ApiVec<A>,
+    ) -> HashMap<QualifiedName, TypedefTargetInfo>
     where
         A::TypedefAnalysis: TypedefTarget,
     {
@@ -837,8 +872,7 @@ impl<'a> TypeConverter<'a> {
             .filter_map(|api| match &api {
                 Api::Typedef { analysis, .. } => analysis
                     .get_target()
-                    .cloned()
-                    .map(|ty| (api.name().clone(), ty)),
+                    .map(|target| (api.name().clone(), target)),
                 _ => None,
             })
             .collect()
@@ -921,20 +955,23 @@ pub(crate) fn add_analysis<A: AnalysisPhase>(api: UnanalyzedApi) -> Api<A> {
     }
 }
 pub(crate) trait TypedefTarget {
-    fn get_target(&self) -> Option<&Type>;
+    fn get_target(&self) -> Option<TypedefTargetInfo>;
 }
 
 impl TypedefTarget for () {
-    fn get_target(&self) -> Option<&Type> {
+    fn get_target(&self) -> Option<TypedefTargetInfo> {
         None
     }
 }
 
 impl TypedefTarget for TypedefAnalysis {
-    fn get_target(&self) -> Option<&Type> {
-        Some(match self.kind {
-            TypedefKind::Type(ref ty) => &ty.ty,
-            TypedefKind::Use(ref ty) => ty,
+    fn get_target(&self) -> Option<TypedefTargetInfo> {
+        Some(TypedefTargetInfo {
+            ty: match self.kind {
+                TypedefKind::Type(ref ty) => (*ty.ty).clone(),
+                TypedefKind::Use(ref ty) => (***ty).clone(),
+            },
+            kind: self.target_kind.clone(),
         })
     }
 }

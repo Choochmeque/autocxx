@@ -20506,3 +20506,65 @@ fn test_derive_default_on_enum_refused() {
         "DeriveDefaultOnEnum",
     );
 }
+
+/// A typedef to an rvalue reference, used as a parameter. Both a C++ pointer
+/// and a C++ rvalue reference come out of the type converter as a Rust
+/// pointer, so the alias looked exactly like `typedef fx_Movable* P` - and
+/// autocxx wrote a C++ shim taking `fx_Movable*` and handed it to a function
+/// wanting `fx_Movable&&`, which does not compile. See google/autocxx#1363.
+#[test]
+fn test_typedef_to_rvalue_reference_parameter() {
+    let hdr = indoc! {"
+        #include <string>
+        struct fx_Movable { std::string a; };
+        typedef fx_Movable&& fx_MovableRef;
+        inline void fx_take(fx_MovableRef) {}
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Movable::new().within_unique_ptr();
+        ffi::fx_take(a);
+
+        moveit! { let a2 = ffi::fx_Movable::new() };
+        ffi::fx_take(a2);
+    };
+    run_test("", hdr, rs, &["fx_Movable", "fx_take"], &[]);
+}
+
+/// The same through a chain of typedefs, which is the case that decides where
+/// the fact has to be kept: the second alias is analysed by resolving the
+/// first, so an answer worked out afresh at each point of use would have to be
+/// right at every link.
+#[test]
+fn test_typedef_chain_to_rvalue_reference_parameter() {
+    let hdr = indoc! {"
+        #include <string>
+        struct fx_Movable2 { std::string a; };
+        typedef fx_Movable2&& fx_Movable2Ref;
+        typedef fx_Movable2Ref fx_Movable2RefAgain;
+        inline void fx_take2(fx_Movable2RefAgain) {}
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Movable2::new().within_unique_ptr();
+        ffi::fx_take2(a);
+    };
+    run_test("", hdr, rs, &["fx_Movable2", "fx_take2"], &[]);
+}
+
+/// A typedef to a pointer must stay a pointer: the two are told apart by what
+/// the typedef's own analysis recorded, and nothing else, so the case which
+/// keeps that honest belongs next to the one which needed it.
+/// See google/autocxx#1368.
+#[test]
+fn test_typedef_to_pointer_parameter_is_still_a_pointer() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Held { uint32_t a; };
+        typedef fx_Held* fx_HeldPtr;
+        inline uint32_t fx_read_ptr(fx_HeldPtr h) { return h->a; }
+    "};
+    let rs = quote! {
+        let mut held = ffi::fx_Held { a: 42 };
+        assert_eq!(unsafe { ffi::fx_read_ptr(&mut held) }, 42);
+    };
+    run_test("", hdr, rs, &["fx_read_ptr"], &["fx_Held"]);
+}

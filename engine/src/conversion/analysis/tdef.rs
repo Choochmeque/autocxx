@@ -13,7 +13,9 @@ use syn::ItemType;
 
 use crate::{
     conversion::{
-        analysis::type_converter::{add_analysis, Annotated, TypeConversionContext, TypeConverter},
+        analysis::type_converter::{
+            add_analysis, Annotated, TypeConversionContext, TypeConverter, TypeKind,
+        },
         api::{AnalysisPhase, Api, ApiName, NullPhase, OpaqueTypedefReason, TypedefKind},
         apivec::ApiVec,
         check_for_fatal_attrs,
@@ -29,6 +31,12 @@ use crate::{
 #[derive(std::fmt::Debug)]
 pub(crate) struct TypedefAnalysis {
     pub(crate) kind: TypedefKind,
+    /// What sort of thing the converted target turned out to be. Kept because
+    /// converting throws the distinction away in one case: a C++ rvalue
+    /// reference and a C++ pointer both end up as a Rust pointer, and whoever
+    /// later uses this alias has no other way to tell which it was. See
+    /// google/autocxx#1363.
+    pub(crate) target_kind: TypeKind,
     pub(crate) deps: HashSet<QualifiedName>,
 }
 
@@ -76,6 +84,10 @@ pub(crate) fn convert_typedef_targets(
                     old_tyname,
                     analysis: TypedefAnalysis {
                         kind: item,
+                        // A `use` names a type and is passed through
+                        // unconverted, so there is nothing here that a caller
+                        // couldn't read off the type itself.
+                        target_kind: TypeKind::Regular,
                         deps: HashSet::new(),
                     },
                 },
@@ -171,6 +183,10 @@ fn get_replacement_typedef(
             old_tyname,
             analysis: TypedefAnalysis {
                 kind: TypedefKind::Type(Box::new(converted_type.into())),
+                // What the type converter says of a function pointer wherever
+                // one is allowed: it behaves as a pointer in every way the
+                // later analyses ask about.
+                target_kind: TypeKind::Pointer,
                 deps: HashSet::new(),
             },
         });
@@ -236,6 +252,7 @@ fn get_replacement_typedef(
                 old_tyname,
                 analysis: TypedefAnalysis {
                     kind: TypedefKind::Type(Box::new(converted_type.into())),
+                    target_kind: final_type.kind,
                     deps: final_type.types_encountered,
                 },
             })
