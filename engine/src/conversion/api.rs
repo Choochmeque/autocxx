@@ -103,6 +103,11 @@ pub(crate) struct SuperclassMethod {
     /// [`TypeConversionPolicy::inverse_rust_conversion`].
     pub(crate) param_conversions: Vec<TypeConversionPolicy>,
     pub(crate) ret_type: ReturnType,
+    /// How the return value was converted for the Rust-calls-C++ direction, so
+    /// that codegen can undo that conversion too - a `subclass!` override
+    /// produces this value rather than receiving it. See
+    /// [`TypeConversionPolicy::inverse_rust_return_conversion`].
+    pub(crate) ret_conversion: Option<TypeConversionPolicy>,
     pub(crate) receiver_mutability: ReceiverMutability,
     pub(crate) requires_unsafe: UnsafetyNeeded,
     /// Whether the peer class offers a `foo_super` helper by which a Rust

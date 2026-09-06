@@ -130,6 +130,7 @@ pub(super) fn create_subclass_trait_item(
                 .map(|pd| pd.conversion.clone())
                 .collect(),
             ret_type: analysis.ret_type.clone(),
+            ret_conversion: analysis.ret_conversion.clone(),
             receiver_mutability: *receiver_mutability,
             requires_unsafe,
             has_super_helper,
