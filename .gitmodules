@@ -1,3 +1,6 @@
 [submodule "examples/s2/s2geometry"]
 	path = examples/s2/s2geometry
 	url = https://github.com/google/s2geometry.git
+[submodule "examples/s2/abseil-cpp"]
+	path = examples/s2/abseil-cpp
+	url = https://github.com/abseil/abseil-cpp.git
