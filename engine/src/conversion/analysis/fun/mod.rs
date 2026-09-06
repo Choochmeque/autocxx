@@ -42,7 +42,7 @@ use autocxx_parser::{ExternCppType, IncludeCppConfig, UnsafePolicy};
 use function_wrapper::{CppFunction, CppFunctionBody, TypeConversionPolicy};
 use itertools::Itertools;
 use proc_macro2::Span;
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, Ident, Pat, PatType, ReturnType, Type,
     TypePath, TypePtr, TypeReference, Visibility,
@@ -1919,35 +1919,54 @@ impl<'a> FnAnalyzer<'a> {
                             Type::Ptr(TypePtr {
                                 elem, mutability, ..
                             }) => match elem.as_ref() {
-                                Type::Path(typ) => {
-                                    let typ = unwrap_has_opaque(typ)
-                                        .and_then(|ty| match ty {
-                                            Type::Path(typ) => Some(typ),
-                                            _ => None,
-                                        })
-                                        .unwrap_or(typ);
-                                    let receiver_mutability = if mutability.is_some() {
-                                        ReceiverMutability::Mutable
-                                    } else {
-                                        ReceiverMutability::Const
-                                    };
-
-                                    let this_type = if let Some(virtual_this) = virtual_this {
-                                        let this_type_path = virtual_this.to_type_path();
-                                        let const_token = if mutability.is_some() {
-                                            None
+                                // bindgen could not name the type this method
+                                // belongs to and put an opaque blob of the
+                                // right size and alignment in its place. A
+                                // class with a non-type template parameter is
+                                // one way to arrive here: bindgen tracks only
+                                // type parameters, so it generates the methods
+                                // and then has no name to write for the
+                                // receiver.
+                                //
+                                // There is no receiver to be had from a blob.
+                                // What it is spelled with in Rust - `u8` for a
+                                // one-byte class - names no C++ type, so
+                                // reading a name out of it would say the
+                                // method belongs to `u8`, and everything
+                                // derived from that name (the impl block, the
+                                // overload name, the dependencies) would be
+                                // worked out from a fiction. Converting the
+                                // `this` parameter refuses the blob a moment
+                                // later, which is what saves us today; say it
+                                // here, where the pretense would start.
+                                Type::Path(typ) => match unwrap_has_opaque(typ) {
+                                    Some(blob) => Err(ConvertErrorFromCpp::BindgenOpaqueBlob(
+                                        blob.to_token_stream().to_string(),
+                                    )),
+                                    None => {
+                                        let receiver_mutability = if mutability.is_some() {
+                                            ReceiverMutability::Mutable
                                         } else {
-                                            Some(syn::Token![const](Span::call_site()))
+                                            ReceiverMutability::Const
                                         };
-                                        pt.ty = Box::new(parse_quote! {
-                                            * #mutability #const_token #this_type_path
-                                        });
-                                        virtual_this.clone()
-                                    } else {
-                                        QualifiedName::from_type_path(typ)
-                                    };
-                                    Ok((this_type, receiver_mutability))
-                                }
+
+                                        let this_type = if let Some(virtual_this) = virtual_this {
+                                            let this_type_path = virtual_this.to_type_path();
+                                            let const_token = if mutability.is_some() {
+                                                None
+                                            } else {
+                                                Some(syn::Token![const](Span::call_site()))
+                                            };
+                                            pt.ty = Box::new(parse_quote! {
+                                                * #mutability #const_token #this_type_path
+                                            });
+                                            virtual_this.clone()
+                                        } else {
+                                            QualifiedName::from_type_path(typ)
+                                        };
+                                        Ok((this_type, receiver_mutability))
+                                    }
+                                },
                                 _ => Err(ConvertErrorFromCpp::UnexpectedThisType(
                                     diagnostic_name.clone(),
                                 )),
@@ -2048,6 +2067,19 @@ impl<'a> FnAnalyzer<'a> {
             annotated_type.kind,
             type_converter::TypeKind::RValueReference
         );
+        // TODO: `TypeKind::MutableReference` is deliberately not here, and
+        // that costs `unsafe_references_wrapped` the thing it exists for. In
+        // that mode a *const* reference parameter becomes a `CppRef<T>` and a
+        // method's receiver a `CppMutRef<T>` (which is what `is_self` is doing
+        // here), but a mutable reference *parameter* is left as
+        // `Pin<&mut T>` - a Rust mutable reference, which C++ is free to alias
+        // and which the mode promises to have eliminated. Both spellings of
+        // one, written out and through a typedef, are pinned to the current
+        // behaviour by `test_mutable_reference_parameter_cpprefs` and
+        // `test_typedef_to_mutable_reference_parameter_cpprefs`, so whatever
+        // this becomes, it becomes for both at once. Changing it means
+        // deciding what `CppMutRef<T>` does to the C++ side of a parameter,
+        // which the receiver path already answers.
         let is_reference =
             matches!(annotated_type.kind, type_converter::TypeKind::Reference) || is_self;
         let rust_conversion_forced = force_rust_conversion.is_some();

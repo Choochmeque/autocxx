@@ -517,7 +517,7 @@ fn test_negative_take_as_pod_with_move_constructor() {
         struct Bob {
             uint32_t a;
             uint32_t b;
-            inline Bob(Bob&& other_bob) {}
+            inline Bob(Bob&&) {}
         };
         uint32_t take_bob(Bob a);
     "};
@@ -807,12 +807,12 @@ fn test_take_nonpod_by_ptr_in_method() {
         class A {
         public:
             A() {};
-            uint32_t take_bob(const Bob* a) const {
-                return a->a;
+            uint32_t take_bob(const Bob* bob) const {
+                return bob->a;
             }
-            std::unique_ptr<Bob> make_bob(uint32_t a) const {
+            std::unique_ptr<Bob> make_bob(uint32_t val) const {
                 auto b = std::make_unique<Bob>();
-                b->a = a;
+                b->a = val;
                 return b;
             }
             uint16_t a;
@@ -844,12 +844,12 @@ fn test_take_nonpod_by_ptr_in_wrapped_method() {
         class A {
         public:
             A() {};
-            uint32_t take_bob(const Bob* a, C) const {
-                return a->a;
+            uint32_t take_bob(const Bob* bob, C) const {
+                return bob->a;
             }
-            std::unique_ptr<Bob> make_bob(uint32_t a) const {
+            std::unique_ptr<Bob> make_bob(uint32_t val) const {
                 auto b = std::make_unique<Bob>();
-                b->a = a;
+                b->a = val;
                 return b;
             }
             uint16_t a;
@@ -879,8 +879,8 @@ fn run_char_test(builder_modifier: Option<BuilderModifier>) {
         class A {
         public:
             A() {};
-            uint32_t take_char(const char* a, C) const {
-                return a[0];
+            uint32_t take_char(const char* text, C) const {
+                return text[0];
             }
             const char* make_char(C extra) const {
                 return extra.test;
@@ -2168,9 +2168,9 @@ fn test_method_pass_nonpod_by_up() {
 fn test_method_return_nonpod_by_value() {
     let cxx = indoc! {"
         Anna Bob::get_anna() const {
-            Anna a;
-            a.a = 12;
-            return a;
+            Anna anna;
+            anna.a = 12;
+            return anna;
         }
     "};
     let hdr = indoc! {"
@@ -4743,7 +4743,7 @@ fn test_foreign_ns_meth_arg_pod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(A::Bob a) const { return a.a; }
+                uint32_t daft(A::Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -4769,7 +4769,7 @@ fn test_foreign_ns_meth_arg_nonpod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(A::Bob a) const { return a.a; }
+                uint32_t daft(A::Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -4970,7 +4970,7 @@ fn test_root_ns_meth_arg_pod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(Bob a) const { return a.a; }
+                uint32_t daft(Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -4994,7 +4994,7 @@ fn test_root_ns_meth_arg_nonpod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(Bob a) const { return a.a; }
+                uint32_t daft(Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -5163,8 +5163,8 @@ fn test_forward_declaration() {
             delete a;
         }
         A B::daft4() {
-            A a;
-            return a;
+            A result;
+            return result;
         }
         std::unique_ptr<A> B::daft5() {
             return std::make_unique<A>();
@@ -16155,13 +16155,13 @@ fn test_issue_1229() {
     struct Thing {
         float id;
     
-        Thing(float id) : id(id) {}
+        Thing(float new_id) : id(new_id) {}
     };
 
     struct Item {
         float id;
     
-        Item(float id) : id(id) {}
+        Item(float new_id) : id(new_id) {}
     };
     "};
     let hexathorpe = Token![#](Span::call_site());
@@ -16207,14 +16207,14 @@ fn test_issue_1239() {
     struct Thing {
         float id;
 
-        Thing(float id) : id(id) {}
+        Thing(float new_id) : id(new_id) {}
         float foo() const { return id; }
     };
 
     struct Item {
         float id;
 
-        Item(float id) : id(id) {}
+        Item(float new_id) : id(new_id) {}
         float foo() const { return id; }
     };
     "};
@@ -16255,8 +16255,8 @@ fn issue_1265_header() -> &'static str {
         class Test
         {
         public:
-          explicit Test(std::string string)
-            : string(std::move(string))
+          explicit Test(std::string s)
+            : string(std::move(s))
           {
           }
 
@@ -20090,26 +20090,72 @@ fn test_pod_function_pointer_field_written_from_rust() {
 
 /// A function pointer in a *signature* is a different matter: that type has to
 /// go into the `cxx::bridge`, and cxx has no function pointer type. So it stays
-/// refused, and the reason reaches the user rather than cxx complaining about
-/// a type it cannot parse. See google/autocxx#1494.
-///
-/// TODO: the complaint names `std::option::Option`, which is the Rust type
-/// bindgen wrote rather than anything the user's C++ says. Saying "function
-/// pointer" instead would need its own `ConvertErrorFromCpp` variant, raised
-/// where the type converter meets `Option<fn ..>` outside a struct field.
+/// refused - and the complaint says "function pointer" and points at the
+/// documented way to have C++ call into Rust, rather than naming
+/// `std::option::Option`, which is bindgen's Rust spelling of it and appears
+/// nowhere in the user's C++. See google/autocxx#1494.
 #[test]
 fn test_function_pointer_parameter_still_refused() {
     let hdr = indoc! {"
         #include <cstdint>
         inline uint32_t fx_call_it(uint32_t (*fx_f)(uint32_t)) { return fx_f(1); }
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {},
         &["fx_call_it"],
         &[],
-        "UnsupportedBuiltInType",
+        &[
+            "FunctionPointerInSignature",
+            "A function pointer appears in this signature",
+            "rust_calls.html",
+        ],
+    );
+}
+
+/// A function pointer *returned*, which reaches the type converter by a
+/// different route from a parameter, and gets the same explanation.
+#[test]
+fn test_function_pointer_return_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t (*fx_getter)(uint32_t);
+        inline fx_getter fx_which_one(bool) { return nullptr; }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_which_one"],
+        &[],
+        &[
+            "FunctionPointerInSignature",
+            "A function pointer appears in this signature",
+        ],
+    );
+}
+
+/// The same through a typedef, which is how C++ usually spells a callback
+/// parameter. The typedef itself is kept (a struct field may hold one), so the
+/// refusal has to happen where it is used rather than where it is declared.
+#[test]
+fn test_function_pointer_typedef_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t (*fx_cb)(uint32_t);
+        inline uint32_t fx_call_cb(fx_cb f) { return f(1); }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_call_cb"],
+        &[],
+        &[
+            "FunctionPointerInSignature",
+            "A function pointer appears in this signature",
+        ],
     );
 }
 
@@ -20458,5 +20504,98 @@ fn test_derive_default_on_enum_refused() {
             derive!("fx_Shade", "Default")
         },
         "DeriveDefaultOnEnum",
+    );
+}
+
+/// A typedef to an rvalue reference, used as a parameter. Both a C++ pointer
+/// and a C++ rvalue reference come out of the type converter as a Rust
+/// pointer, so the alias looked exactly like `typedef fx_Movable* P` - and
+/// autocxx wrote a C++ shim taking `fx_Movable*` and handed it to a function
+/// wanting `fx_Movable&&`, which does not compile. See google/autocxx#1363.
+#[test]
+fn test_typedef_to_rvalue_reference_parameter() {
+    let hdr = indoc! {"
+        #include <string>
+        struct fx_Movable { std::string a; };
+        typedef fx_Movable&& fx_MovableRef;
+        inline void fx_take(fx_MovableRef) {}
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Movable::new().within_unique_ptr();
+        ffi::fx_take(a);
+
+        moveit! { let a2 = ffi::fx_Movable::new() };
+        ffi::fx_take(a2);
+    };
+    run_test("", hdr, rs, &["fx_Movable", "fx_take"], &[]);
+}
+
+/// The same through a chain of typedefs, which is the case that decides where
+/// the fact has to be kept: the second alias is analysed by resolving the
+/// first, so an answer worked out afresh at each point of use would have to be
+/// right at every link.
+#[test]
+fn test_typedef_chain_to_rvalue_reference_parameter() {
+    let hdr = indoc! {"
+        #include <string>
+        struct fx_Movable2 { std::string a; };
+        typedef fx_Movable2&& fx_Movable2Ref;
+        typedef fx_Movable2Ref fx_Movable2RefAgain;
+        inline void fx_take2(fx_Movable2RefAgain) {}
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Movable2::new().within_unique_ptr();
+        ffi::fx_take2(a);
+    };
+    run_test("", hdr, rs, &["fx_Movable2", "fx_take2"], &[]);
+}
+
+/// A typedef to a pointer must stay a pointer: the two are told apart by what
+/// the typedef's own analysis recorded, and nothing else, so the case which
+/// keeps that honest belongs next to the one which needed it.
+/// See google/autocxx#1368.
+#[test]
+fn test_typedef_to_pointer_parameter_is_still_a_pointer() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Held { uint32_t a; };
+        typedef fx_Held* fx_HeldPtr;
+        inline uint32_t fx_read_ptr(fx_HeldPtr h) { return h->a; }
+    "};
+    let rs = quote! {
+        let mut held = ffi::fx_Held { a: 42 };
+        assert_eq!(unsafe { ffi::fx_read_ptr(&mut held) }, 42);
+    };
+    run_test("", hdr, rs, &["fx_read_ptr"], &["fx_Held"]);
+}
+
+/// A method on a class bindgen could not name. bindgen tracks a class
+/// template's *type* parameters and not its non-type ones, so for
+/// `template <int N> struct S` it has no name to write and substitutes an
+/// opaque blob of the right size - while still generating the class's methods,
+/// whose receiver is then that blob. There is no receiver to be had from a
+/// blob: the Rust type it is spelled with (`u8` here) names no C++ type, so
+/// the method has to be refused, and refused saying what went wrong.
+#[test]
+fn test_method_on_a_type_bindgen_could_not_name_is_refused() {
+    let hdr = indoc! {"
+        template <int N> struct fx_Sized {
+            int x[N];
+            int fx_first() const { return x[0]; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_all!()
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fx_first".to_string(),
+            "replaced it with an opaque blob of bytes".to_string(),
+        ])),
+        None,
     );
 }

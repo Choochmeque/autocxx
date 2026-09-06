@@ -164,6 +164,8 @@ pub enum ConvertErrorFromCpp {
     DefaultedButDeleted,
     #[error("This structure has an rvalue reference field (&&) which is not yet supported.")]
     RValueReferenceField,
+    #[error("A function pointer appears in this signature. cxx has no function pointer type, so autocxx has no way to declare one to it; a function pointer can only be held as struct field data, where it is copied about rather than crossing the language boundary. For C++ to call back into Rust, subclass a C++ observer class from Rust or hand C++ a named Rust function with extern_rust_function - both are described at https://google.github.io/autocxx/rust_calls.html. See https://github.com/google/autocxx/issues/1494.")]
+    FunctionPointerInSignature,
     #[error("This type was not on the allowlist, so we are not generating methods for it.")]
     MethodOfNonAllowlistedType,
     #[error("This type is templated, so we can't generate bindings. We will instead generate bindings for each instantiation.")]

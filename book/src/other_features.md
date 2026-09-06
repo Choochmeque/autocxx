@@ -104,10 +104,17 @@ bind one either; its function support stops at
 generates nothing which takes or returns one. Only the members which mention
 `std::function` are lost: the rest of the enclosing class is generated as usual.
 
-A shim which takes a plain C function pointer does not help, because `bindgen`
-writes those as `Option<extern "C" fn(..)>` and `autocxx` has no binding for
-`Option` either. To have C++ call into Rust, either subclass a C++ observer
-class from Rust or hand C++ a named Rust function; both are described under
+A shim which takes a plain C function pointer does not help either: `cxx` has
+no function pointer type, so `autocxx` has nothing to declare to it, and a
+function with one in its signature is refused saying so. A *struct field* of
+function pointer type is a different matter and does work: a field is data
+whose layout `autocxx` copies rather than a type crossing the language
+boundary, so a struct holding one can even be POD, and Rust can put one of its
+own `extern "C"` functions there for C++ to call. It is passing or returning
+one that has nowhere to go.
+
+To have C++ call into Rust without that, either subclass a C++ observer class
+from Rust or hand C++ a named Rust function; both are described under
 [callbacks into Rust](rust_calls.md).
 
 The explanation reaches you through the doc comment of the stub standing in for
