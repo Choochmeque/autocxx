@@ -2099,8 +2099,27 @@ impl<'a> FnAnalyzer<'a> {
                             CppConversionType::Move,
                             RustConversionType::None,
                         )
-                    } else {
+                    } else if is_reference || known_types().is_known_type(&tn) {
+                        // A reference parameter - a `Pin<&mut T>` reaches us
+                        // as a path, and `Pin` is itself POD-safe - is handed
+                        // straight on: there is no value of ours to move, and
+                        // the callee may want an lvalue. A built-in scalar is
+                        // handed straight on too, being always copyable.
                         TypeConversionPolicy::new_unconverted(ty)
+                    } else {
+                        // A POD out of the user's own headers, by value. The
+                        // Rust side owns it and destroys it after the call, so
+                        // a wrapper should hand it over by move where C++
+                        // allows one. Passing it bare asks for a copy
+                        // constructor, which a type that opts into
+                        // relocatability by declaring its own move constructor
+                        // no longer has - and forcing wrapper generation then
+                        // failed to compile. See google/autocxx#1252.
+                        TypeConversionPolicy::new(
+                            ty,
+                            CppConversionType::MoveOrCopy,
+                            RustConversionType::None,
+                        )
                     }
                 } else if known_types().convertible_from_strs(&tn)
                     && !self.config.exclude_utilities()

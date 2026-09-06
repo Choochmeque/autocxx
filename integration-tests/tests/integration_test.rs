@@ -9,7 +9,7 @@
 use crate::{
     builder_modifiers::{
         make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
-        EnableAutodiscover, SetSuppressSystemHeaders,
+        EnableAutodiscover, ForceWrapperGeneration, SetSuppressSystemHeaders,
     },
     code_checkers::{
         make_checks_without_building, make_error_finder, make_rust_code_finder,
@@ -528,7 +528,6 @@ fn test_negative_take_as_pod_with_move_constructor() {
     run_test_expect_fail(cxx, hdr, rs, &["take_bob"], &["Bob"]);
 }
 
-#[ignore] // https://github.com/google/autocxx/issues/1252
 #[test]
 fn test_take_as_pod_with_is_relocatable() {
     let cxx = indoc! {"
@@ -19699,6 +19698,50 @@ fn test_generate_nested_type_by_flattened_name() {
         },
         None,
         None,
+        None,
+    );
+}
+
+/// A generated C++ wrapper hands a POD parameter over with the move-or-copy
+/// helper rather than bare, because the Rust side owns that value and destroys
+/// it after the call. A type which opts into relocatability by declaring its
+/// own move constructor has no copy constructor left, so passing it bare did
+/// not compile at all once wrapper generation was forced.
+/// See google/autocxx#1252.
+#[test]
+fn test_wrapper_moves_pod_argument() {
+    let cxx = indoc! {"
+        uint32_t fx_take_bob(fx_Bob a) {
+            return a.a;
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <type_traits>
+        struct fx_Bob {
+            uint32_t a;
+            uint32_t b;
+            inline fx_Bob() {}
+            inline ~fx_Bob() {}
+            inline fx_Bob(fx_Bob&& other) { a = other.a; b = other.b; }
+            using IsRelocatable = std::true_type;
+        };
+        uint32_t fx_take_bob(fx_Bob a);
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Bob { a: 12, b: 13 };
+        assert_eq!(ffi::fx_take_bob(a), 12);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        directives_from_lists(&["fx_take_bob"], &["fx_Bob"], None),
+        Some(Box::new(ForceWrapperGeneration)),
+        Some(Box::new(CppMatcher::new(
+            &["::autocxx_move_or_copy(arg0)"],
+            &["fx_take_bob(arg0)"],
+        ))),
         None,
     );
 }

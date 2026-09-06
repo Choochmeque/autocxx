@@ -98,6 +98,12 @@ impl TypeConversionPolicy {
             CppConversionType::FromUniquePtrToValue => {
                 Some(format!("::autocxx_move_or_copy(*{var_name})"))
             }
+            // And this one is the wrapper's own by-value parameter, which is
+            // about to be destroyed too, so the same reasoning applies. Passing
+            // it bare would ask for a copy constructor, which a POD type that
+            // opts into relocatability by writing its own move constructor no
+            // longer has. See google/autocxx#1252.
+            CppConversionType::MoveOrCopy => Some(format!("::autocxx_move_or_copy({var_name})")),
             CppConversionType::FromValueToUniquePtr => Some(format!(
                 "std::make_unique<{}>({})",
                 self.unconverted_type(cpp_name_map)?,
@@ -123,7 +129,9 @@ impl TypeConversionPolicy {
     pub(super) fn may_use_move_or_copy_helper(&self) -> bool {
         matches!(
             self.cpp_conversion,
-            CppConversionType::FromUniquePtrToValue | CppConversionType::FromPtrToValue
+            CppConversionType::FromUniquePtrToValue
+                | CppConversionType::FromPtrToValue
+                | CppConversionType::MoveOrCopy
         )
     }
 }
