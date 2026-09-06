@@ -198,6 +198,11 @@ pub(crate) struct ReturnTypeAnalysis {
     conversion: Option<TypeConversionPolicy>,
     was_reference: bool,
     was_mutable_reference: bool,
+    /// Whether C++ declared this return an rvalue reference, `T&&`, which
+    /// only the type converter can say for certain: written out it arrives as
+    /// one of bindgen's markers, but behind a typedef it arrives as an
+    /// ordinary path and the alias has to be resolved first.
+    was_rvalue_reference: bool,
     deps: HashSet<QualifiedName>,
     placement_param_needed: Option<(FnArg, ArgumentAnalysis)>,
 }
@@ -209,6 +214,7 @@ impl Default for ReturnTypeAnalysis {
             conversion: None,
             was_reference: false,
             was_mutable_reference: false,
+            was_rvalue_reference: false,
             deps: Default::default(),
             placement_param_needed: None,
         }
@@ -1424,6 +1430,36 @@ impl<'a> FnAnalyzer<'a> {
 
         let requires_unsafe = self.should_be_unsafe(&param_details, &kind);
 
+        // The refusal further up caught a `T&&` return spelled out, which
+        // reaches us as one of bindgen's markers. Behind a typedef it does
+        // not: it arrives as an ordinary path, and only the type converter,
+        // having resolved the alias, can say what it was. So say it again
+        // here, for the same reason: the shim such a function would need has
+        // to turn the `T&&` it returned into a pointer, and `&` wants an
+        // lvalue, so the result would first have to be given a name - which
+        // a wrapper body, one expression built around the call, has nowhere
+        // to put. A subclass peer's override is unaffected - it
+        // is generated for a pure virtual method whether or not the
+        // superclass got a binding, and goes the other way about. See
+        // google/autocxx#1363 for the parameter half of the same story.
+        //
+        // Not for an assignment operator, though. The chain above classifies
+        // one before it ever looks at the return type, and that is the one
+        // ignore reason read back later: `implicit_constructors` counts a
+        // class as having an assignment operator only if it finds this
+        // reason or none, so relabelling one would change which of that
+        // class's *other* special members autocxx believes C++ implicitly
+        // defines. Nothing escapes by leaving it alone - the function is
+        // ignored either way, which is all this refusal is for.
+        if return_analysis.was_rvalue_reference
+            && !matches!(
+                fun.special_member,
+                Some(SpecialMemberKind::AssignmentOperator)
+            )
+        {
+            set_ignore_reason(ConvertErrorFromCpp::RValueReturn);
+        }
+
         // The following sections reject some types of function because of the arrangement
         // of Rust references. We could lift these restrictions when/if we switch to using
         // CppRef to represent C++ references.
@@ -2360,36 +2396,39 @@ impl<'a> FnAnalyzer<'a> {
                         );
                         let was_reference = was_mutable_reference
                             || matches!(annotated_type.kind, type_converter::TypeKind::Reference);
-                        // TODO: a returned *rvalue* reference is neither of
-                        // those kinds, so it takes the unconverted branch below
-                        // and its C++ type stays the `T*` the type converter
-                        // made of it - there is no `FromPointerToRValueReference`
-                        // to ask for. That is harmless for a free function,
-                        // whose shim is free to return `T*`, but wrong for a
-                        // subclass peer's override, which must repeat the
-                        // superclass's `T&&` exactly: the generated `T* f()
-                        // override` does not compile. Reproduced under both
-                        // `unsafe` and `unsafe_references_wrapped`, so this is
-                        // not a reference-wrapping matter; a fix belongs with
-                        // the conversion machinery, which would need to learn
-                        // the rvalue direction on both sides.
-                        let conversion = Some(
-                            if was_reference
-                                && matches!(
-                                    self.config.unsafe_policy,
-                                    UnsafePolicy::ReferencesWrappedAllFunctionsSafe
-                                )
-                            {
-                                TypeConversionPolicy::return_reference_into_wrapper(ty.clone())
-                            } else {
-                                TypeConversionPolicy::new_unconverted(ty.clone())
-                            },
+                        // An *rvalue* reference is neither of those kinds. It
+                        // reaches here as the same pointer the type converter
+                        // makes of a `T&`, and nothing in Rust spells the
+                        // difference, so the conversion has to carry it: a
+                        // subclass peer's override must repeat the
+                        // superclass's `T&&` exactly, and the `T* f()
+                        // override` we used to generate overrides nothing and
+                        // does not compile. See google/autocxx#837 for the
+                        // ref-qualifier half of the same story.
+                        let was_rvalue_reference = matches!(
+                            annotated_type.kind,
+                            type_converter::TypeKind::RValueReference
                         );
+                        let wraps_references = matches!(
+                            self.config.unsafe_policy,
+                            UnsafePolicy::ReferencesWrappedAllFunctionsSafe
+                        );
+                        let conversion = Some(if was_rvalue_reference {
+                            TypeConversionPolicy::return_rvalue_reference(
+                                ty.clone(),
+                                wraps_references,
+                            )
+                        } else if was_reference && wraps_references {
+                            TypeConversionPolicy::return_reference_into_wrapper(ty.clone())
+                        } else {
+                            TypeConversionPolicy::new_unconverted(ty.clone())
+                        });
                         ReturnTypeAnalysis {
                             rt: ReturnType::Type(*rarrow, boxed_type),
                             conversion,
                             was_reference,
                             was_mutable_reference,
+                            was_rvalue_reference,
                             deps: annotated_type.types_encountered,
                             placement_param_needed: None,
                         }

@@ -853,6 +853,131 @@ fn test_subclass_super_call_mut_ref_return_cpprefs() {
     );
 }
 
+/// A virtual method returning an *rvalue* reference. C++'s `&&` has no Rust
+/// spelling at all - the type converter makes the same pointer of it that it
+/// makes of a `T&` - so this mode says about it what it says about any other
+/// C++ reference an override hands back: a `CppMutRef`, not the raw pointer
+/// the trait item used to ask for. The extra `&` is the superclass's promise
+/// that C++ may move out of the referent, which is between the override and
+/// the header it implements, exactly as it is between two C++ classes.
+///
+/// The peer's override repeats the `fx_Baton&&`, which is what makes it an
+/// override at all; a `fx_Baton*` there overrides nothing and does not
+/// compile. `fx_Baton`'s copy constructor is deleted, so C++ can only take
+/// what it was given by moving out of it - and the moved-from object is
+/// checked afterwards, so the move has to have happened through the override
+/// rather than anywhere else.
+#[test]
+fn test_subclass_rvalue_ref_return_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Baton {
+            uint32_t a;
+            explicit fx_Baton(uint32_t a) : a(a) {}
+            fx_Baton(fx_Baton&& other) : a(other.a) { other.a = 0; }
+            fx_Baton(const fx_Baton&) = delete;
+            uint32_t fx_get() const { return a; }
+        };
+        class fx_Relay {
+        public:
+            fx_Relay() {}
+            virtual fx_Baton&& fx_pass() = 0;
+            virtual ~fx_Relay() {}
+        };
+        inline uint32_t fx_run(fx_Relay& r) {
+            fx_Baton taken(r.fx_pass());
+            return taken.fx_get();
+        }
+    "};
+    let rs = quote! {
+        let mut baton = autocxx::CppUniquePtrPin::new(ffi::fx_Baton::new(42).within_unique_ptr());
+        let relay = MyRelay::new_rust_owned(MyRelay {
+            baton: baton.as_cpp_mut_ref(),
+            cpp_peer: Default::default(),
+        });
+        // Take the pointer in a statement of its own, so the `RefCell` borrow
+        // is over before C++ calls back into the override.
+        let sup: *mut ffi::fx_Relay = unsafe { relay.borrow_mut().pin_mut().get_unchecked_mut() };
+        assert_eq!(ffi::fx_run(autocxx::CppMutRef::from_ptr(sup)), 42);
+        assert_eq!(baton.as_cpp_ref().fx_get(), 0);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_run")
+            generate!("fx_Baton")
+            subclass!("fx_Relay",MyRelay)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Relay_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyRelay {
+                baton: autocxx::CppMutRef<ffi::fx_Baton>,
+            }
+            impl fx_Relay_methods for MyRelay {
+                fn fx_pass(&mut self) -> autocxx::CppMutRef<ffi::fx_Baton> {
+                    self.baton
+                }
+            }
+        }),
+    );
+}
+
+/// The const twin of [`test_subclass_rvalue_ref_return_cpprefs`]. A
+/// `const fx_Token&&` crosses the bridge as a `*const`, so the wrapper on the
+/// Rust side is a `CppRef`, and the peer has to say `const` in both halves of
+/// its signature or it overrides nothing.
+#[test]
+fn test_subclass_const_rvalue_ref_return_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Token { uint32_t a; };
+        class fx_Vault {
+        public:
+            fx_Vault() {}
+            virtual const fx_Token&& fx_yield() const = 0;
+            virtual ~fx_Vault() {}
+        };
+        inline uint32_t fx_peek(const fx_Vault& v) { return v.fx_yield().a; }
+    "};
+    let rs = quote! {
+        let token = CppPin::new(ffi::fx_Token { a: 42 });
+        let vault = MyVault::new_rust_owned(MyVault {
+            token: token.as_cpp_ref(),
+            cpp_peer: Default::default(),
+        });
+        let vault = vault.borrow();
+        let sup: &ffi::fx_Vault = vault.as_ref();
+        assert_eq!(ffi::fx_peek(autocxx::CppRef::from_ptr(sup)), 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_peek")
+            generate_pod!("fx_Token")
+            subclass!("fx_Vault",MyVault)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Vault_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyVault {
+                token: autocxx::CppRef<ffi::fx_Token>,
+            }
+            impl fx_Vault_methods for MyVault {
+                fn fx_yield(&self) -> autocxx::CppRef<ffi::fx_Token> {
+                    self.token
+                }
+            }
+        }),
+    );
+}
+
 /// A copy constructor in this mode. Its source is a `const T&`, which the mode
 /// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
 /// `&Self` and that is not negotiable - so the source stays a Rust reference
