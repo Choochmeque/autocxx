@@ -119,6 +119,20 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
                                    // thousands of lines into every Windows CI log. `/W4` is the curated
                                    // equivalent, and is what `warnings(true)` asks for.
     b.warnings(true).extra_warnings(false);
+    if target.contains("msvc") {
+        // Exception unwinding, asked for explicitly rather than through the
+        // CXXFLAGS=/EHsc the CI legs set: a command-line dump on the msvc leg
+        // showed the environment's flags reaching this builder's compiles in
+        // the integration test process and not in autocxx-gen's cmd_test
+        // process - same job, same step, same environment - so five of
+        // cmd_test's compiles carried try/catch with no unwind semantics
+        // (warning C4530, and termination-on-throw not guaranteed). Which
+        // process drops the variable and why is unresolved; what this line
+        // resolves is any compile through this harness depending on it.
+        // gcc and clang enable exceptions by default, so the other branch
+        // needs nothing.
+        b.flag("/EHsc");
+    }
     if !target.contains("msvc") {
         b.flag("-Werror");
         // TODO: MSVC gets no `/WX`, which is cl's spelling of this (it rejects
