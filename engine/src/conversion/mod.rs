@@ -14,6 +14,7 @@ mod codegen_rs;
 #[cfg(test)]
 mod conversion_tests;
 mod convert_error;
+mod derives;
 mod doc_attr;
 mod error_reporter;
 mod parse;
@@ -224,6 +225,13 @@ impl<'a> BridgeConverter<'a> {
                 // error instead of a silent failure. See google/autocxx#1269.
                 confirm_all_generate_directives_still_obeyed(self.config, &analyzed_apis)
                     .map_err(ConvertError::Cpp)?;
+                // `derive!` names a type the same way, and equally may name
+                // one which never made it this far - or one whose Rust
+                // definition the user never sees. Settle that here too, where
+                // there is still somewhere to report it.
+                let derive_requests =
+                    derives::resolve_derive_directives(self.config, &analyzed_apis)
+                        .map_err(ConvertError::Cpp)?;
                 // And finally pass them to the code gen phases, which outputs
                 // code suitable for cxx to consume.
                 let cxxgen_header_name = codegen_options
@@ -249,6 +257,7 @@ impl<'a> BridgeConverter<'a> {
                     &RsCodegenInputs {
                         parse_observations: &parse_observations,
                         bridge_type_names: &bridge_type_names,
+                        derive_requests: &derive_requests,
                     },
                 );
                 Ok(CodegenResults {
@@ -280,6 +289,9 @@ pub(crate) struct RsCodegenInputs<'a> {
     pub(crate) parse_observations: &'a ParseObservations,
     /// See [`BridgeTypeNames`].
     pub(crate) bridge_type_names: &'a BridgeTypeNames,
+    /// The traits each type's `derive!` directives asked for. See
+    /// [`derives::resolve_derive_directives`].
+    pub(crate) derive_requests: &'a derives::DeriveRequests,
 }
 
 /// The names which bindgen defined more than once, and which `ApiVec` therefore

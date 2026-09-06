@@ -19989,3 +19989,474 @@ fn test_reference_return_with_several_reference_parameters_declined() {
         "MultipleMutableInputReferences",
     );
 }
+
+/// A struct holding a C function pointer is trivially copyable, so it can be
+/// held by value in Rust. bindgen renders the field as
+/// `Option<unsafe extern "C" fn()>`. See google/autocxx#1494.
+#[test]
+fn test_pod_with_function_pointer_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_callbacks {
+            uint32_t (*fx_get)(uint32_t);
+        };
+        inline uint32_t fx_double(uint32_t a) { return a * 2; }
+        inline fx_callbacks fx_make_callbacks() { return fx_callbacks { fx_double }; }
+    "};
+    let rs = quote! {
+        let cb = ffi::fx_make_callbacks();
+        assert_eq!(unsafe { cb.fx_get.unwrap()(21) }, 42);
+    };
+    run_test("", hdr, rs, &["fx_make_callbacks"], &["fx_callbacks"]);
+}
+
+/// The same, where the function pointer type reaches the field through a
+/// typedef. See google/autocxx#1494.
+#[test]
+fn test_pod_with_typedefed_function_pointer_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t (*fx_get_t)(uint32_t);
+        struct fx_callbacks2 {
+            fx_get_t fx_get;
+        };
+        inline uint32_t fx_treble(uint32_t a) { return a * 3; }
+        inline fx_callbacks2 fx_make_callbacks2() { return fx_callbacks2 { fx_treble }; }
+    "};
+    let rs = quote! {
+        let cb = ffi::fx_make_callbacks2();
+        assert_eq!(unsafe { cb.fx_get.unwrap()(14) }, 42);
+    };
+    run_test("", hdr, rs, &["fx_make_callbacks2"], &["fx_callbacks2"]);
+}
+
+/// A null function pointer, which is the whole reason bindgen wraps the field
+/// in an `Option`, has to survive the crossing in both directions: C++ writing
+/// `nullptr` must reach Rust as `None`, and Rust writing `None` must reach C++
+/// as a null pointer. Nothing converts the field - the struct is copied whole -
+/// so this is the layout guarantee that `Option<fn>` is the pointer itself,
+/// with `None` as its null, being taken at its word. See google/autocxx#1494.
+#[test]
+fn test_pod_with_null_function_pointer_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_callbacks3 {
+            uint32_t (*fx_get)(uint32_t);
+        };
+        inline fx_callbacks3 fx_make_null_callbacks() { return fx_callbacks3 { nullptr }; }
+        inline bool fx_callbacks_are_null(fx_callbacks3 cb) { return cb.fx_get == nullptr; }
+    "};
+    let rs = quote! {
+        assert!(ffi::fx_make_null_callbacks().fx_get.is_none());
+        assert!(ffi::fx_callbacks_are_null(ffi::fx_callbacks3 { fx_get: None }));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_make_null_callbacks", "fx_callbacks_are_null"],
+        &["fx_callbacks3"],
+    );
+}
+
+/// The other direction for a pointer which is not null: Rust puts one of its
+/// own functions in the field and C++ calls it. That is the end-to-end proof
+/// that the field really is the C function pointer it claims to be, rather
+/// than something which merely happens to read back the same in Rust.
+/// See google/autocxx#1494.
+#[test]
+fn test_pod_function_pointer_field_written_from_rust() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_callbacks4 {
+            uint32_t (*fx_get)(uint32_t);
+        };
+        inline uint32_t fx_call_callbacks(fx_callbacks4 cb, uint32_t arg) {
+            return cb.fx_get ? cb.fx_get(arg) : 0;
+        }
+    "};
+    let rs = quote! {
+        unsafe extern "C" fn fx_written_in_rust(a: u32) -> u32 {
+            a * 7
+        }
+        let cb = ffi::fx_callbacks4 { fx_get: Some(fx_written_in_rust) };
+        assert_eq!(ffi::fx_call_callbacks(cb, 6), 42);
+        // And the null case again from this side, since C++ is the one
+        // dereferencing it here.
+        assert_eq!(ffi::fx_call_callbacks(ffi::fx_callbacks4 { fx_get: None }, 6), 0);
+    };
+    run_test("", hdr, rs, &["fx_call_callbacks"], &["fx_callbacks4"]);
+}
+
+/// A function pointer in a *signature* is a different matter: that type has to
+/// go into the `cxx::bridge`, and cxx has no function pointer type. So it stays
+/// refused, and the reason reaches the user rather than cxx complaining about
+/// a type it cannot parse. See google/autocxx#1494.
+///
+/// TODO: the complaint names `std::option::Option`, which is the Rust type
+/// bindgen wrote rather than anything the user's C++ says. Saying "function
+/// pointer" instead would need its own `ConvertErrorFromCpp` variant, raised
+/// where the type converter meets `Option<fn ..>` outside a struct field.
+#[test]
+fn test_function_pointer_parameter_still_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t fx_call_it(uint32_t (*fx_f)(uint32_t)) { return fx_f(1); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_call_it"],
+        &[],
+        "UnsupportedBuiltInType",
+    );
+}
+
+/// The shape google/autocxx#1192 was reported in: a *namespaced* type autocxx
+/// cannot make sense of (there, `Eigen::Vector2d`), replaced by a Rust type of
+/// the user's own, declared POD, and held by value inside a struct the user
+/// asks to be POD. `test_issue_1192` covers the same thing without a
+/// namespace; the namespace is what makes the `pod!` name and the
+/// `extern_cpp_type!` name have to agree about a type nobody generated.
+#[test]
+fn test_extern_cpp_type_pod_in_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_eigen {
+            template <typename T, int N> struct fx_Matrix { T data[N]; };
+            typedef fx_Matrix<double, 2> fx_Vector2d;
+        }
+        struct fx_MyStruct {
+            fx_eigen::fx_Vector2d vec;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            extern_cpp_type!("fx_eigen::fx_Vector2d", crate::FxVector2d)
+            pod!("fx_eigen::fx_Vector2d")
+            generate_pod!("fx_MyStruct")
+        },
+        None,
+        None,
+        Some(quote! {
+            #[repr(transparent)]
+            pub struct FxVector2d(pub [f64; 2]);
+
+            unsafe impl cxx::ExternType for FxVector2d {
+                type Id = cxx::type_id!("fx_eigen::fx_Vector2d");
+                type Kind = cxx::kind::Trivial;
+            }
+        }),
+    );
+}
+
+/// The shape of google/autocxx#1363: OpenCV spells `cv::OutputArray` as a
+/// typedef whose target is a reference - `typedef const cv::_OutputArray&
+/// OutputArray;` - and passes it by value as a parameter. autocxx generated a
+/// C++ shim taking `const cv::_OutputArray*` and handed that straight to a
+/// function wanting the reference.
+#[test]
+fn test_typedef_to_const_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Array { uint32_t a; };
+        typedef const fx_Array& fx_ArrayRef;
+        inline uint32_t fx_read(fx_ArrayRef arr) { return arr.a; }
+    "};
+    let rs = quote! {
+        let arr = ffi::fx_Array { a: 42 };
+        assert_eq!(ffi::fx_read(&arr), 42);
+    };
+    run_test("", hdr, rs, &["fx_read"], &["fx_Array"]);
+}
+
+/// The same as a method taking the typedef, which is how `cv::VideoCapture`
+/// reached it - autocxx writes a wrapper for a method, so the wrapper's
+/// parameter is the one that has to be spelled right.
+#[test]
+fn test_typedef_to_const_reference_method_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Out { uint32_t a; };
+        typedef const fx_Out& fx_OutRef;
+        class fx_Capture {
+        public:
+            bool fx_retrieve(fx_OutRef out, int flag) {
+                total = out.a + flag;
+                return true;
+            }
+            uint32_t fx_total() const { return total; }
+        private:
+            uint32_t total = 0;
+        };
+    "};
+    let rs = quote! {
+        let out = ffi::fx_Out { a: 40 };
+        let mut cap = ffi::fx_Capture::new().within_unique_ptr();
+        assert!(cap.pin_mut().fx_retrieve(&out, autocxx::c_int(2)));
+        assert_eq!(cap.fx_total(), 42);
+    };
+    run_test("", hdr, rs, &["fx_Capture"], &["fx_Out"]);
+}
+
+/// A reference returned by a function whose only reference input arrives
+/// through a typedef. The lifetime elision autocxx does needs to see that the
+/// parameter is a reference; through a typedef it did not.
+/// See google/autocxx#1302.
+#[test]
+fn test_typedef_to_const_reference_borrowed_return() {
+    let hdr = indoc! {"
+        class fx_Bytes {
+        public:
+            typedef const char& fx_reference;
+            fx_reference fx_front() const { return d_ptr[0]; }
+        private:
+            const char* d_ptr = \"hi\";
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::fx_Bytes::new().within_unique_ptr();
+        assert_eq!(*b.fx_front(), 'h' as std::os::raw::c_char);
+    };
+    run_test("", hdr, rs, &["fx_Bytes"], &[]);
+}
+
+/// A typedef to a *mutable* reference used as a parameter.
+#[test]
+fn test_typedef_to_mutable_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Sink { uint32_t a; };
+        typedef fx_Sink& fx_SinkRef;
+        inline void fx_fill(fx_SinkRef sink) { sink.a = 42; }
+    "};
+    let rs = quote! {
+        let mut sink = ffi::fx_Sink { a: 0 };
+        ffi::fx_fill(std::pin::Pin::new(&mut sink));
+        assert_eq!(sink.a, 42);
+    };
+    run_test("", hdr, rs, &["fx_fill"], &["fx_Sink"]);
+}
+
+/// A reference returned by a free function, borrowing from a reference
+/// parameter, where both are spelled with a typedef. The lifetime autocxx
+/// elides has to come from the parameter, and that means knowing the parameter
+/// is a reference even though the type it is written with is a name.
+/// See google/autocxx#1363.
+#[test]
+fn test_typedef_to_const_reference_borrowed_from_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Cell { uint32_t a; };
+        typedef const fx_Cell& fx_CellRef;
+        inline fx_CellRef fx_same(fx_CellRef cell) { return cell; }
+    "};
+    let rs = quote! {
+        let cell = ffi::fx_Cell { a: 42 };
+        assert_eq!(ffi::fx_same(&cell).a, 42);
+    };
+    run_test("", hdr, rs, &["fx_same"], &["fx_Cell"]);
+}
+
+/// A reference return written out, borrowing from a reference parameter which
+/// is spelled with a typedef. autocxx elides the returned reference's lifetime
+/// from a reference parameter, and it has to see the parameter for one through
+/// the typedef; otherwise there is nothing for the return to borrow from and
+/// the function is declined. See google/autocxx#1363.
+#[test]
+fn test_reference_return_borrowing_from_a_typedefed_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Cell2 { uint32_t a; };
+        typedef const fx_Cell2& fx_Cell2Ref;
+        inline const fx_Cell2& fx_same2(fx_Cell2Ref cell) { return cell; }
+    "};
+    let rs = quote! {
+        let cell = ffi::fx_Cell2 { a: 42 };
+        assert_eq!(ffi::fx_same2(&cell).a, 42);
+    };
+    run_test("", hdr, rs, &["fx_same2"], &["fx_Cell2"]);
+}
+
+/// `derive!` puts extra traits on the Rust type autocxx generates for a POD
+/// C++ one. See google/autocxx#668.
+#[test]
+fn test_derive_on_pod() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Point { uint32_t x; uint32_t y; };
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Point { x: 1, y: 2 };
+        let b = ffi::fx_Point { x: 1, y: 2 };
+        assert_eq!(a, b);
+        assert_eq!(format!("{:?}", a), "fx_Point { x: 1, y: 2 }");
+        let c = a.clone();
+        assert_eq!(c.y, 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate_pod!("fx_Point")
+            derive!("fx_Point", "Debug", "PartialEq")
+            derive!("fx_Point", "Clone")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A derive whose fields have to support it: `Clone` on a POD holding another
+/// POD works only because the inner one is `Clone` too.
+#[test]
+fn test_derive_clone_through_a_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Inner3 { uint32_t a; };
+        struct fx_Outer3 { fx_Inner3 inner; uint32_t b; };
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_Outer3 { inner: ffi::fx_Inner3 { a: 1 }, b: 2 };
+        let copy = outer.clone();
+        assert_eq!(copy.inner.a, 1);
+        assert_eq!(copy.b, 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate_pod!("fx_Outer3")
+            generate_pod!("fx_Inner3")
+            derive!("fx_Inner3", "Clone")
+            derive!("fx_Outer3", "Clone")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same for an enum, where bindgen has already written a derive list of
+/// its own. Asking for one of the traits it put there must not produce a
+/// second, conflicting implementation.
+#[test]
+fn test_derive_on_enum() {
+    let hdr = indoc! {"
+        enum class fx_Colour { Red, Green };
+    "};
+    let rs = quote! {
+        assert_eq!(format!("{:?}", ffi::fx_Colour::Green), "Green");
+        assert_eq!(ffi::fx_Colour::Red.clone(), ffi::fx_Colour::Red);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_Colour")
+            derive!("fx_Colour", "Debug", "Clone")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `derive!` names a type the way every other directive does, so the C++
+/// spelling of a nested type has to work as well as the flattened one bindgen
+/// gives it.
+#[test]
+fn test_derive_on_nested_type_by_cpp_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns4 {
+            struct fx_outer4 {
+                struct fx_inner4 { uint32_t a; };
+            };
+        }
+    "};
+    let rs = quote! {
+        let i = ffi::fx_ns4::fx_outer4_fx_inner4 { a: 3 };
+        assert_eq!(format!("{:?}", i), "fx_outer4_fx_inner4 { a: 3 }");
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate_pod!("fx_ns4::fx_outer4::fx_inner4")
+            derive!("fx_ns4::fx_outer4::fx_inner4", "Debug")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `derive!` for something autocxx never generated is a mistake worth
+/// reporting, exactly as an unused `generate!` is.
+#[test]
+fn test_derive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Present { uint32_t a; };
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_pod!("fx_Present")
+            derive!("fx_Absent", "Debug")
+        },
+        "DeriveDirectiveMatchedNothing",
+    );
+}
+
+/// A non-POD type is re-emitted as an opaque wrapper with no fields, so a
+/// derive on the bindgen definition would never reach the user. Say so.
+#[test]
+fn test_derive_on_non_pod_refused() {
+    let hdr = indoc! {"
+        #include <string>
+        struct fx_Stringy { std::string s; };
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Stringy")
+            derive!("fx_Stringy", "Debug")
+        },
+        "DeriveOnTypeWithNoRustDefinition",
+    );
+}
+
+/// `Default` on an enum is refused rather than emitted: nothing makes one
+/// enumerator of a C++ enum the default, which is why bindgen's own `Default`
+/// is stripped from every enum, and a derived one would not compile.
+#[test]
+fn test_derive_default_on_enum_refused() {
+    let hdr = indoc! {"
+        enum class fx_Shade { Light, Dark };
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Shade")
+            derive!("fx_Shade", "Default")
+        },
+        "DeriveDefaultOnEnum",
+    );
+}

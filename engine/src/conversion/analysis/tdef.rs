@@ -19,6 +19,7 @@ use crate::{
         check_for_fatal_attrs,
         convert_error::{ConvertErrorWithContext, ErrorContext},
         error_reporter::convert_apis,
+        type_helpers::unwrap_function_pointer,
         ConvertErrorFromCpp,
     },
     types::QualifiedName,
@@ -155,6 +156,25 @@ fn get_replacement_typedef(
     }
     let mut converted_type = ity.clone();
     check_for_fatal_attrs(parse_callback_results, &name.name)?;
+    // A typedef to a C function pointer. bindgen writes the target as
+    // `Option<unsafe extern "C" fn(..)>`, which names no C++ type at all and
+    // so gives the type converter nothing to do; put through it, the `Option`
+    // would be taken for a C++ type we know nothing about and the typedef
+    // discarded. Keep it exactly as bindgen wrote it, so that a struct with a
+    // field of this type can still be POD. A typedef is only ever re-exported
+    // from the bindgen module, never declared to cxx, so nothing downstream
+    // has to be able to spell it. See google/autocxx#1494.
+    if matches!(&*ity.ty, syn::Type::Path(typ) if unwrap_function_pointer(typ).is_some()) {
+        return Ok(Api::Typedef {
+            name,
+            item: TypedefKind::Type(Box::new(converted_type.clone().into())),
+            old_tyname,
+            analysis: TypedefAnalysis {
+                kind: TypedefKind::Type(Box::new(converted_type.into())),
+                deps: HashSet::new(),
+            },
+        });
+    }
     let type_conversion_results = type_converter.convert_type(
         (*ity.ty).clone(),
         name.name.get_namespace(),

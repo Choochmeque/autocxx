@@ -226,6 +226,7 @@ use syn::{
     TypeParamBound, UseTree,
 };
 
+use crate::conversion::derives::DeriveRequests;
 use crate::types::{make_ident, Namespace, QualifiedName};
 
 /// Remove type aliases in the bindgen mod (recursively) which refer
@@ -924,6 +925,105 @@ pub(super) fn collapse_colliding_type_names(
             }
         }
     }
+}
+
+/// Put the traits `derive!` asked for onto the bindgen definitions of the
+/// types which asked.
+///
+/// It has to be the bindgen definition: a POD struct or an enum is what
+/// `ffi::Thing` resolves to, autocxx re-exporting it with a `use` rather than
+/// writing a type of its own. (For everything else autocxx does write its own
+/// type - an opaque one with no fields - which is why `derive!` refuses to
+/// name one of those rather than decorating a definition nobody can reach.)
+///
+/// Runs after the passes above, so that a `Default` we are asked for is not
+/// then stripped back out by [`remove_unwanted_defaults`], and so that we
+/// never decorate a placeholder [`collapse_colliding_type_names`] left behind.
+pub(super) fn add_requested_derives(bindgen_mod: &mut ItemMod, requested: &DeriveRequests) {
+    if requested.is_empty() {
+        return;
+    }
+    let Some((_, items)) = &mut bindgen_mod.content else {
+        return;
+    };
+    for item in items {
+        // With namespaces enabled bindgen puts everything in a mod called
+        // `root`, which is the C++ global namespace; the items beside it are
+        // autocxx's own and are never named by a directive.
+        if let Item::Mod(root_mod) = item {
+            if root_mod.ident == "root" {
+                derive_in_mod(root_mod, &Namespace::new(), requested);
+            }
+        }
+    }
+}
+
+fn derive_in_mod(item_mod: &mut ItemMod, ns: &Namespace, requested: &DeriveRequests) {
+    let Some((_, items)) = &mut item_mod.content else {
+        return;
+    };
+    for item in items {
+        if let Item::Mod(m) = item {
+            let child_ns = ns.push(m.ident.to_string());
+            derive_in_mod(m, &child_ns, requested);
+            continue;
+        }
+        let Some(ident) = type_namespace_item_ident(item) else {
+            continue;
+        };
+        let Some(traits) = requested.get(&QualifiedName::new(ns, make_ident(ident.to_string())))
+        else {
+            continue;
+        };
+        let attrs = match item {
+            Item::Struct(s) => &mut s.attrs,
+            Item::Enum(e) => &mut e.attrs,
+            Item::Union(u) => &mut u.attrs,
+            // A type alias cannot derive anything, and `derive!` only ever
+            // resolves to a struct or an enum, so this is unreachable in
+            // practice.
+            _ => continue,
+        };
+        add_derives_to_attrs(attrs, traits);
+    }
+}
+
+/// Add each of `wanted` to `attrs`, skipping any which is derived already.
+///
+/// The skipping matters: bindgen writes `Clone, Hash, PartialEq, Eq` onto
+/// every enum of its own accord, and a second `#[derive(Clone)]` is a
+/// conflicting implementation rather than a no-op. Traits are compared by
+/// their final path segment, which is how they are spelled in the lists
+/// bindgen writes; two different traits of the same name would be taken for
+/// one, and erring that way costs a derive rather than a compile error.
+fn add_derives_to_attrs(attrs: &mut Vec<Attribute>, wanted: &[Path]) {
+    let mut already: HashSet<String> = HashSet::new();
+    for attr in attrs.iter() {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        // A derive list we cannot read is one we cannot check against, so
+        // leave it be and add ours regardless; a duplicate is a clearer
+        // complaint than a silently missing trait.
+        let _ = attr.parse_nested_meta(|meta| {
+            if let Some(name) = final_segment(&meta.path) {
+                already.insert(name);
+            }
+            Ok(())
+        });
+    }
+    let to_add: Vec<&Path> = wanted
+        .iter()
+        .filter(|path| !final_segment(path).is_some_and(|name| already.contains(&name)))
+        .collect();
+    if to_add.is_empty() {
+        return;
+    }
+    attrs.push(parse_quote! { #[derive(#(#to_add),*)] });
+}
+
+fn final_segment(path: &Path) -> Option<String> {
+    path.segments.last().map(|seg| seg.ident.to_string())
 }
 
 fn collapse_in_mod(
@@ -1712,6 +1812,132 @@ mod tests {
     }
 
     /// The derive list of the named enum or struct, as plain strings.
+    /// A mod shaped the way bindgen writes namespaced types, for the
+    /// `derive!` pass to work over.
+    fn mod_with_namespaced_types() -> ItemMod {
+        parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    #[repr(C)]
+                    #[derive(Default)]
+                    pub struct Point {
+                        pub x: u32,
+                    }
+                    #[repr(u32)]
+                    #[derive(Clone, Hash, PartialEq, Eq)]
+                    pub enum Fruit {
+                        APPLE = 1,
+                    }
+                    pub mod ns {
+                        #[repr(C)]
+                        pub struct Point {
+                            pub y: u32,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn derive_requests(entries: &[(&str, &[&str])]) -> DeriveRequests {
+        entries
+            .iter()
+            .map(|(name, traits)| {
+                (
+                    QualifiedName::new_from_cpp_name(name),
+                    traits
+                        .iter()
+                        .map(|t| syn::parse_str::<Path>(t).unwrap())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The derives on the type at `path`, which for these tests has to name
+    /// the enclosing mods too: the fixture deliberately has two types called
+    /// `Point`, and telling them apart is the point. Unlike [`derives_of`],
+    /// this looks only in the mod the path names, never inside its children.
+    fn derives_at(item_mod: &ItemMod, path: &[&str]) -> Vec<String> {
+        let (name, mods) = path.split_last().expect("a path names something");
+        let mut here = item_mod;
+        for mod_name in mods {
+            let (_, items) = here.content.as_ref().expect("an inline mod");
+            here = items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Mod(m) if m.ident == mod_name => Some(m),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no mod {mod_name}"));
+        }
+        let (_, items) = here.content.as_ref().expect("an inline mod");
+        let attrs = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Enum(e) if e.ident == name => Some(&e.attrs),
+                Item::Struct(s) if s.ident == name => Some(&s.attrs),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no type {name}"));
+        let mut found = Vec::new();
+        for attr in attrs {
+            if !attr.path().is_ident("derive") {
+                continue;
+            }
+            attr.parse_nested_meta(|meta| {
+                found.push(meta.path.to_token_stream().to_string());
+                Ok(())
+            })
+            .unwrap();
+        }
+        found
+    }
+
+    #[test]
+    fn adds_requested_derives_to_the_named_type_only() {
+        let mut m = mod_with_namespaced_types();
+        add_requested_derives(
+            &mut m,
+            &derive_requests(&[("Point", &["Debug", "PartialEq"])]),
+        );
+        assert_eq!(
+            derives_at(&m, &["root", "Point"]),
+            vec!["Default", "Debug", "PartialEq"]
+        );
+        assert!(derives_at(&m, &["root", "ns", "Point"]).is_empty());
+    }
+
+    #[test]
+    fn tells_two_namespaces_apart() {
+        let mut m = mod_with_namespaced_types();
+        add_requested_derives(&mut m, &derive_requests(&[("ns::Point", &["Debug"])]));
+        assert_eq!(derives_at(&m, &["root", "ns", "Point"]), vec!["Debug"]);
+        assert_eq!(derives_at(&m, &["root", "Point"]), vec!["Default"]);
+    }
+
+    /// bindgen writes `Clone, Hash, PartialEq, Eq` onto every enum itself, and
+    /// a second `#[derive(Clone)]` is a conflicting implementation.
+    #[test]
+    fn does_not_repeat_a_derive_bindgen_already_wrote() {
+        let mut m = mod_with_namespaced_types();
+        add_requested_derives(&mut m, &derive_requests(&[("Fruit", &["Clone", "Debug"])]));
+        assert_eq!(
+            derives_of(&m, "Fruit"),
+            vec!["Clone", "Hash", "PartialEq", "Eq", "Debug"]
+        );
+    }
+
+    #[test]
+    fn leaves_unmentioned_types_alone() {
+        let mut m = mod_with_namespaced_types();
+        add_requested_derives(&mut m, &derive_requests(&[("Point", &["Debug"])]));
+        assert_eq!(
+            derives_of(&m, "Fruit"),
+            vec!["Clone", "Hash", "PartialEq", "Eq"]
+        );
+    }
+
     fn derives_of(item_mod: &ItemMod, name: &str) -> Vec<String> {
         let mut found = Vec::new();
         for attr in attrs_of(item_mod, name) {

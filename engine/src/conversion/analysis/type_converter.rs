@@ -13,7 +13,10 @@ use crate::{
         },
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
-        type_helpers::{unwrap_bitfield, unwrap_has_opaque, unwrap_reference},
+        type_helpers::{
+            extract_pinned_mutable_reference_type, unwrap_bitfield, unwrap_function_pointer,
+            unwrap_has_opaque, unwrap_reference,
+        },
         ConvertErrorFromCpp,
     },
     known_types::{known_types, CxxGenericType},
@@ -226,6 +229,9 @@ impl<'a> TypeConverter<'a> {
         ns: &Namespace,
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        if let Some(annotated) = Self::function_pointer_field(&typ, ctx) {
+            return Ok(annotated);
+        }
         // First we try to spot if these are the special marker paths that
         // bindgen uses to denote references or other things. Note that
         // there is deliberately no `__bindgen_marker_UnusedTemplateParam`
@@ -382,6 +388,29 @@ impl<'a> TypeConverter<'a> {
         let (mut typ, tn) = match self.resolve_typedef(&original_tn)? {
             None => (typ, original_tn),
             Some(Type::Path(resolved_tp)) => {
+                // The typedef may resolve to a C function pointer, which is
+                // field data we take exactly as bindgen wrote it - see
+                // `function_pointer_field`. Nothing within it needs
+                // converting, and the `Option` wrapping it must not be
+                // mistaken for a type we should go looking for.
+                if let Some(mut annotated) = Self::function_pointer_field(resolved_tp, ctx) {
+                    annotated.types_encountered.extend(deps);
+                    return Ok(annotated);
+                }
+                // `Pin<&mut T>` is not a name to go looking for: it is what
+                // analysing the typedef already made of a C++ mutable
+                // reference, and it is finished. Read as a name it is the
+                // generic `core::pin::Pin`, which cxx knows nothing about, so
+                // autocxx would invent a concrete type for it and write
+                // `T&*` into the generated C++. See google/autocxx#1363.
+                if extract_pinned_mutable_reference_type(resolved_tp).is_some() {
+                    return Ok(Annotated::new(
+                        Type::Path(resolved_tp.clone()),
+                        deps,
+                        ApiVec::new(),
+                        TypeKind::MutableReference,
+                    ));
+                }
                 let resolved_tn = QualifiedName::from_type_path(resolved_tp);
                 deps.insert(resolved_tn.clone());
                 (resolved_tp.clone(), resolved_tn)
@@ -399,12 +428,27 @@ impl<'a> TypeConverter<'a> {
                 return Ok(annotated);
             }
             Some(other) => {
-                return Ok(Annotated::new(
-                    other.clone(),
-                    deps,
-                    ApiVec::new(),
-                    TypeKind::Regular,
-                ))
+                // Anything else the typedef resolved to was converted when the
+                // typedef itself was analysed, so take it as it stands - but
+                // say what kind it is. A typedef to a C++ reference lands here
+                // as `&T`, and calling that `Regular` costs the caller the one
+                // fact it needs: whether the value borrows, which decides
+                // lifetimes on a returned reference and how a parameter
+                // crosses the bridge. See google/autocxx#1363.
+                //
+                // TODO: a typedef to an rvalue reference does *not* land here.
+                // Analysing it leaves a `Type::Ptr`, the same as a typedef to
+                // a pointer, so the arm above cannot tell the two apart and
+                // both come out as `TypeKind::Pointer`. Recovering that needs
+                // the typedef's own analysis to record which it was.
+                let kind = match other {
+                    Type::Reference(reference) if reference.mutability.is_some() => {
+                        TypeKind::MutableReference
+                    }
+                    Type::Reference(_) => TypeKind::Reference,
+                    _ => TypeKind::Regular,
+                };
+                return Ok(Annotated::new(other.clone(), deps, ApiVec::new(), kind));
             }
         };
 
@@ -580,6 +624,37 @@ impl<'a> TypeConverter<'a> {
                 _ => return Ok(r),
             }
         }
+    }
+
+    /// A C function pointer used as struct field data, taken exactly as
+    /// bindgen wrote it: `Option<unsafe extern "C" fn(..)>`, the `Option`
+    /// being there because a null pointer is one of the values such a field
+    /// can hold. Nothing in that names a C++ type, so there is nothing to
+    /// convert, and copying the field copies a pointer - which is what lets a
+    /// struct holding one be POD. See google/autocxx#1494.
+    ///
+    /// Field data only. A POD struct is re-exported from the bindgen module
+    /// rather than declared to cxx, so its fields never have to be types cxx
+    /// can express; the types in a signature do, and cxx has no function
+    /// pointer type. So a function pointer anywhere else still falls through
+    /// to the ordinary path, and is still refused there.
+    fn function_pointer_field(
+        typ: &TypePath,
+        ctx: &TypeConversionContext,
+    ) -> Option<Annotated<Type>> {
+        if !ctx.within_struct_field() || unwrap_function_pointer(typ).is_none() {
+            return None;
+        }
+        Some(Annotated::new(
+            Type::Path(typ.clone()),
+            HashSet::new(),
+            ApiVec::new(),
+            // It behaves as a pointer in every way the later analyses ask
+            // about: a field holding one is left uninitialized by an implicit
+            // default constructor, copied by an implicit copy constructor, and
+            // destroyed by doing nothing at all.
+            TypeKind::Pointer,
+        ))
     }
 
     fn convert_ptr(

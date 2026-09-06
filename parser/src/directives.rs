@@ -23,6 +23,7 @@ use crate::config::AllowlistErr;
 #[cfg(feature = "reproduction_case")]
 use crate::config::Allowlist;
 
+use crate::derives::DeriveError;
 use crate::directive_names::{EXTERN_RUST_FUN, EXTERN_RUST_TYPE, SUBCLASS};
 use crate::enum_style::{EnumStyle, EnumStyleError};
 use crate::{AllowlistEntry, IncludeCppConfig};
@@ -130,6 +131,7 @@ pub(crate) fn get_directives() -> &'static DirectivesMap {
             Box::new(ExternCppType { opaque: true }),
         );
         need_exclamation.insert("enum_style".into(), Box::new(EnumStyleDirective));
+        need_exclamation.insert("derive".into(), Box::new(DeriveDirective));
 
         DirectivesMap {
             need_hexathorpe,
@@ -641,6 +643,83 @@ impl Directive for EnumStyleDirective {
         Box::new(config.enum_styles.iter().map(|(name, style)| {
             quote! {
                 #style, #name
+            }
+        }))
+    }
+}
+
+/// `derive!("Type", "Debug", "PartialEq")` - put extra `#[derive(..)]` traits
+/// on the Rust type `autocxx` generates for a C++ one.
+struct DeriveDirective;
+
+impl Directive for DeriveDirective {
+    fn parse(
+        &self,
+        args: ParseStream,
+        config: &mut IncludeCppConfig,
+        _ident_span: &Span,
+    ) -> ParseResult<()> {
+        let cpp_name: syn::LitStr = args.parse()?;
+        args.parse::<syn::token::Comma>()?;
+        let traits: syn::punctuated::Punctuated<syn::LitStr, syn::token::Comma> =
+            syn::punctuated::Punctuated::parse_separated_nonempty(args)?;
+        for trait_name in traits {
+            // The trait ends up written into the generated code, so it has to
+            // be something Rust could name there. Settle that now, where we
+            // can point at the string the user wrote.
+            let trait_path = syn::parse_str::<syn::Path>(&trait_name.value()).map_err(|_| {
+                syn::Error::new(
+                    trait_name.span(),
+                    format!(
+                        "{:?} is not the name of a trait; write it as you would \
+                         inside #[derive(..)]",
+                        trait_name.value()
+                    ),
+                )
+            })?;
+            match config.derives.insert(cpp_name.value(), trait_path) {
+                Ok(()) => {}
+                Err(DeriveError::NotAPlainName) => {
+                    return Err(syn::Error::new(
+                        cpp_name.span(),
+                        format!(
+                            "{:?} is not a plain type name; name the type here \
+                             exactly as you would in generate!",
+                            cpp_name.value()
+                        ),
+                    ))
+                }
+                Err(DeriveError::Duplicate) => {
+                    return Err(syn::Error::new(
+                        trait_name.span(),
+                        format!(
+                            "{} was already asked to derive {}",
+                            cpp_name.value(),
+                            trait_name.value()
+                        ),
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "reproduction_case")]
+    fn output<'a>(
+        &self,
+        config: &'a IncludeCppConfig,
+    ) -> Box<dyn Iterator<Item = TokenStream> + 'a> {
+        // One directive per type, which re-parses to the same map as whatever
+        // grouping the user originally wrote.
+        Box::new(config.derives.iter().map(|(cpp_name, traits)| {
+            // Back into the string literals the directive reads, so that the
+            // reproduction case re-parses to the same map.
+            let traits = traits
+                .iter()
+                .map(|path| path.to_token_stream().to_string())
+                .collect::<Vec<_>>();
+            quote! {
+                #cpp_name, #(#traits),*
             }
         }))
     }

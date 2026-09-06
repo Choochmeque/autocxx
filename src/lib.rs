@@ -518,6 +518,44 @@ macro_rules! enum_style {
     ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
 }
 
+/// Puts extra `#[derive(..)]` traits on the Rust type generated for a C++ one.
+///
+/// The syntax is:
+/// `derive!("Type", "Debug", "PartialEq")`
+///
+/// Name the type exactly as you would in [`generate`] - so a namespaced type
+/// is `"ns::Thing"`, and a type nested inside a class is `"Outer_Inner"`,
+/// because that is the name `bindgen` gives it. Repeat the directive to add
+/// more traits, or to name more types; asking twice for the same trait on the
+/// same type is an error.
+///
+/// Each trait is written as you would inside `#[derive(..)]`, so a path works
+/// too: `derive!("Thing", "num_enum::TryFromPrimitive")`. It is your job to
+/// make sure the derive macro is in scope where the bindings are generated,
+/// and that the type can satisfy it: `Clone` needs every field to be `Clone`,
+/// `PartialEq` needs every field to be `PartialEq`, and so on. autocxx does
+/// not check, so an impossible request comes back from `rustc` rather than
+/// from autocxx.
+///
+/// # Only for types held by value
+///
+/// The trait goes onto the type autocxx re-exports, which means the directive
+/// only works for a [`generate_pod`] type or an enum. Everything else is an
+/// opaque type - autocxx emits a wrapper with no fields, precisely because
+/// Rust must not look inside it - so there would be nothing for a derive to
+/// work from, and asking is an error rather than a no-op.
+///
+/// `Default` on an enum is refused too. Nothing makes one enumerator of a C++
+/// enum the default, and a derived `Default` on an enum with no variant marked
+/// `#[default]` does not compile.
+///
+/// A directive to be included inside
+/// [include_cpp] - see [include_cpp] for general information.
+#[macro_export]
+macro_rules! derive {
+    ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! usage {

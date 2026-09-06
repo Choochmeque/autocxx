@@ -124,3 +124,36 @@ pub(crate) fn unwrap_bitfield(ty: &TypePath) -> Option<&syn::Type> {
     }
     inner
 }
+
+/// If `ty` is `Option<F>` for a bare function type `F`, return that function
+/// type. This is the shape bindgen gives a C function pointer, because a null
+/// pointer is one of the values one can hold.
+///
+/// bindgen writes the path out as `::std::option::Option`; the shorter
+/// spellings of the same path are accepted too, but nothing else, because a
+/// C++ class called `Option` reaches us as `root::Option`.
+pub(crate) fn unwrap_function_pointer(ty: &TypePath) -> Option<&syn::TypeBareFn> {
+    if ty.qself.is_some() {
+        return None;
+    }
+    let mut segments = ty.path.segments.iter().rev();
+    let last = segments.next()?;
+    if !segments.all(|seg| matches!(seg.ident.to_string().as_str(), "std" | "core" | "option")) {
+        return None;
+    }
+    match unwrap_newtype(last, "Option")? {
+        Type::BareFn(fun) => Some(fun),
+        _ => None,
+    }
+}
+
+/// Whether `ty` is a pointer as far as copying it is concerned: one written
+/// out, or a C function pointer in the `Option<unsafe extern "C" fn(..)>`
+/// shape bindgen gives it. Either is trivially copyable whatever it points at.
+pub(crate) fn is_pointer_like(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(_) => true,
+        Type::Path(typ) => unwrap_function_pointer(typ).is_some(),
+        _ => false,
+    }
+}

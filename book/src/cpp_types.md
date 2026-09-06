@@ -197,6 +197,61 @@ fn main() {
 )
 ```
 
+## Extra derives
+
+The Rust types `autocxx` generates carry only the derives it needs itself, so
+by default you cannot print a generated struct or compare two of them. Use
+[`derive!`](https://docs.rs/autocxx/latest/autocxx/macro.derive.html) to ask
+for more:
+
+```rust,ignore
+derive!("Point", "Debug", "PartialEq")
+```
+
+Name the type exactly as you would in `generate!`, and write each trait as you
+would inside `#[derive(..)]` - a path works too, so a derive macro from another
+crate can be asked for as `"num_enum::TryFromPrimitive"`. It is then your job
+to have that macro in scope, and to make sure the type can satisfy the trait:
+`Clone` needs every field to be `Clone`, and so on. `autocxx` does not check,
+so an impossible request comes back from `rustc` rather than from `autocxx`.
+
+The trait goes onto the type `autocxx` re-exports, which means `derive!` works
+for a `generate_pod!` type or an enum, and is refused for anything else -
+everything else is an opaque type with no fields, precisely because Rust must
+not look inside it, so there would be nothing for a derive to work from.
+`Default` on an enum is refused too: nothing makes one enumerator of a C++ enum
+the default, and a derived `Default` on an enum with no variant marked
+`#[default]` does not compile.
+
+```rust,ignore,autocxx,hidecpp
+autocxx_integration_tests::doctest(
+"",
+"#include <cstdint>
+struct Point {
+    uint32_t x;
+    uint32_t y;
+};
+",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate_pod!("Point")
+    derive!("Point", "Debug", "PartialEq")
+}
+
+fn main() {
+    let a = ffi::Point { x: 1, y: 2 };
+    let b = ffi::Point { x: 1, y: 2 };
+    assert_eq!(a, b);
+    assert_eq!(format!("{:?}", a), "Point { x: 1, y: 2 }");
+}
+}
+)
+```
+
 ## Forward declarations
 
 A type which is incomplete in the C++ headers (i.e. represented only by a forward

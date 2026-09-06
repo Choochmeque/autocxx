@@ -25,6 +25,7 @@ use syn::{
 use syn::{Ident, Result as ParseResult};
 use thiserror::Error;
 
+use crate::derives::DeriveMap;
 use crate::enum_style::{EnumStyle, EnumStyleMap};
 use crate::{directives::get_directives, RustPath};
 
@@ -256,6 +257,7 @@ pub struct IncludeCppConfig {
     pub opaquelist: Vec<String>,
     pub(crate) throws_list: Vec<String>,
     pub(crate) enum_styles: EnumStyleMap,
+    pub(crate) derives: DeriveMap,
 }
 
 impl Parse for IncludeCppConfig {
@@ -436,6 +438,16 @@ impl IncludeCppConfig {
     /// `bindgen`.
     pub fn enum_styles(&self) -> impl Iterator<Item = (&str, EnumStyle)> {
         self.enum_styles.iter()
+    }
+
+    /// Every `derive!` request, as (C++ type name, traits).
+    pub fn derives(&self) -> impl Iterator<Item = (&str, &[syn::Path])> {
+        self.derives.iter()
+    }
+
+    /// Whether any `derive!` was written at all.
+    pub fn has_derives(&self) -> bool {
+        !self.derives.is_empty()
     }
 
     pub fn get_blocklist(&self) -> impl Iterator<Item = &String> {
@@ -636,6 +648,120 @@ mod parse_tests {
         });
         assert!(
             err.contains("not a plain enum name"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    fn vec_of(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// Each `derive!` request with its traits written back out as strings,
+    /// since `syn::Path` is awkward to write in an expected value.
+    fn rendered_derives(config: &IncludeCppConfig) -> Vec<(String, Vec<String>)> {
+        config
+            .derives()
+            .map(|(name, traits)| {
+                (
+                    name.to_string(),
+                    traits
+                        .iter()
+                        .map(|path| {
+                            quote::ToTokens::to_token_stream(path)
+                                .to_string()
+                                .replace(' ', "")
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_derive() {
+        let config: IncludeCppConfig = parse_quote! {
+            derive!("Point", "Debug", "PartialEq")
+            derive!("Point", "Clone")
+            derive!("ns::Thing", "num_enum::TryFromPrimitive")
+            generate_pod!("Point")
+        };
+        let derives = rendered_derives(&config);
+        assert_eq!(
+            derives,
+            vec![
+                (
+                    "Point".to_string(),
+                    vec_of(&["Debug", "PartialEq", "Clone"])
+                ),
+                (
+                    "ns::Thing".to_string(),
+                    vec_of(&["num_enum::TryFromPrimitive"])
+                ),
+            ]
+        );
+    }
+
+    #[cfg(feature = "reproduction_case")]
+    #[test]
+    fn test_derive_reproduction_case_round_trips() {
+        let config: IncludeCppConfig = parse_quote! {
+            derive!("Point", "Debug", "PartialEq")
+            derive!("Other", "Clone")
+            generate_pod!("Point")
+        };
+        let reparsed: IncludeCppConfig =
+            syn::parse2(quote::ToTokens::to_token_stream(&config)).unwrap();
+        let derives = rendered_derives(&reparsed);
+        assert_eq!(
+            derives,
+            vec![
+                ("Point".to_string(), vec_of(&["Debug", "PartialEq"])),
+                ("Other".to_string(), vec_of(&["Clone"])),
+            ]
+        );
+    }
+
+    fn derive_parse_error(directive: proc_macro2::TokenStream) -> String {
+        syn::parse2::<IncludeCppConfig>(directive)
+            .expect_err("expected the derive! directive to be rejected")
+            .to_string()
+    }
+
+    /// Deriving the same trait twice would be two `#[derive]`s of it, which
+    /// is a conflicting implementation rather than a no-op.
+    #[test]
+    fn test_derive_duplicate_trait_rejected() {
+        let err = derive_parse_error(quote::quote! {
+            derive!("Point", "Debug")
+            derive!("Point", "Debug")
+        });
+        assert!(
+            err.contains("Point") && err.contains("already"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// A pattern would reach nothing: autocxx matches the name literally
+    /// against the types it generated.
+    #[test]
+    fn test_derive_regex_rejected() {
+        let err = derive_parse_error(quote::quote! {
+            derive!(".*Point", "Debug")
+        });
+        assert!(
+            err.contains("not a plain type name"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// The trait has to be something Rust could name inside `#[derive(..)]`.
+    #[test]
+    fn test_derive_non_trait_rejected() {
+        let err = derive_parse_error(quote::quote! {
+            derive!("Point", "not a trait")
+        });
+        assert!(
+            err.contains("is not the name of a trait"),
             "unhelpful error: {err}"
         );
     }

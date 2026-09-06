@@ -87,6 +87,12 @@ pub enum ConvertErrorFromCpp {
     DidNotGenerateAnything(String),
     #[error("The 'generate' or 'generate_pod' directive for '{0}' did not result in any usable code being generated, because autocxx couldn't generate bindings for it: {1}")]
     DidNotGenerateAnythingUsable(String, Box<ConvertErrorFromCpp>),
+    #[error("The 'derive' directive for '{0}' matched nothing autocxx generated. Perhaps this was mis-spelled, or you didn't qualify the name with any namespaces, or there is no 'generate' directive for it?")]
+    DeriveDirectiveMatchedNothing(String),
+    #[error("The 'derive' directive for '{0}' names a type autocxx does not hold by value, so there is no Rust definition of it for the traits to go on. autocxx emits an opaque type with no fields for such a type; use 'generate_pod' if it is safe to hold by value.")]
+    DeriveOnTypeWithNoRustDefinition(String),
+    #[error("The 'derive' directive asks '{0}' to derive Default, and it is an enum. Nothing makes one enumerator of a C++ enum the default, so Rust would refuse to derive it.")]
+    DeriveDefaultOnEnum(String),
     #[error("Found an attempt at using a forward declaration ({}) inside a templated cxx type such as UniquePtr or CxxVector. If the forward declaration is a typedef, perhaps autocxx wasn't sure whether or not it involved a forward declaration. If you're sure it didn't, then you may be able to solve this by using instantiable!.", .0.to_cpp_name())]
     TypeContainingForwardDeclaration(QualifiedName),
     /// Reported in place of [`Self::TypeContainingForwardDeclaration`] where we
