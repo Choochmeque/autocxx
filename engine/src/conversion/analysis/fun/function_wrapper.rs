@@ -38,6 +38,13 @@ pub(crate) enum CppConversionType {
     FromReturnValueToPlacementPtr,
     FromPointerToReference, // unwrapped_type is always Type::Ptr
     FromReferenceToPointer, // unwrapped_type is always Type::Ptr
+    /// The rvalue-reference counterparts of the two above, for the return
+    /// value of a C++ function declared `T&&`. The type converter turns such
+    /// a return into the same pointer it makes of a `T&`, and nothing in Rust
+    /// spells the difference, so these two carry it instead.
+    /// `unwrapped_type` is always Type::Ptr.
+    FromPointerToRValueReference,
+    FromRValueReferenceToPointer,
 }
 
 impl CppConversionType {
@@ -55,6 +62,12 @@ impl CppConversionType {
             CppConversionType::FromValueToUniquePtr => CppConversionType::FromUniquePtrToValue,
             CppConversionType::FromPointerToReference => CppConversionType::FromReferenceToPointer,
             CppConversionType::FromReferenceToPointer => CppConversionType::FromPointerToReference,
+            CppConversionType::FromPointerToRValueReference => {
+                CppConversionType::FromRValueReferenceToPointer
+            }
+            CppConversionType::FromRValueReferenceToPointer => {
+                CppConversionType::FromPointerToRValueReference
+            }
             _ => panic!("Did not expect to have to invert this conversion"),
         }
     }
@@ -150,6 +163,32 @@ impl TypeConversionPolicy {
             },
             cpp_conversion: CppConversionType::FromReferenceToPointer,
             rust_conversion: RustConversionType::FromPointerToReferenceWrapper,
+        }
+    }
+
+    /// The return value of a C++ function declared `T&&`, which by the time
+    /// it gets here is the same `*mut T`/`*const T` the type converter makes
+    /// of a `T&`. Only the conversion remembers which of the two C++ wrote,
+    /// and a subclass peer's override has to repeat the superclass's spelling
+    /// exactly or it overrides nothing and does not compile.
+    ///
+    /// `wrap` asks for the pointer to be a `CppRef`/`CppMutRef` on the Rust
+    /// side, which is what `ReferencesWrappedAllFunctionsSafe` wants for the
+    /// same reason it wants one for a returned `T&`: whoever implements the
+    /// override should not have to produce a raw pointer in a mode whose
+    /// whole point is that safe Rust never handles one. The wrapper says
+    /// "a C++ reference to a T" and no more; that C++ may move out of the
+    /// referent, which is what the extra `&` means, is between the override
+    /// and the header it is implementing, exactly as it is in C++.
+    pub(crate) fn return_rvalue_reference(ty: Type, wrap: bool) -> Self {
+        TypeConversionPolicy {
+            unwrapped_type: ty.into(),
+            cpp_conversion: CppConversionType::FromRValueReferenceToPointer,
+            rust_conversion: if wrap {
+                RustConversionType::FromPointerToReferenceWrapper
+            } else {
+                RustConversionType::None
+            },
         }
     }
 

@@ -20792,6 +20792,90 @@ fn test_typedef_chain_to_rvalue_reference_parameter() {
     run_test("", hdr, rs, &["fx_Movable2", "fx_take2"], &[]);
 }
 
+/// A typedef to an rvalue reference in *return* position, which the refusal
+/// of `T&&` returns has to catch as surely as it catches one written out.
+/// Written out, the return reaches analysis as one of bindgen's markers and
+/// is turned down on sight; behind a typedef it arrives as an ordinary path,
+/// and only the type converter - having resolved the alias - knows what it
+/// is. Before, that difference got as far as codegen, which emitted a shim
+/// whose function pointer had the wrong type and would not compile.
+#[test]
+fn test_typedef_to_rvalue_reference_return_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Handoff { uint32_t a; };
+        typedef fx_Handoff&& fx_HandoffRef;
+        inline fx_HandoffRef fx_hand_over(fx_Handoff& h) {
+            return static_cast<fx_HandoffRef>(h);
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_Handoff", "fx_hand_over"],
+        &[],
+        "returns an rvalue reference",
+    );
+}
+
+/// And the same typedef on a virtual method, where a subclass peer still has
+/// to override it and so still has to spell the `&&` - the refusal above only
+/// stops autocxx generating a way for Rust to *call* the superclass method,
+/// which was never what made the override possible.
+#[test]
+fn test_subclass_virtual_returning_typedef_to_rvalue_reference() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    struct fx_Parcel { uint32_t a; };
+    typedef fx_Parcel&& fx_ParcelRef;
+
+    class fx_Depot {
+    public:
+        fx_Depot() {}
+        virtual fx_ParcelRef fx_collect() = 0;
+        virtual ~fx_Depot() {}
+    };
+
+    inline uint32_t fx_fetch(fx_Depot* d) { return d->fx_collect().a; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut parcel = ffi::fx_Parcel { a: 42 };
+            let depot = MyDepot::new_rust_owned(MyDepot {
+                parcel: &mut parcel,
+                cpp_peer: Default::default(),
+            });
+            let sup: *mut ffi::fx_Depot =
+                unsafe { depot.borrow_mut().pin_mut().get_unchecked_mut() };
+            assert_eq!(unsafe { ffi::fx_fetch(sup) }, 42);
+        },
+        quote! {
+            generate!("fx_fetch")
+            generate_pod!("fx_Parcel")
+            subclass!("fx_Depot",MyDepot)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Depot_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyDepot {
+                parcel: *mut ffi::fx_Parcel,
+            }
+            impl fx_Depot_methods for MyDepot {
+                fn fx_collect(&mut self) -> *mut ffi::fx_Parcel {
+                    self.parcel
+                }
+            }
+        }),
+    );
+}
+
 /// A typedef to a pointer must stay a pointer: the two are told apart by what
 /// the typedef's own analysis recorded, and nothing else, so the case which
 /// keeps that honest belongs next to the one which needed it.
@@ -22178,5 +22262,260 @@ fn test_pod_struct_holding_array_of_struct_containing_non_pod_is_rejected() {
         &[],
         &["fx_HoldsDeepArray"],
         &["could not be POD", "fx_DeepHolder"],
+    );
+}
+
+/// A virtual method which returns an *rvalue* reference. The peer's override
+/// has to repeat the superclass's `fx_Baton&&`; it used to say `fx_Baton*`,
+/// which overrides nothing and does not even compile once `override` is on
+/// the declaration.
+///
+/// C++ has no way to get its hands on the returned object here except by
+/// moving out of the reference, since the copy constructor is deleted - so if
+/// either half of the signature drifted back to a pointer, or to a plain
+/// lvalue reference, this would fail to build rather than quietly copy. The
+/// moved-from object is checked afterwards, which is how the test knows the
+/// move really happened through the override rather than somewhere else.
+#[test]
+fn test_subclass_virtual_returning_rvalue_reference() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    struct fx_Baton {
+        uint32_t a;
+        explicit fx_Baton(uint32_t a) : a(a) {}
+        fx_Baton(fx_Baton&& other) : a(other.a) { other.a = 0; }
+        fx_Baton(const fx_Baton&) = delete;
+        uint32_t fx_get() const { return a; }
+    };
+
+    class fx_Relay {
+    public:
+        fx_Relay() {}
+        virtual fx_Baton&& fx_pass() = 0;
+        virtual ~fx_Relay() {}
+    };
+
+    inline uint32_t fx_run(fx_Relay* r) {
+        fx_Baton taken(r->fx_pass());
+        return taken.fx_get();
+    }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let baton = ffi::fx_Baton::new(42).within_unique_ptr();
+            let relay = MyRelay::new_rust_owned(MyRelay {
+                baton: baton.as_mut_ptr(),
+                cpp_peer: Default::default(),
+            });
+            // Via a pointer rather than a `Pin<&mut>`, so that the `RefCell`
+            // borrow is over before C++ calls back into the override.
+            let sup: *mut ffi::fx_Relay =
+                unsafe { relay.borrow_mut().pin_mut().get_unchecked_mut() };
+            assert_eq!(unsafe { ffi::fx_run(sup) }, 42);
+            assert_eq!(baton.as_ref().unwrap().fx_get(), 0);
+        },
+        quote! {
+            generate!("fx_run")
+            generate!("fx_Baton")
+            subclass!("fx_Relay",MyRelay)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Relay_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyRelay {
+                baton: *mut ffi::fx_Baton,
+            }
+            impl fx_Relay_methods for MyRelay {
+                fn fx_pass(&mut self) -> *mut ffi::fx_Baton {
+                    self.baton
+                }
+            }
+        }),
+    );
+}
+
+/// A *public* non-pure virtual returning an rvalue reference, which a Rust
+/// subclass cannot override: such a method gets a `_super` helper so that an
+/// override can call the superclass's own implementation, that helper is a
+/// call *to* a method returning `T&&`, autocxx generates no binding for one
+/// of those, and the method drops out of the `_methods` trait along with it.
+/// The superclass's implementation runs instead, which is what this checks.
+///
+/// So the deciding fact is the `_super` helper, not purity: a *private*
+/// non-pure virtual gets no helper - the peer may override it but not call
+/// it - and is overridable exactly as a pure virtual is. That is
+/// `test_subclass_private_non_pure_virtual_returning_rvalue_reference`
+/// below.
+///
+/// None of this is new here, and none of it is what this change is about; it
+/// is pinned because the neighbouring cases now work and the line between
+/// them is otherwise invisible.
+/// `test_subclass_ref_qualified_virtual_method` is the same shape for a
+/// non-pure `&&`-*qualified* method.
+#[test]
+fn test_subclass_non_pure_virtual_returning_rvalue_reference() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    struct fx_Crate { uint32_t a; };
+
+    class fx_Store {
+    public:
+        fx_Store() : held{7} {}
+        virtual fx_Crate&& fx_open() { return static_cast<fx_Crate&&>(held); }
+        virtual ~fx_Store() {}
+    private:
+        fx_Crate held;
+    };
+
+    inline uint32_t fx_open_of(fx_Store* s) { return s->fx_open().a; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let store = MyStore::new_rust_owned(MyStore { cpp_peer: Default::default() });
+            let sup: *mut ffi::fx_Store =
+                unsafe { store.borrow_mut().pin_mut().get_unchecked_mut() };
+            assert_eq!(unsafe { ffi::fx_open_of(sup) }, 7);
+        },
+        quote! {
+            generate!("fx_open_of")
+            generate_pod!("fx_Crate")
+            subclass!("fx_Store",MyStore)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Store_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyStore {}
+            impl fx_Store_methods for MyStore {}
+        }),
+    );
+}
+
+/// The other side of the line drawn in
+/// [`test_subclass_non_pure_virtual_returning_rvalue_reference`]: a *private*
+/// non-pure virtual returning `T&&`. A peer may override a private virtual
+/// but may not call it, so autocxx generates no `_super` helper, so there is
+/// no binding to a `T&&`-returning method to go missing, so the method stays
+/// in the `_methods` trait and the override is generated - the pure-virtual
+/// path in all but name. The C++ here calls the private virtual through a
+/// public method of its own, which is what a private virtual is for.
+#[test]
+fn test_subclass_private_non_pure_virtual_returning_rvalue_reference() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    struct fx_Ticket { uint32_t a; };
+
+    class fx_Gate {
+    public:
+        fx_Gate() : held{7} {}
+        virtual ~fx_Gate() {}
+        uint32_t fx_admit() { return fx_check().a; }
+    private:
+        virtual fx_Ticket&& fx_check() { return static_cast<fx_Ticket&&>(held); }
+        fx_Ticket held;
+    };
+
+    inline uint32_t fx_admit_of(fx_Gate* g) { return g->fx_admit(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut ticket = ffi::fx_Ticket { a: 42 };
+            let gate = MyGate::new_rust_owned(MyGate {
+                ticket: &mut ticket,
+                cpp_peer: Default::default(),
+            });
+            let sup: *mut ffi::fx_Gate =
+                unsafe { gate.borrow_mut().pin_mut().get_unchecked_mut() };
+            assert_eq!(unsafe { ffi::fx_admit_of(sup) }, 42);
+        },
+        quote! {
+            generate!("fx_admit_of")
+            generate_pod!("fx_Ticket")
+            subclass!("fx_Gate",MyGate)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Gate_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyGate {
+                ticket: *mut ffi::fx_Ticket,
+            }
+            impl fx_Gate_methods for MyGate {
+                fn fx_check(&mut self) -> *mut ffi::fx_Ticket {
+                    self.ticket
+                }
+            }
+        }),
+    );
+}
+
+/// The `const` twin of [`test_subclass_virtual_returning_rvalue_reference`].
+/// `const fx_Token&&` is still an rvalue reference, and still nothing a
+/// pointer can stand in for in the override's signature - but the pointer it
+/// crosses the bridge as is a `*const` one, and the peer has to say `const`
+/// in both places or it overrides nothing.
+#[test]
+fn test_subclass_virtual_returning_const_rvalue_reference() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    struct fx_Token { uint32_t a; };
+
+    class fx_Vault {
+    public:
+        fx_Vault() {}
+        virtual const fx_Token&& fx_yield() const = 0;
+        virtual ~fx_Vault() {}
+    };
+
+    inline uint32_t fx_peek(const fx_Vault& v) { return v.fx_yield().a; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let token = ffi::fx_Token { a: 42 };
+            let vault = MyVault::new_rust_owned(MyVault {
+                token: &token as *const ffi::fx_Token,
+                cpp_peer: Default::default(),
+            });
+            assert_eq!(ffi::fx_peek(vault.borrow().as_ref()), 42);
+        },
+        quote! {
+            generate!("fx_peek")
+            generate_pod!("fx_Token")
+            subclass!("fx_Vault",MyVault)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_Vault_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyVault {
+                token: *const ffi::fx_Token,
+            }
+            impl fx_Vault_methods for MyVault {
+                fn fx_yield(&self) -> *const ffi::fx_Token {
+                    self.token
+                }
+            }
+        }),
     );
 }
