@@ -323,3 +323,34 @@ fn test_pass_rust_str_by_mut_ref_cpprefs() {
     };
     run_cpprefs_test(cxx, hdr, rs, &["measure_string"], &[]);
 }
+
+/// A copy constructor in this mode. Its source is a `const T&`, which the mode
+/// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
+/// `&Self` and that is not negotiable - so the source stays a Rust reference
+/// here as it is under every other policy. Before, the mode's conversion made
+/// the parameter unrecognizable as a reference and the copy constructor became
+/// an ordinary constructor: `CopyNew` went unimplemented and `.clone()` and
+/// `moveit!` had nothing to call.
+#[test]
+fn test_copy_constructor_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        class fx_Copyable {
+        public:
+            fx_Copyable(uint32_t a) : s(std::to_string(a)) {}
+            fx_Copyable(const fx_Copyable& other) : s(other.s) {}
+            uint32_t len() const { return static_cast<uint32_t>(s.length()); }
+        private:
+            std::string s;
+        };
+    "};
+    let rs = quote! {
+        let a = ffi::fx_Copyable::new(12345).within_unique_ptr();
+        let a = autocxx::CppUniquePtrPin::new(a);
+        moveit! { let b = autocxx::moveit::new::copy(unsafe { a.as_cpp_ref().as_ref() }); }
+        let b = autocxx::CppRef::from_ptr(b.as_ref().get_ref() as *const ffi::fx_Copyable);
+        assert_eq!(b.len(), 5);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_Copyable"], &[]);
+}

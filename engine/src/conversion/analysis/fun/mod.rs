@@ -1009,21 +1009,24 @@ impl<'a> FnAnalyzer<'a> {
                     .unwrap_or_else(|| self.get_overload_name(ns, type_ident, rust_name));
                 let error_context = self.error_context_for_method(&self_ty, &rust_name);
 
-                // If this is 'None', then something weird is going on. We'll check for that
-                // later when we have enough context to generate useful errors.
-                let arg_is_reference = matches!(
-                    param_details
-                        .get(1)
-                        .map(|param| param.conversion.cxxbridge_type()),
-                    Some(Type::Reference(_))
-                );
                 // A copy constructor taking a non-const source - `T(T&)` or
                 // `T(volatile T&)` - cannot implement CopyNew, which copies from
-                // a `&self`, so we treat it as a regular constructor. We detect
-                // the two by their argument being translated to Pin at this
-                // point. The const-qualified forms, `T(const T&)` and
-                // `T(const volatile T&)`, both can and do implement CopyNew.
-                if is_move || arg_is_reference {
+                // a `&self`, so we treat it as a regular constructor. The
+                // const-qualified forms, `T(const T&)` and `T(const volatile
+                // T&)`, both can and do implement CopyNew.
+                //
+                // Ask what C++ wrote, rather than what the parameter has been
+                // translated to: under `ReferencesWrappedAllFunctionsSafe`
+                // every C++ reference becomes a pointer, so a source spelled
+                // `const T&` would answer "not a reference" and every copy
+                // constructor in that mode would quietly become an ordinary
+                // one. If this is `None`, then something weird is going on;
+                // we'll check for that later when we have enough context to
+                // generate useful errors.
+                let arg_is_const_reference = param_details
+                    .get(1)
+                    .is_some_and(|param| param.has_lifetime && !param.is_mutable_reference);
+                if is_move || arg_is_const_reference {
                     let (kind, method_name, trait_id) = if is_move {
                         (
                             TraitMethodKind::MoveConstructor,
@@ -1222,6 +1225,27 @@ impl<'a> FnAnalyzer<'a> {
                     &mut params,
                     &mut param_details,
                     Some(RustConversionType::FromPinMaybeUninitToPtr),
+                    sophistication,
+                    false,
+                    false,
+                )
+                .unwrap_or_else(&mut set_ignore_reason);
+                // `CopyNew::copy_new` copies from a `&Self`, so the source has
+                // to arrive as a Rust reference whatever the unsafety policy
+                // says about C++ references in general. Naming a conversion
+                // for it - even the identity one - is how this asks
+                // `argument_conversion_details` not to wrap it, which is what
+                // `ReferencesWrappedAllFunctionsSafe` would otherwise do. Every
+                // other policy leaves it as a `&T` anyway, so this changes
+                // nothing there.
+                self.reanalyze_parameter(
+                    1,
+                    fun,
+                    ns,
+                    &diagnostic_name,
+                    &mut params,
+                    &mut param_details,
+                    Some(RustConversionType::None),
                     sophistication,
                     false,
                     false,
