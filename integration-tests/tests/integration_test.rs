@@ -17196,37 +17196,56 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "libclang and the C++ compiler lay this struct out differently on \
-              both Windows targets, and neither of them is autocxx. libclang, \
-              which computes the offsets bindgen writes into the accessors, \
-              packs by Itanium rules whichever Windows target it is asked for - \
-              `unsigned:4, int:4, uint8_t:3, int8_t:3, bool:1, Shade:2, \
-              Handle:4, size_t:5` all into one allocation unit at bits 0, 4, 8, \
-              11, 14, 15, 17 and 21 - and passing `--target=` for the right \
-              triple (see engine/src/clang_target.rs) does not change that. \
-              Both cl.exe and the mingw g++ instead follow Microsoft's rule, \
-              starting a fresh allocation unit at every change of declared type \
-              size: units at byte 0 (plain_unsigned, plain_int), byte 4 \
-              (fixed_unsigned, fixed_signed, flag), byte 8 (shade, handle) and \
-              byte 16 (counted). Both make the struct 24 bytes, so nothing \
-              fails to compile, and the fields up to the first change of type \
-              size agree; `fixed_unsigned`, the first one after it, is read \
-              from a byte Microsoft layout never writes and comes back 0. None \
-              of this is bindgen's transmute or its replacement - the offsets \
-              are the same either way - and it is why the test above groups \
-              its bitfields by declared type size, which both rules lay out \
-              alike. Fixing it means making libclang agree with the C++ \
-              compiler about Microsoft bitfield layout, which changes every \
-              Windows binding and wants its own change and its own testing."
+    ignore = "the offsets bindgen writes into these accessors are not \
+              libclang's. libclang, asked for either Windows triple, reports \
+              Microsoft layout for this struct - `plain_unsigned` and \
+              `plain_int` at bits 0 and 4, then fresh allocation units at bits \
+              32, 64 and 128 as the declared type size changes from `unsigned` \
+              to `uint8_t` to `Shade` to `size_t` - which is exactly what \
+              cl.exe and mingw g++ produce, and `clang_Cursor_getOffsetOfField` \
+              hands those numbers straight to bindgen. bindgen throws them away \
+              for bitfields: `bitfields_to_allocation_units` in its `ir/comp.rs` \
+              groups bitfields into units by running its own packing algorithm, \
+              and that algorithm is Itanium's, hardcoded - `const is_ms_struct: \
+              bool = false`, under a comment wondering whether it ought to \
+              check whether the target is MSVC. So every field here lands in \
+              one four-byte unit at bits 0, 4, 8, 11, 14, 15, 17 and 21, the \
+              layout a Linux compiler would give it, and `fixed_unsigned` \
+              onwards are read from bytes Microsoft layout never writes. The \
+              struct still comes out 24 bytes, because the tail is padded to \
+              the size libclang reports, so nothing fails to compile and the \
+              fields before the first change of type size agree. Fixing it \
+              means either teaching bindgen the Microsoft rule - a new \
+              allocation unit whenever the declared type's size changes - or, \
+              better, making it honour the offsets libclang already gives it, \
+              which would be right for every ABI rather than one more. Either \
+              changes every Windows binding that mixes bitfield type sizes, and \
+              wants its own change and its own testing."
 )]
 /// A bitfield struct which mixes declared type sizes, pinning the layout the
 /// C++ compiler and libclang have to agree about. This is the shape
 /// `test_bitfield_accessors_do_not_transmute_unnecessarily` deliberately
 /// avoids: the conversions it exercises are the same ones, so nothing about
 /// the lint fix rests on this test, and it is here to keep the platform
-/// divergence visible rather than forgotten. Whoever makes libclang agree
-/// with the Windows compilers should be able to delete the `cfg_attr` above
-/// and find this passing.
+/// divergence visible rather than forgotten.
+///
+/// The fix belongs in autocxx-bindgen, not in the flags autocxx passes: no
+/// clang flag changes the answer, because clang is already right. `-mms-bitfields`
+/// is what makes the mingw triple use Microsoft bitfields (its C++ ABI is
+/// Itanium, so bindgen's existing `ABIKind`, which keys off `msvc` in the
+/// triple, is the wrong predicate to reuse). Two routes, in preference order:
+/// make `bitfields_to_allocation_units` group units from the per-field offsets
+/// clang already put in `RawField::offset`, and teach
+/// `codegen/struct_layout.rs::saw_bitfield_unit` to pad up to a unit's offset
+/// the way `saw_field` does for data members - that is ABI-agnostic and also
+/// covers `#pragma pack` and `__attribute__((ms_struct))`; or set
+/// `is_ms_struct` from the target and rewrite bindgen's existing (and also
+/// wrong) MS branch, which flushes a unit only when a field will not fit and
+/// has no notion of the declared type's size changing. Whichever is done,
+/// re-enabling layout tests would not have caught this: bindgen's layout tests
+/// skip `Field::Bitfields` entirely, and the tail padding hides the size.
+/// Whoever does it should be able to delete the `cfg_attr` above and find this
+/// passing.
 fn test_bitfield_mixing_declared_type_sizes() {
     let hdr = indoc! {"
         #include <cstdint>
