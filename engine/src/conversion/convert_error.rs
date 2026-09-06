@@ -213,6 +213,10 @@ pub enum ConvertErrorFromCpp {
     },
     #[error("autocxx could not tell what C++ reference this function returns. A reference return reaches the code which builds the conversion either as a Rust reference or as the raw pointer the type converter makes of one, and this was neither - it was `{0}`. This is an autocxx bug rather than anything wrong with the C++; please report the header which produced it.")]
     UnexpectedReferenceReturn(String),
+    #[error("autocxx has to hand this parameter to the cxx::bridge as a raw pointer, and the type converter rendered it as `{0}` instead. This is an autocxx bug rather than anything wrong with the C++; please report the header which produced it.")]
+    ParameterWasNotAPointer(String),
+    #[error("autocxx builds a C++ subclass peer by inverting each of the conversions the ordinary wrapper performs, and one of this function's has no opposite to invert to. This is an autocxx bug rather than anything wrong with the C++; please report the header which produced it.")]
+    NonInvertibleConversion,
 }
 
 /// Which type a [`ConvertErrorFromCpp::TypeContainingUngeneratableTypedef`]

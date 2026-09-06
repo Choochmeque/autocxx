@@ -372,7 +372,7 @@ impl<'a> FnGenerator<'a> {
                     if pd.is_placement_return_destination {
                         ptr_arg_name = Some(conversion);
                     } else {
-                        let param_mutability = pd.conversion.rust_conversion.requires_mutability();
+                        let param_mutability = pd.conversion.requires_mutability();
                         wrapper_params.push(parse_quote!(
                             #param_mutability #wrapper_arg_name: #ty
                         ));

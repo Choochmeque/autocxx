@@ -487,8 +487,10 @@ impl<'a> CppCodeGenerator<'a> {
                             ty.unconverted_type(&self.original_name_map)?,
                         ConversionDirection::CppCallsCpp =>
                             ty.converted_type(&self.original_name_map)?,
-                        ConversionDirection::CppCallsRust =>
-                            ty.inverse().unconverted_type(&self.original_name_map)?,
+                        ConversionDirection::CppCallsRust => ty
+                            .inverse()
+                            .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)?
+                            .unconverted_type(&self.original_name_map)?,
                     },
                     get_arg_name(counter)
                 ))
@@ -513,9 +515,11 @@ impl<'a> CppCodeGenerator<'a> {
                 ConversionDirection::CppCallsCpp => {
                     Some(x.unconverted_type(&self.original_name_map))
                 }
-                ConversionDirection::CppCallsRust => {
-                    Some(x.inverse().converted_type(&self.original_name_map))
-                }
+                ConversionDirection::CppCallsRust => Some(
+                    x.inverse()
+                        .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)
+                        .and_then(|x| x.converted_type(&self.original_name_map)),
+                ),
             })
             .unwrap_or_else(|| Ok(default_return.to_string()))?;
         let constness = match details.kind {
@@ -571,11 +575,12 @@ impl<'a> CppCodeGenerator<'a> {
                     conv.cpp_conversion(&get_arg_name(counter), &self.original_name_map, false)
                 }
                 ConversionDirection::CppCallsCpp => Ok(Some(get_arg_name(counter))),
-                ConversionDirection::CppCallsRust => conv.inverse().cpp_conversion(
-                    &get_arg_name(counter),
-                    &self.original_name_map,
-                    false,
-                ),
+                ConversionDirection::CppCallsRust => conv
+                    .inverse()
+                    .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)
+                    .and_then(|conv| {
+                        conv.cpp_conversion(&get_arg_name(counter), &self.original_name_map, false)
+                    }),
             })
             .collect();
         let mut arg_list = arg_list?.into_iter().flatten();
@@ -706,11 +711,10 @@ impl<'a> CppCodeGenerator<'a> {
                     ret.cpp_conversion(&underlying_function_call, &self.original_name_map, true)?
                 }
                 ConversionDirection::CppCallsCpp => Some(underlying_function_call),
-                ConversionDirection::CppCallsRust => ret.inverse().cpp_conversion(
-                    &underlying_function_call,
-                    &self.original_name_map,
-                    true,
-                )?,
+                ConversionDirection::CppCallsRust => ret
+                    .inverse()
+                    .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)?
+                    .cpp_conversion(&underlying_function_call, &self.original_name_map, true)?,
             }
             .expect(
                 "Expected some conversion type for return value which resulted in a parameter name",
@@ -718,7 +722,7 @@ impl<'a> CppCodeGenerator<'a> {
 
             underlying_function_call = match placement_param {
                 Some(placement_param) => {
-                    let tyname = self.original_name_map.type_to_cpp(ret.cxxbridge_type())?;
+                    let tyname = self.original_name_map.type_to_cpp(&ret.cxxbridge_type())?;
                     // `::new` for the same reason as in `PlacementNew` above.
                     need_placement_new = true;
                     format!("::new({placement_param}) {tyname}({call_itself})")
@@ -767,7 +771,15 @@ impl<'a> CppCodeGenerator<'a> {
             .any(|conv| match conversion_direction {
                 ConversionDirection::RustCallsCpp => conv.may_use_move_or_copy_helper(),
                 ConversionDirection::CppCallsCpp => false,
-                ConversionDirection::CppCallsRust => conv.inverse().may_use_move_or_copy_helper(),
+                // A conversion with no opposite has already been reported by
+                // the argument and return handling above, both of which run
+                // first and both of which give up on the whole function. Say
+                // yes anyway rather than pick a direction here: this only
+                // decides whether to emit a template definition, and an unused
+                // one costs nothing where a missing one fails to compile.
+                ConversionDirection::CppCallsRust => conv
+                    .inverse()
+                    .is_none_or(|conv| conv.may_use_move_or_copy_helper()),
             });
         if needs_move_or_copy {
             headers.push(Header::System("type_traits"));

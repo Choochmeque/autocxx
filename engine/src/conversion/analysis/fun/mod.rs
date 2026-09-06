@@ -15,7 +15,7 @@ mod subclass;
 use crate::{
     conversion::{
         analysis::{
-            fun::function_wrapper::{CppConversionType, CppFunctionKind},
+            fun::function_wrapper::{BridgePointer, CppFunctionKind},
             type_converter::{self, add_analysis, TypeConversionContext, TypeConverter},
         },
         api::{
@@ -26,6 +26,7 @@ use crate::{
         convert_error::{ConvertErrorWithContext, ErrorContext, ErrorContextType},
         error_reporter::{convert_apis, report_any_error},
         parse::CppRefQualifier,
+        type_helpers::extract_pinned_mutable_reference_type,
         type_helpers::{type_is_reference, unwrap_has_opaque},
         CppEffectiveName, CppOriginalName,
     },
@@ -45,7 +46,7 @@ use proc_macro2::Span;
 use quote::{quote, ToTokens};
 use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, Ident, Pat, PatType, ReturnType, Type,
-    TypePath, TypePtr, TypeReference, Visibility,
+    TypePtr, TypeReference, Visibility,
 };
 
 use crate::{
@@ -58,7 +59,10 @@ use crate::{
 
 use self::{
     bridge_name_tracker::BridgeNameTracker,
-    function_wrapper::RustConversionType,
+    function_wrapper::{
+        ForcedRustConversion, PointerCppConversion, PointerRustConversion, WholeCppConversion,
+        WholeRustConversion,
+    },
     implicit_constructors::{
         discard_deleted_defaulted_members, find_constructors_present, ItemsFound, WhyNoConstructors,
     },
@@ -1206,7 +1210,9 @@ impl<'a> FnAnalyzer<'a> {
                     &diagnostic_name,
                     &mut params,
                     &mut param_details,
-                    Some(RustConversionType::FromTypeToPtr),
+                    Some(ForcedRustConversion::Pointer(
+                        PointerRustConversion::FromTypeToPtr,
+                    )),
                     sophistication,
                     false,
                     false,
@@ -1230,7 +1236,9 @@ impl<'a> FnAnalyzer<'a> {
                     &diagnostic_name,
                     &mut params,
                     &mut param_details,
-                    Some(RustConversionType::FromPinMaybeUninitToPtr),
+                    Some(ForcedRustConversion::Pointer(
+                        PointerRustConversion::FromPinMaybeUninitToPtr,
+                    )),
                     sophistication,
                     false,
                     false,
@@ -1251,7 +1259,7 @@ impl<'a> FnAnalyzer<'a> {
                     &diagnostic_name,
                     &mut params,
                     &mut param_details,
-                    Some(RustConversionType::None),
+                    Some(ForcedRustConversion::Identity),
                     sophistication,
                     false,
                     false,
@@ -1276,7 +1284,9 @@ impl<'a> FnAnalyzer<'a> {
                     &diagnostic_name,
                     &mut params,
                     &mut param_details,
-                    Some(RustConversionType::FromPinMaybeUninitToPtr),
+                    Some(ForcedRustConversion::Pointer(
+                        PointerRustConversion::FromPinMaybeUninitToPtr,
+                    )),
                     sophistication,
                     false,
                     false,
@@ -1289,7 +1299,9 @@ impl<'a> FnAnalyzer<'a> {
                     &diagnostic_name,
                     &mut params,
                     &mut param_details,
-                    Some(RustConversionType::FromPinMoveRefToPtr),
+                    Some(ForcedRustConversion::Pointer(
+                        PointerRustConversion::FromPinMoveRefToPtr,
+                    )),
                     sophistication,
                     false,
                     true,
@@ -1798,7 +1810,7 @@ impl<'a> FnAnalyzer<'a> {
         diagnostic_name: &QualifiedName,
         params: &mut Punctuated<FnArg, Comma>,
         param_details: &mut [ArgumentAnalysis],
-        force_rust_conversion: Option<RustConversionType>,
+        force_rust_conversion: Option<ForcedRustConversion>,
         sophistication: TypeConversionSophistication,
         construct_into_self: bool,
         is_move_constructor: bool,
@@ -2007,7 +2019,7 @@ impl<'a> FnAnalyzer<'a> {
         virtual_this: &Option<QualifiedName>,
         treat_this_as_reference: bool,
         is_move_constructor: bool,
-        force_rust_conversion: Option<RustConversionType>,
+        force_rust_conversion: Option<ForcedRustConversion>,
         sophistication: TypeConversionSophistication,
         construct_into_self: bool,
     ) -> Result<(FnArg, ArgumentAnalysis), ConvertErrorFromCpp> {
@@ -2105,7 +2117,9 @@ impl<'a> FnAnalyzer<'a> {
                 let is_placement_return_destination = is_placement_return_destination
                     || matches!(
                         force_rust_conversion,
-                        Some(RustConversionType::FromPlacementParamToNewReturn)
+                        Some(ForcedRustConversion::Pointer(
+                            PointerRustConversion::FromPlacementParamToNewReturn
+                        ))
                     );
                 let annotated_type = self.convert_boxed_type(ty_to_convert, ns)?;
                 let conversion = self.argument_conversion_details(
@@ -2115,7 +2129,7 @@ impl<'a> FnAnalyzer<'a> {
                     sophistication,
                     self_type.is_some(),
                     is_placement_return_destination,
-                );
+                )?;
                 let new_ty = annotated_type.ty;
                 pt.pat = Box::new(new_pat.clone());
                 pt.ty = new_ty;
@@ -2158,11 +2172,11 @@ impl<'a> FnAnalyzer<'a> {
         &self,
         annotated_type: &Annotated<Box<Type>>,
         is_move_constructor: bool,
-        force_rust_conversion: Option<RustConversionType>,
+        force_rust_conversion: Option<ForcedRustConversion>,
         sophistication: TypeConversionSophistication,
         is_self: bool,
         is_placement_return_destination: bool,
-    ) -> TypeConversionPolicy {
+    ) -> Result<TypeConversionPolicy, ConvertErrorFromCpp> {
         let is_subclass_holder = match &annotated_type.kind {
             type_converter::TypeKind::SubclassHolder(holder) => Some(holder),
             _ => None,
@@ -2199,28 +2213,32 @@ impl<'a> FnAnalyzer<'a> {
         let ty = &*annotated_type.ty;
         if let Some(holder_id) = is_subclass_holder {
             let subclass = SubclassName::from_holder_name(holder_id);
-            return {
+            return Ok({
                 let ty = parse_quote! {
                     rust::Box<#holder_id>
                 };
-                TypeConversionPolicy::new(
+                TypeConversionPolicy::whole(
                     ty,
-                    CppConversionType::Move,
-                    RustConversionType::ToBoxedUpHolder(subclass),
+                    WholeCppConversion::Move,
+                    WholeRustConversion::ToBoxedUpHolder(subclass),
                 )
-            };
+            });
         } else if matches!(
             force_rust_conversion,
-            Some(RustConversionType::FromPlacementParamToNewReturn)
+            Some(ForcedRustConversion::Pointer(
+                PointerRustConversion::FromPlacementParamToNewReturn
+            ))
         ) && matches!(sophistication, TypeConversionSophistication::Regular)
         {
-            return TypeConversionPolicy::new(
-                ty.clone(),
-                CppConversionType::IgnoredPlacementPtrParameter,
-                RustConversionType::FromPlacementParamToNewReturn,
-            );
+            return Ok(TypeConversionPolicy::pointer(
+                BridgePointer::from_type(ty).ok_or_else(|| {
+                    ConvertErrorFromCpp::ParameterWasNotAPointer(ty.to_token_stream().to_string())
+                })?,
+                PointerCppConversion::IgnoredPlacementPtrParameter,
+                PointerRustConversion::FromPlacementParamToNewReturn,
+            ));
         }
-        match ty {
+        Ok(match ty {
             Type::Path(p) => {
                 let ty = ty.clone();
                 let tn = QualifiedName::from_type_path(p);
@@ -2231,18 +2249,23 @@ impl<'a> FnAnalyzer<'a> {
                     && !rust_conversion_forced
                 // must be std::pin::Pin<&mut T>
                 {
-                    let unwrapped_type = extract_type_from_pinned_mut_ref(p);
-                    TypeConversionPolicy::new(
-                        parse_quote! { *mut #unwrapped_type },
-                        CppConversionType::FromPointerToReference,
-                        RustConversionType::FromReferenceWrapperToPointer,
+                    let unwrapped_type =
+                        extract_pinned_mutable_reference_type(p).ok_or_else(|| {
+                            ConvertErrorFromCpp::ParameterWasNotAPointer(
+                                ty.to_token_stream().to_string(),
+                            )
+                        })?;
+                    TypeConversionPolicy::pointer(
+                        BridgePointer::to(unwrapped_type.clone(), true),
+                        PointerCppConversion::FromPointerToReference,
+                        PointerRustConversion::FromReferenceWrapperToPointer,
                     )
                 } else if self.pod_safe_types.contains(&tn) {
                     if known_types().lacks_copy_constructor(&tn) {
-                        TypeConversionPolicy::new(
+                        TypeConversionPolicy::whole(
                             ty,
-                            CppConversionType::Move,
-                            RustConversionType::None,
+                            WholeCppConversion::Move,
+                            WholeRustConversion::None,
                         )
                     } else if is_reference || known_types().is_known_type(&tn) {
                         // A reference parameter - a `Pin<&mut T>` reaches us
@@ -2260,50 +2283,54 @@ impl<'a> FnAnalyzer<'a> {
                         // relocatability by declaring its own move constructor
                         // no longer has - and forcing wrapper generation then
                         // failed to compile. See google/autocxx#1252.
-                        TypeConversionPolicy::new(
+                        TypeConversionPolicy::whole(
                             ty,
-                            CppConversionType::MoveOrCopy,
-                            RustConversionType::None,
+                            WholeCppConversion::MoveOrCopy,
+                            WholeRustConversion::None,
                         )
                     }
                 } else if known_types().convertible_from_strs(&tn)
                     && !self.config.exclude_utilities()
                 {
-                    TypeConversionPolicy::new(
+                    TypeConversionPolicy::whole(
                         ty,
-                        CppConversionType::FromUniquePtrToValue,
-                        RustConversionType::FromStr,
+                        WholeCppConversion::FromUniquePtrToValue,
+                        WholeRustConversion::FromStr,
                     )
                 } else if matches!(
                     sophistication,
                     TypeConversionSophistication::SimpleForSubclasses
                 ) {
-                    TypeConversionPolicy::new(
+                    TypeConversionPolicy::whole(
                         ty,
-                        CppConversionType::FromUniquePtrToValue,
-                        RustConversionType::None,
+                        WholeCppConversion::FromUniquePtrToValue,
+                        WholeRustConversion::None,
                     )
                 } else {
-                    TypeConversionPolicy::new(
+                    TypeConversionPolicy::whole(
                         ty,
-                        CppConversionType::FromPtrToValue,
-                        RustConversionType::FromValueParamToPtr,
+                        WholeCppConversion::FromPtrToValue,
+                        WholeRustConversion::FromValueParamToPtr,
                     )
                 }
             }
             Type::Ptr(tp) => {
-                let rust_conversion = force_rust_conversion.unwrap_or(RustConversionType::None);
+                let pointer = BridgePointer::to((*tp.elem).clone(), tp.mutability.is_some());
+                let rust_conversion = force_rust_conversion.map_or(
+                    PointerRustConversion::None,
+                    ForcedRustConversion::on_pointer,
+                );
                 if is_move_constructor {
-                    TypeConversionPolicy::new(
-                        ty.clone(),
-                        CppConversionType::FromPtrToMove,
+                    TypeConversionPolicy::pointer(
+                        pointer,
+                        PointerCppConversion::FromPtrToMove,
                         rust_conversion,
                     )
                 } else if is_rvalue_ref {
-                    TypeConversionPolicy::new(
-                        *tp.elem.clone(),
-                        CppConversionType::FromPtrToValue,
-                        RustConversionType::FromRValueParamToPtr,
+                    TypeConversionPolicy::whole(
+                        (*tp.elem).clone(),
+                        WholeCppConversion::FromPtrToValue,
+                        WholeRustConversion::FromRValueParamToPtr,
                     )
                 } else if matches!(
                     self.config.unsafe_policy,
@@ -2312,13 +2339,17 @@ impl<'a> FnAnalyzer<'a> {
                     && !rust_conversion_forced
                     && !is_placement_return_destination
                 {
-                    TypeConversionPolicy::new(
-                        ty.clone(),
-                        CppConversionType::FromPointerToReference,
-                        RustConversionType::FromReferenceWrapperToPointer,
+                    TypeConversionPolicy::pointer(
+                        pointer,
+                        PointerCppConversion::FromPointerToReference,
+                        PointerRustConversion::FromReferenceWrapperToPointer,
                     )
                 } else {
-                    TypeConversionPolicy::new(ty.clone(), CppConversionType::None, rust_conversion)
+                    TypeConversionPolicy::pointer(
+                        pointer,
+                        PointerCppConversion::None,
+                        rust_conversion,
+                    )
                 }
             }
             Type::Reference(TypeReference {
@@ -2329,22 +2360,28 @@ impl<'a> FnAnalyzer<'a> {
             ) && !rust_conversion_forced
                 && !is_placement_return_destination =>
             {
-                let is_mut = mutability.is_some();
-                TypeConversionPolicy::new(
-                    if is_mut {
-                        panic!("Never expected to find &mut T at this point, we should be Pin<&mut T> by now")
-                    } else {
-                        parse_quote! { *const #elem }
-                    },
-                    CppConversionType::FromPointerToReference,
-                    RustConversionType::FromReferenceWrapperToPointer,
+                // A mutable C++ reference is a `Pin<&mut T>` by now, and took
+                // the path branch above. `&mut T` here would mean the type
+                // converter had stopped doing that, which is an autocxx bug
+                // rather than anything wrong with the C++.
+                if mutability.is_some() {
+                    return Err(ConvertErrorFromCpp::ParameterWasNotAPointer(
+                        ty.to_token_stream().to_string(),
+                    ));
+                }
+                TypeConversionPolicy::pointer(
+                    BridgePointer::to((**elem).clone(), false),
+                    PointerCppConversion::FromPointerToReference,
+                    PointerRustConversion::FromReferenceWrapperToPointer,
                 )
             }
-            _ => {
-                let rust_conversion = force_rust_conversion.unwrap_or(RustConversionType::None);
-                TypeConversionPolicy::new(ty.clone(), CppConversionType::None, rust_conversion)
-            }
-        }
+            _ => TypeConversionPolicy::whole(
+                ty.clone(),
+                WholeCppConversion::None,
+                force_rust_conversion
+                    .map_or(Ok(WholeRustConversion::None), |forced| forced.on_whole(ty))?,
+            ),
+        })
     }
 
     fn convert_return_type(
@@ -2385,7 +2422,9 @@ impl<'a> FnAnalyzer<'a> {
                                 &None,
                                 false,
                                 false,
-                                Some(RustConversionType::FromPlacementParamToNewReturn),
+                                Some(ForcedRustConversion::Pointer(
+                                    PointerRustConversion::FromPlacementParamToNewReturn,
+                                )),
                                 TypeConversionSophistication::Regular,
                                 false,
                             )?;
@@ -2840,27 +2879,6 @@ fn return_type_is_reference(output: &crate::minisyn::ReturnType) -> bool {
         type_is_reference(ty.as_ref(), true)
     } else {
         false
-    }
-}
-
-fn extract_type_from_pinned_mut_ref(ty: &TypePath) -> Type {
-    match ty
-        .path
-        .segments
-        .last()
-        .expect("was not std::pin::Pin")
-        .arguments
-    {
-        syn::PathArguments::AngleBracketed(ref ab) => {
-            match ab.args.first().expect("did not have angle bracketed args") {
-                syn::GenericArgument::Type(ref ty) => match ty {
-                    Type::Reference(ref tyr) => tyr.elem.as_ref().clone(),
-                    _ => panic!("pin did not contain a reference"),
-                },
-                _ => panic!("argument was not a type"),
-            }
-        }
-        _ => panic!("did not find angle bracketed args"),
     }
 }
 
