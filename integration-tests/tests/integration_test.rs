@@ -1325,7 +1325,13 @@ fn test_enum_style_several_enums() {
             FIRST_A = 5,
             FIRST_B = 6
         };
-        enum Second {
+        // `: int` here and on `Fourth` below is not incidental. An unscoped
+        // enum with no fixed underlying type has an implementation-defined
+        // one, and on the targets CI builds MSVC makes it `int` while gcc and
+        // clang make it `unsigned int`. These two styles put that type in
+        // front of the user as the newtype's field, so `.0` would be `c_int`
+        // on one CI leg and `c_uint` on another.
+        enum Second : int {
             SECOND_A,
             SECOND_B
         };
@@ -1333,7 +1339,7 @@ fn test_enum_style_several_enums() {
             THIRD_A = 1 << 1,
             THIRD_B = 1 << 3
         };
-        enum Fourth {
+        enum Fourth : int {
             FOURTH_A,
             FOURTH_B
         };

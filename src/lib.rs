@@ -480,6 +480,15 @@ macro_rules! throws {
 ///   constants, plus the bitwise operators `&`, `|`, `^` and `!`. This is
 ///   what you want for flags.
 /// * `NewtypeEnum` - the same newtype without the operators.
+///
+/// The integer either newtype wraps is the enum's underlying type as the C++
+/// compiler sees it, so `flags.0` is a `c_int` for `enum Flags : int` and a
+/// `c_uint` for `enum Flags : unsigned`. An unscoped enum with no fixed
+/// underlying type has no portable answer: the compiler picks, and it may
+/// pick differently from one target or set of flags to the next. On the
+/// targets autocxx tests, MSVC gives it `int`, while gcc and clang give one
+/// whose enumerators are all non-negative `unsigned int`. Name the underlying
+/// type in C++ if you intend to write `.0`'s type down.
 /// * `RustifiedEnum` - a native Rust `enum`. This is the default, so naming
 ///   it is only useful for emphasis.
 /// * `RustifiedNonExhaustiveEnum` - a native Rust `enum` marked
