@@ -8249,8 +8249,8 @@ fn test_take_nonpod_rvalue_from_stack() {
 ///
 /// It does not work, and the reason is architectural rather than a bug we
 /// could fix: `moveit::New::new` (what `ffi::A::new()` returns something
-/// implementing) is `unsafe fn new(self, this: Pin<&mut MaybeUninit<Output>>)`
-/// - it only ever *writes into* a place the caller already supplied. There is
+/// implementing) is `unsafe fn new(self, this: Pin<&mut MaybeUninit<Output>>)`,
+/// which only ever *writes into* a place the caller already supplied. There is
 /// no method that hands back an owned `A` by value, because a non-POD C++
 /// object can only be brought into existence via a C++ constructor running
 /// directly at its final address (see the top of this file's module docs on
@@ -12742,8 +12742,8 @@ fn test_only_non_const_copy_constructor() {
 }
 
 /// The helper which hands a value parameter over is called with an argument of
-/// the parameter's own type, so C++ looks for it in that type's namespaces too
-/// - where a function of the same name would be a better match than our
+/// the parameter's own type, so C++ looks for it in that type's namespaces
+/// too, where a function of the same name would be a better match than our
 /// template. The generated call has to name ours from the global namespace.
 /// See <https://github.com/google/autocxx/issues/873>.
 #[test]
@@ -13913,15 +13913,18 @@ fn test_virtual_methods_additional() {
 ///     come out deleted (https://github.com/google/autocxx/issues/815). The
 ///     cases here cover it at public visibility only; the `test_defaulted_*`
 ///     tests cover deletion, and non-public visibility.
+///
 /// applied to each of these:
 ///   * Default constructor
 ///   * Copy constructor
 ///   * Move constructor
+///
 /// in any of these:
 ///   * The class itself
 ///   * A base class
 ///   * A field of the class
 ///   * A field of a base class
+///
 /// with any of these access modifiers:
 ///   * private (impossible for implicitly defaulted)
 ///   * protected (impossible for implicitly defaulted)
