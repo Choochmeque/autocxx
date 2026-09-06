@@ -13,7 +13,9 @@ use crate::{
         },
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
-        type_helpers::{unwrap_bitfield, unwrap_has_opaque, unwrap_reference},
+        type_helpers::{
+            unwrap_bitfield, unwrap_function_pointer, unwrap_has_opaque, unwrap_reference,
+        },
         ConvertErrorFromCpp,
     },
     known_types::{known_types, CxxGenericType},
@@ -226,6 +228,9 @@ impl<'a> TypeConverter<'a> {
         ns: &Namespace,
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        if let Some(annotated) = Self::function_pointer_field(&typ, ctx) {
+            return Ok(annotated);
+        }
         // First we try to spot if these are the special marker paths that
         // bindgen uses to denote references or other things. Note that
         // there is deliberately no `__bindgen_marker_UnusedTemplateParam`
@@ -382,6 +387,15 @@ impl<'a> TypeConverter<'a> {
         let (mut typ, tn) = match self.resolve_typedef(&original_tn)? {
             None => (typ, original_tn),
             Some(Type::Path(resolved_tp)) => {
+                // The typedef may resolve to a C function pointer, which is
+                // field data we take exactly as bindgen wrote it - see
+                // `function_pointer_field`. Nothing within it needs
+                // converting, and the `Option` wrapping it must not be
+                // mistaken for a type we should go looking for.
+                if let Some(mut annotated) = Self::function_pointer_field(resolved_tp, ctx) {
+                    annotated.types_encountered.extend(deps);
+                    return Ok(annotated);
+                }
                 let resolved_tn = QualifiedName::from_type_path(resolved_tp);
                 deps.insert(resolved_tn.clone());
                 (resolved_tp.clone(), resolved_tn)
@@ -580,6 +594,37 @@ impl<'a> TypeConverter<'a> {
                 _ => return Ok(r),
             }
         }
+    }
+
+    /// A C function pointer used as struct field data, taken exactly as
+    /// bindgen wrote it: `Option<unsafe extern "C" fn(..)>`, the `Option`
+    /// being there because a null pointer is one of the values such a field
+    /// can hold. Nothing in that names a C++ type, so there is nothing to
+    /// convert, and copying the field copies a pointer - which is what lets a
+    /// struct holding one be POD. See google/autocxx#1494.
+    ///
+    /// Field data only. A POD struct is re-exported from the bindgen module
+    /// rather than declared to cxx, so its fields never have to be types cxx
+    /// can express; the types in a signature do, and cxx has no function
+    /// pointer type. So a function pointer anywhere else still falls through
+    /// to the ordinary path, and is still refused there.
+    fn function_pointer_field(
+        typ: &TypePath,
+        ctx: &TypeConversionContext,
+    ) -> Option<Annotated<Type>> {
+        if !ctx.within_struct_field() || unwrap_function_pointer(typ).is_none() {
+            return None;
+        }
+        Some(Annotated::new(
+            Type::Path(typ.clone()),
+            HashSet::new(),
+            ApiVec::new(),
+            // It behaves as a pointer in every way the later analyses ask
+            // about: a field holding one is left uninitialized by an implicit
+            // default constructor, copied by an implicit copy constructor, and
+            // destroyed by doing nothing at all.
+            TypeKind::Pointer,
+        ))
     }
 
     fn convert_ptr(

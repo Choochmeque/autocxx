@@ -12,7 +12,7 @@ use crate::{
     conversion::{
         analysis::tdef::TypedefPhase,
         api::{Api, TypedefKind},
-        type_helpers::unwrap_bitfield,
+        type_helpers::{is_pointer_like, unwrap_bitfield, unwrap_function_pointer},
     },
     types::{Namespace, QualifiedName},
 };
@@ -123,25 +123,26 @@ impl ByValueChecker {
                     // directly written pointer field; previously it
                     // fell through to "typedef to a complex type" and
                     // poisoned containing PODs. See google/autocxx#1368.
+                    // A C function pointer is the same story, and reaches us
+                    // as `Option<unsafe extern "C" fn(..)>` rather than as a
+                    // pointer, so it has to be spotted before the name of that
+                    // `Option` is taken for the target of an alias.
+                    // See google/autocxx#1494.
                     let target_is_pointer = match analysis.kind {
-                        TypedefKind::Type(ref type_item) => {
-                            matches!(type_item.ty.as_ref(), Type::Ptr(_))
-                        }
-                        TypedefKind::Use(ref ty) => {
-                            matches!(**ty, crate::minisyn::Type(Type::Ptr(_)))
-                        }
+                        TypedefKind::Type(ref type_item) => is_pointer_like(type_item.ty.as_ref()),
+                        TypedefKind::Use(ref ty) => is_pointer_like(ty),
                     };
                     match typedef_target {
+                        _ if target_is_pointer => {
+                            byvalue_checker
+                                .results
+                                .insert(name.clone(), StructDetails::new(PodState::IsPod));
+                        }
                         Some(target) => {
                             byvalue_checker.results.insert(
                                 name.clone(),
                                 StructDetails::new(PodState::IsAlias(target)),
                             );
-                        }
-                        None if target_is_pointer => {
-                            byvalue_checker
-                                .results
-                                .insert(name.clone(), StructDetails::new(PodState::IsPod));
                         }
                         None => byvalue_checker.ingest_nonpod_type(name.clone()),
                     }
@@ -425,6 +426,15 @@ impl ByValueChecker {
                 if unwrap_bitfield(p).is_some() {
                     // A bitfield allocation unit is a byte array with
                     // accessors, so likewise.
+                    continue;
+                }
+                if unwrap_function_pointer(p).is_some() {
+                    // A C function pointer, which bindgen writes as
+                    // `Option<unsafe extern "C" fn(..)>`. Copying the field
+                    // copies a pointer, so it neither blocks POD-ness nor
+                    // names a type we have to settle first - and the name it
+                    // does bear, `std::option::Option`, is one we know nothing
+                    // about. See google/autocxx#1494.
                     continue;
                 }
                 results.push(QualifiedName::from_type_path(p));

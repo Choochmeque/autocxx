@@ -19990,6 +19990,129 @@ fn test_reference_return_with_several_reference_parameters_declined() {
     );
 }
 
+/// A struct holding a C function pointer is trivially copyable, so it can be
+/// held by value in Rust. bindgen renders the field as
+/// `Option<unsafe extern "C" fn()>`. See google/autocxx#1494.
+#[test]
+fn test_pod_with_function_pointer_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_callbacks {
+            uint32_t (*fx_get)(uint32_t);
+        };
+        inline uint32_t fx_double(uint32_t a) { return a * 2; }
+        inline fx_callbacks fx_make_callbacks() { return fx_callbacks { fx_double }; }
+    "};
+    let rs = quote! {
+        let cb = ffi::fx_make_callbacks();
+        assert_eq!(unsafe { cb.fx_get.unwrap()(21) }, 42);
+    };
+    run_test("", hdr, rs, &["fx_make_callbacks"], &["fx_callbacks"]);
+}
+
+/// The same, where the function pointer type reaches the field through a
+/// typedef. See google/autocxx#1494.
+#[test]
+fn test_pod_with_typedefed_function_pointer_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef uint32_t (*fx_get_t)(uint32_t);
+        struct fx_callbacks2 {
+            fx_get_t fx_get;
+        };
+        inline uint32_t fx_treble(uint32_t a) { return a * 3; }
+        inline fx_callbacks2 fx_make_callbacks2() { return fx_callbacks2 { fx_treble }; }
+    "};
+    let rs = quote! {
+        let cb = ffi::fx_make_callbacks2();
+        assert_eq!(unsafe { cb.fx_get.unwrap()(14) }, 42);
+    };
+    run_test("", hdr, rs, &["fx_make_callbacks2"], &["fx_callbacks2"]);
+}
+
+/// A null function pointer, which is the whole reason bindgen wraps the field
+/// in an `Option`, has to survive the crossing in both directions: C++ writing
+/// `nullptr` must reach Rust as `None`, and Rust writing `None` must reach C++
+/// as a null pointer. Nothing converts the field - the struct is copied whole -
+/// so this is the layout guarantee that `Option<fn>` is the pointer itself,
+/// with `None` as its null, being taken at its word. See google/autocxx#1494.
+#[test]
+fn test_pod_with_null_function_pointer_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_callbacks3 {
+            uint32_t (*fx_get)(uint32_t);
+        };
+        inline fx_callbacks3 fx_make_null_callbacks() { return fx_callbacks3 { nullptr }; }
+        inline bool fx_callbacks_are_null(fx_callbacks3 cb) { return cb.fx_get == nullptr; }
+    "};
+    let rs = quote! {
+        assert!(ffi::fx_make_null_callbacks().fx_get.is_none());
+        assert!(ffi::fx_callbacks_are_null(ffi::fx_callbacks3 { fx_get: None }));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_make_null_callbacks", "fx_callbacks_are_null"],
+        &["fx_callbacks3"],
+    );
+}
+
+/// The other direction for a pointer which is not null: Rust puts one of its
+/// own functions in the field and C++ calls it. That is the end-to-end proof
+/// that the field really is the C function pointer it claims to be, rather
+/// than something which merely happens to read back the same in Rust.
+/// See google/autocxx#1494.
+#[test]
+fn test_pod_function_pointer_field_written_from_rust() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_callbacks4 {
+            uint32_t (*fx_get)(uint32_t);
+        };
+        inline uint32_t fx_call_callbacks(fx_callbacks4 cb, uint32_t arg) {
+            return cb.fx_get ? cb.fx_get(arg) : 0;
+        }
+    "};
+    let rs = quote! {
+        unsafe extern "C" fn fx_written_in_rust(a: u32) -> u32 {
+            a * 7
+        }
+        let cb = ffi::fx_callbacks4 { fx_get: Some(fx_written_in_rust) };
+        assert_eq!(ffi::fx_call_callbacks(cb, 6), 42);
+        // And the null case again from this side, since C++ is the one
+        // dereferencing it here.
+        assert_eq!(ffi::fx_call_callbacks(ffi::fx_callbacks4 { fx_get: None }, 6), 0);
+    };
+    run_test("", hdr, rs, &["fx_call_callbacks"], &["fx_callbacks4"]);
+}
+
+/// A function pointer in a *signature* is a different matter: that type has to
+/// go into the `cxx::bridge`, and cxx has no function pointer type. So it stays
+/// refused, and the reason reaches the user rather than cxx complaining about
+/// a type it cannot parse. See google/autocxx#1494.
+///
+/// TODO: the complaint names `std::option::Option`, which is the Rust type
+/// bindgen wrote rather than anything the user's C++ says. Saying "function
+/// pointer" instead would need its own `ConvertErrorFromCpp` variant, raised
+/// where the type converter meets `Option<fn ..>` outside a struct field.
+#[test]
+fn test_function_pointer_parameter_still_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t fx_call_it(uint32_t (*fx_f)(uint32_t)) { return fx_f(1); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_call_it"],
+        &[],
+        "UnsupportedBuiltInType",
+    );
+}
+
 /// The shape google/autocxx#1192 was reported in: a *namespaced* type autocxx
 /// cannot make sense of (there, `Eigen::Vector2d`), replaced by a Rust type of
 /// the user's own, declared POD, and held by value inside a struct the user
