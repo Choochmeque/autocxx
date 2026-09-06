@@ -74,12 +74,14 @@ impl BridgePointer {
 
 /// What C++ does with a bridge type which is a raw pointer.
 ///
-/// These are the conversions which occur alongside one. Two of them read the
-/// pointee to name the C++ reference the pointer stands for, and the rest
-/// merely happen to sit next to a Rust-side conversion which reads it; either
-/// way the [`BridgePointer`] is in the same
+/// The four reference variants read the pointee, to spell the C++ reference
+/// the pointer stands for. The other three do not, and are here because they
+/// occur alongside a pointer anyway - two of them beside a Rust-side
+/// conversion which does read it, and one beside no conversion at all. Either
+/// way the [`BridgePointer`] is a field of the same
 /// [`TypeConversionPolicy::Pointer`] variant, so reading it is a field access
-/// rather than a `syn::Type` match with nothing to say when it does not match.
+/// rather than a `syn::Type` match with nothing to say when it does not
+/// match.
 #[derive(Clone, Debug)]
 pub(crate) enum PointerCppConversion {
     /// C++ takes the pointer exactly as the bridge declares it. Only the Rust
@@ -131,9 +133,10 @@ impl PointerCppConversion {
 
 /// What Rust does with a bridge type which is a raw pointer.
 ///
-/// Every one of these reads the pointee, the mutability, or both: to build the
-/// `Pin<&mut MaybeUninit<T>>` a constructor takes, or to pick between `CppRef`
-/// and `CppMutRef`. See [`PointerCppConversion`] for where they get it.
+/// All but the identity read the pointee, the mutability, or both: to build
+/// the `Pin<&mut MaybeUninit<T>>` a constructor takes, or to pick between
+/// `CppRef` and `CppMutRef`. See [`PointerCppConversion`] for where they get
+/// it.
 #[derive(Clone, Debug)]
 pub(crate) enum PointerRustConversion {
     /// The pointer crosses as it is.
@@ -210,17 +213,33 @@ impl WholeCppConversion {
     /// As [`PointerCppConversion::inverse`].
     fn inverse(&self) -> Option<Self> {
         Some(match self {
-            // Neither changes any type, so neither has an opposite to perform
-            // on the way back.
+            // `None` changes no type and has nothing to undo.
+            //
+            // `MoveOrCopy` changes no type either, and inverts to `None`,
+            // which is what it has always done and not obviously right: a
+            // subclass peer's override of a method taking one of these hands
+            // its own by-value parameter on bare, which asks for a copy
+            // constructor, and a POD which declares its own move constructor
+            // has none - google/autocxx#1252 is that same missing constructor
+            // on the other side of the call. Answering `MoveOrCopy` would ask
+            // for `::autocxx_move_or_copy` instead and cover both, but it
+            // would also rewrite the C++ generated for every override which
+            // takes an ordinary copyable POD, so it is not this change's to
+            // make.
             Self::None | Self::MoveOrCopy => Self::None,
             Self::FromUniquePtrToValue | Self::FromPtrToValue => Self::FromValueToUniquePtr,
             Self::FromValueToUniquePtr => Self::FromUniquePtrToValue,
-            // `Move` changes no type either, but unlike `MoveOrCopy` it has
-            // never been inverted, so saying it inverts to nothing would be
-            // guessing at a case nothing has ever produced. Placement new is
-            // the wrapper writing its result into a caller's pointer, which is
-            // a shape the way back does not have.
-            Self::Move | Self::FromReturnValueToPlacementPtr => return Option::None,
+            // `Move` changes no type either, but it is not the same as nothing:
+            // it is what a by-value parameter of a type with no copy
+            // constructor gets, and handing one of those on without the
+            // `std::move` asks for the copy constructor it does not have. The
+            // way back is a subclass peer's override receiving such a value and
+            // passing it to Rust, which needs the move for the same reason.
+            Self::Move => Self::Move,
+            // Placement new is the wrapper constructing its result into a
+            // pointer the caller supplied, which is a shape the way back does
+            // not have: a subclass peer's override returns its value.
+            Self::FromReturnValueToPlacementPtr => return Option::None,
         })
     }
 }
@@ -276,27 +295,29 @@ fn reference_return_as_pointer(ty: &Type) -> Result<BridgePointer, ConvertErrorF
 /// `function_wrapper_rs` and `function_wrapper_cpp`.
 ///
 /// The split between the two variants is the one thing the conversions
-/// disagree about: whether anything has to look inside the type the
-/// `cxx::bridge` carries. Several of them do - to name the C++ reference a
-/// pointer stands for, to wrap that pointer in a `CppRef`, to build the
-/// `Pin<&mut MaybeUninit<T>>` a constructor takes - and every one of those used
-/// to re-derive the pointee by matching a `syn::Type` which it had no way of
-/// knowing was a pointer, and panicked several files from the mistake when it
-/// was not. Those conversions live in [`Self::Pointer`], which holds a
-/// [`BridgePointer`] and so cannot be built without one; the rest live in
-/// [`Self::Whole`], which holds the type and hands it on entire.
+/// disagree about: whether anything has to look inside the type. Several of
+/// them do - to name the C++ reference a pointer stands for, to wrap that
+/// pointer in a `CppRef`, to build the `Pin<&mut MaybeUninit<T>>` a
+/// constructor takes - and every one of those used to re-derive the pointee by
+/// matching a `syn::Type` which it had no way of knowing was a pointer, and
+/// panicked several files from the mistake when it was not. Those conversions
+/// live in [`Self::Pointer`], which holds a [`BridgePointer`] and so cannot be
+/// built without one; the rest live in [`Self::Whole`], which holds the type
+/// and hands it on entire.
 #[derive(Clone, Debug)]
 pub(crate) enum TypeConversionPolicy {
-    /// The `cxx::bridge` carries a raw pointer, and at least one side reads
-    /// what it points at.
+    /// A raw pointer, kept as the pointee and the mutability so that the
+    /// conversions which read those can. Not every pairing here does read
+    /// them, since an ordinary `T*` parameter which neither side converts is a
+    /// `Pointer` too, but every conversion which could is in this variant.
     Pointer {
         pointer: BridgePointer,
         cpp: PointerCppConversion,
         rust: PointerRustConversion,
     },
-    /// The `cxx::bridge` carries a type which neither side takes apart. That
-    /// type may itself be a pointer - a C++ `T*` parameter is handed straight
-    /// over - but nothing here has to know it.
+    /// A type which neither side takes apart, so it is kept whole. It may
+    /// itself be a pointer: a function returning a `T*` converts nothing and
+    /// gets one of these.
     Whole {
         ty: crate::minisyn::Type,
         cpp: WholeCppConversion,
@@ -328,7 +349,16 @@ impl TypeConversionPolicy {
         Self::Pointer { pointer, cpp, rust }
     }
 
-    /// The type the `cxx::bridge` declaration carries.
+    /// The unwrapped type this conversion is about: the pointer for
+    /// [`Self::Pointer`], and whatever [`Self::Whole`] was built with.
+    ///
+    /// That is often what the `cxx::bridge` declaration carries, but not
+    /// always: the three conversions between a value and something holding it
+    /// put something else there, `UniquePtr<T>` for a `T` handed over as a
+    /// `std::unique_ptr` and `*mut T` for one handed over as a pointer.
+    /// [`Self::converted_rust_type`] and [`Self::unconverted_rust_type`] are
+    /// what the bridge is written from, and each of those answers this for
+    /// every conversion but its own.
     pub(crate) fn cxxbridge_type(&self) -> Type {
         match self {
             Self::Pointer { pointer, .. } => pointer.ty(),
@@ -870,8 +900,8 @@ mod tests {
                 "FromRValueReferenceToPointer",
                 // Then the conversions of a type handed on whole.
                 "None",
-                "-",
-                "-",
+                "Move",
+                "Move",
                 "None",
                 "FromValueToUniquePtr",
                 "FromValueToUniquePtr",
@@ -903,7 +933,7 @@ mod tests {
     /// The conversions with no opposite, named. A subclass peer built from one
     /// of these is what the callers of `inverse` refuse.
     #[test]
-    fn the_conversions_without_an_opposite_are_the_expected_four() {
+    fn the_conversions_without_an_opposite_are_the_expected_three() {
         let without: Vec<String> = pointer_policies()
             .into_iter()
             .chain(whole_policies())
@@ -918,8 +948,6 @@ mod tests {
             vec![
                 "FromPtrToMove",
                 "IgnoredPlacementPtrParameter",
-                "Move",
-                "Move",
                 "FromReturnValueToPlacementPtr",
             ]
         );
