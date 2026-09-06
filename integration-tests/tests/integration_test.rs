@@ -19746,6 +19746,120 @@ fn test_wrapper_moves_pod_argument() {
     );
 }
 
+/// A virtual method taking a `std::vector` of a forward-declared type is
+/// skipped, with the reason recorded where the user will see it, and the rest
+/// of the class stays usable.
+///
+/// cxx would otherwise instantiate `std::vector<T>::size()` for an incomplete
+/// `T`, which is a C++ error deep inside the standard library rather than
+/// anything the user could act on. See google/autocxx#692.
+#[test]
+fn test_vector_of_forward_declaration_in_virtual_method() {
+    let hdr = indoc! {"
+        #include <vector>
+        #include <cstdint>
+        struct fx_Fwd;
+        class fx_Obs {
+        public:
+            virtual void notify(const std::vector<fx_Fwd>& details) { (void)details; }
+            virtual uint32_t ok() const { return 42; }
+            virtual ~fx_Obs() {}
+        };
+    "};
+    let rs = quote! {
+        let o = ffi::fx_Obs::new().within_unique_ptr();
+        assert_eq!(o.ok(), 42);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Obs"], &[], None),
+        None,
+        // Both halves matter: that the method is replaced by a stub, and that
+        // the reason recorded against it names the type which caused it.
+        Some(make_string_finder(vec![
+            "fn notify (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "forward declaration (fx_Fwd)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A function returning a reference to a `concrete!` template instantiation.
+/// The lifetime of the returned reference is elided from the single reference
+/// parameter, exactly as it is for any other type; google/autocxx#1370 reports
+/// that this fails to compile with "missing lifetime specifier".
+///
+/// Generating and building is the whole test: a `concrete!` type is opaque, so
+/// there is nothing to read off the returned reference at run time.
+#[test]
+fn test_concrete_template_reference_return() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> class fx_Inner {
+        public:
+            T held;
+            uint32_t v = 4;
+        };
+        class fx_Held { public: uint32_t a = 1; };
+        class fx_Outer { public: fx_Inner<fx_Held> data; };
+        inline fx_Inner<fx_Held>& fx_get_inner(fx_Outer& outer) { return outer.data; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Outer")
+            generate!("fx_Held")
+            concrete!("fx_Inner<fx_Held>", fx_Inner_fx_Held)
+            generate!("fx_get_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A C++ `[[deprecated]]` function, bound and never called from Rust.
+///
+/// Both halves of the generated C++ name the function - autocxx's own wrapper
+/// in `autocxxgen_ffi.h` and cxx's shim in `gen0.cxx` - so both draw
+/// `-Wdeprecated-declarations`, which this harness compiles with `-Werror`.
+/// The warning fires whether or not any Rust code calls the function, because
+/// the wrapper is emitted for everything `generate!` names.
+///
+/// The signal belongs on the Rust side, as `#[deprecated]` carrying the C++
+/// message. It cannot be put there yet: `autocxx-bindgen` 0.73 has no
+/// deprecation handling at all, so nothing about the attribute reaches this
+/// layer. The two other things this crate recovers behind bindgen's back -
+/// ref-qualifiers and linkage - are both encoded in the mangled name, and
+/// `[[deprecated]]` is not encoded anywhere. Fixing this needs a bindgen
+/// `ParseCallbacks` hook backed by `clang_getCursorPlatformAvailability`.
+#[test]
+#[ignore] // https://github.com/google/autocxx/issues/1403
+fn test_deprecated_cpp_function() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Dep {
+        public:
+            [[deprecated(\"use bar instead\")]] virtual uint32_t foo() { return 1; }
+            virtual ~fx_Dep() {}
+        };
+        [[deprecated(\"gone soon\")]] inline uint32_t fx_old_fn() { return 2; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_Dep", "fx_old_fn"], &[], None),
+        None,
+        None,
+        None,
+    );
+}
+
 /// `generate!` naming a nested *class* the way C++ spells it, where that class
 /// has a constructor and a method. The methods are what the enum-only test
 /// above cannot cover: they are allowlisted through a different code path.
@@ -19816,5 +19930,62 @@ fn test_generate_nested_class_with_methods_by_flattened_name() {
         None,
         None,
         None,
+    );
+}
+
+/// A reference return whose lifetime can't be elided from any parameter is
+/// declined with a diagnostic, rather than emitted for rustc to reject with
+/// "missing lifetime specifier". This is the guard which keeps
+/// google/autocxx#1370 from arising: with no reference parameter there is
+/// nothing for the returned reference to borrow from.
+#[test]
+fn test_reference_return_with_no_reference_parameter_declined() {
+    let hdr = indoc! {"
+        template <typename T> class fx_Inner1 { public: T held; };
+        class fx_Held1 { public: int a = 1; };
+        inline fx_Inner1<fx_Held1>& fx_get_global1() {
+            static fx_Inner1<fx_Held1> b;
+            return b;
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Held1")
+            concrete!("fx_Inner1<fx_Held1>", fx_Inner1_fx_Held1)
+            generate!("fx_get_global1")
+        },
+        "NoMutableInputReference",
+    );
+}
+
+/// The same when there is more than one candidate: which one the returned
+/// reference borrows from is ambiguous, so we decline that too.
+#[test]
+fn test_reference_return_with_several_reference_parameters_declined() {
+    let hdr = indoc! {"
+        template <typename T> class fx_Inner2 { public: T held; };
+        class fx_Held2 { public: int a = 1; };
+        class fx_Outer2 { public: fx_Inner2<fx_Held2> data; };
+        class fx_Other2 { public: int b = 2; };
+        inline fx_Inner2<fx_Held2>& fx_get_inner2(fx_Outer2& outer, fx_Other2& other) {
+            (void)other;
+            return outer.data;
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_Outer2")
+            generate!("fx_Held2")
+            generate!("fx_Other2")
+            concrete!("fx_Inner2<fx_Held2>", fx_Inner2_fx_Held2)
+            generate!("fx_get_inner2")
+        },
+        "MultipleMutableInputReferences",
     );
 }
