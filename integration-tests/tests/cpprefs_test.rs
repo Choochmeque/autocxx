@@ -108,6 +108,52 @@ fn test_method_call_const() {
     )
 }
 
+/// A mutable reference parameter spelled with a typedef, which is how C++
+/// libraries usually spell an output parameter. Whether the typedef is
+/// understood to be a reference at all decides how the parameter crosses the
+/// bridge, and this mode is where it decides the most: a reference is handed
+/// over as a wrapper rather than as a Rust reference, so getting it wrong is
+/// not a matter of taste. Plain mode covers the same header in
+/// `test_typedef_to_mutable_reference_parameter`; this is the half of it that
+/// only nightly can run. See google/autocxx#1363.
+#[test]
+fn test_typedef_to_mutable_reference_parameter_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Sink { uint32_t a; };
+        typedef fx_Sink& fx_SinkRef;
+        inline void fx_fill(fx_SinkRef sink) { sink.a = 42; }
+    "};
+    let rs = quote! {
+        let mut sink = ffi::fx_Sink { a: 0 };
+        ffi::fx_fill(std::pin::Pin::new(&mut sink));
+        assert_eq!(sink.a, 42);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_fill"], &["fx_Sink"]);
+}
+
+/// The same header with the reference written out, so that the two spellings
+/// are pinned to agree in this mode as well as in the plain one. They agree on
+/// `Pin<&mut T>`: this mode wraps a *const* reference parameter into a
+/// `CppRef` and a method's receiver into a `CppMutRef`, and leaves a mutable
+/// reference parameter as a Rust reference - see the TODO in
+/// `argument_conversion_details`. Whatever that comes to be, both spellings
+/// have to arrive at it together, which is what this pair is here to catch.
+#[test]
+fn test_mutable_reference_parameter_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Sink2 { uint32_t a; };
+        inline void fx_fill2(fx_Sink2& sink) { sink.a = 42; }
+    "};
+    let rs = quote! {
+        let mut sink = ffi::fx_Sink2 { a: 0 };
+        ffi::fx_fill2(std::pin::Pin::new(&mut sink));
+        assert_eq!(sink.a, 42);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_fill2"], &["fx_Sink2"]);
+}
+
 #[test]
 fn test_return_reference_cpprefs() {
     let cxx = indoc! {"

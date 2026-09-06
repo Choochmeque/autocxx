@@ -2067,6 +2067,19 @@ impl<'a> FnAnalyzer<'a> {
             annotated_type.kind,
             type_converter::TypeKind::RValueReference
         );
+        // TODO: `TypeKind::MutableReference` is deliberately not here, and
+        // that costs `unsafe_references_wrapped` the thing it exists for. In
+        // that mode a *const* reference parameter becomes a `CppRef<T>` and a
+        // method's receiver a `CppMutRef<T>` (which is what `is_self` is doing
+        // here), but a mutable reference *parameter* is left as
+        // `Pin<&mut T>` - a Rust mutable reference, which C++ is free to alias
+        // and which the mode promises to have eliminated. Both spellings of
+        // one, written out and through a typedef, are pinned to the current
+        // behaviour by `test_mutable_reference_parameter_cpprefs` and
+        // `test_typedef_to_mutable_reference_parameter_cpprefs`, so whatever
+        // this becomes, it becomes for both at once. Changing it means
+        // deciding what `CppMutRef<T>` does to the C++ side of a parameter,
+        // which the receiver path already answers.
         let is_reference =
             matches!(annotated_type.kind, type_converter::TypeKind::Reference) || is_self;
         let rust_conversion_forced = force_rust_conversion.is_some();
