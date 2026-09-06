@@ -277,6 +277,17 @@ pub(super) struct ItemsFound {
     pub(super) non_const_copy_constructor: SpecialMemberFound,
     pub(super) move_constructor: SpecialMemberFound,
 
+    /// Whether C++ calls this class's destructor *trivial*: the class declares
+    /// none of its own, and every base and field is itself trivially
+    /// destructible. Destroying one of these does nothing whatsoever, which
+    /// makes calling the destructor optional rather than merely cheap.
+    ///
+    /// Conservative in both the ways it can be: a `~T() = default;` counts as
+    /// declaring one, and a class with a base or field we didn't understand
+    /// counts as non-trivial, so this is never `true` where the truth is
+    /// unknown.
+    pub(super) destructor_is_trivial: bool,
+
     /// The full name of the type. We identify instances by [`QualifiedName`], because that's
     /// the only thing which [`FnKind::Method`] has to tie it to, and that's unique enough for
     /// identification.  However, when generating functions for implicit special members, we need
@@ -466,6 +477,8 @@ pub(super) fn find_constructors_present(
                         const_copy_constructor: SpecialMemberFound::Implicit,
                         non_const_copy_constructor: SpecialMemberFound::NotPresent,
                         move_constructor: SpecialMemberFound::Implicit,
+                        // An enum is an integer with a name on it.
+                        destructor_is_trivial: true,
                         name: Some(name.clone()),
                         why_no_constructors: Default::default(),
                     })
@@ -515,6 +528,9 @@ pub(super) fn find_constructors_present(
                             const_copy_constructor: SpecialMemberFound::Implicit,
                             non_const_copy_constructor: SpecialMemberFound::NotPresent,
                             move_constructor: SpecialMemberFound::Implicit,
+                            // Destroying a pointer does not destroy the
+                            // pointee; C++ leaves that to whoever owns it.
+                            destructor_is_trivial: true,
                             name: Some(name.clone()),
                             why_no_constructors: Default::default(),
                         }),
@@ -528,6 +544,9 @@ pub(super) fn find_constructors_present(
                             const_copy_constructor: SpecialMemberFound::Implicit,
                             non_const_copy_constructor: SpecialMemberFound::NotPresent,
                             move_constructor: SpecialMemberFound::Implicit,
+                            // As for a pointer: a reference member binds to
+                            // something it does not own.
+                            destructor_is_trivial: true,
                             name: Some(name.clone()),
                             why_no_constructors: Default::default(),
                         }),
@@ -628,6 +647,14 @@ pub(super) fn find_constructors_present(
                     const_copy_constructor: is_explicit(ExplicitKind::ConstCopyConstructor),
                     non_const_copy_constructor: is_explicit(ExplicitKind::NonConstCopyConstructor),
                     move_constructor: is_explicit(ExplicitKind::MoveConstructor),
+                    // We don't know all this class's bases and fields, so we
+                    // cannot know that none of them has a destructor to run.
+                    // The optimism above about the destructor *existing* is
+                    // safe in a way optimism here would not be: assuming a
+                    // destructor exists costs a compile error if it doesn't,
+                    // whereas assuming it does nothing would silently not call
+                    // one that does something.
+                    destructor_is_trivial: false,
                     name: Some(name.clone()),
                     // This is the case google/autocxx#1034 is about: a type
                     // with no constructors at all and, until now, nothing at
@@ -978,12 +1005,26 @@ pub(super) fn find_constructors_present(
                 };
                 let (move_constructor, why_no_move_constructor) = move_constructor;
 
+                // C++'s definition of a trivial destructor, [class.dtor]: the
+                // class declares none of its own - so ours is `Implicit`, which
+                // excludes `= default` as well as a user-defined one - and each
+                // base and each field of class type has a trivial destructor
+                // too. `bases_items_found` and `fields_items_found` are
+                // complete here: the arm above catches the case where a base or
+                // field was not understood.
+                let destructor_is_trivial = destructor.exists_implicit()
+                    && bases_items_found
+                        .iter()
+                        .chain(fields_items_found.iter())
+                        .all(|(_, items_found)| items_found.destructor_is_trivial);
+
                 let items_found = ItemsFound {
                     default_constructor,
                     destructor,
                     const_copy_constructor,
                     non_const_copy_constructor,
                     move_constructor,
+                    destructor_is_trivial,
                     name: Some(name.clone()),
                     why_no_constructors: WhyNoConstructors {
                         default_constructor: why_no_default_constructor,
@@ -1270,6 +1311,7 @@ fn known_type_items_found(constructor_details: KnownTypeConstructorDetails) -> I
         const_copy_constructor: exists_public_if(constructor_details.has_const_copy_constructor),
         non_const_copy_constructor: SpecialMemberFound::NotPresent,
         move_constructor: exists_public_if(constructor_details.has_move_constructor),
+        destructor_is_trivial: constructor_details.destructor_is_trivial,
         name: None,
         why_no_constructors: Default::default(),
     }

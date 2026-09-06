@@ -19293,3 +19293,152 @@ fn test_opaque_type_still_works_by_reference_and_pointer() {
         None,
     );
 }
+
+/// Every generated type used to get an `impl Drop` calling a C++ destructor,
+/// including types whose destructor does nothing at all. For a type Rust holds
+/// by value that is not free: a type which implements `Drop` may not have a
+/// field moved out of it, may not be built with `..other` update syntax, and
+/// may never be `Copy`. C++ elides the call to a trivial destructor, and so
+/// should we.
+#[test]
+fn test_trivially_destructible_pod_has_no_drop_impl() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Inner { uint32_t a; };
+        struct fx_Outer { fx_Inner inner; uint32_t b; };
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_Outer {
+            inner: ffi::fx_Inner { a: 3 },
+            b: 4,
+        };
+        // Update syntax, then moving a field out. Both are refused with E0509
+        // on a type which implements `Drop`.
+        let updated = ffi::fx_Outer { b: 7, ..outer };
+        let inner = updated.inner;
+        assert_eq!(inner.a, 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&[], &["fx_Inner", "fx_Outer"], None),
+        None,
+        Some(make_string_absence_finder(vec![
+            "impl Drop for output :: fx_Outer".to_string(),
+            "impl Drop for output :: fx_Inner".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The other half of that rule. A class which declares no destructor of its
+/// own still has a non-trivial one if any of its fields does, and C++ really
+/// does call it, so the `impl Drop` has to stay.
+///
+/// autocxx would never let this program run: `generate_pod!` emits a
+/// `static_assert(::rust::IsRelocatable<T>::value)` - see
+/// `codegen_cpp::generate_pod_assertion`, which exists for exactly this
+/// hazard - and a field with a destructor fails it. That assertion is what
+/// makes leaving the `Drop` impl out of a POD safe in the first place, since
+/// C++ has already promised the destructor does nothing. This test is the
+/// belt to that pair of braces: it pins the analysis rather than the program,
+/// so it inspects the generated code and stops before the C++ compiler.
+#[test]
+fn test_pod_whose_field_has_a_destructor_keeps_drop_impl() {
+    struct FindDropImpl;
+    impl CodeCheckerFns for FindDropImpl {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            if quote::quote!(#rs)
+                .to_string()
+                .contains("impl Drop for output :: fx_HoldsNoisy")
+            {
+                Ok(())
+            } else {
+                Err(TestError::RsCodeExaminationFail(
+                    "fx_HoldsNoisy lost its Drop impl".into(),
+                ))
+            }
+        }
+        fn skip_build(&self) -> bool {
+            true
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& fx_dtor_count() { static uint32_t n = 0; return n; }
+        struct fx_Noisy { uint32_t a; ~fx_Noisy() { fx_dtor_count()++; } };
+        struct fx_HoldsNoisy { fx_Noisy inner; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&[], &["fx_HoldsNoisy"], None),
+        None,
+        Some(Box::new(FindDropImpl)),
+        None,
+    );
+}
+
+/// The analysis above has one blind spot, and this is the backstop for it.
+/// bindgen emits no field for an *empty* base class, so a class deriving from
+/// one which has a destructor looks trivially destructible to autocxx, which
+/// would then leave out the `Drop` impl and never run that destructor.
+///
+/// cxx's own `IsRelocatable` assertion does not cover this, because a user may
+/// opt into that trait by hand. So the generated C++ asserts the property
+/// autocxx actually relied on - `std::is_trivially_destructible` - and the
+/// build stops here rather than silently skipping cleanup.
+#[test]
+fn test_omitted_destructor_is_asserted_in_the_generated_cpp() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& fx_dtor_count() { static uint32_t n = 0; return n; }
+        struct fx_EmptyNoisy { ~fx_EmptyNoisy() { fx_dtor_count()++; } };
+        struct fx_DerivedPod : public fx_EmptyNoisy { uint32_t x; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_DerivedPod"],
+        // Every compiler quotes a failed `static_assert`'s message, but each
+        // words its own part of the diagnostic differently, so pin only the
+        // message.
+        &["autocxx generated no destructor call for fx_DerivedPod"],
+    );
+}
+
+/// A non-POD type keeps its `impl Drop` whether or not its destructor does
+/// anything: it is only ever reached through a pointer or a smart pointer,
+/// where implementing `Drop` costs nothing, and `moveit!` on the stack wants
+/// something to call.
+#[test]
+fn test_trivially_destructible_non_pod_keeps_drop_impl() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Plain {
+        public:
+            fx_Plain() {}
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a = 1;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::fx_Plain::new().within_unique_ptr();
+            assert_eq!(p.get(), 1);
+        },
+        directives_from_lists(&["fx_Plain"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "impl Drop for output :: fx_Plain".to_string()
+        ])),
+        None,
+    );
+}

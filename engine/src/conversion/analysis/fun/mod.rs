@@ -300,15 +300,21 @@ pub(crate) struct PublicConstructors {
     /// the absence to whoever reads the bindings; nothing is generated from
     /// it. See <https://github.com/google/autocxx/issues/1034>.
     pub(crate) why_no_constructors: WhyNoConstructors,
+    /// Whether we left this type without a destructor - and so without an
+    /// `impl Drop` - because we worked out that C++ destroys one trivially.
+    /// The generated C++ has to say so out loud: see
+    /// [`crate::conversion::codegen_cpp::CppCodeGenerator::generate_trivial_destructor_assertion`].
+    pub(crate) destructor_omitted_as_trivial: bool,
 }
 
 impl PublicConstructors {
-    fn from_items_found(items_found: &ItemsFound) -> Self {
+    fn from_items_found(items_found: &ItemsFound, destructor_omitted_as_trivial: bool) -> Self {
         Self {
             move_constructor: items_found.move_constructor.callable_any(),
             destructor: items_found.destructor.callable_any(),
             destructor_inaccessible: !items_found.destructor.callable_any(),
             why_no_constructors: items_found.why_no_constructors.clone(),
+            destructor_omitted_as_trivial,
         }
     }
 }
@@ -2289,9 +2295,29 @@ impl<'a> FnAnalyzer<'a> {
     /// for further analysis phases.
     fn add_constructors_present(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase2> {
         let all_items_found = find_constructors_present(&apis);
+        // The types Rust holds by value, and so the only ones for which an
+        // `impl Drop` costs anything - see the destructor case below.
+        let pod_types: HashSet<QualifiedName> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct {
+                    name,
+                    analysis:
+                        PodAnalysis {
+                            kind: TypeKind::Pod,
+                            ..
+                        },
+                    ..
+                } => Some(name.name.clone()),
+                _ => None,
+            })
+            .collect();
         // C++ may have deleted some of the special members it declared for
         // `= default`. Withdraw those before we consider what to synthesize.
         let mut apis = discard_deleted_defaulted_members(apis, &all_items_found);
+        // Filled in by the destructor case below, and read by the pass which
+        // annotates each struct, so that codegen can assert what we assumed.
+        let mut destructors_omitted_as_trivial: HashSet<QualifiedName> = HashSet::new();
         for (self_ty, items_found) in all_items_found.iter() {
             if self.config.exclude_impls {
                 // Only the synthesis below is skipped. The analysis above runs
@@ -2349,7 +2375,26 @@ impl<'a> FnAnalyzer<'a> {
                     parse_quote! { this: *mut #path, other: __bindgen_marker_Reference < *const #path > },
                 )
             }
-            if items_found.implicit_destructor_needed() {
+            // A destructor which does nothing, on a type Rust holds by value,
+            // is worse than useless. The `impl Drop` it needs costs the user
+            // everything a type which implements `Drop` may not do: move a
+            // field out, build one with `..other` update syntax, be `Copy`.
+            // Nothing is bought with that, because `~T()` is trivial - C++
+            // itself elides the call. Non-POD types keep their destructor: they
+            // live behind a pointer or a `UniquePtr`, where an `impl Drop`
+            // costs nothing, and `moveit!` on the stack wants it.
+            //
+            // We are not the last word on whether C++ destroys one trivially:
+            // bindgen cannot see an empty base class, so a class deriving from
+            // one with a destructor looks trivial here. The generated C++
+            // therefore asserts what we assumed - see
+            // `codegen_cpp::generate_trivial_destructor_assertion` - which is
+            // why the decision has to travel out of this loop.
+            let destructor_would_do_nothing =
+                items_found.destructor_is_trivial && pod_types.contains(self_ty);
+            if destructor_would_do_nothing {
+                destructors_omitted_as_trivial.insert(self_ty.clone());
+            } else if items_found.implicit_destructor_needed() {
                 self.synthesize_special_member(
                     items_found,
                     "destructor",
@@ -2368,13 +2413,18 @@ impl<'a> FnAnalyzer<'a> {
             Api::fun_unchanged,
             |name, details, analysis| {
                 let items_found = all_items_found.get(&name.name);
+                let destructor_omitted_as_trivial =
+                    destructors_omitted_as_trivial.contains(&name.name);
                 Ok(Box::new(std::iter::once(Api::Struct {
                     name,
                     details,
                     analysis: PodAndConstructorAnalysis {
                         pod: analysis,
                         constructors: if let Some(items_found) = items_found {
-                            PublicConstructors::from_items_found(items_found)
+                            PublicConstructors::from_items_found(
+                                items_found,
+                                destructor_omitted_as_trivial,
+                            )
                         } else {
                             PublicConstructors::default()
                         },

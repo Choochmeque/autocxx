@@ -268,11 +268,16 @@ impl<'a> CppCodeGenerator<'a> {
                                     kind: TypeKind::Pod,
                                     ..
                                 },
+                            constructors,
                             ..
                         },
                     ..
                 } => {
-                    self.generate_pod_assertion(self.original_name_map.map(&name.name));
+                    let cpp_name = self.original_name_map.map(&name.name);
+                    if constructors.destructor_omitted_as_trivial {
+                        self.generate_trivial_destructor_assertion(cpp_name.clone());
+                    }
+                    self.generate_pod_assertion(cpp_name);
                 }
                 _ => panic!("Should have filtered on needs_cpp_codegen"),
             }
@@ -379,6 +384,30 @@ impl<'a> CppCodeGenerator<'a> {
         self.additional_functions.push(ExtraCpp {
             declaration,
             headers: vec![Header::CxxH],
+            ..Default::default()
+        })
+    }
+
+    /// Say in C++ what the trivial-destructor analysis assumed about this
+    /// type, for a type where it concluded that no `impl Drop` was needed.
+    ///
+    /// This is not the same claim as the relocatability assertion above, and
+    /// neither one covers the other. That one is cxx's `IsRelocatable`, which
+    /// a user may opt into by hand - `using IsRelocatable = std::true_type;`
+    /// on the type, or a `rust::IsRelocatable` specialization - so it does not
+    /// establish anything about the destructor. This one asks the question we
+    /// actually relied on, of the language rather than of a trait anyone may
+    /// answer for. It matters because the analysis has a blind spot: bindgen
+    /// does not report an empty base class, so a class deriving from one which
+    /// has a destructor looks trivially destructible to us. Rust would then
+    /// never run that destructor, and nothing would say so. Now C++ does.
+    fn generate_trivial_destructor_assertion(&mut self, name: String) {
+        let declaration = Some(format!(
+            "static_assert(::std::is_trivially_destructible<{name}>::value, \"autocxx generated no destructor call for {name}, because it worked out that C++ destroys one trivially, and this assertion says C++ disagrees. Something {name} owns - most likely through a base class autocxx cannot see - has a destructor which does work, and Rust would never have run it. Use generate! rather than generate_pod! for this type.\");"
+        ));
+        self.additional_functions.push(ExtraCpp {
+            declaration,
+            headers: vec![Header::System("type_traits")],
             ..Default::default()
         })
     }
