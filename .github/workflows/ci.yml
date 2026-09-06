@@ -42,10 +42,8 @@ jobs:
           # sibling. The skip list went from twelve entries to two, and the
           # last two are off for this run as well: both carried a hypothesis
           # which only a run without the skip could settle, so this leg is
-          # the experiment. Nothing sets skip_windows_gnu_failing_tests to
-          # anything now, though the flag is still passed and still declared
-          # in integration-tests/build.rs, so restoring either skip is a
-          # one-line change.
+          # the experiment - and both hypotheses resolved: one fixture bug
+          # fixed, one stale entry. No skip machinery remains anywhere.
           - name: Windows (gnu)
             rust: nightly-x86_64-pc-windows-gnu
             os: windows
@@ -95,13 +93,16 @@ jobs:
         # never diagnosed). The creduce-needing reduce tests are env-gated
         # behind AUTOCXX_RUN_REDUCTION_TESTS these days, so both packages'
         # remaining tests may simply work; running to find out.
+        # This deliberately blanks the job-level RUSTFLAGS (deny_warnings)
+        # for the suite itself - the fixtures are not warning-clean and are
+        # not meant to be - and historically also carried the per-leg skip
+        # cfgs, the last of which retired in 2026 when every skip on both
+        # Windows lists turned out fixed or fixable.
         run: |
           echo RUSTFLAGS=$RUSTFLAGS >> $GITHUB_ENV
           echo exclude= >> "$GITHUB_OUTPUT"
         env:
-          # non-linux failures https://github.com/google/autocxx/issues/819
-          # beta failing tests https://github.com/google/autocxx/issues/818
-          RUSTFLAGS: ${{matrix.name == 'Windows (msvc)' && '--cfg skip_windows_msvc_failing_tests' || ''}} ${{matrix.name == 'Windows (gnu)' && '--cfg skip_windows_gnu_failing_tests' || ''}}
+          RUSTFLAGS: ""
         id: testsuite
         shell: bash
       - run: cargo test --workspace ${{steps.testsuite.outputs.exclude}}

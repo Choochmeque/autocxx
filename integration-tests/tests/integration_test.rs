@@ -7407,7 +7407,6 @@ fn test_error_fatal_for_explicitly_generated_static_data() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_error_generated_for_array_dependent_function() {
     // An explicitly requested function whose parameter we can't handle is a
     // hard error - google/autocxx#1269. (The equivalent method on a type which
@@ -7432,7 +7431,6 @@ fn test_error_generated_for_array_dependent_function() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_error_generated_for_array_dependent_method() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -8008,7 +8006,6 @@ fn test_ref_qualified_virtual_method() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 #[test]
 fn test_stringview() {
     // Test that APIs using std::string_view are handled gracefully. We can't
@@ -9173,21 +9170,15 @@ fn test_rust_reference_no_autodiscover_no_usage() {
     );
 }
 
+// This test spent 2022-2026 on the MSVC skip list. Two things were wrong,
+// both now fixed in the product rather than here: the C++ standard flag was
+// passed in a spelling cl.exe ignores (make_cpp17_adder goes through
+// cc::Build::std since the flag rework), and cl reports __cplusplus as
+// 199711L whatever /std: says unless /Zc:__cplusplus is also passed - which
+// the engine's own builder now supplies on MSVC, because a user's header
+// gating declarations on the standard macro hits exactly this. The
+// static_assert below is that user's header in miniature.
 #[test]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
-// TODO - make this work on MSVC. `make_cpp17_adder` passes a GNU-spelled
-// `-std=c++17` to the cc build, which cl.exe does not accept. Three separate
-// things need fixing, not just the one this note used to describe:
-//   1. the flag spelling. `cc::Build::std("c++17")` handles this - cc picks
-//      `-std=c++17` or `-std:c++17` from the tool family (cc 1.2.15 lib.rs,
-//      the `if let Some(ref std) = self.std` block).
-//   2. `__cplusplus`. MSVC reports 199711L whatever `/std` says unless
-//      `/Zc:__cplusplus` is also passed, so the static_assert below fails
-//      anyway. cc never adds it - the string appears nowhere in cc 1.2.15.
-//   3. (fixed) `configure_builder` now uses `cc::Build::std("c++14")`, which
-//      spells the flag per tool family and lets per-test `-std=c++17`
-//      modifiers override it, so only items 1-2 remain.
-// Needs verifying on a real MSVC runner once done.
 fn test_cpp17() {
     let hdr = indoc! {"
         static_assert(__cplusplus >= 201703L, \"This file expects a C++17 compatible compiler.\");
@@ -15326,7 +15317,6 @@ fn test_recursive_field_indirect() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 // MSVC failure appears to be https://github.com/rust-lang/rust-bindgen/issues/3159
 fn test_typedef_unsupported_type_pub() {
     let hdr = indoc! {"
@@ -15351,7 +15341,6 @@ fn test_typedef_unsupported_type_pub() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 // MSVC failure appears to be https://github.com/rust-lang/rust-bindgen/issues/3159
 fn test_typedef_unsupported_type_pri() {
     let hdr = indoc! {"
@@ -16637,7 +16626,6 @@ fn test_using_string_method() {
 }
 
 #[test]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
 fn test_override_typedef_fn() {
     let hdr = indoc! {"
         #include <map>
