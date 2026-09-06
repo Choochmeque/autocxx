@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use crate::{AsCppMutRef, CppPin, CppUniquePtrPin};
 use cxx::{memory::UniquePtrTarget, UniquePtr};
 use moveit::{AsMove, CopyNew, MoveNew, New};
 use std::{marker::PhantomPinned, mem::MaybeUninit, ops::Deref, pin::Pin};
@@ -25,6 +26,11 @@ use std::{marker::PhantomPinned, mem::MaybeUninit, ops::Deref, pin::Pin};
 /// destroying the object you're passing in. Simply use a reference if you want
 /// copy semantics, or the item itself if you want move semantics.
 ///
+/// The same goes for the owning C++ reference wrappers,
+/// [`crate::CppPin`] and [`crate::CppUniquePtrPin`]: hand one over and C++
+/// takes the object itself, leaving you nothing. To keep the object, copy out
+/// of it explicitly - see below.
+///
 /// It is not recommended that you implement this trait, nor that you directly
 /// use its methods, which are for use by `autocxx` generated code only.
 ///
@@ -39,6 +45,12 @@ use std::{marker::PhantomPinned, mem::MaybeUninit, ops::Deref, pin::Pin};
 /// If you wish to explicitly force either a move or a copy of some type,
 /// use [`as_mov`] or [`as_copy`].
 ///
+/// [`as_copy`] is also how you pass by value out of a [`crate::CppPin`] or a
+/// [`crate::CppRef`] while keeping the original, since neither of those hands
+/// out a Rust reference for free: write `as_copy(unsafe { pin.as_ref() })`,
+/// and in doing so promise that C++ won't mutate the referent while the copy
+/// constructor runs.
+///
 /// # Performance
 ///
 /// At present, some additional copying occurs for all implementations of
@@ -48,8 +60,8 @@ use std::{marker::PhantomPinned, mem::MaybeUninit, ops::Deref, pin::Pin};
 ///
 /// # Panics
 ///
-/// The implementations of this trait which take a [`cxx::UniquePtr`] will
-/// panic if the pointer is NULL.
+/// The implementations of this trait which take a [`cxx::UniquePtr`], or a
+/// [`crate::CppUniquePtrPin`] holding one, will panic if the pointer is NULL.
 ///
 /// # Safety
 ///
@@ -109,7 +121,68 @@ where
     }
 }
 
-// TODO implement for CppPin<T> and for CppRef<T: CopyNew>
+unsafe impl<T> ValueParam<T> for CppPin<T> {
+    type StackStorage = CppPin<T>;
+
+    unsafe fn populate_stack_space(self, mut stack: Pin<&mut Option<Self::StackStorage>>) {
+        // Safety: we will not move the contents of the pin.
+        *Pin::into_inner_unchecked(stack.as_mut()) = Some(self)
+    }
+
+    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+        // Safety: we won't move/swap the contents of the outer pin. The
+        // pointer is to the `T` inside the `CppPin`'s own `Box`, which we now
+        // own and keep alive until after the call, so it's non-null, aligned
+        // and points to an initialized `T`. It comes from `as_mut_ptr` and not
+        // from the `CppMutRef` the `CppPin` caches beside the box, because
+        // `CppPin`'s `DerefMut` lets safe code overwrite that cached reference
+        // with any pointer at all. No Rust reference to the `T` is created
+        // along the way (see the note on `CppPin::as_mut_ptr`), so C++ moving
+        // out of it can't collide with Rust's aliasing rules.
+        unsafe { Pin::into_inner_unchecked(stack).as_mut_ptr() }
+    }
+}
+
+unsafe impl<T> ValueParam<T> for CppUniquePtrPin<T>
+where
+    T: UniquePtrTarget,
+{
+    type StackStorage = CppUniquePtrPin<T>;
+
+    unsafe fn populate_stack_space(self, mut stack: Pin<&mut Option<Self::StackStorage>>) {
+        // Safety: we will not move the contents of the pin.
+        *Pin::into_inner_unchecked(stack.as_mut()) = Some(self)
+    }
+
+    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+        // Safety: we won't move/swap the contents of the outer pin, nor of the
+        // type stored within the UniquePtr, which we own and keep alive until
+        // after the call. Here the cached `CppMutRef` is the pointer to use:
+        // it was taken from the `UniquePtr` on construction, and unlike
+        // `CppPin` this type vends no `DerefMut`, so no safe code can have
+        // replaced it. Nothing dereferences the `UniquePtr` into a `&T`.
+        let ptr = unsafe { Pin::into_inner_unchecked(stack) }
+            .as_cpp_mut_ref()
+            .as_mut_ptr();
+        assert!(
+            !ptr.is_null(),
+            "Passed a NULL CppUniquePtrPin as a C++ value parameter"
+        );
+        ptr
+    }
+}
+
+// A borrowed `CppPin` or a `CppRef` deliberately gets no implementation here,
+// though a copy constructor is all it would take. Either would have to build
+// its copy out of a Rust `&T`, which is the one thing these types exist to
+// avoid: `CppPin::as_ref` is `unsafe` precisely because C++ may hold aliasing
+// mutable references to the contents, and a `CppRef` is a raw pointer which
+// `CppRef::from_ptr` will make out of anything at all, null included.
+// Generated code calls `populate_stack_space` on behalf of safe callers, so an
+// implementation here would put that dereference beyond the reach of anybody's
+// `unsafe`. Passing by value out of one of these without consuming it
+// therefore stays spelled `as_copy(unsafe { pin.as_ref() })`, where the caller
+// can see what they are promising.
 
 unsafe impl<T> ValueParam<T> for UniquePtr<T>
 where
@@ -294,5 +367,26 @@ impl<T, VP: ValueParam<T>> Drop for ValueParamHandler<T, VP> {
         if let Some(space) = self.space.as_mut() {
             unsafe { VP::do_drop(Pin::new_unchecked(space)) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cxx::CxxString;
+
+    /// A null [`CppUniquePtrPin`] has no object for C++ to take by value, so
+    /// it has to fail as loudly as a null [`UniquePtr`] does rather than hand
+    /// C++ a null pointer to move out of.
+    #[test]
+    #[should_panic(expected = "Passed a NULL CppUniquePtrPin")]
+    fn null_cpp_unique_ptr_pin_is_rejected() {
+        let pin = CppUniquePtrPin::new(UniquePtr::<CxxString>::null());
+        let mut handler = ValueParamHandler::<CxxString, CppUniquePtrPin<CxxString>>::default();
+        // Safety: the handler is a local which nothing moves hereafter, and
+        // `populate` is called exactly once before `get_ptr`.
+        let mut handler = unsafe { Pin::new_unchecked(&mut handler) };
+        unsafe { handler.as_mut().populate(pin) };
+        let _ = handler.get_ptr();
     }
 }

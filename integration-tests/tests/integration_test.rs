@@ -9116,10 +9116,71 @@ fn test_extern_rust_fn_mutable_reference() {
     );
 }
 
-// TODO: one more extern_rust_fn test is still missing: that types the
-// signature depends on, as receiver, parameters and return, are not garbage
-// collected. References in both directions are now covered, by
-// test_extern_rust_method and test_extern_rust_fn_mutable_reference.
+/// Nothing in the C++ headers mentions the Rust types here. They arrive only
+/// through `extern_rust_function` signatures, and between them they occupy
+/// every position a signature has: `Chef` and `Dish` as receivers, `Ingredient`
+/// as a parameter, and `Ingredient` and `Dish` as return types. All three still
+/// have to appear in the `extern "Rust"` block, or the bridge would call
+/// methods on types it never declared, so none of them may be swept away as
+/// unused. Two independent mechanisms keep them - every `extern_rust_type!` is
+/// a root of the sweep in its own right, and the deps which
+/// `assemble_extern_fun_deps` reads out of each signature are followed from the
+/// function - so this test goes red only if both break at once. References in
+/// both directions are covered by `test_extern_rust_method` and
+/// `test_extern_rust_fn_mutable_reference`.
+#[test]
+fn test_extern_rust_fn_signature_types_are_not_collected() {
+    let cpp = indoc! {"
+        uint32_t cook_dinner(const Chef& chef) {
+            return chef.cook(make_ingredient())->value();
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Chef;
+        uint32_t cook_dinner(const Chef& chef);
+    "};
+    run_test_ex(
+        cpp,
+        hdr,
+        quote! {
+            let chef = Chef;
+            assert_eq!(ffi::cook_dinner(&chef), 42);
+        },
+        directives_from_lists(&["cook_dinner"], &[], None),
+        Some(Box::new(EnableAutodiscover)),
+        None,
+        Some(quote! {
+            #[autocxx::extern_rust::extern_rust_type]
+            pub struct Chef;
+
+            #[autocxx::extern_rust::extern_rust_type]
+            pub struct Ingredient(i32);
+
+            #[autocxx::extern_rust::extern_rust_type]
+            pub struct Dish(i32);
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn make_ingredient() -> Box<Ingredient> {
+                Box::new(Ingredient(21))
+            }
+
+            impl Chef {
+                #[autocxx::extern_rust::extern_rust_function]
+                pub fn cook(&self, ingredient: Box<Ingredient>) -> Box<Dish> {
+                    Box::new(Dish(ingredient.0 * 2))
+                }
+            }
+
+            impl Dish {
+                #[autocxx::extern_rust::extern_rust_function]
+                pub fn value(&self) -> u32 {
+                    self.0 as u32
+                }
+            }
+        }),
+    );
+}
 
 #[test]
 fn test_rust_reference_no_autodiscover() {
@@ -12610,6 +12671,68 @@ fn test_pass_by_value_moves_where_it_can() {
             "move_count",
             "reset_counts",
         ],
+        &[],
+    );
+}
+
+/// A value parameter out of the owning C++ reference wrappers. A `CppPin` or a
+/// `CppUniquePtrPin` owns its object outright, so handing one to C++ consumes
+/// it, and C++ moves out of it where the type allows a move, just as consuming
+/// a `UniquePtr` does. Keeping the object instead means copying out of it, and
+/// that is where the `unsafe` lives: these wrappers exist because C++ may hold
+/// aliasing references to what they hold, so neither hands out a Rust
+/// reference for free.
+#[test]
+fn test_pass_by_value_from_cpp_reference_wrappers() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    inline int32_t& copies() { static int32_t c = 0; return c; }
+    inline int32_t& moves() { static int32_t m = 0; return m; }
+    struct A {
+        A() : a(0) {}
+        A(const A& other) : a(other.a) { copies()++; }
+        A(A&& other) : a(other.a) { moves()++; }
+        void set(uint32_t val) { a = val; }
+        uint32_t a;
+        std::string so_we_are_non_trivial;
+    };
+    inline uint32_t take_a(A a) { return a.a; }
+    inline int32_t copy_count() { return copies(); }
+    inline int32_t move_count() { return moves(); }
+    inline void reset_counts() { copies() = 0; moves() = 0; }
+    "};
+    let rs = quote! {
+        // A `CppPin` around storage which Rust allocated.
+        let mut obj = ffi::A::new().within_box();
+        obj.as_mut().set(42);
+        let pin = CppPin::from_pinned_box(obj);
+        // Copying out of it keeps the object: a copy into Rust-side storage,
+        // then a move out of that storage into the parameter.
+        ffi::reset_counts();
+        assert_eq!(ffi::take_a(as_copy(unsafe { pin.as_ref() })), 42);
+        assert_eq!(ffi::copy_count(), 1);
+        assert_eq!(ffi::move_count(), 1);
+        // Handing over the pin itself consumes it, and costs no copy.
+        ffi::reset_counts();
+        assert_eq!(ffi::take_a(pin), 42);
+        assert_eq!(ffi::copy_count(), 0);
+        assert_eq!(ffi::move_count(), 1);
+
+        // And a `CppUniquePtrPin`, which owns a C++-side allocation.
+        let mut obj = ffi::A::new().within_unique_ptr();
+        obj.pin_mut().set(43);
+        let pin = CppUniquePtrPin::new(obj);
+        ffi::reset_counts();
+        assert_eq!(ffi::take_a(pin), 43);
+        assert_eq!(ffi::copy_count(), 0);
+        assert_eq!(ffi::move_count(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["A", "take_a", "copy_count", "move_count", "reset_counts"],
         &[],
     );
 }
