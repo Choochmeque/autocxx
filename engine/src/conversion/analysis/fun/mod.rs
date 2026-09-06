@@ -2085,21 +2085,30 @@ impl<'a> FnAnalyzer<'a> {
             annotated_type.kind,
             type_converter::TypeKind::RValueReference
         );
-        // TODO: `TypeKind::MutableReference` is deliberately not here, and
-        // that costs `unsafe_references_wrapped` the thing it exists for. In
-        // that mode a *const* reference parameter becomes a `CppRef<T>` and a
-        // method's receiver a `CppMutRef<T>` (which is what `is_self` is doing
-        // here), but a mutable reference *parameter* is left as
-        // `Pin<&mut T>` - a Rust mutable reference, which C++ is free to alias
-        // and which the mode promises to have eliminated. Both spellings of
-        // one, written out and through a typedef, are pinned to the current
-        // behaviour by `test_mutable_reference_parameter_cpprefs` and
-        // `test_typedef_to_mutable_reference_parameter_cpprefs`, so whatever
-        // this becomes, it becomes for both at once. Changing it means
-        // deciding what `CppMutRef<T>` does to the C++ side of a parameter,
-        // which the receiver path already answers.
-        let is_reference =
-            matches!(annotated_type.kind, type_converter::TypeKind::Reference) || is_self;
+        // Every C++ reference in a parameter position, const or mutable.
+        // What reads it is `unsafe_references_wrapped`, in the two branches
+        // below which test it: there this decides which parameters become a
+        // wrapper rather than a Rust reference. A mutable one has to be in
+        // here. Left out, it stayed `Pin<&mut T>` - a Rust mutable
+        // reference to an object C++ is entitled to hold other references to,
+        // and ruling out exactly that aliasing is what the mode is for.
+        //
+        // The receiver `is_self` stands for is a C++ reference too, and a
+        // mutable one whenever the method is non-const, and it has always been
+        // wrapped. A parameter now takes that same route through those same
+        // two branches, which is why nothing below had to learn about
+        // mutability. The C++ side is unchanged either way: the shim takes a
+        // pointer and dereferences it into the reference the function asked
+        // for.
+        //
+        // The third reader is the POD branch further down, and it sees no
+        // difference: what arrives there for a mutable reference is
+        // `Pin<&mut T>`, and `Pin` is a known type, so that arm was already
+        // taken by its other disjunct under every policy.
+        let is_reference = matches!(
+            annotated_type.kind,
+            type_converter::TypeKind::Reference | type_converter::TypeKind::MutableReference
+        ) || is_self;
         let rust_conversion_forced = force_rust_conversion.is_some();
         let ty = &*annotated_type.ty;
         if let Some(holder_id) = is_subclass_holder {

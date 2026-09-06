@@ -314,7 +314,15 @@ macro_rules! concrete {
 /// policy available here:
 /// `safety!(unsafe_references_wrapped)`
 /// This policy treats C++ references as scary and requires
-/// them to be wrapped in a `CppRef` type: see [`CppRef`].
+/// them to be wrapped. A `const T&` becomes a [`CppRef`]
+/// and a `T&` a [`CppMutRef`], both as a parameter and as
+/// the object a method is called on; a returned reference
+/// becomes the lifetime-carrying [`CppLtRef`] or
+/// [`CppMutLtRef`]. No C++ reference reaches you as a Rust
+/// reference, so none of them can alias one. To hand
+/// something of your own to such a function, put it in a
+/// [`CppPin`] (or a [`CppUniquePtrPin`], for a
+/// [`cxx::UniquePtr`]) and ask that for the reference.
 /// This only works on nightly Rust because it
 /// depends upon an unstable feature
 /// (`arbitrary_self_types`). However, it should
