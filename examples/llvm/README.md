@@ -6,13 +6,12 @@ whatever `llvm-config` is on `PATH`, or whatever `LLVM_CONFIG_PATH` names.
 Install your distribution's `llvm-<version>-dev` package and `cargo build`
 should find it.
 
-It is not built in CI. The old job hardcoded `apt-get install llvm-13-dev`
-and LLVM 13 is no longer packaged for the runner images, but the header
-search is no longer the obstacle: the example does build against a current
-LLVM, and then trips rustc's `unnecessary_transmutes` lint on the bitfield
-accessors bindgen generates for `llvm::ErrorOr`. The examples job runs with
-`-Dwarnings`, so that is a hard error there. A crate-local `allow` could
-paper over it (the job denies warnings rather than forbidding them), but
-the offending code comes out of bindgen, into the private `mod bindgen`
-that autocxx generates - so the project's choice is to fix it once in the
-engine rather than suppress it per consumer.
+CI builds this example on the Ubuntu legs against the distribution's
+`llvm-dev`. It spent some years out of CI: the old job hardcoded
+`apt-get install llvm-13-dev` until that stopped existing, and once the
+header search was rewritten to ask `llvm-config`, the build tripped
+rustc's `unnecessary_transmutes` lint on the bitfield accessors bindgen
+generated for `llvm::ErrorOr` - which is exactly the kind of thing this
+example exists to catch, being the only one that pushes autocxx through
+a large real-world header set. The engine now generates those accessors
+with casts instead, and the example is back on duty.

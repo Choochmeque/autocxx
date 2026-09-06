@@ -177,15 +177,22 @@ jobs:
       - name: Build cpp_calling_rust example
         working-directory: ./examples/cpp_calling_rust
         run: cargo build
-      # examples/llvm is still not built here. Its build.rs no longer hardcodes
-      # the LLVM 13 header paths that got this step deleted - it asks
-      # llvm-config - and the example does compile against a current LLVM. What
-      # stops it is this job's -Dwarnings: bindgen generates bitfield accessors
-      # for llvm::ErrorOr that transmute between bool and u8, and rustc's
-      # unnecessary_transmutes lint fires on them. The fix belongs where the
-      # engine attaches allows to the generated `mod bindgen`
-      # (engine/src/conversion/codegen_rs/mod.rs), next to the
-      # unsafe_op_in_unsafe_fn one, and not in this workflow.
+      # Ubuntu only: the distro's unversioned llvm-dev tracks ubuntu-latest,
+      # build.rs finds it through llvm-config (loudly, if it can't), and one
+      # platform is enough for a does-autocxx-still-digest-LLVM's-headers
+      # canary. macOS would spend ~10 minutes brew-installing LLVM for the
+      # same signal, and Windows LLVM distributions may not ship llvm-config.
+      # The C++ compiler here is g++, deliberately: distro LLVM packages are
+      # gcc-built, and gcc-compile/libclang-parse agree on Linux's single ABI.
+      - name: Install LLVM development headers
+        if: matrix.os == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install llvm-dev
+      - name: Build llvm example
+        working-directory: ./examples/llvm
+        if: matrix.os == ''
+        run: cargo build
 
   sanitizer:
     name: Address Sanitizer
