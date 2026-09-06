@@ -9,7 +9,8 @@
 use crate::{
     builder_modifiers::{
         make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
-        EnableAutodiscover, ForceWrapperGeneration, SetSuppressSystemHeaders,
+        make_unsigned_char_adder, EnableAutodiscover, ForceWrapperGeneration,
+        SetSuppressSystemHeaders,
     },
     code_checkers::{
         make_checks, make_checks_without_building, make_error_finder, make_rust_code_finder,
@@ -915,7 +916,7 @@ fn test_take_char_by_ptr_in_wrapped_method() {
 
 #[test]
 fn test_take_char_by_ptr_in_wrapped_method_with_unsigned_chars() {
-    run_char_test(make_clang_arg_adder(&["-funsigned-char"]))
+    run_char_test(make_unsigned_char_adder())
 }
 
 #[test]

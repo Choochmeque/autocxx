@@ -10,33 +10,63 @@ use autocxx_engine::Builder;
 
 use autocxx_integration_tests::{BuilderModifier, BuilderModifierFns, TestBuilderContext};
 
-pub(crate) fn make_cpp17_adder() -> Option<BuilderModifier> {
-    make_clang_arg_adder(&["-std=c++17"])
-}
-
-/// C++20 for both halves of the build.
+/// A C++ standard for both halves of the build.
 ///
 /// Not `make_clang_arg_adder`: that passes its flags to the C++ compiler
-/// verbatim, and `-std=c++20` is not how cl.exe spells it. bindgen is always
-/// clang and takes the flag as written; the C++ compiler is told through
-/// `cc`'s `std`, which picks the spelling for the tool family - and, being set
-/// after `configure_builder`'s `c++14`, replaces it.
-pub(crate) fn make_cpp20_adder() -> Option<BuilderModifier> {
-    Some(Box::new(Cpp20Adder))
+/// verbatim, and `-std=c++17` is not how cl.exe spells it - it ignored the
+/// gcc spelling with warning D9002, quietly compiling these tests at its
+/// default standard. bindgen is always clang and takes the flag as written;
+/// the C++ compiler is told through `cc`'s `std`, which picks the spelling
+/// for the tool family - and, being set after `configure_builder`'s `c++14`,
+/// replaces it.
+pub(crate) fn make_cpp17_adder() -> Option<BuilderModifier> {
+    Some(Box::new(StdAdder("c++17")))
 }
 
-struct Cpp20Adder;
+/// See [`make_cpp17_adder`].
+pub(crate) fn make_cpp20_adder() -> Option<BuilderModifier> {
+    Some(Box::new(StdAdder("c++20")))
+}
 
-impl BuilderModifierFns for Cpp20Adder {
+struct StdAdder(&'static str);
+
+impl BuilderModifierFns for StdAdder {
     fn modify_autocxx_builder<'a>(
         &self,
         builder: Builder<'a, TestBuilderContext>,
     ) -> Builder<'a, TestBuilderContext> {
-        builder.extra_clang_args(&["-std=c++20"])
+        builder.extra_clang_args(&[&format!("-std={}", self.0)])
     }
 
     fn modify_cc_builder<'a>(&self, builder: &'a mut cc::Build) -> &'a mut cc::Build {
-        builder.std("c++20")
+        builder.std(self.0)
+    }
+}
+
+/// `char` is unsigned, told to each tool in its own spelling: clang and gcc
+/// take `-funsigned-char`; cl.exe calls it `/J` and ignored the gcc spelling
+/// with warning D9002, so on MSVC the test formerly ran with `char` signed -
+/// which is that test's whole subject.
+pub(crate) fn make_unsigned_char_adder() -> Option<BuilderModifier> {
+    Some(Box::new(UnsignedCharAdder))
+}
+
+struct UnsignedCharAdder;
+
+impl BuilderModifierFns for UnsignedCharAdder {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        builder.extra_clang_args(&["-funsigned-char"])
+    }
+
+    fn modify_cc_builder<'a>(&self, builder: &'a mut cc::Build) -> &'a mut cc::Build {
+        let msvc = builder
+            .try_get_compiler()
+            .map(|c| c.is_like_msvc())
+            .unwrap_or(false);
+        builder.flag(if msvc { "/J" } else { "-funsigned-char" })
     }
 }
 
