@@ -1594,6 +1594,19 @@ happened while assembling its arguments. Construct the object first, with
 <p><strong>Performance</strong>: Exception handling adds minimal runtime overhead - the
 cost is only incurred when an exception actually occurs.</p>
 </li>
+<li>
+<p><strong>MSVC</strong>: an exception model must be selected, or cl.exe emits no
+unwind tables: exceptions still propagate and get caught, but
+destructors in intervening frames are skipped, so every throwing call
+leaks its owning temporaries. The <code>cc::Build</code> returned by
+<code>autocxx-build</code>'s <code>Builder</code> passes <code>/EHsc</code> for the code it compiles.
+Two things stay outside its reach: C++ you compile separately (via
+<code>autocxx-gen</code>, CMake, or another <code>cc::Build</code>) needs a compatible
+exception model of its own, and the <code>cxx</code> crate's own runtime
+(<code>cxx.cc</code>) is compiled by cxx's build script, which currently passes
+no <code>/EH</code> flag — set <code>CXXFLAGS=/EHsc</code> in your build environment to
+cover it until that is fixed upstream.</p>
+</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="callbacks-into-rust"><a class="header" href="#callbacks-into-rust">Callbacks into Rust</a></h1>
 <p><code>autocxx</code> is primarily to allow calls from Rust to C++, but like <code>cxx</code> it also allows you to expose Rust APIs to C++.</p>
