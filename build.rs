@@ -15,7 +15,28 @@ fn main() {
             println!("cargo:rustc-cfg=nightly")
         }
     }
+    build_c_type_vector_glue();
 }
+
+/// Compile the C++ half of the `std::vector` shims which
+/// `src/c_type_vectors.rs` declares for the `autocxx::c_*` newtypes. See that
+/// module for why this crate, rather than each generated bridge, is the one
+/// that has to do it. See google/autocxx#422.
+#[cfg(feature = "c-type-vectors")]
+fn build_c_type_vector_glue() {
+    println!("cargo:rerun-if-changed=src/c_type_vectors.rs");
+    println!("cargo:rerun-if-changed=src/c_type_vectors.h");
+    cxx_build::bridge("src/c_type_vectors.rs")
+        .include("src")
+        .std("c++14")
+        .compile("autocxx-c-type-vectors");
+}
+
+/// Without the feature this crate compiles no C++ of its own, so a consumer
+/// which only parses, or which uses pre-generated bindings, need not pull in
+/// `cxx-build`.
+#[cfg(not(feature = "c-type-vectors"))]
+fn build_c_type_vector_glue() {}
 
 fn rustc_version() -> Option<String> {
     let rustc = std::env::var_os("RUSTC")?;

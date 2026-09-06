@@ -603,6 +603,14 @@ unsafe impl cxx::ExternType for c_void {
     type Kind = cxx::kind::Trivial;
 }
 
+/// The `std::vector` glue for the `c_*` newtypes above.
+///
+/// Lives in its own file because `cxx-build` reads the source to find the
+/// bridge, and honours any `#[cfg]` it finds there - so the feature gate has
+/// to be here, on the `mod`, rather than on the bridge itself.
+#[cfg(feature = "c-type-vectors")]
+mod c_type_vectors;
+
 /// A C++ `char16_t`. Like the other C type wrappers here, this is a
 /// transparent newtype over the Rust integer of the same width, so a value
 /// crosses between the two with `.0` or [`From`].

@@ -8128,7 +8128,6 @@ fn test_cint_vector() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/422
 fn test_int_vector() {
     let hdr = indoc! {"
         #include <vector>
@@ -19527,4 +19526,54 @@ fn test_trivially_destructible_non_pod_keeps_drop_impl() {
         ])),
         None,
     );
+}
+
+/// A `std::vector<int>` reached by reference and read element by element.
+/// `int` is not one of the widths cxx knows natively, so this only works
+/// because the `autocxx` crate declares the `std::vector` glue for the
+/// `autocxx::c_*` newtypes on every bridge's behalf. See google/autocxx#422.
+#[test]
+fn test_c_int_vector_by_reference() {
+    let hdr = indoc! {"
+        #include <vector>
+        class fx_Holder {
+        public:
+            fx_Holder() : v{1, 2, 3} {}
+            const std::vector<int>& ints() const { return v; }
+        private:
+            std::vector<int> v;
+        };
+    "};
+    let rs = quote! {
+        let h = ffi::fx_Holder::new().within_unique_ptr();
+        let v = h.ints();
+        assert_eq!(v.len(), 3);
+        let total: i32 = v.iter().map(|i| i.0).sum();
+        assert_eq!(total, 6);
+    };
+    run_test("", hdr, rs, &["fx_Holder"], &[]);
+}
+
+/// The same for the other variable-width C integers, which reach cxx through
+/// the same mechanism.
+#[test]
+fn test_c_long_and_c_ushort_vectors() {
+    let hdr = indoc! {"
+        #include <vector>
+        inline std::vector<long> fx_give_longs() { return std::vector<long> {1, 2}; }
+        inline std::vector<unsigned short> fx_give_ushorts() {
+            return std::vector<unsigned short> {3, 4};
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            ffi::fx_give_longs().as_ref().unwrap().as_slice(),
+            &[autocxx::c_long(1), autocxx::c_long(2)]
+        );
+        assert_eq!(
+            ffi::fx_give_ushorts().as_ref().unwrap().as_slice(),
+            &[autocxx::c_ushort(3), autocxx::c_ushort(4)]
+        );
+    };
+    run_test("", hdr, rs, &["fx_give_longs", "fx_give_ushorts"], &[]);
 }

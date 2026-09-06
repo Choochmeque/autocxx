@@ -26,7 +26,21 @@ rust-version = "1.88"
 resolver = "2"
 
 [features]
+default = ["c-type-vectors"]
 arbitrary_self_types = []
+# Declares `std::vector` glue for the `autocxx::c_*` newtypes, so that a
+# `std::vector<int>` (or `long`, `short`, `long long`, signed or unsigned) can
+# cross a bridge - see google/autocxx#422. cxx implements `VectorElement` only
+# for the widths it knows natively, and the orphan rule stops a generated
+# bridge implementing it for our types, so this crate has to.
+#
+# It is what makes this crate compile C++ of its own, which is why it can be
+# turned off: without it nothing here needs `cxx-build`, which suits a
+# parse-only, pre-generated or non-Cargo consumer. Turning it off breaks
+# nothing that doesn't use such a vector; a binding that does fails to compile
+# with cxx's own "the trait `VectorElement` is not implemented for
+# `autocxx::c_int`", which names what to turn back on.
+c-type-vectors = ["dep:cxx-build"]
 
 [dependencies]
 autocxx-macro = { path="macro", version="0.30.0" }
@@ -46,6 +60,11 @@ autocxx-macro = { path="macro", version="0.30.0" }
 cxx = "1.0.136" # ... also needed because expansion of type_id refers to ::cxx
 aquamarine = "0.1" # docs
 moveit = { version = "0.6", features = [ "cxx" ] }
+
+[build-dependencies]
+# Compiles the `std::vector` glue for the `c_*` newtypes - see `build.rs`.
+# Optional so that `--no-default-features` leaves this a pure-Rust crate.
+cxx-build = { version = "1.0.136", optional = true }
 
 [workspace]
 members = ["parser", "engine", "gen/cmd", "gen/build", "macro", "demo", "tools/reduce", "tools/mdbook-preprocessor", "integration-tests"]
