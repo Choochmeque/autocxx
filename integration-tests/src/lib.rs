@@ -105,12 +105,14 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
                                    // two comparable).
                                    //
                                    // Asking cc to turn warnings ON, rather than off and then passing the
-                                   // flags ourselves, which looks equivalent and is not: cc 1.4 made
-                                   // `warnings(false)` emit `-w`, and `-w` beats `-Wall -Werror` in either
-                                   // order on clang - an unused variable compiles clean - so a lockfile bump
-                                   // would have silently deleted the coverage this is here to pin down. This
-                                   // direction can only fail the other way: the worst a future cc can do to
-                                   // it is hand us a different set of warnings to obey, never none.
+                                   // flags ourselves, which looks equivalent and is not: cc 1.2.50 made
+                                   // `warnings(false)` emit `-w` (rust-lang/cc-rs#1633, closing its issue
+                                   // #283 - before that release the call silently did nothing), and `-w`
+                                   // beats `-Wall -Werror` in either order on clang - an unused variable
+                                   // compiles clean - so a lockfile bump would have silently deleted the
+                                   // coverage this is here to pin down. This direction can only fail the
+                                   // other way: the worst a future cc can do to it is hand us a different
+                                   // set of warnings to obey, never none.
                                    //
                                    // What must not be done is to pass `-Wall` by hand. On gcc and clang that
                                    // names a curated set; cl.exe reads it as `/Wall`, which Microsoft

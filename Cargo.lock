@@ -178,7 +178,7 @@ name = "autocxx-build"
 version = "0.30.0"
 dependencies = [
  "autocxx-engine",
- "env_logger 0.9.3",
+ "env_logger",
  "indexmap 1.9.3",
  "syn 2.0.98",
 ]
@@ -232,7 +232,7 @@ dependencies = [
  "autocxx-integration-tests",
  "clap 3.2.25",
  "cxx",
- "env_logger 0.9.3",
+ "env_logger",
  "indexmap 1.9.3",
  "itertools 0.10.5",
  "miette",
@@ -249,7 +249,7 @@ dependencies = [
  "autocxx-engine",
  "cc",
  "cxx",
- "env_logger 0.9.3",
+ "env_logger",
  "indoc",
  "itertools 0.10.5",
  "link-cplusplus",
@@ -271,7 +271,6 @@ name = "autocxx-macro"
 version = "0.30.0"
 dependencies = [
  "autocxx-parser",
- "proc-macro-error",
  "proc-macro2",
  "quote",
  "syn 2.0.98",
@@ -284,7 +283,7 @@ dependencies = [
  "anyhow",
  "autocxx-integration-tests",
  "clap 3.2.25",
- "env_logger 0.9.3",
+ "env_logger",
  "gag",
  "itertools 0.10.5",
  "mdbook",
@@ -583,9 +582,9 @@ dependencies = [
 
 [[package]]
 name = "cxx"
-version = "1.0.199"
+version = "1.0.200"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "824894a4a85dca76d4c95c2b9098c036f5a29f627b30c12780774f6654e60974"
+checksum = "2d93a9baeb9798b2e8ff0de24463b9e5cf9a0dd0a88f5ea02afc9ea35e7abae7"
 dependencies = [
  "cc",
  "cxx-build",
@@ -598,9 +597,9 @@ dependencies = [
 
 [[package]]
 name = "cxx-build"
-version = "1.0.199"
+version = "1.0.200"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1ae0b651ea5b0000b19513aef5a03f194d7e3486f2d9258b658da8677fe9036"
+checksum = "d32b61d087102ad38552a458eb61d24ff13cdf29d6e06f1ec85c1e1c066c0457"
 dependencies = [
  "cc",
  "codespan-reporting",
@@ -613,9 +612,9 @@ dependencies = [
 
 [[package]]
 name = "cxx-gen"
-version = "0.7.199"
+version = "0.7.200"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51e54565cd4c9385e30c81b73b0f3702a7c92b3c86aad59c6d5d50d6dd9fb870"
+checksum = "94a4480ca3e9a70cfa4d27d3ba4ddecd482880b38add6ebbeed6d62485ce2116"
 dependencies = [
  "codespan-reporting",
  "indexmap 2.14.1",
@@ -626,9 +625,9 @@ dependencies = [
 
 [[package]]
 name = "cxxbridge-cmd"
-version = "1.0.199"
+version = "1.0.200"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb05f91d3fb8435d9bab6ac5ce6ac1868be774325fb7fb2a91be39393b21388e"
+checksum = "25784b9f840a76b9b5151553ad70fc2abb3ec3b21fe379c5c7b029b2e0b91faf"
 dependencies = [
  "clap 4.5.31",
  "codespan-reporting",
@@ -640,15 +639,15 @@ dependencies = [
 
 [[package]]
 name = "cxxbridge-flags"
-version = "1.0.199"
+version = "1.0.200"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf293202e0e3e98495785745389e8d0755b217e66f19194a5c695c25e03282ef"
+checksum = "3c6fafa9a47c12b9a48140893e4850480bd64a091b6f6467b9b6d30df61c3ec5"
 
 [[package]]
 name = "cxxbridge-macro"
-version = "1.0.199"
+version = "1.0.200"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca001d746947c7249ed9d332a10f7a59daedbafeb0ec68c5c18a7db7a93f6ccc"
+checksum = "83246854d73be26cb7c32e35779698a8828a8f17654bd7fd1ebf4cbca414dfb2"
 dependencies = [
  "indexmap 2.14.1",
  "proc-macro2",
@@ -769,19 +768,6 @@ checksum = "186e05a59d4c50738528153b83b0b0194d3a29507dfec16eccd4b342903397d0"
 dependencies = [
  "log",
  "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a12e6657c4c97ebab115a42dcee77225f7f482cdd841cf7088c657a42e9e00e7"
-dependencies = [
- "atty",
- "humantime",
- "log",
- "regex",
- "termcolor",
 ]
 
 [[package]]
@@ -1114,7 +1100,7 @@ dependencies = [
  "chrono",
  "clap 4.5.31",
  "clap_complete",
- "env_logger 0.11.6",
+ "env_logger",
  "handlebars",
  "log",
  "memchr",

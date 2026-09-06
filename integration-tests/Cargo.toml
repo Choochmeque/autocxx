@@ -20,14 +20,29 @@ categories = ["development-tools::ffi", "api-bindings"]
 
 [dependencies]
 proc-macro2 = "1.0.11"
-# More recent versions of trybuild don't work due to
-# https://github.com/dtolnay/trybuild/issues/283
-# There are some workarounds suggested there if needs be.
+# DO NOT BUMP. Pinned below the release that carries
+# https://github.com/dtolnay/trybuild/pull/278 ("Combine all rustflags into
+# cargo `--config` arg", merged 2024-07-06), which is what
+# https://github.com/dtolnay/trybuild/issues/283 - open, unfixed - reports:
+# after it, a caller's own `$RUSTFLAGS` is no longer propagated into the nested
+# cargo invocation that builds the generated fixture crate. 1.0.81 predates it,
+# so `$RUSTFLAGS` still reaches that child build by ordinary process-env
+# inheritance.
+#
+# What breaks on a bump: the Address Sanitizer CI leg sets its
+# instrumentation through `$RUSTFLAGS`, and every test here compiles its Rust
+# through trybuild. Drop the propagation and those fixtures build *fine* -
+# unsanitized - and the leg goes red, not dark: the two asan canary tests
+# (`perform_asan_doom_test`) assert that deliberate corruption is CAUGHT, so
+# unsanitized fixtures fail them loudly. A noisy red leg blaming the canaries
+# is still a bad way to rediscover this, hence the pin. Hold at 1.0.81 until
+# #283 is fixed upstream, or until a workaround from that thread is in place
+# here and the canaries have been shown to still trip.
 trybuild = "=1.0.81"
 # The suite installs its own logger - see `init_logging` - rather than letting
 # `test-log` put one on each test, because the filter it wants is an argument
 # to that crate's attribute and there are over six hundred of those.
-env_logger = "0.9.0"
+env_logger = "0.11"
 rust_info = "0.3.1"
 # 1.0.89 for `cc::Build::get_files`, which is how a failed C++ build's
 # diagnostics are recovered - see `build_cpp`.
