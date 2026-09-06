@@ -154,18 +154,44 @@ impl<'a> ParseBindgen<'a> {
     /// replace some of the existing APIs (structs/enums/etc.) with replacements.
     fn replace_extern_cpp_types(&mut self) {
         let pod_requests: HashSet<_> = self.config.get_pod_requests().iter().collect();
+        // Which API each spelling a user might have written names. A nested
+        // type has two - see [`cpp_spellings`] - and the one C++ itself uses
+        // is the one a person is most likely to write, so it has to work.
+        let apis_by_spelling: HashMap<String, ApiName> = self
+            .apis
+            .iter()
+            .flat_map(|api| {
+                let api_name = api.name_info();
+                api_name
+                    .cpp_spellings()
+                    .map(move |spelling| (spelling, api_name.clone()))
+            })
+            .collect();
         let replacements: HashMap<_, _> = self
             .config
             .externs
             .0
             .iter()
             .map(|(cpp_definition, details)| {
-                let qn = QualifiedName::new_from_cpp_name(cpp_definition);
-                let pod = pod_requests.contains(&qn.to_cpp_name());
+                // Keep the name of whatever we're replacing, so that the C++
+                // we go on to generate spells the type the way C++ can find
+                // it: for a nested type the flat `Outer_Inner` which bindgen
+                // gave it names nothing at all. See google/autocxx#1422.
+                let name = apis_by_spelling
+                    .get(cpp_definition)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ApiName::new_from_qualified_name(QualifiedName::new_from_cpp_name(
+                            cpp_definition,
+                        ))
+                    });
+                let pod = name
+                    .cpp_spellings()
+                    .any(|spelling| pod_requests.contains(&spelling));
                 (
-                    qn.clone(),
+                    name.name.clone(),
                     Api::ExternCppType {
-                        name: ApiName::new_from_qualified_name(qn),
+                        name,
                         details: details.clone(),
                         pod,
                     },
@@ -426,7 +452,9 @@ impl<'a> ParseBindgen<'a> {
             if let Some(stem) = crate::types::dedup_name_stem(&name) {
                 overloaded_stems.insert(stem.to_string());
             }
-            api_names.insert(name);
+            // Both spellings of a nested type, so that a directive naming one
+            // the way C++ does isn't reported as having matched nothing.
+            api_names.extend(api.name_info().cpp_spellings());
         }
         for generate_directive in self.config.must_generate_list() {
             if !api_names.contains(&generate_directive)

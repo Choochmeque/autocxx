@@ -19577,3 +19577,201 @@ fn test_c_long_and_c_ushort_vectors() {
     };
     run_test("", hdr, rs, &["fx_give_longs", "fx_give_ushorts"], &[]);
 }
+
+/// The C++ used by the two `extern_cpp_type!`-with-a-nested-type tests below.
+const NESTED_EXTERN_TYPE_HDR: &str = indoc! {"
+    #include <cstdint>
+    namespace fx_ns {
+        struct fx_outer {
+            enum fx_inner { A, B };
+        };
+        inline uint32_t fx_take(fx_outer::fx_inner i) {
+            return i == fx_outer::B ? 7 : 1;
+        }
+    }
+"};
+
+/// `extern_cpp_type!` naming a nested type the way C++ spells it. bindgen
+/// flattens the nesting to `fx_outer_fx_inner`, and nobody writing the
+/// directive would know that, so the C++ spelling has to work.
+/// See google/autocxx#1422.
+#[test]
+fn test_extern_cpp_type_nested() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        pub mod base {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_base)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_outer")
+                generate!("fx_ns::fx_outer::fx_inner")
+            }
+            pub use ffi_base::*;
+        }
+        pub mod dependent {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_dep)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_take")
+                extern_cpp_type!("fx_ns::fx_outer::fx_inner", crate::base::fx_ns::fx_outer_fx_inner)
+                pod!("fx_ns::fx_outer::fx_inner")
+            }
+            pub use ffi_dep::*;
+        }
+        fn main() {
+            assert_eq!(
+                crate::dependent::fx_ns::fx_take(crate::base::fx_ns::fx_outer_fx_inner::B),
+                7
+            );
+        }
+    };
+    do_run_test_manual("", NESTED_EXTERN_TYPE_HDR, rs, None, None).unwrap();
+}
+
+/// The same, written with bindgen's flattened spelling. That names the same
+/// type, so it must work too - and must still generate C++ which says
+/// `fx_ns::fx_outer::fx_inner`, the only spelling C++ will accept.
+#[test]
+fn test_extern_cpp_type_nested_flattened_spelling() {
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        pub mod base {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_base)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_outer")
+                generate!("fx_ns::fx_outer::fx_inner")
+            }
+            pub use ffi_base::*;
+        }
+        pub mod dependent {
+            autocxx::include_cpp! {
+                #hexathorpe include "input.h"
+                name!(ffi_dep)
+                safety!(unsafe_ffi)
+                generate!("fx_ns::fx_take")
+                extern_cpp_type!("fx_ns::fx_outer_fx_inner", crate::base::fx_ns::fx_outer_fx_inner)
+                pod!("fx_ns::fx_outer_fx_inner")
+            }
+            pub use ffi_dep::*;
+        }
+        fn main() {
+            assert_eq!(
+                crate::dependent::fx_ns::fx_take(crate::base::fx_ns::fx_outer_fx_inner::B),
+                7
+            );
+        }
+    };
+    do_run_test_manual("", NESTED_EXTERN_TYPE_HDR, rs, None, None).unwrap();
+}
+
+/// `generate!` naming a nested type the way C++ spells it, rather than by the
+/// `Outer_Inner` bindgen flattened it to. See google/autocxx#1422.
+#[test]
+fn test_generate_nested_type_by_cpp_name() {
+    run_test_ex(
+        "",
+        NESTED_EXTERN_TYPE_HDR,
+        quote! {},
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer::fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The flattened spelling names the same type, so it has to keep working.
+#[test]
+fn test_generate_nested_type_by_flattened_name() {
+    run_test_ex(
+        "",
+        NESTED_EXTERN_TYPE_HDR,
+        quote! {},
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer_fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `generate!` naming a nested *class* the way C++ spells it, where that class
+/// has a constructor and a method. The methods are what the enum-only test
+/// above cannot cover: they are allowlisted through a different code path.
+#[test]
+fn test_generate_nested_class_with_methods_by_cpp_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            struct fx_outer {
+                class fx_inner {
+                public:
+                    fx_inner(uint32_t a) : a_(a) {}
+                    uint32_t get() const { return a_; }
+                private:
+                    uint32_t a_;
+                };
+            };
+        }
+    "};
+    let rs = quote! {
+        let i = ffi::fx_ns::fx_outer_fx_inner::new(3).within_unique_ptr();
+        assert_eq!(i.get(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer::fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same nested class by its flattened spelling, which names the same type
+/// and so must keep working.
+#[test]
+fn test_generate_nested_class_with_methods_by_flattened_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            struct fx_outer {
+                class fx_inner {
+                public:
+                    fx_inner(uint32_t a) : a_(a) {}
+                    uint32_t get() const { return a_; }
+                private:
+                    uint32_t a_;
+                };
+            };
+        }
+    "};
+    let rs = quote! {
+        let i = ffi::fx_ns::fx_outer_fx_inner::new(3).within_unique_ptr();
+        assert_eq!(i.get(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_ns::fx_outer")
+            generate!("fx_ns::fx_outer_fx_inner")
+        },
+        None,
+        None,
+        None,
+    );
+}

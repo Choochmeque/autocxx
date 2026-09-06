@@ -54,7 +54,7 @@ use self::{
         statics::discard_statics_of_non_pod_type,
         tdef::convert_typedef_targets,
     },
-    api::{AnalysisPhase, Api, NullPhase},
+    api::{AnalysisPhase, Api, NestedCppNames, NullPhase},
     apivec::ApiVec,
     codegen_rs::RsCodeGenerator,
     parse::{find_shadowed_types, ParseBindgen},
@@ -388,16 +388,17 @@ fn confirm_all_generate_directives_still_obeyed(
     config: &IncludeCppConfig,
     apis: &ApiVec<FnPhase>,
 ) -> Result<(), ConvertErrorFromCpp> {
+    let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
     let mut generated: HashSet<String> = HashSet::new();
     let mut discarded: HashMap<String, &ConvertErrorFromCpp> = HashMap::new();
     for api in apis.iter() {
         match api {
             Api::IgnoredItem { err, .. } => {
-                for name in api.allowlist_names() {
+                for name in api.allowlist_names(&nested_cpp_names) {
                     discarded.entry(name).or_insert(err);
                 }
             }
-            _ => generated.extend(api.allowlist_names()),
+            _ => generated.extend(api.allowlist_names(&nested_cpp_names)),
         }
     }
     for generate_directive in config.must_generate_list() {

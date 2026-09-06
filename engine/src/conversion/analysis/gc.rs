@@ -12,7 +12,10 @@ use indexmap::set::IndexSet as HashSet;
 use autocxx_parser::IncludeCppConfig;
 
 use crate::{
-    conversion::{api::Api, apivec::ApiVec},
+    conversion::{
+        api::{Api, NestedCppNames},
+        apivec::ApiVec,
+    },
     types::QualifiedName,
 };
 
@@ -39,10 +42,11 @@ pub(crate) fn filter_apis_by_following_edges_from_allowlist(
     apis: ApiVec<FnPhase>,
     config: &IncludeCppConfig,
 ) -> ApiVec<FnPhase> {
+    let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
     let mut todos: Vec<QualifiedName> = apis
         .iter()
         .filter(|api| {
-            api.allowlist_names()
+            api.allowlist_names(&nested_cpp_names)
                 .any(|name| config.is_on_allowlist(&name))
         })
         .map(Api::name)

@@ -18,7 +18,7 @@ use syn::{ItemStruct, Type, Visibility};
 use crate::{
     conversion::{
         analysis::type_converter::{self, add_analysis, TypeConversionContext, TypeConverter},
-        api::{AnalysisPhase, Api, ApiName, NullPhase, StructDetails, TypeKind},
+        api::{AnalysisPhase, Api, ApiName, NestedCppNames, NullPhase, StructDetails, TypeKind},
         apivec::ApiVec,
         check_for_fatal_attrs,
         convert_error::{ConvertErrorWithContext, ErrorContext},
@@ -88,6 +88,9 @@ pub(crate) fn analyze_pod_apis(
     // a type contains a std::string or some other type which can't be
     // held safely by value in Rust.
     let byvalue_checker = ByValueChecker::new_from_apis(&apis, config)?;
+    // A base class may be a nested type which the user allowlisted by the name
+    // C++ gives it; see google/autocxx#1422.
+    let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
     let mut extra_apis = ApiVec::new();
     let mut type_converter = TypeConverter::new(config, &apis);
     let mut results = ApiVec::new();
@@ -102,7 +105,7 @@ pub(crate) fn analyze_pod_apis(
                 &mut extra_apis,
                 name,
                 details,
-                config,
+                &nested_cpp_names,
                 parse_callback_results,
             )
         },
@@ -125,7 +128,7 @@ pub(crate) fn analyze_pod_apis(
                 &mut more_extra_apis,
                 name,
                 details,
-                config,
+                &nested_cpp_names,
                 parse_callback_results,
             )
         },
@@ -152,7 +155,7 @@ fn analyze_struct(
     extra_apis: &mut ApiVec<NullPhase>,
     name: ApiName,
     details: Box<StructDetails>,
-    config: &IncludeCppConfig,
+    nested_cpp_names: &NestedCppNames,
     parse_callback_results: &ParseCallbackResults,
 ) -> Result<Box<dyn Iterator<Item = Api<PodPhase>>>, ConvertErrorWithContext> {
     let id = name.name.get_final_ident();
@@ -195,7 +198,7 @@ fn analyze_struct(
         .iter()
         .filter(|(_, is_public)| **is_public)
         .map(|(base, _)| base)
-        .filter(|base| config.is_on_allowlist(&base.to_cpp_name()))
+        .filter(|base| nested_cpp_names.is_on_allowlist(base))
         .cloned()
         .collect();
     let num_generics = details.item.generics.params.len();

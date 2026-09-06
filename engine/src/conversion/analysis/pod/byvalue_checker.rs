@@ -157,10 +157,28 @@ impl ByValueChecker {
         for (def, ns) in Self::structs_in_dependency_order(apis) {
             byvalue_checker.ingest_struct(def, ns)
         }
+        // A `pod!` may name a nested type the way C++ does - `Outer::Inner` -
+        // where we know it by the flattened `Outer_Inner` bindgen gave it, so
+        // resolve through the names the APIs themselves answer to rather than
+        // splitting the string and hoping. See google/autocxx#1422.
+        let names_by_spelling: HashMap<String, QualifiedName> = apis
+            .iter()
+            .flat_map(|api| {
+                let name = api.name();
+                api.name_info()
+                    .cpp_spellings()
+                    .map(move |spelling| (spelling, name.clone()))
+            })
+            .collect();
         let pod_requests = config
             .get_pod_requests()
             .iter()
-            .map(|ty| QualifiedName::new_from_cpp_name(ty))
+            .map(|ty| {
+                names_by_spelling
+                    .get(ty)
+                    .cloned()
+                    .unwrap_or_else(|| QualifiedName::new_from_cpp_name(ty))
+            })
             .collect();
         byvalue_checker
             .satisfy_requests(pod_requests)
