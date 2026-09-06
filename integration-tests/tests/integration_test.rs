@@ -295,7 +295,7 @@ fn test_cycle_string_up() {
             return std::make_unique<std::string>(\"Bob\");
         }
         uint32_t take_str_up(std::unique_ptr<std::string> a) {
-            return a->length();
+            return static_cast<uint32_t>(a->length());
         }
     "};
     let hdr = indoc! {"
@@ -319,7 +319,7 @@ fn test_cycle_string() {
             return std::string(\"Bob\");
         }
         uint32_t take_str(std::string a) {
-            return a.length();
+            return static_cast<uint32_t>(a.length());
         }
     "};
     let hdr = indoc! {"
@@ -343,7 +343,7 @@ fn test_cycle_string_by_ref() {
             return std::make_unique<std::string>(\"Bob\");
         }
         uint32_t take_str(const std::string& a) {
-            return a.length();
+            return static_cast<uint32_t>(a.length());
         }
     "};
     let hdr = indoc! {"
@@ -368,7 +368,7 @@ fn test_cycle_string_by_mut_ref() {
             return std::make_unique<std::string>(\"Bob\");
         }
         uint32_t take_str(std::string& a) {
-            return a.length();
+            return static_cast<uint32_t>(a.length());
         }
     "};
     let hdr = indoc! {"
@@ -2201,7 +2201,7 @@ fn test_method_return_nonpod_by_value() {
 fn test_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t measure_string(std::string z) {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
         std::unique_ptr<std::string> get_msg() {
             return std::make_unique<std::string>(\"hello\");
@@ -2226,7 +2226,7 @@ fn test_pass_string_by_value() {
 fn test_ns_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t A::measure_string(std::string z) {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
     "};
     let hdr = indoc! {"
@@ -2248,7 +2248,7 @@ fn test_ns_pass_string_by_value() {
 fn test_ns_deep_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t A::B::C::measure_string(std::string z) {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
     "};
     let hdr = indoc! {"
@@ -2292,7 +2292,7 @@ fn test_return_string_by_value() {
 fn test_method_pass_string_by_value() {
     let cxx = indoc! {"
         uint32_t Bob::measure_string(std::string z) const {
-            return z.length();
+            return static_cast<uint32_t>(z.length());
         }
         std::unique_ptr<std::string> get_msg() {
             return std::make_unique<std::string>(\"hello\");
@@ -2348,7 +2348,7 @@ fn test_method_return_string_by_value() {
 fn test_pass_rust_string_by_ref() {
     let cxx = indoc! {"
         uint32_t measure_string(const rust::String& z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2367,7 +2367,7 @@ fn test_pass_rust_string_by_ref() {
 fn test_pass_rust_string_by_value() {
     let cxx = indoc! {"
         uint32_t measure_string(rust::String z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2387,7 +2387,7 @@ fn test_pass_rust_str() {
     // passing by value is the only legal option
     let cxx = indoc! {"
         uint32_t measure_string(rust::Str z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2410,7 +2410,7 @@ fn test_pass_rust_str() {
 fn test_pass_rust_str_by_ref() {
     let cxx = indoc! {"
         uint32_t measure_string(const rust::Str& z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -2432,7 +2432,7 @@ fn test_pass_rust_str_by_ref() {
 fn test_pass_rust_str_by_mut_ref() {
     let cxx = indoc! {"
         uint32_t measure_string(rust::Str& z) {
-            return std::string(z).length();
+            return static_cast<uint32_t>(std::string(z).length());
         }
     "};
     let hdr = indoc! {"
@@ -3400,7 +3400,7 @@ fn test_class_with_unordered_map_member() {
             map_[key] = value;
         }
         uint32_t MyMapWrapper::count() const {
-            return map_.size();
+            return static_cast<uint32_t>(map_.size());
         }
     "};
     let hdr = indoc! {"
@@ -5434,7 +5434,7 @@ fn test_generic_type() {
             Secondary() {}
             void take_a(const Container<char>) const {}
             void take_b(const Container<uint16_t>) const {}
-            uint16_t take_c(std::string a) const { return 10 + a.size(); }
+            uint16_t take_c(std::string a) const { return static_cast<uint16_t>(10 + a.size()); }
         };
     "};
     let rs = quote! {
@@ -5558,7 +5558,7 @@ fn test_vector_cycle_up() {
             uint32_t a;
         };
         inline uint32_t take_vec(std::unique_ptr<std::vector<A>> many_as) {
-            return many_as->size();
+            return static_cast<uint32_t>(many_as->size());
         }
         inline std::unique_ptr<std::vector<A>> get_vec() {
             auto items = std::make_unique<std::vector<A>>();
@@ -5584,7 +5584,7 @@ fn test_vector_cycle_bare() {
             uint32_t a;
         };
         inline uint32_t take_vec(std::vector<A> many_as) {
-            return many_as.size();
+            return static_cast<uint32_t>(many_as.size());
         }
         inline std::vector<A> get_vec() {
             std::vector<A> items;
@@ -5631,7 +5631,7 @@ fn test_typedef_to_std() {
         #include <cstdint>
         typedef std::string my_string;
         inline uint32_t take_str(my_string a) {
-            return a.size();
+            return static_cast<uint32_t>(a.size());
         }
     "};
     let rs = quote! {
@@ -5649,7 +5649,7 @@ fn test_typedef_to_up_in_fn_call() {
         #include <cstdint>
         typedef std::unique_ptr<std::string> my_string;
         inline uint32_t take_str(my_string a) {
-            return a->size();
+            return static_cast<uint32_t>(a->size());
         }
     "};
     let rs = quote! {
@@ -5717,7 +5717,7 @@ fn test_string_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a.size();
+            return static_cast<uint32_t>(a.a.size());
         }
     "};
     let rs = quote! {
@@ -5742,7 +5742,7 @@ fn test_up_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a->size();
+            return static_cast<uint32_t>(a.a->size());
         }
     "};
     let rs = quote! {
@@ -5768,7 +5768,7 @@ fn test_typedef_to_std_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a.size();
+            return static_cast<uint32_t>(a.a.size());
         }
     "};
     let rs = quote! {
@@ -5794,7 +5794,7 @@ fn test_typedef_to_up_in_struct() {
             return bob;
         }
         inline uint32_t take_a(A a) {
-            return a.a->size();
+            return static_cast<uint32_t>(a.a->size());
         }
     "};
     let rs = quote! {
@@ -6843,7 +6843,7 @@ fn test_string_transparent_function() {
     let hdr = indoc! {"
         #include <string>
         #include <cstdint>
-        inline uint32_t take_string(std::string a) { return a.size(); }
+        inline uint32_t take_string(std::string a) { return static_cast<uint32_t>(a.size()); }
     "};
     let rs = quote! {
         assert_eq!(ffi::take_string("hello"), 5);
@@ -6885,7 +6885,7 @@ fn test_string_through_a_using_declaration() {
         #include <string>
         #include <cstdint>
         using std::string;
-        inline uint32_t take_string(string a) { return a.size(); }
+        inline uint32_t take_string(string a) { return static_cast<uint32_t>(a.size()); }
     "};
     let rs = quote! {
         assert_eq!(ffi::take_string("hello"), 5);
@@ -6900,7 +6900,7 @@ fn test_string_transparent_method() {
         #include <cstdint>
         struct A {
             A() {}
-            inline uint32_t take_string(std::string a) const { return a.size(); }
+            inline uint32_t take_string(std::string a) const { return static_cast<uint32_t>(a.size()); }
         };
     "};
     let rs = quote! {
@@ -6917,7 +6917,7 @@ fn test_string_transparent_static_method() {
         #include <cstdint>
         struct A {
             A() {}
-            static inline uint32_t take_string(std::string a) { return a.size(); }
+            static inline uint32_t take_string(std::string a) { return static_cast<uint32_t>(a.size()); }
         };
     "};
     let rs = quote! {
@@ -17633,7 +17633,7 @@ fn test_elab_struct_shadowed_by_variable_nonpod() {
         #include <string>
         struct filedata { std::string x; filedata() : x(\"hi\") {} };
         extern struct filedata filedata;
-        inline int take_filedata(const struct filedata& s) { return s.x.length(); }
+        inline int take_filedata(const struct filedata& s) { return static_cast<int>(s.x.length()); }
     "};
     let cxx = "struct filedata filedata;";
     let rs = quote! {
