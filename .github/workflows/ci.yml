@@ -11,8 +11,15 @@ env:
   RUST_BACKTRACE: short
   # CI builds don't benefit very much from this and it has bugs
   CARGO_INCREMENTAL: 0
-  # We can't use a debugger in CI, and this makes builds faster and the cache
-  # smaller. (TODO: use -Cdebuginfo=0 if it doesn't make backtraces useless)
+  # We can't use a debugger in CI. Limited debuginfo (=1) builds faster and
+  # caches smaller than the default (=2) while keeping file:line in panic
+  # backtraces; =0 would shrink further, but windows-msvc symbolizes
+  # backtraces from PDBs, so it would leave failures there as bare
+  # addresses. Jobs that run no tests use =0 instead; the asan job also
+  # keeps its pre-existing =0 (linux-only, diagnosed through the
+  # sanitizer's own reports). Jobs that define their own RUSTFLAGS must
+  # restate the choice, because job-level env replaces this value rather
+  # than appending to it.
   RUSTFLAGS: -Cdebuginfo=1
   CARGO_TERM_COLOR: always
 
@@ -53,7 +60,7 @@ jobs:
             flags: /EHsc
     env:
       CXXFLAGS: ${{matrix.flags}}
-      RUSTFLAGS: --cfg deny_warnings -Dwarnings
+      RUSTFLAGS: --cfg deny_warnings -Dwarnings -Cdebuginfo=1
 
     steps:
       - uses: actions/checkout@v6
@@ -93,16 +100,17 @@ jobs:
         # never diagnosed). The creduce-needing reduce tests are env-gated
         # behind AUTOCXX_RUN_REDUCTION_TESTS these days, so both packages'
         # remaining tests may simply work; running to find out.
-        # This deliberately blanks the job-level RUSTFLAGS (deny_warnings)
+        # This deliberately drops deny_warnings from the job-level RUSTFLAGS
         # for the suite itself - the fixtures are not warning-clean and are
-        # not meant to be - and historically also carried the per-leg skip
-        # cfgs, the last of which retired in 2026 when every skip on both
-        # Windows lists turned out fixed or fixable.
+        # not meant to be - while keeping the workflow's debuginfo choice.
+        # It historically also carried the per-leg skip cfgs, the last of
+        # which retired in 2026 when every skip on both Windows lists turned
+        # out fixed or fixable.
         run: |
           echo RUSTFLAGS=$RUSTFLAGS >> $GITHUB_ENV
           echo exclude= >> "$GITHUB_OUTPUT"
         env:
-          RUSTFLAGS: ""
+          RUSTFLAGS: "-Cdebuginfo=1"
         id: testsuite
         shell: bash
       - run: cargo test --workspace ${{steps.testsuite.outputs.exclude}}
@@ -152,7 +160,11 @@ jobs:
             flags: /EHsc
     env:
       CXXFLAGS: ${{matrix.flags}}
-      RUSTFLAGS: --cfg deny_warnings -Dwarnings
+      # Build-only job, so =0 is nearly free: no test ever runs here. Build
+      # scripts and proc macros do run and compile under this flag too, but
+      # a build.rs panic reports its own file:line without debuginfo, and
+      # losing frames beyond that is an accepted tradeoff.
+      RUSTFLAGS: --cfg deny_warnings -Dwarnings -Cdebuginfo=0
     steps:
       - uses: actions/checkout@v6
         with:
