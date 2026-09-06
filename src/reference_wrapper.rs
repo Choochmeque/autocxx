@@ -322,18 +322,11 @@ impl<T: ?Sized> AsCppRef<T> for CppMutRef<T> {
 }
 
 /// Workaround for the inability to use std::ptr::addr_of! on the contents
-/// of a box.
+/// of a box. Now that the accessors below take the address of `(*boxed).0`
+/// directly, this newtype does nothing a plain `Box<T>` wouldn't; removing it
+/// would take the transmutes in `from_box` and `extract` with it.
 #[repr(transparent)]
 struct CppPinContents<T: ?Sized>(T);
-
-impl<T: ?Sized> CppPinContents<T> {
-    fn addr_of(&self) -> *const T {
-        std::ptr::addr_of!(self.0)
-    }
-    fn addr_of_mut(&mut self) -> *mut T {
-        std::ptr::addr_of_mut!(self.0)
-    }
-}
 
 /// A newtype wrapper which causes the contained object to obey C++ reference
 /// semantics rather than Rust reference semantics. That is, multiple aliasing
@@ -397,7 +390,7 @@ impl<T: ?Sized> CppPin<T> {
         T: Sized,
     {
         let mut contents = Box::new(CppPinContents(item));
-        let ptr = contents.addr_of_mut();
+        let ptr = std::ptr::addr_of_mut!((*contents).0);
         Self(contents, CppMutRef(ptr))
     }
 
@@ -416,7 +409,7 @@ impl<T: ?Sized> CppPin<T> {
         //   Box<CppPinContents<T>>
         // is safe.
         let mut contents = unsafe { std::mem::transmute::<Box<T>, Box<CppPinContents<T>>>(item) };
-        let ptr = contents.addr_of_mut();
+        let ptr = std::ptr::addr_of_mut!((*contents).0);
         Self(contents, CppMutRef(ptr))
     }
 
@@ -435,12 +428,32 @@ impl<T: ?Sized> CppPin<T> {
 
     /// Get an immutable pointer to the underlying object.
     pub fn as_ptr(&self) -> *const T {
-        self.0.addr_of()
+        // The address of a place, as in [`Self::as_mut_ptr`], so no Rust
+        // reference to the contents is made here either. What it gets is a
+        // read-only raw reborrow, though, and Stacked Borrows says a write
+        // through a pointer from `as_mut_ptr` invalidates one of those - so a
+        // `CppRef` kept across such a write falls outside that model, however
+        // ordinary it is in C++. Handing out mutable provenance from a `&self`
+        // method would take either an `UnsafeCell` around the contents or a
+        // cached pointer which the `DerefMut` below could not replace: a
+        // change to this type's shape rather than to any caller, and so one to
+        // make deliberately rather than in passing.
+        std::ptr::addr_of!((*self.0).0)
     }
 
     /// Get a mutable pointer to the underlying object.
     pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.0.addr_of_mut()
+        // The address of a place, taken without a Rust reference to the
+        // contents ever existing. Reaching the contents through one - as a
+        // `self.0.addr_of_mut()` helper on `CppPinContents` would - creates a
+        // `&mut` covering the whole `T` for an instant, even where `addr_of!`
+        // then avoids a second one to the field. Under Stacked Borrows that
+        // retag invalidates raw pointers handed out earlier, whereas the
+        // mutable raw reborrows this makes coexist with each other - and
+        // handing out several aliasing pointers to one object is precisely
+        // what this type is for. Two calls to `as_cpp_mut_ref` would otherwise
+        // leave the first answer questionable.
+        std::ptr::addr_of_mut!((*self.0).0)
     }
 
     /// Get a normal Rust reference to the underlying object. This is unsafe.
@@ -597,6 +610,19 @@ mod unique_ptr_pin_tests {
     }
 }
 
+// These tests have never compiled. `cpp_pin` builds a `RustThing`, which has
+// been undefined since the module was written in 2022, and the two methods on
+// `CppOuter` spell `CppRef<'a, CppOuter>`, from before `CppRef` lost its
+// lifetime parameter to `CppLtRef`. Nothing notices, because nothing in CI
+// turns this crate's `arbitrary_self_types` feature on, and the module is
+// gated on it. (`cargo test -p autocxx --lib --features arbitrary_self_types`
+// shows the above. On stable it also objects to the `self: &CppRef<Self>`
+// receivers, which are legal on nightly alone, where the `Receiver` impl above
+// exists; those are not part of the rot.) What the tests describe is worth
+// having - a C++ object handing out references to its own field and to a
+// global, and a `lifetime_cast` outliving the pin it came from - so they are
+// to be rewritten against the current API rather than deleted, as a piece of
+// work in its own right.
 #[cfg(all(feature = "arbitrary_self_types", test))]
 mod tests {
     use super::*;

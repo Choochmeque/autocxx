@@ -328,6 +328,39 @@ fn test_rvalue_reference_parameter_cpprefs() {
     run_cpprefs_test("", hdr, rs, &["Movable", "take_movable"], &[]);
 }
 
+/// A value parameter, out of the owning wrappers this mode leaves you holding.
+/// Both of them own their object outright, so handing one over consumes it:
+/// C++ is given the object itself rather than something copied out of a Rust
+/// owner which lives on, the same bargain as consuming a `UniquePtr`. (Whether
+/// the hand-over is then a move or a copy is up to what the type permits;
+/// `fx_Load` here declares a copy constructor and so has no implicit move
+/// constructor to offer.) Keeping the object instead would mean building a
+/// copy from a Rust `&T` to contents C++ may hold aliasing references to,
+/// which is what these wrappers exist to refuse; that copy stays spelled
+/// `as_copy(unsafe { pin.as_ref() })`, with the promise where the caller can
+/// see it.
+#[test]
+fn test_value_parameter_from_wrappers_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        struct fx_Load {
+            fx_Load() : a(42) {}
+            fx_Load(const fx_Load& other) : a(other.a) {}
+            uint32_t a;
+            std::string so_we_are_non_trivial;
+        };
+        inline uint32_t fx_weigh(fx_Load l) { return l.a; }
+    "};
+    let rs = quote! {
+        let load = ffi::fx_Load::new().within_cpp_pin();
+        assert_eq!(ffi::fx_weigh(load), 42);
+        let load = autocxx::CppUniquePtrPin::new(ffi::fx_Load::new().within_unique_ptr());
+        assert_eq!(ffi::fx_weigh(load), 42);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_Load", "fx_weigh"], &[]);
+}
+
 /// `rust::Str&` is a mutable C++ reference like any other, and in this mode it
 /// becomes a wrapper like any other - around the `&str` which is how cxx
 /// spells a `rust::Str`. Plain mode has the same header in
