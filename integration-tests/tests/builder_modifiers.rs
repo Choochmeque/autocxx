@@ -70,6 +70,34 @@ impl BuilderModifierFns for UnsignedCharAdder {
     }
 }
 
+/// Both modifiers, applied in order. For a test which needs, say, a C++
+/// standard *and* a warning scoped off.
+pub(crate) fn combine_modifiers(
+    a: Option<BuilderModifier>,
+    b: Option<BuilderModifier>,
+) -> Option<BuilderModifier> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(Box::new(CombinedModifier(a, b))),
+        (one, None) | (None, one) => one,
+    }
+}
+
+struct CombinedModifier(BuilderModifier, BuilderModifier);
+
+impl BuilderModifierFns for CombinedModifier {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        self.1
+            .modify_autocxx_builder(self.0.modify_autocxx_builder(builder))
+    }
+
+    fn modify_cc_builder<'a>(&self, builder: &'a mut cc::Build) -> &'a mut cc::Build {
+        self.1.modify_cc_builder(self.0.modify_cc_builder(builder))
+    }
+}
+
 struct ClangArgAdder(Vec<String>, Vec<String>);
 
 pub(crate) fn make_clang_arg_adder(args: &[&str]) -> Option<BuilderModifier> {
