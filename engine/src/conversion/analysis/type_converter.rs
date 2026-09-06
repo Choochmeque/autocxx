@@ -14,7 +14,8 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            unwrap_bitfield, unwrap_function_pointer, unwrap_has_opaque, unwrap_reference,
+            extract_pinned_mutable_reference_type, unwrap_bitfield, unwrap_function_pointer,
+            unwrap_has_opaque, unwrap_reference,
         },
         ConvertErrorFromCpp,
     },
@@ -396,6 +397,20 @@ impl<'a> TypeConverter<'a> {
                     annotated.types_encountered.extend(deps);
                     return Ok(annotated);
                 }
+                // `Pin<&mut T>` is not a name to go looking for: it is what
+                // analysing the typedef already made of a C++ mutable
+                // reference, and it is finished. Read as a name it is the
+                // generic `core::pin::Pin`, which cxx knows nothing about, so
+                // autocxx would invent a concrete type for it and write
+                // `T&*` into the generated C++. See google/autocxx#1363.
+                if extract_pinned_mutable_reference_type(resolved_tp).is_some() {
+                    return Ok(Annotated::new(
+                        Type::Path(resolved_tp.clone()),
+                        deps,
+                        ApiVec::new(),
+                        TypeKind::MutableReference,
+                    ));
+                }
                 let resolved_tn = QualifiedName::from_type_path(resolved_tp);
                 deps.insert(resolved_tn.clone());
                 (resolved_tp.clone(), resolved_tn)
@@ -413,12 +428,27 @@ impl<'a> TypeConverter<'a> {
                 return Ok(annotated);
             }
             Some(other) => {
-                return Ok(Annotated::new(
-                    other.clone(),
-                    deps,
-                    ApiVec::new(),
-                    TypeKind::Regular,
-                ))
+                // Anything else the typedef resolved to was converted when the
+                // typedef itself was analysed, so take it as it stands - but
+                // say what kind it is. A typedef to a C++ reference lands here
+                // as `&T`, and calling that `Regular` costs the caller the one
+                // fact it needs: whether the value borrows, which decides
+                // lifetimes on a returned reference and how a parameter
+                // crosses the bridge. See google/autocxx#1363.
+                //
+                // TODO: a typedef to an rvalue reference does *not* land here.
+                // Analysing it leaves a `Type::Ptr`, the same as a typedef to
+                // a pointer, so the arm above cannot tell the two apart and
+                // both come out as `TypeKind::Pointer`. Recovering that needs
+                // the typedef's own analysis to record which it was.
+                let kind = match other {
+                    Type::Reference(reference) if reference.mutability.is_some() => {
+                        TypeKind::MutableReference
+                    }
+                    Type::Reference(_) => TypeKind::Reference,
+                    _ => TypeKind::Regular,
+                };
+                return Ok(Annotated::new(other.clone(), deps, ApiVec::new(), kind));
             }
         };
 

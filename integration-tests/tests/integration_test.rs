@@ -20153,3 +20153,131 @@ fn test_extern_cpp_type_pod_in_namespace() {
         }),
     );
 }
+
+/// The shape of google/autocxx#1363: OpenCV spells `cv::OutputArray` as a
+/// typedef whose target is a reference - `typedef const cv::_OutputArray&
+/// OutputArray;` - and passes it by value as a parameter. autocxx generated a
+/// C++ shim taking `const cv::_OutputArray*` and handed that straight to a
+/// function wanting the reference.
+#[test]
+fn test_typedef_to_const_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Array { uint32_t a; };
+        typedef const fx_Array& fx_ArrayRef;
+        inline uint32_t fx_read(fx_ArrayRef arr) { return arr.a; }
+    "};
+    let rs = quote! {
+        let arr = ffi::fx_Array { a: 42 };
+        assert_eq!(ffi::fx_read(&arr), 42);
+    };
+    run_test("", hdr, rs, &["fx_read"], &["fx_Array"]);
+}
+
+/// The same as a method taking the typedef, which is how `cv::VideoCapture`
+/// reached it - autocxx writes a wrapper for a method, so the wrapper's
+/// parameter is the one that has to be spelled right.
+#[test]
+fn test_typedef_to_const_reference_method_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Out { uint32_t a; };
+        typedef const fx_Out& fx_OutRef;
+        class fx_Capture {
+        public:
+            bool fx_retrieve(fx_OutRef out, int flag) {
+                total = out.a + flag;
+                return true;
+            }
+            uint32_t fx_total() const { return total; }
+        private:
+            uint32_t total = 0;
+        };
+    "};
+    let rs = quote! {
+        let out = ffi::fx_Out { a: 40 };
+        let mut cap = ffi::fx_Capture::new().within_unique_ptr();
+        assert!(cap.pin_mut().fx_retrieve(&out, autocxx::c_int(2)));
+        assert_eq!(cap.fx_total(), 42);
+    };
+    run_test("", hdr, rs, &["fx_Capture"], &["fx_Out"]);
+}
+
+/// A reference returned by a function whose only reference input arrives
+/// through a typedef. The lifetime elision autocxx does needs to see that the
+/// parameter is a reference; through a typedef it did not.
+/// See google/autocxx#1302.
+#[test]
+fn test_typedef_to_const_reference_borrowed_return() {
+    let hdr = indoc! {"
+        class fx_Bytes {
+        public:
+            typedef const char& fx_reference;
+            fx_reference fx_front() const { return d_ptr[0]; }
+        private:
+            const char* d_ptr = \"hi\";
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::fx_Bytes::new().within_unique_ptr();
+        assert_eq!(*b.fx_front(), 'h' as std::os::raw::c_char);
+    };
+    run_test("", hdr, rs, &["fx_Bytes"], &[]);
+}
+
+/// A typedef to a *mutable* reference used as a parameter.
+#[test]
+fn test_typedef_to_mutable_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Sink { uint32_t a; };
+        typedef fx_Sink& fx_SinkRef;
+        inline void fx_fill(fx_SinkRef sink) { sink.a = 42; }
+    "};
+    let rs = quote! {
+        let mut sink = ffi::fx_Sink { a: 0 };
+        ffi::fx_fill(std::pin::Pin::new(&mut sink));
+        assert_eq!(sink.a, 42);
+    };
+    run_test("", hdr, rs, &["fx_fill"], &["fx_Sink"]);
+}
+
+/// A reference returned by a free function, borrowing from a reference
+/// parameter, where both are spelled with a typedef. The lifetime autocxx
+/// elides has to come from the parameter, and that means knowing the parameter
+/// is a reference even though the type it is written with is a name.
+/// See google/autocxx#1363.
+#[test]
+fn test_typedef_to_const_reference_borrowed_from_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Cell { uint32_t a; };
+        typedef const fx_Cell& fx_CellRef;
+        inline fx_CellRef fx_same(fx_CellRef cell) { return cell; }
+    "};
+    let rs = quote! {
+        let cell = ffi::fx_Cell { a: 42 };
+        assert_eq!(ffi::fx_same(&cell).a, 42);
+    };
+    run_test("", hdr, rs, &["fx_same"], &["fx_Cell"]);
+}
+
+/// A reference return written out, borrowing from a reference parameter which
+/// is spelled with a typedef. autocxx elides the returned reference's lifetime
+/// from a reference parameter, and it has to see the parameter for one through
+/// the typedef; otherwise there is nothing for the return to borrow from and
+/// the function is declined. See google/autocxx#1363.
+#[test]
+fn test_reference_return_borrowing_from_a_typedefed_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Cell2 { uint32_t a; };
+        typedef const fx_Cell2& fx_Cell2Ref;
+        inline const fx_Cell2& fx_same2(fx_Cell2Ref cell) { return cell; }
+    "};
+    let rs = quote! {
+        let cell = ffi::fx_Cell2 { a: 42 };
+        assert_eq!(ffi::fx_same2(&cell).a, 42);
+    };
+    run_test("", hdr, rs, &["fx_same2"], &["fx_Cell2"]);
+}
