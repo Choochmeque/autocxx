@@ -56,11 +56,23 @@ impl Depfile {
     // diff_paths return None. Should propagate a clean error like
     // main.rs does, but relativize's callers don't return Result yet.
     fn relativize(&self, path: &Path) -> String {
-        pathdiff::diff_paths(path, &self.depfile_dir)
-            .expect("Unable to make a relative path from the depfile's directory to the dependency")
-            .to_str()
-            .expect("Unable to represent the file path in a UTF8 encoding")
-            .into()
+        let relative = pathdiff::diff_paths(path, &self.depfile_dir).expect(
+            "Unable to make a relative path from the depfile's directory to the dependency",
+        );
+        // A .d file is Make syntax, where backslash is the escape character,
+        // so Windows separators would produce a file no consumer parses
+        // back to these paths. Forward slashes are understood by make and
+        // ninja on every platform, Windows included, so the depfile speaks
+        // them regardless of what the OS calls its own.
+        relative
+            .components()
+            .map(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .expect("Unable to represent the file path in a UTF8 encoding")
+            })
+            .collect::<Vec<_>>()
+            .join("/")
     }
 }
 
