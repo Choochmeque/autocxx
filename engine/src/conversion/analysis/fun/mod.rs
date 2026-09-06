@@ -1165,6 +1165,27 @@ impl<'a> FnAnalyzer<'a> {
             )
         };
 
+        // Whether this is C++'s `operator=`. Three of the ignore reasons below
+        // turn on it, because the reason recorded for an assignment operator is
+        // read back later: `implicit_constructors` counts a class as having one
+        // only if it finds this function ignored for being an assignment
+        // operator or not ignored at all, and treats any other reason as
+        // meaning it cannot tell, which changes which of that class's *other*
+        // special members autocxx believes C++ implicitly defines.
+        //
+        // Nothing has reached any of the three with the autocxx-bindgen this
+        // crate pins, 0.73.0: bindgen reports the special member kind of every
+        // constructor and destructor it finds and never that of an `operator=`,
+        // so no function arrives carrying this kind - not even one whose class
+        // declares an assignment operator explicitly, and not even at the
+        // callback which records the kind. They stay because the classification
+        // is right either way and is what the reader-back needs the moment
+        // bindgen does report one.
+        let is_assignment_operator = matches!(
+            fun.special_member,
+            Some(SpecialMemberKind::AssignmentOperator)
+        );
+
         // If we encounter errors from here on, we can give some context around
         // where the error occurred such that we can put a marker in the output
         // Rust code to indicate that a problem occurred (benefiting people using
@@ -1331,10 +1352,7 @@ impl<'a> FnAnalyzer<'a> {
                 Ok(_) => panic!("No error in the error"),
                 Err(problem) => set_ignore_reason(problem),
             }
-        } else if matches!(
-            fun.special_member,
-            Some(SpecialMemberKind::AssignmentOperator)
-        ) {
+        } else if is_assignment_operator {
             // Be careful with the order of this if-else tree. Anything above here means we won't
             // treat it as an assignment operator, but anything below we still consider when
             // deciding which other C++ special member functions are implicitly defined.
@@ -1475,26 +1493,24 @@ impl<'a> FnAnalyzer<'a> {
         // google/autocxx#1363 for the parameter half of the same story.
         //
         // Not for an assignment operator, though. The chain above classifies
-        // one before it ever looks at the return type, and that is the one
-        // ignore reason read back later: `implicit_constructors` counts a
-        // class as having an assignment operator only if it finds this
-        // reason or none, so relabelling one would change which of that
-        // class's *other* special members autocxx believes C++ implicitly
-        // defines. Nothing escapes by leaving it alone - the function is
-        // ignored either way, which is all this refusal is for.
-        if return_analysis.was_rvalue_reference
-            && !matches!(
-                fun.special_member,
-                Some(SpecialMemberKind::AssignmentOperator)
-            )
-        {
+        // one before it ever looks at the return type, and relabelling it here
+        // would lose the reason that gets read back. Nothing escapes by
+        // leaving it alone - the function is ignored either way, which is all
+        // this refusal is for.
+        if return_analysis.was_rvalue_reference && !is_assignment_operator {
             set_ignore_reason(ConvertErrorFromCpp::RValueReturn);
         }
 
         // The following sections reject some types of function because of the arrangement
         // of Rust references. We could lift these restrictions when/if we switch to using
         // CppRef to represent C++ references.
-        if return_analysis.was_reference {
+        //
+        // Both skip an assignment operator for the same reason as the refusal
+        // above, and both would otherwise relabel every one there is:
+        // `T& operator=(const T&)` returns a mutable reference and takes two
+        // references, so it fails the first count for having more than one and
+        // would have failed the second had it taken one fewer.
+        if return_analysis.was_reference && !is_assignment_operator {
             // cxx only allows functions to return a reference if they take exactly
             // one reference as a parameter. Let's see.
             let num_input_references = param_details.iter().filter(|pd| pd.has_lifetime).count();
@@ -1507,7 +1523,7 @@ impl<'a> FnAnalyzer<'a> {
                 ));
             }
         }
-        if return_analysis.was_mutable_reference {
+        if return_analysis.was_mutable_reference && !is_assignment_operator {
             // This one's a bit more subtle. We can't have:
             //    fn foo(thing: &Thing) -> &mut OtherThing
             // because Rust doesn't allow it.
