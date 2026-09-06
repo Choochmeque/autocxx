@@ -95,7 +95,7 @@ pub enum ConvertErrorFromCpp {
     /// whether a typedef reached a forward declaration - and is no help at all
     /// when the target was, say, a nested type which isn't public. Where
     /// there's a real reason on file, give that.
-    #[error("Found an attempt at using {}, which autocxx replaced with an opaque type because it could not generate {}: {}", .name.to_cpp_name(), .culprit.to_cpp_name(), .reason)]
+    #[error("Found an attempt at using {}, which autocxx replaced with an opaque type{}: {}", .name.to_cpp_name(), culprit_clause(.name, .culprit), .reason)]
     TypeContainingUngeneratableTypedef {
         name: QualifiedName,
         culprit: QualifiedName,
@@ -107,6 +107,8 @@ pub enum ConvertErrorFromCpp {
     UnusedTemplateParam,
     #[error("{}", STD_FUNCTION_ADVICE)]
     UnsupportedStdFunction,
+    #[error("bindgen could not name this C++ type, and replaced it with an opaque blob of bytes ({0}) of the same size and alignment. autocxx will not put that blob into the bindings in place of the type, because the result would compile and be the wrong signature. Two things arrive this way: a type which C++ only reaches through a `using` declaration, where naming the underlying type in a `generate!` directive is usually enough; and std::function. {}", STD_FUNCTION_ADVICE)]
+    BindgenOpaqueBlob(String),
     #[error("This item relies on a type not known to autocxx ({})", .0.to_cpp_name())]
     UnknownDependentType(QualifiedName),
     #[error("This item depends on some other type(s) which autocxx could not generate, some of them are: {}. {} could not be generated because: {}", .deps.iter().join(", "), .culprit, .reason)]
@@ -196,6 +198,21 @@ pub enum ConvertErrorFromCpp {
         #[source]
         err: Box<ConvertErrorFromCpp>,
     },
+}
+
+/// Which type a [`ConvertErrorFromCpp::TypeContainingUngeneratableTypedef`]
+/// should blame, if it is not the typedef the reader is already looking at.
+///
+/// Usually the two differ and naming the culprit is the whole point. They are
+/// the same where bindgen erased the type a typedef named: the alias is then
+/// the only name that type has, and "could not generate `Alias`" straight
+/// after "using `Alias`" would say nothing twice.
+fn culprit_clause(name: &QualifiedName, culprit: &QualifiedName) -> String {
+    if name == culprit {
+        String::new()
+    } else {
+        format!(" because it could not generate {}", culprit.to_cpp_name())
+    }
 }
 
 /// Error types derived from Rust code. This is separate from [`ConvertError`] because these

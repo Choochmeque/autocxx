@@ -29,6 +29,34 @@ enum Behavior {
     RustContainerByValueSafe,
 }
 
+impl Behavior {
+    /// Whether destroying a value of a type which behaves this way does
+    /// nothing at all, so that C++ calls the destructor of a class holding one
+    /// trivial. Note this is a stricter question than
+    /// [`TypeDatabase::get_pod_safe_types`] asks: a `UniquePtr` is perfectly
+    /// safe for Rust to hold by value, and it certainly has a destructor.
+    fn destructor_is_trivial(&self) -> bool {
+        match self {
+            // Primitives, and `Pin<&T>`, which is a reference.
+            Behavior::CByValue
+            | Behavior::CByValueVecSafe
+            | Behavior::CVariableLengthByValue
+            | Behavior::CChar16
+            | Behavior::CVoid
+            | Behavior::RustByValue
+            // `rust::Str` is a borrowed (pointer, length) pair.
+            | Behavior::RustStr => true,
+            // Each of these owns something it has to give back: a heap
+            // allocation, a refcount, or a Rust `Box`.
+            Behavior::CxxString
+            | Behavior::CxxContainerPtr
+            | Behavior::CxxContainerVector
+            | Behavior::RustString
+            | Behavior::RustContainerByValueSafe => false,
+        }
+    }
+}
+
 /// Details about known special types, mostly primitives.
 #[derive(Debug)]
 struct TypeDetails {
@@ -157,6 +185,9 @@ pub enum CxxGenericType {
 pub struct KnownTypeConstructorDetails {
     pub has_move_constructor: bool,
     pub has_const_copy_constructor: bool,
+    /// Whether destroying one of these does nothing at all, so that C++ would
+    /// call the destructor of a class holding one trivial.
+    pub destructor_is_trivial: bool,
 }
 
 impl TypeDatabase {
@@ -226,6 +257,7 @@ impl TypeDatabase {
         self.get(qn).map(|x| KnownTypeConstructorDetails {
             has_move_constructor: x.has_move_constructor,
             has_const_copy_constructor: x.has_const_copy_constructor,
+            destructor_is_trivial: x.behavior.destructor_is_trivial(),
         })
     }
 

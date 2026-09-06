@@ -1325,7 +1325,13 @@ fn test_enum_style_several_enums() {
             FIRST_A = 5,
             FIRST_B = 6
         };
-        enum Second {
+        // `: int` here and on `Fourth` below is not incidental. An unscoped
+        // enum with no fixed underlying type has an implementation-defined
+        // one, and on the targets CI builds MSVC makes it `int` while gcc and
+        // clang make it `unsigned int`. These two styles put that type in
+        // front of the user as the newtype's field, so `.0` would be `c_int`
+        // on one CI leg and `c_uint` on another.
+        enum Second : int {
             SECOND_A,
             SECOND_B
         };
@@ -1333,7 +1339,7 @@ fn test_enum_style_several_enums() {
             THIRD_A = 1 << 1,
             THIRD_B = 1 << 3
         };
-        enum Fourth {
+        enum Fourth : int {
             FOURTH_A,
             FOURTH_B
         };
@@ -5190,14 +5196,13 @@ fn test_ulong() {
     run_test("", hdr, rs, &["daft"], &[]);
 }
 
-// Skipped on Windows since 2022, and still skipped now that autocxx parses
-// headers for the right ABI and the rest of the 2022 list has come off. What
-// makes this one different is that `unsigned long` is 32 bits on Windows and 64
-// bits everywhere this passes - a difference both Windows ABIs share, so
-// nothing the parsing ABI could have caused. Undiagnosed beyond that; note that
-// the same type without the typedef, in `test_ulong` above, passes everywhere.
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
+// Skipped on Windows from 2022 to 2026. The 2022-era theory was the width of
+// `unsigned long` (32 bits on Windows, 64 elsewhere), but the mingw leg
+// passed the moment its skip came off, and both Windows ABIs share that
+// width - so whatever broke in 2022 is gone, most plausibly fixed when
+// autocxx started parsing headers for the right ABI. The msvc skip comes off
+// on the strength of the same evidence; if it fails after all, the failure
+// text this run produces is the diagnosis the last four years never had.
 #[test]
 fn test_typedef_to_ulong() {
     let hdr = indoc! {"
@@ -5272,20 +5277,12 @@ fn test_reserved_name() {
     run_test("", hdr, rs, &["async"], &[]);
 }
 
-// Skipped on Windows since 2022, and still skipped now that autocxx parses
-// headers for the right ABI and the rest of the 2022 list has come off.
-//
-// Why it is not in that list: UNRESOLVED. Nobody has read the failure. Naming
-// no standard library type does not put this beyond the parsing ABI's reach -
-// the mangling of a nested type is ABI-governed too - so the fix might cover
-// it. The competing hypothesis, which would account for both Windows ABIs
-// failing where the parsing ABI does not, is `take_A_B` and `take_A_C`:
-// declared and never defined, so the shims cxx writes for them call functions
-// nothing in the build defines, and the platforms where this passes may simply
-// be the ones whose linker discards those shims rather than reporting them.
-// Deciding between the two needs a run with this skip removed.
-#[cfg_attr(skip_windows_gnu_failing_tests, ignore)]
-#[cfg_attr(skip_windows_msvc_failing_tests, ignore)]
+// Skipped on Windows from 2022 to 2026, for a reason nobody had read: the
+// mingw run with the skip lifted failed at the link step, undefined
+// references to take_A_B and take_A_C - declared below, and never defined.
+// Every other platform's linker discarded the unused shims before resolving
+// them, so only Windows ever told the truth. Same story as the fake Chromium
+// example's FromFrameTreeNodeId. Bodies supplied; no skip needed anywhere.
 #[test]
 fn test_nested_type() {
     // Test that we can import APIs that use nested types.
@@ -5304,9 +5301,9 @@ fn test_nested_type() {
             B() {}
             void method_on_top_level_type() const {}
         };
-        void take_A_B(A::B);
-        void take_A_C(A::C);
-        void take_A_D(A::D);
+        inline void take_A_B(A::B) {}
+        inline void take_A_C(A::C) {}
+        inline void take_A_D(A::D) {}
     "};
     let rs = quote! {
         let _ = ffi::A::new().within_unique_ptr();
@@ -17190,37 +17187,56 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "libclang and the C++ compiler lay this struct out differently on \
-              both Windows targets, and neither of them is autocxx. libclang, \
-              which computes the offsets bindgen writes into the accessors, \
-              packs by Itanium rules whichever Windows target it is asked for - \
-              `unsigned:4, int:4, uint8_t:3, int8_t:3, bool:1, Shade:2, \
-              Handle:4, size_t:5` all into one allocation unit at bits 0, 4, 8, \
-              11, 14, 15, 17 and 21 - and passing `--target=` for the right \
-              triple (see engine/src/clang_target.rs) does not change that. \
-              Both cl.exe and the mingw g++ instead follow Microsoft's rule, \
-              starting a fresh allocation unit at every change of declared type \
-              size: units at byte 0 (plain_unsigned, plain_int), byte 4 \
-              (fixed_unsigned, fixed_signed, flag), byte 8 (shade, handle) and \
-              byte 16 (counted). Both make the struct 24 bytes, so nothing \
-              fails to compile, and the fields up to the first change of type \
-              size agree; `fixed_unsigned`, the first one after it, is read \
-              from a byte Microsoft layout never writes and comes back 0. None \
-              of this is bindgen's transmute or its replacement - the offsets \
-              are the same either way - and it is why the test above groups \
-              its bitfields by declared type size, which both rules lay out \
-              alike. Fixing it means making libclang agree with the C++ \
-              compiler about Microsoft bitfield layout, which changes every \
-              Windows binding and wants its own change and its own testing."
+    ignore = "the offsets bindgen writes into these accessors are not \
+              libclang's. libclang, asked for either Windows triple, reports \
+              Microsoft layout for this struct - `plain_unsigned` and \
+              `plain_int` at bits 0 and 4, then fresh allocation units at bits \
+              32, 64 and 128 as the declared type size changes from `unsigned` \
+              to `uint8_t` to `Shade` to `size_t` - which is exactly what \
+              cl.exe and mingw g++ produce, and `clang_Cursor_getOffsetOfField` \
+              hands those numbers straight to bindgen. bindgen throws them away \
+              for bitfields: `bitfields_to_allocation_units` in its `ir/comp.rs` \
+              groups bitfields into units by running its own packing algorithm, \
+              and that algorithm is Itanium's, hardcoded - `const is_ms_struct: \
+              bool = false`, under a comment wondering whether it ought to \
+              check whether the target is MSVC. So every field here lands in \
+              one four-byte unit at bits 0, 4, 8, 11, 14, 15, 17 and 21, the \
+              layout a Linux compiler would give it, and `fixed_unsigned` \
+              onwards are read from bytes Microsoft layout never writes. The \
+              struct still comes out 24 bytes, because the tail is padded to \
+              the size libclang reports, so nothing fails to compile and the \
+              fields before the first change of type size agree. Fixing it \
+              means either teaching bindgen the Microsoft rule - a new \
+              allocation unit whenever the declared type's size changes - or, \
+              better, making it honour the offsets libclang already gives it, \
+              which would be right for every ABI rather than one more. Either \
+              changes every Windows binding that mixes bitfield type sizes, and \
+              wants its own change and its own testing."
 )]
 /// A bitfield struct which mixes declared type sizes, pinning the layout the
 /// C++ compiler and libclang have to agree about. This is the shape
 /// `test_bitfield_accessors_do_not_transmute_unnecessarily` deliberately
 /// avoids: the conversions it exercises are the same ones, so nothing about
 /// the lint fix rests on this test, and it is here to keep the platform
-/// divergence visible rather than forgotten. Whoever makes libclang agree
-/// with the Windows compilers should be able to delete the `cfg_attr` above
-/// and find this passing.
+/// divergence visible rather than forgotten.
+///
+/// The fix belongs in autocxx-bindgen, not in the flags autocxx passes: no
+/// clang flag changes the answer, because clang is already right. `-mms-bitfields`
+/// is what makes the mingw triple use Microsoft bitfields (its C++ ABI is
+/// Itanium, so bindgen's existing `ABIKind`, which keys off `msvc` in the
+/// triple, is the wrong predicate to reuse). Two routes, in preference order:
+/// make `bitfields_to_allocation_units` group units from the per-field offsets
+/// clang already put in `RawField::offset`, and teach
+/// `codegen/struct_layout.rs::saw_bitfield_unit` to pad up to a unit's offset
+/// the way `saw_field` does for data members - that is ABI-agnostic and also
+/// covers `#pragma pack` and `__attribute__((ms_struct))`; or set
+/// `is_ms_struct` from the target and rewrite bindgen's existing (and also
+/// wrong) MS branch, which flushes a unit only when a field will not fit and
+/// has no notion of the declared type's size changing. Whichever is done,
+/// re-enabling layout tests would not have caught this: bindgen's layout tests
+/// skip `Field::Bitfields` entirely, and the tail padding hides the size.
+/// Whoever does it should be able to delete the `cfg_attr` above and find this
+/// passing.
 fn test_bitfield_mixing_declared_type_sizes() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -19065,4 +19081,355 @@ fn test_empty_base_deletes_default_constructor() {
         inline int read_x(const fx_DerivedFromEmpty& d) { return d.x; }
     "};
     run_test("", hdr, quote! {}, &["fx_DerivedFromEmpty", "read_x"], &[]);
+}
+
+/// bindgen skips `CXCursor_UsingDeclaration`, so a C++ type which is only
+/// reachable through `using outer::Alias;` never enters bindgen's allowlist
+/// and is replaced by an opaque blob of the right size and alignment. For a
+/// four-byte type that blob is plain `u32`, which autocxx used to unwrap and
+/// hand to cxx: `void fx_take_bu(fx_BU)`, taking a struct by value, became
+/// `fn fx_take_bu(b: u32)`. Nothing in either language then complains.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        inline void fx_take_bu(fx_BU b) { (void)b; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_bu"],
+        &[],
+        "replaced it with an opaque blob of bytes",
+    );
+}
+
+/// As above, but the blob is what the function returns. The old bindings said
+/// `fn fx_give_bu() -> u32`.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_as_return_value() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; fx_Box() : contents(0) {} };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        inline fx_BU fx_give_bu() { return fx_BU(); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_give_bu"],
+        &[],
+        "replaced it with an opaque blob of bytes",
+    );
+}
+
+/// The blob reaches a reference and a pointer parameter too, where the old
+/// bindings said `&u32` and `*const u32` for a reference and a pointer to a
+/// struct. A reference is not a safe hiding place for it.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_behind_a_reference() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        inline void fx_take_bu_ref(const fx_BU& b) { (void)b; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_bu_ref"],
+        &[],
+        "replaced it with an opaque blob of bytes",
+    );
+}
+
+/// The blob reaches the payload of a cxx container too. `UniquePtr<T>` and
+/// `CxxVector<T>` name their payload type in the bridge, so a blob is no more
+/// use there than in a bare parameter - and unlike a struct field, a container
+/// is not a place layout alone will do.
+#[test]
+fn test_type_hidden_by_using_declaration_is_refused_inside_a_container() {
+    let prefix = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        #include <vector>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+    "};
+    for (decl, func) in [
+        (
+            "inline void fx_take_uptr(std::unique_ptr<fx_BU> b) { (void)b; }",
+            "fx_take_uptr",
+        ),
+        (
+            "inline void fx_take_vec(const std::vector<fx_BU>& b) { (void)b; }",
+            "fx_take_vec",
+        ),
+    ] {
+        run_test_expect_fail_with_error(
+            "",
+            &format!("{prefix}{decl}\n"),
+            quote! {},
+            &[func],
+            &[],
+            "replaced it with an opaque blob of bytes",
+        );
+    }
+}
+
+/// An array of the blob, on the other hand, is fine where any blob is fine:
+/// inside a struct, where its layout is the whole of what autocxx wants from
+/// it. The refusal must not follow the array element into a field.
+#[test]
+fn test_array_of_hidden_type_is_still_allowed_in_a_struct_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        using fx_outer::fx_BU;
+        struct fx_HoldsArray { fx_BU arr[4]; uint32_t tail; };
+    "};
+    let rs = quote! {
+        let h = ffi::fx_HoldsArray::default();
+        assert_eq!(h.tail, 0);
+    };
+    run_test("", hdr, rs, &[], &["fx_HoldsArray"]);
+}
+
+/// Where bindgen gives us a *typedef* to a blob, the alias has a name of its
+/// own, so it becomes an opaque type rather than an alias for an integer. What
+/// then uses it in a position an opaque type cannot fill has to be refused -
+/// and the refusal must carry the blob explanation, not the generic
+/// forward-declaration message, whose advice (`instantiable!`) would send the
+/// reader somewhere unhelpful.
+#[test]
+fn test_typedef_to_a_blob_explains_itself_when_used() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        template <typename T, T N> struct fx_seq { int x[N ? N : 1]; };
+        template <typename T, T N> using fx_A = fx_seq<T, N>;
+        template <int N> using fx_B = fx_A<int, N>;
+        typedef fx_B<3> fx_Concrete;
+        inline void fx_take_conc(std::unique_ptr<fx_Concrete> c) { (void)c; }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_conc"],
+        &[],
+        &[
+            // The alias is named once, not twice: the blob is what the alias
+            // names, so there is no second type to blame.
+            "using fx_Concrete, which autocxx replaced with an opaque type:",
+            "replaced it with an opaque blob of bytes",
+        ],
+    );
+}
+
+/// The other side of the same rule: a type autocxx was *asked* to treat as
+/// opaque keeps its name, so it still crosses the bridge by reference and by
+/// pointer even though bindgen describes its innards as nothing but a blob.
+/// Refusing bindgen's blobs elsewhere must not cost that.
+#[test]
+fn test_opaque_type_still_works_by_reference_and_pointer() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Opaque { uint32_t a; uint32_t b; };
+        inline const fx_Opaque* fx_the_opaque() {
+            static fx_Opaque o{3, 4};
+            return &o;
+        }
+        inline uint32_t fx_read_ref(const fx_Opaque& o) { return o.a; }
+        inline uint32_t fx_read_ptr(const fx_Opaque* o) { return o->b; }
+    "};
+    let rs = quote! {
+        let o = unsafe { ffi::fx_the_opaque() };
+        assert_eq!(unsafe { ffi::fx_read_ptr(o) }, 4);
+        assert_eq!(ffi::fx_read_ref(unsafe { &*o }), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            opaque!("fx_Opaque")
+            generate!("fx_Opaque")
+            generate!("fx_the_opaque")
+            generate!("fx_read_ref")
+            generate!("fx_read_ptr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Every generated type used to get an `impl Drop` calling a C++ destructor,
+/// including types whose destructor does nothing at all. For a type Rust holds
+/// by value that is not free: a type which implements `Drop` may not have a
+/// field moved out of it, may not be built with `..other` update syntax, and
+/// may never be `Copy`. C++ elides the call to a trivial destructor, and so
+/// should we.
+#[test]
+fn test_trivially_destructible_pod_has_no_drop_impl() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Inner { uint32_t a; };
+        struct fx_Outer { fx_Inner inner; uint32_t b; };
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_Outer {
+            inner: ffi::fx_Inner { a: 3 },
+            b: 4,
+        };
+        // Update syntax, then moving a field out. Both are refused with E0509
+        // on a type which implements `Drop`.
+        let updated = ffi::fx_Outer { b: 7, ..outer };
+        let inner = updated.inner;
+        assert_eq!(inner.a, 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&[], &["fx_Inner", "fx_Outer"], None),
+        None,
+        Some(make_string_absence_finder(vec![
+            "impl Drop for output :: fx_Outer".to_string(),
+            "impl Drop for output :: fx_Inner".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The other half of that rule. A class which declares no destructor of its
+/// own still has a non-trivial one if any of its fields does, and C++ really
+/// does call it, so the `impl Drop` has to stay.
+///
+/// autocxx would never let this program run: `generate_pod!` emits a
+/// `static_assert(::rust::IsRelocatable<T>::value)` - see
+/// `codegen_cpp::generate_pod_assertion`, which exists for exactly this
+/// hazard - and a field with a destructor fails it. That assertion is what
+/// makes leaving the `Drop` impl out of a POD safe in the first place, since
+/// C++ has already promised the destructor does nothing. This test is the
+/// belt to that pair of braces: it pins the analysis rather than the program,
+/// so it inspects the generated code and stops before the C++ compiler.
+#[test]
+fn test_pod_whose_field_has_a_destructor_keeps_drop_impl() {
+    struct FindDropImpl;
+    impl CodeCheckerFns for FindDropImpl {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            if quote::quote!(#rs)
+                .to_string()
+                .contains("impl Drop for output :: fx_HoldsNoisy")
+            {
+                Ok(())
+            } else {
+                Err(TestError::RsCodeExaminationFail(
+                    "fx_HoldsNoisy lost its Drop impl".into(),
+                ))
+            }
+        }
+        fn skip_build(&self) -> bool {
+            true
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& fx_dtor_count() { static uint32_t n = 0; return n; }
+        struct fx_Noisy { uint32_t a; ~fx_Noisy() { fx_dtor_count()++; } };
+        struct fx_HoldsNoisy { fx_Noisy inner; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&[], &["fx_HoldsNoisy"], None),
+        None,
+        Some(Box::new(FindDropImpl)),
+        None,
+    );
+}
+
+/// The analysis above has one blind spot, and this is the backstop for it.
+/// bindgen emits no field for an *empty* base class, so a class deriving from
+/// one which has a destructor looks trivially destructible to autocxx, which
+/// would then leave out the `Drop` impl and never run that destructor.
+///
+/// cxx's own `IsRelocatable` assertion does not cover this, because a user may
+/// opt into that trait by hand. So the generated C++ asserts the property
+/// autocxx actually relied on - `std::is_trivially_destructible` - and the
+/// build stops here rather than silently skipping cleanup.
+#[test]
+fn test_omitted_destructor_is_asserted_in_the_generated_cpp() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& fx_dtor_count() { static uint32_t n = 0; return n; }
+        struct fx_EmptyNoisy { ~fx_EmptyNoisy() { fx_dtor_count()++; } };
+        struct fx_DerivedPod : public fx_EmptyNoisy { uint32_t x; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_DerivedPod"],
+        // Every compiler quotes a failed `static_assert`'s message, but each
+        // words its own part of the diagnostic differently, so pin only the
+        // message.
+        &["autocxx generated no destructor call for fx_DerivedPod"],
+    );
+}
+
+/// A non-POD type keeps its `impl Drop` whether or not its destructor does
+/// anything: it is only ever reached through a pointer or a smart pointer,
+/// where implementing `Drop` costs nothing, and `moveit!` on the stack wants
+/// something to call.
+#[test]
+fn test_trivially_destructible_non_pod_keeps_drop_impl() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Plain {
+        public:
+            fx_Plain() {}
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a = 1;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::fx_Plain::new().within_unique_ptr();
+            assert_eq!(p.get(), 1);
+        },
+        directives_from_lists(&["fx_Plain"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "impl Drop for output :: fx_Plain".to_string()
+        ])),
+        None,
+    );
 }

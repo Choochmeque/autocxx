@@ -133,6 +133,15 @@ to pick a different representation for particular enums:
 | `NewtypeEnum` | An integer newtype whose enumerators are associated constants | Values which may be arbitrary integers |
 | `BitfieldEnum` | The same newtype, plus `&`, `|`, `^` and `!` | Flags |
 
+The integer the two newtype styles wrap is the enum's underlying type as the
+C++ compiler sees it, so `flags.0` is a `c_int` for `enum Flags : int` and a
+`c_uint` for `enum Flags : unsigned`. An unscoped enum with no fixed underlying
+type has no portable answer: the compiler picks, and it may pick differently
+from one target or set of flags to the next. On the targets autocxx tests, MSVC
+gives it `int`, while gcc and clang give one whose enumerators are all
+non-negative `unsigned int`. Name the underlying type in C++ if you intend to
+write `.0`'s type down.
+
 The directive takes the style first, then any number of enum names, and may be
 repeated to give different styles to different enums:
 
@@ -161,7 +170,7 @@ POD regardless.
 ```rust,ignore,autocxx,hidecpp
 autocxx_integration_tests::doctest(
 "",
-"enum FileFlags {
+"enum FileFlags : int {
     READ = 1 << 0,
     WRITE = 1 << 1,
     EXECUTE = 1 << 2,

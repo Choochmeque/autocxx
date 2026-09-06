@@ -14,7 +14,7 @@ use syn::ItemType;
 use crate::{
     conversion::{
         analysis::type_converter::{add_analysis, Annotated, TypeConversionContext, TypeConverter},
-        api::{AnalysisPhase, Api, ApiName, NullPhase, TypedefKind},
+        api::{AnalysisPhase, Api, ApiName, NullPhase, OpaqueTypedefReason, TypedefKind},
         apivec::ApiVec,
         check_for_fatal_attrs,
         convert_error::{ConvertErrorWithContext, ErrorContext},
@@ -61,6 +61,7 @@ pub(crate) fn convert_typedef_targets(
         |name, item, old_tyname, _| {
             Ok(Box::new(std::iter::once(match item {
                 TypedefKind::Type(ity) => get_replacement_typedef(
+                    config,
                     name,
                     (*ity).into(),
                     old_tyname,
@@ -138,6 +139,7 @@ fn ignore_typedefs_to_alias_templates(mut apis: ApiVec<TypedefPhase>) -> ApiVec<
 }
 
 fn get_replacement_typedef(
+    config: &IncludeCppConfig,
     name: ApiName,
     ity: ItemType,
     old_tyname: Option<QualifiedName>,
@@ -156,9 +158,44 @@ fn get_replacement_typedef(
     let type_conversion_results = type_converter.convert_type(
         (*ity.ty).clone(),
         name.name.get_namespace(),
-        &TypeConversionContext::WithinReference,
+        // A typedef is one API with no single place of use, so there is no
+        // context to inherit; `within_struct_field: false` is the safe half of
+        // the choice. It costs a typedef whose target bindgen could only
+        // express as an opaque blob, which the next arm turns into an opaque
+        // type rather than an alias for some unrelated integer.
+        &TypeConversionContext::WithinReference {
+            within_struct_field: false,
+        },
     );
     match type_conversion_results {
+        // bindgen could not name the type this typedef points at, so it gave
+        // us a blob of bytes of the right size instead. The typedef itself has
+        // a name, though, which is all an opaque type needs, so keep it as
+        // one: `void f(const Alias&)` then works, where aliasing the blob would
+        // have made it `f(&u8)` and put a lie in the bindings. This is the same
+        // treatment `replace_hopeless_typedef_targets` gives a typedef whose
+        // target autocxx had to ignore, and it carries the same caveat: cxx
+        // cannot declare an opaque type nested inside another, so a nested one
+        // still has to go.
+        //
+        // The reason travels with the stand-in, so that anything which goes on
+        // to use the typedef in a position an opaque type can't fill is told
+        // what was actually wrong. Its culprit is the typedef's own name,
+        // which is a little circular and is nonetheless the truth: bindgen
+        // erased the type this names, so the alias is the only name it has
+        // left. `ConvertErrorFromCpp::TypeContainingUngeneratableTypedef`
+        // knows to say it once rather than twice.
+        Err(err @ ConvertErrorFromCpp::BindgenOpaqueBlob(_)) if !name.cpp_name().is_nested() => {
+            let reason = OpaqueTypedefReason {
+                culprit: name.name.clone(),
+                reason: Box::new(err),
+            };
+            Ok(Api::OpaqueTypedef {
+                forward_declaration: !config.instantiable.contains(&name.name.to_cpp_name()),
+                name,
+                reason: Some(reason),
+            })
+        }
         Err(err) => Err(ConvertErrorWithContext(
             err,
             Some(ErrorContext::new_for_item(name.name.get_final_ident())),
