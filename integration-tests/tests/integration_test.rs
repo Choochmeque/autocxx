@@ -517,7 +517,7 @@ fn test_negative_take_as_pod_with_move_constructor() {
         struct Bob {
             uint32_t a;
             uint32_t b;
-            inline Bob(Bob&& other_bob) {}
+            inline Bob(Bob&&) {}
         };
         uint32_t take_bob(Bob a);
     "};
@@ -807,12 +807,12 @@ fn test_take_nonpod_by_ptr_in_method() {
         class A {
         public:
             A() {};
-            uint32_t take_bob(const Bob* a) const {
-                return a->a;
+            uint32_t take_bob(const Bob* bob) const {
+                return bob->a;
             }
-            std::unique_ptr<Bob> make_bob(uint32_t a) const {
+            std::unique_ptr<Bob> make_bob(uint32_t val) const {
                 auto b = std::make_unique<Bob>();
-                b->a = a;
+                b->a = val;
                 return b;
             }
             uint16_t a;
@@ -844,12 +844,12 @@ fn test_take_nonpod_by_ptr_in_wrapped_method() {
         class A {
         public:
             A() {};
-            uint32_t take_bob(const Bob* a, C) const {
-                return a->a;
+            uint32_t take_bob(const Bob* bob, C) const {
+                return bob->a;
             }
-            std::unique_ptr<Bob> make_bob(uint32_t a) const {
+            std::unique_ptr<Bob> make_bob(uint32_t val) const {
                 auto b = std::make_unique<Bob>();
-                b->a = a;
+                b->a = val;
                 return b;
             }
             uint16_t a;
@@ -879,8 +879,8 @@ fn run_char_test(builder_modifier: Option<BuilderModifier>) {
         class A {
         public:
             A() {};
-            uint32_t take_char(const char* a, C) const {
-                return a[0];
+            uint32_t take_char(const char* text, C) const {
+                return text[0];
             }
             const char* make_char(C extra) const {
                 return extra.test;
@@ -2168,9 +2168,9 @@ fn test_method_pass_nonpod_by_up() {
 fn test_method_return_nonpod_by_value() {
     let cxx = indoc! {"
         Anna Bob::get_anna() const {
-            Anna a;
-            a.a = 12;
-            return a;
+            Anna anna;
+            anna.a = 12;
+            return anna;
         }
     "};
     let hdr = indoc! {"
@@ -4743,7 +4743,7 @@ fn test_foreign_ns_meth_arg_pod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(A::Bob a) const { return a.a; }
+                uint32_t daft(A::Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -4769,7 +4769,7 @@ fn test_foreign_ns_meth_arg_nonpod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(A::Bob a) const { return a.a; }
+                uint32_t daft(A::Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -4970,7 +4970,7 @@ fn test_root_ns_meth_arg_pod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(Bob a) const { return a.a; }
+                uint32_t daft(Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -4994,7 +4994,7 @@ fn test_root_ns_meth_arg_nonpod() {
         namespace B {
             struct C {
                 uint32_t a;
-                uint32_t daft(Bob a) const { return a.a; }
+                uint32_t daft(Bob bob) const { return bob.a; }
             };
         }
     "};
@@ -5163,8 +5163,8 @@ fn test_forward_declaration() {
             delete a;
         }
         A B::daft4() {
-            A a;
-            return a;
+            A result;
+            return result;
         }
         std::unique_ptr<A> B::daft5() {
             return std::make_unique<A>();
@@ -16155,13 +16155,13 @@ fn test_issue_1229() {
     struct Thing {
         float id;
     
-        Thing(float id) : id(id) {}
+        Thing(float new_id) : id(new_id) {}
     };
 
     struct Item {
         float id;
     
-        Item(float id) : id(id) {}
+        Item(float new_id) : id(new_id) {}
     };
     "};
     let hexathorpe = Token![#](Span::call_site());
@@ -16207,14 +16207,14 @@ fn test_issue_1239() {
     struct Thing {
         float id;
 
-        Thing(float id) : id(id) {}
+        Thing(float new_id) : id(new_id) {}
         float foo() const { return id; }
     };
 
     struct Item {
         float id;
 
-        Item(float id) : id(id) {}
+        Item(float new_id) : id(new_id) {}
         float foo() const { return id; }
     };
     "};
@@ -16255,8 +16255,8 @@ fn issue_1265_header() -> &'static str {
         class Test
         {
         public:
-          explicit Test(std::string string)
-            : string(std::move(string))
+          explicit Test(std::string s)
+            : string(std::move(s))
           {
           }
 

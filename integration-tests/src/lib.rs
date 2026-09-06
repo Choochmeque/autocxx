@@ -122,15 +122,52 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
     if !target.contains("msvc") {
         b.flag("-Werror");
         // TODO: MSVC gets no `/WX`, which is cl's spelling of this (it rejects
-        // `-Werror`). Two kinds of fixture warning survive /W4 which no cast
-        // can remove, both from creduce-reduced repros where the offending
-        // shape is the whole point of the test: C4201, a nameless struct or
-        // union member, as in `test_issue_1125`; and C4643, a forward
-        // declaration inside `namespace std`, as in `test_issue_506`,
-        // `test_issue_470_492` and `test_std_thing`. C4643 is on by default
-        // and so is already in the log at cl's own /W1; C4201 arrives with
-        // /W4. Each needs its own decision - restructure the fixture, or scope
-        // the warning off for the one test - before the switch can be thrown.
+        // `-Werror`). What survives /W4 has now been counted in a Windows CI
+        // log rather than guessed at, and it is thirty-two warnings, every one
+        // of them raised by a fixture - nothing from the generated C++, from
+        // cxx, or from the standard library except where a fixture reaches
+        // into it. An earlier note here named C4643, a forward declaration
+        // inside `namespace std`; that one came from the days of `/Wall` and
+        // does not appear at /W4 at all.
+        //
+        // Twelve of them were C4458, a declaration hiding a class member, and
+        // one was C4100, an unreferenced parameter. Neither was any part of
+        // what the tests were demonstrating, so the fixtures no longer do it.
+        // clang's `-Wshadow-all` and `-Wunused-parameter` stand in for the two
+        // and the suite is clean under both, which is how they were found and
+        // how a future pass can re-check cheaply.
+        //
+        // Three kinds remain, all in creduce-reduced repros where the
+        // offending shape is the whole point of the test:
+        //
+        //   C4624 (a destructor implicitly defined as deleted), fourteen
+        //     times, all in `test_implicit_constructor_rules`, whose matrix of
+        //     private, protected and deleted destructors is the test.
+        //   C5205 (deleting an abstract class with a non-virtual destructor),
+        //     three times from `test_issue_506`, raised inside <memory>. That
+        //     fixture already turns clang's counterpart off with
+        //     `-Wno-delete-abstract-non-virtual-dtor`.
+        //   C4201 and C4408 (a nameless struct declaring no data members),
+        //     once each, in `test_issue_1125`.
+        //
+        // Each can be scoped off at its own fixture by passing `/wdNNNN`
+        // through the *optional* list of `make_clang_optional_arg_adder`,
+        // which reaches `cc`'s `flag_if_supported`, so every compiler which
+        // doesn't know the flag skips it - the same per-test route
+        // `test_issue_506` already uses for clang.
+        //
+        // What has to be settled before the switch is thrown is D9002,
+        // "ignoring unknown option", which cl reports three times: twice for
+        // the `-std=c++17` that `make_cpp17_adder` hands to `cc` verbatim, and
+        // once for the `-funsigned-char` in
+        // `test_take_char_by_ptr_in_wrapped_method_with_unsigned_chars`.
+        // Whether `/WX` makes a command-line warning fatal cannot be answered
+        // on a machine without cl.exe, and each is a flag MSVC is silently not
+        // getting anyway, so both want removing first. `make_cpp20_adder`
+        // shows the shape of the fix for the first - ask `cc` for the standard
+        // instead of passing a flag. The second needs `/J` for cl and the
+        // present flag elsewhere, chosen by target, plus a check that the
+        // test's `104i8` still holds once MSVC really does get unsigned chars.
     }
     b
 }
