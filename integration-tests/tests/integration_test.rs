@@ -9622,6 +9622,78 @@ fn test_shared_ptr_const_payload_is_const() {
     );
 }
 
+/// A payload whose `const` is on an alias rather than written at the
+/// instantiation: `typedef const int CI; std::shared_ptr<CI>`.
+///
+/// C++ makes no distinction - `std::shared_ptr<CI>` *is*
+/// `std::shared_ptr<const int>`, and cxx's `SharedPtr<CI>` fails to bind
+/// against it in exactly the same way - but nothing in the type as bindgen
+/// writes it says so: the marker is on the alias, and the argument is a bare
+/// path. Reading the argument alone therefore missed this spelling entirely,
+/// and it was the one shape of `const` payload which was not lowered.
+///
+/// All three ways of writing the alias, because they are three different
+/// things to resolve: `typedef`, `using`, and an alias to an alias.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_payload_through_an_alias() {
+    let hdr = indoc! {"
+        #include <memory>
+        typedef const int fx_CI;
+        using fx_CU = const int;
+        typedef fx_CI fx_CI2;
+        inline std::shared_ptr<fx_CI> fx_hold_typedef() {
+            return std::make_shared<fx_CI>(3);
+        }
+        inline std::shared_ptr<fx_CU> fx_hold_using() {
+            return std::make_shared<fx_CU>(4);
+        }
+        inline std::shared_ptr<fx_CI2> fx_hold_chain() {
+            return std::make_shared<fx_CI2>(5);
+        }
+    "};
+    let rs = quote! {
+        let by_typedef = ffi::fx_hold_typedef();
+        assert_eq!(unsafe { *by_typedef.get() }, autocxx::c_int(3));
+        assert_eq!(by_typedef.use_count(), 1);
+        let by_using = ffi::fx_hold_using();
+        assert_eq!(unsafe { *by_using.get() }, autocxx::c_int(4));
+        let by_chain = ffi::fx_hold_chain();
+        assert_eq!(unsafe { *by_chain.get() }, autocxx::c_int(5));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &["fx_hold_typedef", "fx_hold_using", "fx_hold_chain"],
+            &[],
+            None,
+        ),
+        None,
+        Some(make_checks(vec![
+            // The typedef names the alias, which is how the header spelt the
+            // specialization and is the same C++ type either way.
+            Box::new(CppMatcher::new(
+                &[
+                    "typedef std::shared_ptr<fx_CI>",
+                    "typedef std::shared_ptr<fx_CU>",
+                    "typedef std::shared_ptr<fx_CI2>",
+                ],
+                &[],
+            )),
+            // The alias is resolved on the Rust side, where there is nothing
+            // for it to name: the accessor is the same `*const` a payload
+            // written `const int` gets.
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self) -> * const autocxx :: c_int
+            }]),
+        ])),
+        None,
+    );
+}
+
 /// An empty holder, and one built with the aliasing constructor. Both are
 /// ordinary `std::shared_ptr` states which the generated docs promise nothing
 /// about beyond what C++ does, and both have to survive being cloned, counted
@@ -9675,10 +9747,9 @@ fn test_shared_ptr_const_empty_and_aliasing() {
 /// typecheck for exactly the reason `std::shared_ptr<const T>` does and are
 /// lowered to the same opaque holder.
 ///
-/// They get no accessors - only `std::shared_ptr` does - so what this pins is
-/// the whole of what they can do: they build, and they round-trip through Rust
-/// back into C++. That is worth having as a test because it is worth
-/// remembering as a limitation.
+/// This one pins the plainest thing they do: they build, and they round-trip
+/// through Rust back into C++ without Rust looking inside. The accessors each
+/// gets are pinned by the tests below.
 ///
 /// Addresses part of the bug reported upstream as google/autocxx#799.
 #[test]
@@ -9713,6 +9784,174 @@ fn test_unique_and_weak_ptr_const_round_trip() {
             "fx_take_weak",
         ],
         &[],
+    );
+}
+
+/// The accessors a `std::unique_ptr<const T>` holder gets: the reading half of
+/// what `std::shared_ptr` gets, plus the emptiness question a `unique_ptr` can
+/// answer and a `shared_ptr` cannot be asked in the same way.
+///
+/// `payload_is_null` is deliberately not called `is_null`: the holder arrives
+/// inside a `cxx::UniquePtr`, whose own `is_null` would win the method lookup
+/// and answer about the outer pointer instead. The two disagree exactly here,
+/// where the outer one is present and holds a `unique_ptr` which holds
+/// nothing.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_unique_ptr_const_accessors() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Owned {
+            int a;
+            int describe() const { return a * 2; }
+        };
+        inline std::unique_ptr<const fx_Owned> fx_own() {
+            return std::unique_ptr<const fx_Owned>(new fx_Owned { 3 });
+        }
+        inline std::unique_ptr<const fx_Owned> fx_own_nothing() {
+            return std::unique_ptr<const fx_Owned>();
+        }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_own();
+        assert!(!held.payload_is_null());
+        // SAFETY: `fx_own` always returns a `unique_ptr` owning a real
+        // `fx_Owned`, just checked, and `held` keeps it alive across the read.
+        let payload = unsafe { &*held.get() };
+        assert_eq!(payload.describe(), autocxx::c_int(6));
+
+        let empty = ffi::fx_own_nothing();
+        // The holder is there; what it holds is not. `cxx::UniquePtr::is_null`
+        // answers the first question, and this one answers the second.
+        assert!(!empty.is_null());
+        assert!(empty.payload_is_null());
+        assert!(empty.get().is_null());
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Owned", "fx_own", "fx_own_nothing"], &[], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(
+                &["typedef std::unique_ptr<const fx_Owned>"],
+                &["typedef std::unique_ptr<fx_Owned>"],
+            )),
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self) -> * const output :: fx_Owned
+            }]),
+        ])),
+        None,
+    );
+}
+
+/// The accessors a `std::weak_ptr<const T>` holder gets, and the
+/// `std::shared_ptr<const T>` holder which `lock` hands back - manufactured
+/// alongside the weak one.
+///
+/// The header goes out of its way never to name that specialization: the
+/// owning `shared_ptr` is a function-local static, so nothing autocxx converts
+/// mentions it and the holder `lock` returns exists only because the weak
+/// holder asked for it.
+///
+/// The counts are the rest of it: locking joins the ownership group and raises
+/// the count, dropping the lock lowers it again, and once C++ has let go the
+/// `weak_ptr` says so. `lock` still answers with a holder then, of an empty
+/// `shared_ptr`, which is what C++ does.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_weak_ptr_const_accessors() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Watched {
+            int a;
+            int describe() const { return a + 1; }
+        };
+        // The only `std::shared_ptr` in this header is a local variable, which
+        // bindgen never sees: every signature deals in `std::weak_ptr`.
+        inline std::weak_ptr<const fx_Watched> fx_watched(bool let_go) {
+            static std::shared_ptr<const fx_Watched> kept =
+                std::make_shared<const fx_Watched>(fx_Watched { 5 });
+            if (let_go) { kept.reset(); }
+            return std::weak_ptr<const fx_Watched>(kept);
+        }
+        inline std::weak_ptr<const fx_Watched> fx_watch() { return fx_watched(false); }
+        inline void fx_let_go() { fx_watched(true); }
+    "};
+    let rs = quote! {
+        let weak = ffi::fx_watch();
+        assert!(!weak.expired());
+        // One owner: the `shared_ptr` C++ is keeping. A `weak_ptr` does not
+        // count itself.
+        assert_eq!(weak.use_count(), 1);
+
+        let locked = weak.lock();
+        assert_eq!(weak.use_count(), 2);
+        assert_eq!(locked.use_count(), 2);
+        // SAFETY: `locked` owns a share of the payload for as long as it
+        // lives, so the pointer is to a live object across this read.
+        assert_eq!(unsafe { (*locked.get()).describe() }, autocxx::c_int(6));
+        drop(locked);
+        assert_eq!(weak.use_count(), 1);
+
+        ffi::fx_let_go();
+        assert!(weak.expired());
+        assert_eq!(weak.use_count(), 0);
+        // Still a holder, of the empty `shared_ptr` C++ hands back.
+        let nothing = weak.lock();
+        assert!(!nothing.is_null());
+        assert!(nothing.get().is_null());
+        assert_eq!(nothing.use_count(), 0);
+    };
+    run_test("", hdr, rs, &["fx_Watched", "fx_watch", "fx_let_go"], &[]);
+}
+
+/// A smart pointer reached through an alias to the *container*, whose payload
+/// is `const` through an alias of its own:
+/// `typedef const int CI; using W = std::weak_ptr<CI>`.
+///
+/// This is the shape where the path which reaches the lowering is not
+/// bindgen's. A typedef's target is analysed before any typedef target can be
+/// resolved, so the `const` on `CI` was invisible then and nothing was
+/// lowered; what the alias stored is cxx's own substituted spelling,
+/// `cxx::WeakPtr<CI>`, and that is what a later use of the alias resolves to.
+/// The sibling `std::shared_ptr` holder therefore has to be named afresh
+/// rather than derived from the path in hand, which used to yield
+/// `typedef cxx::shared_ptr<CI> ...` and an undeclared identifier `cxx` in the
+/// generated C++.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_weak_ptr_const_through_a_container_alias() {
+    let hdr = indoc! {"
+        #include <memory>
+        typedef const int fx_CI;
+        using fx_W = std::weak_ptr<fx_CI>;
+        inline fx_W fx_watch_alias() {
+            static std::shared_ptr<fx_CI> kept = std::make_shared<fx_CI>(3);
+            return fx_W(kept);
+        }
+    "};
+    let rs = quote! {
+        let weak = ffi::fx_watch_alias();
+        assert!(!weak.expired());
+        let locked = weak.lock();
+        assert_eq!(unsafe { *locked.get() }, autocxx::c_int(3));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_watch_alias"], &[], None),
+        None,
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &["typedef std::shared_ptr<fx_CI>"],
+            &["cxx::shared_ptr"],
+        ))])),
+        None,
     );
 }
 
@@ -10389,6 +10628,87 @@ fn test_vector_of_pointers_lowers_to_an_opaque_holder() {
             // ordinary type which may live in a vector - so the pointer is
             // what makes this the absence it is about.
             make_string_absence_finder(vec!["CxxVector < * mut".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// A `std::shared_ptr<const T>` holder whose payload class autocxx could not
+/// generate, under `generate_all!`.
+///
+/// A holder's accessors are the only thing which names its payload - whatever
+/// handed the holder over names the holder and nothing else - so the holder is
+/// where that dependency has to be recorded. Without it, `generate_all!` is
+/// the arrangement which shows the hole: it makes every API a garbage
+/// collection root, the holder included, so the holder survives whether or not
+/// anything names it, and a payload which became an `Api::IgnoredItem` leaves
+/// the accessors naming a type nothing declares. autocxx does not get as far
+/// as saying so: cxx rejects the bridge with "unsupported type", which names
+/// the payload but nothing the user wrote. With the dependency recorded the
+/// holder is discarded alongside its payload and the rest of the header is
+/// generated as usual.
+///
+/// The payload here is a private nested class, which autocxx turns down
+/// because Rust could not name it either.
+///
+/// The build is skipped: `generate_all!` over `<memory>` binds the whole of
+/// the standard library the header drags in, which does not compile on every
+/// platform - the reason every other `generate_all!` test here sticks to
+/// `<cstdint>`. That is a limitation of blanket generation and nothing to do
+/// with holders, and the failure this test is about happens during generation,
+/// before any compiler runs.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_holder_follows_an_ignored_payload() {
+    let hdr = indoc! {"
+        #include <memory>
+        class fx_Keeper {
+            struct fx_Hidden { int a; };
+        public:
+            static std::shared_ptr<const fx_Hidden> hold() {
+                return std::make_shared<const fx_Hidden>(fx_Hidden { 3 });
+            }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(make_checks_without_building(vec![
+            // The accessor's return type, which is the only place the payload
+            // would be named. Its own error stub carries the name, so the
+            // absence to look for is the accessor rather than the name.
+            make_string_absence_finder(vec!["* const output :: fx_Keeper_fx_Hidden".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// The same, for a `std::vector<T*>` holder: the element class is the one
+/// autocxx could not generate.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_holder_follows_an_ignored_element() {
+    let hdr = indoc! {"
+        #include <vector>
+        class fx_Warden {
+            struct fx_Ward { int a; };
+        public:
+            static std::vector<fx_Ward*> list() { return {}; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_absence_finder(vec!["* mut output :: fx_Warden_fx_Ward".to_string()]),
         ])),
         None,
     );

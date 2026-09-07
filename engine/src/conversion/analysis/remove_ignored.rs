@@ -82,10 +82,27 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
                     let first = missing_deps.next();
                     std::mem::drop(missing_deps);
                     if let Some(missing_dep) = first.cloned() {
-                        create_ignore_item(
-                            api,
-                            ConvertErrorFromCpp::UnknownDependentType(missing_dep),
-                        )
+                        // Discarded for the same reason as the branch above,
+                        // so it propagates the same way: whatever depends on
+                        // this item needs another iteration to find out that
+                        // it has gone. The item reached this branch through a
+                        // dependency of its own which nothing declares, and
+                        // its dependents have no way to see that name for
+                        // themselves - autocxx's opaque holders are the case
+                        // in point, since the payload they name appears in
+                        // nothing else's dependencies.
+                        //
+                        // Conservative rather than exact, because not every
+                        // edge in `deps.rs` is a name the item's own output
+                        // uses: a struct also depends on its constructors and
+                        // allocators, which it does not name, and a dependent
+                        // discarded over one of those loses more than it had
+                        // to. Better than the alternative, which is a
+                        // dependent left naming an error stub.
+                        iterate_again = true;
+                        let err = ConvertErrorFromCpp::UnknownDependentType(missing_dep);
+                        ignored_items.insert(api.name().clone(), err.clone());
+                        create_ignore_item(api, err)
                     } else {
                         api
                     }

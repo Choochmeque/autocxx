@@ -51,8 +51,8 @@ use super::{
         pod::PodAnalysis,
     },
     api::{
-        AnalysisPhase, Api, HolderSurface, SharedPtrShim, SubclassName, TypeKind, VectorShim,
-        SUPER_FN_SUFFIX,
+        AnalysisPhase, Api, HolderSurface, SharedPtrShim, SubclassName, TypeKind, UniquePtrShim,
+        VectorShim, WeakPtrShim, SUPER_FN_SUFFIX,
     },
     convert_error::ErrorContextType,
     derives::DeriveRequests,
@@ -687,10 +687,15 @@ impl<'a> RsCodeGenerator<'a> {
                     0,
                 );
                 match holder_surface {
-                    Some(HolderSurface::SharedPtr { payload }) => {
+                    Some(HolderSurface::SharedPtr { payload, .. }) => {
                         self.generate_shared_ptr_surface(&name, &bridge_id, &payload, &mut result)
                     }
-                    Some(HolderSurface::VectorOfPointers { element }) => {
+                    Some(HolderSurface::UniquePtr { payload, .. }) => {
+                        self.generate_unique_ptr_surface(&name, &bridge_id, &payload, &mut result)
+                    }
+                    Some(HolderSurface::WeakPtr { shared_holder, .. }) => self
+                        .generate_weak_ptr_surface(&name, &bridge_id, &shared_holder, &mut result),
+                    Some(HolderSurface::VectorOfPointers { element, .. }) => {
                         self.generate_vector_surface(&name, &bridge_id, &element, &mut result)
                     }
                     None => {}
@@ -1194,6 +1199,138 @@ impl<'a> RsCodeGenerator<'a> {
             #[doc = #doc]
             impl #holder {
                 #(#methods)*
+            }
+        });
+    }
+
+    /// Declare the two C++ helpers of a `std::unique_ptr<const T>` holder in
+    /// the bridge, and put a method for each on the holder itself.
+    ///
+    /// Written here rather than as synthesized `Api::Function`s for the reason
+    /// [`Self::generate_shared_ptr_surface`] gives, and `get` is that surface's
+    /// `get` in every respect - the same pointer, the same `unsafe fn` under
+    /// the wrapped-references policy, and the same reason for it. What it does
+    /// not have is `clone` or `use_count`: a `std::unique_ptr` is the one
+    /// owner, so there is nothing to copy and no count to read. See
+    /// google/autocxx#799.
+    fn generate_unique_ptr_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        payload: &Type,
+        result: &mut RsCodegenResult,
+    ) {
+        // As in `generate_shared_ptr_surface`: the bridge mod has a flat
+        // namespace, and the output mod, where the methods go, uses the
+        // qualified spellings.
+        let holder = name.get_final_ident();
+        let bridge_payload = unqualify_type(payload.clone(), self.bridge_type_names);
+        let wrapped = matches!(
+            self.unsafe_policy,
+            UnsafePolicy::ReferencesWrappedAllFunctionsSafe
+        );
+        let mut methods: Vec<ImplItem> = Vec::new();
+        for shim in UniquePtrShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name));
+            let method_id = make_ident(shim.rust_name());
+            // `std::shared_ptr::get`'s reasoning, unchanged: under this policy
+            // a `CppRef` is what safe code may go on to dereference, and the
+            // stored pointer may be null.
+            let unsafety: Option<syn::token::Unsafe> =
+                matches!(shim, UniquePtrShim::Get if wrapped).then(|| parse_quote! { unsafe });
+            let (bridge_ret, method_ret, body): (Type, Type, Expr) = match shim {
+                UniquePtrShim::Get if wrapped => (
+                    parse_quote! { *const #bridge_payload },
+                    parse_quote! { autocxx::CppRef<#payload> },
+                    parse_quote! { autocxx::CppRef::from_ptr(cxxbridge::#shim_id(self)) },
+                ),
+                UniquePtrShim::Get => (
+                    parse_quote! { *const #bridge_payload },
+                    parse_quote! { *const #payload },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+                UniquePtrShim::PayloadIsNull => (
+                    parse_quote! { bool },
+                    parse_quote! { bool },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+            };
+            result.extern_c_mod_items.push(parse_quote! {
+                fn #shim_id(self_: &#bridge_id) -> #bridge_ret;
+            });
+            let doc = unique_ptr_method_doc(shim, wrapped);
+            methods.push(parse_quote! {
+                #[doc = #doc]
+                pub #unsafety fn #method_id(&self) -> #method_ret {
+                    #body
+                }
+            });
+        }
+        let doc = unique_ptr_holder_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #doc]
+            impl #holder {
+                #(#methods)*
+            }
+        });
+    }
+
+    /// Declare the two C++ helpers of a `std::weak_ptr<const T>` holder in the
+    /// bridge, and put the surface built from them on the holder itself.
+    ///
+    /// `lock` hands back the `std::shared_ptr<const T>` holder, which is where
+    /// the payload becomes readable: a `std::weak_ptr` gives no access to it
+    /// at all, so nothing here names the payload and everything a caller can
+    /// do with it is on the other holder. `expired` is written in Rust as the
+    /// `use_count() == 0` C++ defines it to be, rather than costing a third
+    /// shim. See google/autocxx#799.
+    fn generate_weak_ptr_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        shared_holder: &QualifiedName,
+        result: &mut RsCodegenResult,
+    ) {
+        let holder = name.get_final_ident();
+        // Both holders live in the root namespace, so within the output mod
+        // the sibling is reached by its own name; the bridge mod, being flat,
+        // needs the name settled for it there.
+        let shared_id = shared_holder.get_final_ident();
+        let shared_bridge_id = self.bridge_type_names.get(shared_holder);
+        for shim in WeakPtrShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name));
+            result.extern_c_mod_items.push(match shim {
+                WeakPtrShim::Lock => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id) -> UniquePtr<#shared_bridge_id>;
+                },
+                WeakPtrShim::UseCount => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id) -> i64;
+                },
+            });
+        }
+        let lock_id = make_ident(WeakPtrShim::Lock.cpp_name(name));
+        let use_count_id = make_ident(WeakPtrShim::UseCount.cpp_name(name));
+        let holder_doc = weak_ptr_holder_doc();
+        let lock_doc = weak_ptr_lock_doc();
+        let use_count_doc = weak_ptr_use_count_doc();
+        let expired_doc = weak_ptr_expired_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #holder_doc]
+            impl #holder {
+                #[doc = #lock_doc]
+                pub fn lock(&self) -> cxx::UniquePtr<#shared_id> {
+                    cxxbridge::#lock_id(self)
+                }
+
+                #[doc = #use_count_doc]
+                pub fn use_count(&self) -> i64 {
+                    cxxbridge::#use_count_id(self)
+                }
+
+                #[doc = #expired_doc]
+                pub fn expired(&self) -> bool {
+                    self.use_count() == 0
+                }
             }
         });
     }
@@ -2016,6 +2153,119 @@ fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
                 .to_string()
         }
     }
+}
+
+/// What the generated docs say about a `std::unique_ptr<const T>` holder, on
+/// the impl block carrying its two methods. See google/autocxx#799.
+fn unique_ptr_holder_doc() -> String {
+    "This type is a C++ `std::unique_ptr<const T>`, held opaquely.\n\n\
+     `cxx::UniquePtr<T>` cannot stand for it. cxx spells that specialization \
+     `std::unique_ptr<T>`, dropping the `const`, because Rust has no `const T` \
+     to put in the `T`; the C++ which cxx then generates does not compile \
+     against the real signature. autocxx therefore declares this instantiation \
+     to cxx as an opaque extern type whose C++ definition is exactly \
+     `std::unique_ptr<const T>`, and gives it the methods below.\n\n\
+     Ownership is the C++ object's, as it is in C++: dropping the \
+     `cxx::UniquePtr` holding one of these runs `~unique_ptr`, which destroys \
+     the payload. Note the two levels - the outer `cxx::UniquePtr` is how any \
+     opaque C++ object reaches Rust, and the inner one is the C++ type this \
+     is.\n\n\
+     The surface is read-only: `release`, `reset` and `swap` would need a \
+     `Pin<&mut>` receiver and a way to build one of these from Rust, and \
+     neither is needed to bind a header which passes these around. Nor is \
+     there any way to move the payload out.\n\n\
+     The `const` is C++'s, and describes the access path this type gives you \
+     rather than the payload; C++ may hold a mutable pointer to the same \
+     object. Nothing here makes the holder `Send` or `Sync`."
+        .to_string()
+}
+
+/// What the generated docs say about each of the `std::unique_ptr<const T>`
+/// holder's two methods.
+fn unique_ptr_method_doc(shim: UniquePtrShim, wrapped: bool) -> String {
+    let get_caveats = "It may be null - a `std::unique_ptr` need not hold \
+         anything, and `payload_is_null` is how to find out; note that the \
+         `cxx::UniquePtr` this arrives in has an `is_null` of its own, which \
+         answers about that outer pointer instead. Beyond null, the pointer is \
+         only as good as the holder: the payload dies with the `unique_ptr`.";
+    match shim {
+        UniquePtrShim::Get if wrapped => format!(
+            "The stored pointer, as a `CppRef` - `std::unique_ptr::get`.\n\n\
+             {get_caveats}\n\n\
+             # Safety\n\n\
+             Under this policy a `CppRef` is what a C++ `const T&` parameter \
+             takes, and the generated C++ dereferences it without any further \
+             `unsafe` on your part - so producing one is where the promise has \
+             to be made. The caller must establish what the C++ header would \
+             otherwise have promised: that the stored pointer is non-null - \
+             [`Self::payload_is_null`] answers that - aligned, and refers to a \
+             live object for as long as the `CppRef` is used.\n\n\
+             The payload's C++ type is `const`, so no method here yields \
+             anything mutable - though `CppRef::const_cast` will hand you a \
+             `CppMutRef` if you ask, exactly as C++'s `const_cast` would."
+        ),
+        UniquePtrShim::Get => format!(
+            "The stored pointer - `std::unique_ptr::get`.\n\n\
+             {get_caveats} Both are why dereferencing it is `unsafe`.\n\n\
+             The payload's C++ type is `const`, so this is a `*const` and no \
+             method here yields a `*mut` - though Rust will let you cast one, \
+             exactly as C++'s `const_cast` would."
+        ),
+        UniquePtrShim::PayloadIsNull => "Whether this `unique_ptr` holds nothing - \
+             C++'s `operator bool`, negated.\n\n\
+             The question [`Self::get`] does not answer, and the one to settle \
+             before dereferencing what it returns."
+            .to_string(),
+    }
+}
+
+/// What the generated docs say about a `std::weak_ptr<const T>` holder, on the
+/// impl block carrying its methods. See google/autocxx#799.
+fn weak_ptr_holder_doc() -> String {
+    "This type is a C++ `std::weak_ptr<const T>`, held opaquely.\n\n\
+     `cxx::WeakPtr<T>` cannot stand for it. cxx spells that specialization \
+     `std::weak_ptr<T>`, dropping the `const`, because Rust has no `const T` \
+     to put in the `T`; the C++ which cxx then generates does not compile \
+     against the real signature. autocxx therefore declares this instantiation \
+     to cxx as an opaque extern type whose C++ definition is exactly \
+     `std::weak_ptr<const T>`, and gives it the methods below.\n\n\
+     A `std::weak_ptr` observes an ownership group without joining it, so it \
+     gives no access to the payload at all: `lock` is the only way to read \
+     one, and it answers with a `std::shared_ptr` which does own a share. That \
+     is why the payload is nowhere in this type's own methods - everything you \
+     can do with it is on what `lock` returns.\n\n\
+     Nothing here makes the holder `Send` or `Sync`."
+        .to_string()
+}
+
+fn weak_ptr_lock_doc() -> String {
+    "A `std::shared_ptr` sharing ownership of the payload, if it is still \
+     there - `std::weak_ptr::lock`.\n\n\
+     The result is always a holder, never nothing: C++ answers an expired \
+     `weak_ptr` with an *empty* `shared_ptr`, and so does this. `get` on it is \
+     then null and `use_count` is zero, which is how to tell the two apart. \
+     Taking the lock is the only way to read the payload safely - checking \
+     [`Self::expired`] first and reading afterwards would be checking \
+     something another thread may since have changed."
+        .to_string()
+}
+
+fn weak_ptr_use_count_doc() -> String {
+    "`std::weak_ptr::use_count` - the number of `shared_ptr`s owning the \
+     payload this observes. This `weak_ptr` is not one of them, so it does not \
+     count itself.\n\n\
+     As in C++, the answer is for diagnostics - in the presence of other \
+     threads it may already be stale."
+        .to_string()
+}
+
+fn weak_ptr_expired_doc() -> String {
+    "Whether the payload is gone - `std::weak_ptr::expired`, which C++ defines \
+     as `use_count() == 0` and this computes the same way.\n\n\
+     Also as in C++, a `false` answer may already be stale by the time you \
+     read it. [`Self::lock`] is the answer which cannot be, because what it \
+     hands back keeps the payload alive."
+        .to_string()
 }
 
 /// What the generated docs say about a `std::vector<T*>` holder, on the impl
