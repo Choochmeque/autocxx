@@ -31,7 +31,7 @@ use crate::{
         error_reporter::{convert_apis, report_any_error},
         parse::CppRefQualifier,
         type_helpers::extract_pinned_mutable_reference_type,
-        type_helpers::{type_is_reference, unwrap_has_opaque},
+        type_helpers::{denotes_cpp_array, type_is_reference, unwrap_has_opaque},
         CppEffectiveName, CppOriginalName,
     },
     known_types::known_types,
@@ -2556,6 +2556,15 @@ impl<'a> FnAnalyzer<'a> {
         ) || is_self;
         let rust_conversion_forced = force_rust_conversion.is_some();
         let ty = &*annotated_type.ty;
+        // Nothing below decays an array, and cxx would not write the C++ this
+        // parameter was declared with; see `denotes_cpp_array`. Said here
+        // rather than left to the catch-all at the end of this match, which
+        // hands whatever it is to cxx unconverted.
+        if denotes_cpp_array(ty) {
+            return Err(ConvertErrorFromCpp::CppArrayInSignature(
+                ty.to_token_stream().to_string(),
+            ));
+        }
         if let Some(holder_id) = is_subclass_holder {
             let subclass = SubclassName::from_holder_name(holder_id);
             return Ok({
@@ -2743,6 +2752,13 @@ impl<'a> FnAnalyzer<'a> {
                 let was_const = annotated_type.is_const;
                 let boxed_type = annotated_type.ty;
                 let ty: &Type = boxed_type.as_ref();
+                // As for a parameter: cxx would write `std::array` where C++
+                // wrote an array. See `denotes_cpp_array`.
+                if denotes_cpp_array(ty) {
+                    return Err(ConvertErrorFromCpp::CppArrayInSignature(
+                        ty.to_token_stream().to_string(),
+                    ));
+                }
                 match ty {
                     Type::Path(p)
                         if !self

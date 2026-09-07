@@ -6317,6 +6317,70 @@ fn test_take_array() {
     run_test("", hdr, rs, &["take_array"], &[]);
 }
 
+/// A *reference* to an array keeps the array type where a plain array
+/// parameter would have decayed: `const uint32_t (&a)[4]` reaches autocxx as
+/// `&[u32; 4]`, and cxx writes a Rust `[T; N]` as `std::array<T, N>`, so the
+/// bridge declared a parameter the function has not got. autocxx turns it down
+/// instead. Part of the arrays request reported upstream as google/autocxx#266;
+/// `test_take_array` is the decayed parameter, which is unaffected.
+#[test]
+fn test_array_reference_param_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    inline uint32_t take_array_ref(const uint32_t (&a)[4]) {
+        return a[0] + a[2];
+    }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_array_ref"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
+/// As `test_array_reference_param_refused`, for the mutable spelling, which
+/// arrives as `Pin<&mut [u32; 4]>` rather than as a reference.
+#[test]
+fn test_mutable_array_reference_param_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    inline void take_mut_array_ref(uint32_t (&a)[4]) { a[0] = 1; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_mut_array_ref"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
+/// A pointer to an array is refused by `ensure_pointee_is_valid` when the
+/// array is spelled out, but an alias hides it: `A4*` is a pointer to a path
+/// when that check looks, and only becomes `*mut [u32; 4]` once the alias is
+/// resolved. cxx then wrote `::std::array< ::std::uint32_t, 4> *` for a
+/// function taking `uint32_t (*)[4]`.
+#[test]
+fn test_array_pointer_through_alias_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    using A4 = uint32_t[4];
+    inline uint32_t take_alias_ptr(A4* p) { return (*p)[0]; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_alias_ptr"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
 /// A `const` member is moved by whatever accepts a `const M&&`, and
 /// `M(const M&&)` is exactly that - C++ counts it as a move constructor, and it
 /// is the one spelling of one a const member can use. `fx_CRM` has no copy

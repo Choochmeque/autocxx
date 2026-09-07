@@ -8,7 +8,7 @@
 
 use syn::{
     AngleBracketedGenericArguments, GenericArgument, Path, PathArguments, PathSegment, Type,
-    TypePath, TypeReference,
+    TypePath, TypePtr, TypeReference,
 };
 
 /// Looks in a `core::pin::Pin<&mut Something>` and returns the `Something`
@@ -158,6 +158,36 @@ pub(crate) fn unqualified_array_element_type(ty: &Type) -> &Type {
         ty = strip_const_markers(&arr.elem);
     }
     ty
+}
+
+/// Whether `ty` is a C++ array, or reaches one through the indirections a
+/// signature can be written with.
+///
+/// cxx spells a Rust `[T; N]` as `std::array<T, N>`, which is a different C++
+/// type from the `T[N]` bindgen wrote it for. A struct field is unaffected -
+/// the struct is defined by the C++ header, and cxx only checks its layout -
+/// but a function signature is not: the bridge declares a parameter of
+/// `std::array` and then takes the address of a function which has no such
+/// parameter, which C++ refuses.
+///
+/// An array *parameter* is not this. C++ decays one to a pointer before
+/// bindgen sees the declaration, so it arrives already a pointer and is bound
+/// as one; `test_take_array` is that case. What is left are the shapes which
+/// keep the array type, and they arrive spelled four ways: the array itself,
+/// `&[T; N]` for `const T (&)[N]`, `Pin<&mut [T; N]>` for `T (&)[N]`, and
+/// `*mut [T; N]` for a pointer whose pointee only becomes an array after
+/// `ensure_pointee_is_valid` has looked - which is what an alias does, as in
+/// `using A = T[N]; void f(A*)`.
+pub(crate) fn denotes_cpp_array(ty: &Type) -> bool {
+    match ty {
+        Type::Array(_) => true,
+        Type::Reference(TypeReference { elem, .. }) => denotes_cpp_array(elem),
+        Type::Ptr(TypePtr { elem, .. }) => denotes_cpp_array(elem),
+        Type::Path(typ) => {
+            matches!(extract_pinned_mutable_reference_type(typ), Some(inner) if denotes_cpp_array(inner))
+        }
+        _ => false,
+    }
 }
 
 /// If `ty` is `root::__BindgenBitfieldUnit<[u8; N]>` - the allocation unit
