@@ -16,8 +16,8 @@ mod non_pod_struct;
 pub(crate) mod unqualify;
 mod utils;
 
-use autocxx_bindgen::callbacks::SpecialMemberKind;
-use autocxx_bindgen::callbacks::Visibility as CppVisibility;
+use crate::vendored_bindgen::callbacks::SpecialMemberKind;
+use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 

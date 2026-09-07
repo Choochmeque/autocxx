@@ -52,9 +52,10 @@ to `cxx`.
 
 However, most of the actual code is in `engine/src/conversion/mod.rs`.
 
-At the moment we're using a slightly branched version of `bindgen` called `autocxx-bindgen`.
-It's hoped this is temporary (see [here](https://github.com/google/autocxx/issues/124)
-for status.)
+`bindgen` is vendored rather than depended upon: `engine/third_party/rust-bindgen` is a
+submodule of upstream `rust-lang/rust-bindgen` pinned at a release tag, and
+`engine/third_party/patches` holds autocxx's delta as a patch series which `engine/build.rs`
+applies into `OUT_DIR`. See "Rolling bindgen" below.
 
 ## How to develop
 
@@ -144,44 +145,45 @@ To make a new release of autocxx,
 
 ## Rolling bindgen
 
-autocxx currently depends upon a fork of bindgen called `autocxx-bindgen`.
-[This issue](https://github.com/google/autocxx/issues/124) is an attempt
-at entirely unforking bindgen. There are about 14 upstream PRs required;
-we should work hard to make required changes to get them accepted,
-because then this section becomes irrelevant and you'll never need to follow
-these steps.
+autocxx needs facts about C++ which bindgen does not report: access specifiers, special
+members, virtualness, the original C++ spelling behind a flattened nested name, and markers
+telling opaque types and references apart from what they are generated as. It used to get
+them from `autocxx-bindgen`, a fork republished under its own name, which had to be rebased
+by hand and fell far enough behind upstream to miss the clang-22 fix for
+`clang_getTypeDeclaration` (see [google/autocxx#1509](https://github.com/google/autocxx/issues/1509)
+and [rust-lang/rust-bindgen#3278](https://github.com/rust-lang/rust-bindgen/issues/3278)).
 
-Otherwise, periodically, you'll need to merge bindgen into autocxx-bindgen.
-[`autocxx-bindgen` is kept in this repository](https://github.com/adetaylor/rust-bindgen)
-in the `master` branch (which should be renamed eventually if we don't
-unfork bindgen).
+Instead:
 
-To update it,
+* `engine/third_party/rust-bindgen` is a git submodule of upstream `rust-lang/rust-bindgen`,
+  checked out at a release tag. Nothing in it is edited, and no upstream code is committed to
+  this repository.
+* `engine/third_party/patches/*.patch` is autocxx's delta, one file per feature, applied in
+  numeric order. Each patch applies to the submodule's `bindgen/` directory.
+* `engine/build.rs` copies the submodule sources into `OUT_DIR`, applies the patches, and
+  rewrites the result so it compiles as a module rather than a crate: bindgen's cargo
+  features become fixed `cfg`s, macros reached through `#[macro_use] extern crate` become
+  absolute paths, and `crate::` becomes `crate::vendored_bindgen::`.
+* `engine/src/lib.rs` mounts the result as `mod vendored_bindgen`.
 
-* Check out the master branch of that repo
-* Make a new branch
-* `git pull <upstream repo> main` (note that we use merge rather than
-  rebase)
-* Resolve conflicts and commit.
-* Push this branch to [the autocxx-bindgen repo](https://github.com/adetaylor/rust-bindgen)
-* Make a new branch of autocxx
-* Amend [`engine/Cargo.toml`](https://github.com/google/autocxx/blob/main/engine/Cargo.toml#L34)
-  to point to the new git branch of autocxx-bindgen instead of using
-  a published version (see the commented-out line)
-* Maybe `cd integration-tests; cargo test` to ensure things build and seem to
-  work... but you won't really know until you push to github CI
-* So, push your autocxx and make a pull request
-* If everything passes on CI, bump the `autocxx-bindgen` version number.
-  This needs to be done in `bindgen/Cargo.toml` and `Cargo.toml`. Commit that.
-* Push directly onto the master branch of
-  [the autocxx-bindgen repo](https://github.com/adetaylor/rust-bindgen).
-  You can't raise this roll as a pull request because Google's CLA tooling
-  will reject it.
-* `cargo publish` the new autocxx-bindgen version.
-* Amend your `autocxx` PR to switch to the published `autocxx-bindgen` version,
-  and push that.
-* Ensure CI still passes.
-* If so, merge your `autocxx` PR.
+A checkout therefore needs `git submodule update --init --recursive`, and CI jobs which
+compile the engine check out with `submodules: recursive`. `cargo package` flattens the
+submodule's files into the published crate, so crates.io users need none of this.
+
+To move to a new bindgen release:
+
+* `cd engine/third_party/rust-bindgen && git fetch && git checkout <new tag>`
+* `cargo check -p autocxx-engine`. Every patch that no longer applies fails the build naming
+  the patch and the file, so there is no silent mis-patching.
+* Rebase the failing patches. The delta is small and each patch is one feature, so this is a
+  matter of re-reading the hunk against the new upstream code rather than a merge.
+* Run the integration suite, and diff generated output against the previous commit for
+  anything the release changed on its own.
+* Commit the submodule bump and the rebased patches together.
+
+Anything in the patch series which upstream would take is worth sending upstream: the series
+is the list of reasons autocxx cannot use bindgen as published, and every patch removed from
+it is one less thing to rebase.
 
 ## Major areas of tech debt
 
@@ -212,10 +214,11 @@ Without further ado, they are:
    become uniform here by abstracting the name deconfliction stuff from the
    function analysis.
 
-2. **Fork of bindgen**. As noted under [rolling bindgen, above](#rolling-bindgen),
-   we currently use a fork of bindgen called `autocxx-bindgen`. This carries
-   a maintenance burden as we roll upstream. Also as noted above, we're
-   making good progress on undoing this. Tracked
+2. **Patched bindgen**. As noted under [rolling bindgen, above](#rolling-bindgen),
+   autocxx patches bindgen rather than using it as published. The patch series is
+   small and each patch is one feature, but every one of them is a hunk to rebase
+   at each bindgen release, and a feature upstream would take is a feature nobody
+   has to rebase again. Tracked
    [here](https://github.com/google/autocxx/issues/124).
 
 3. **Sensitivity to bindgen bugs caused by constructor calculations**.

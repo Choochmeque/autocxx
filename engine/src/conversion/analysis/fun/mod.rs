@@ -12,6 +12,8 @@ mod implicit_constructors;
 mod overload_tracker;
 mod subclass;
 
+use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
+use crate::vendored_bindgen::callbacks::{Explicitness, SpecialMemberKind, Virtualness};
 use crate::{
     conversion::{
         analysis::{
@@ -34,8 +36,6 @@ use crate::{
     minisyn::{minisynize_punctuated, FnArg},
     types::validate_ident_ok_for_rust,
 };
-use autocxx_bindgen::callbacks::Visibility as CppVisibility;
-use autocxx_bindgen::callbacks::{Explicitness, SpecialMemberKind, Virtualness};
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 

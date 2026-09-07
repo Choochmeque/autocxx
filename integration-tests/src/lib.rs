@@ -34,7 +34,8 @@ const KEEP_TEMPDIRS: bool = false;
 /// The bare `warn` is the level everything gets; the named directives raise or
 /// lower particular crates, longest name winning, so `autocxx` covers
 /// autocxx's own crates - the engine, the parser, this harness - and
-/// `autocxx_bindgen` then overrules it for that one.
+/// `autocxx_engine::vendored_bindgen` then overrules it for bindgen, which is
+/// a module of the engine rather than a crate of its own.
 ///
 /// Which it has to, because bindgen is where the noise is. Running the suite
 /// produces something like eighty-five thousand WARN lines from it and about
@@ -44,10 +45,12 @@ const KEEP_TEMPDIRS: bool = false;
 /// parsing the C++ standard library, which autocxx deliberately does not try to
 /// bind. A test which fails is then reported somewhere inside a hundred
 /// thousand lines of that. Nothing is being swept away permanently:
-/// `RUST_LOG=autocxx_bindgen=warn` puts it all back for anyone who wants it,
+/// `RUST_LOG=autocxx_engine::vendored_bindgen=warn` puts it all back for anyone
+/// who wants it,
 /// which is the right way round, because it is worth reading when you are
 /// debugging bindgen and worth nothing when you are not.
-const DEFAULT_LOG_FILTER: &str = "warn,autocxx=info,autocxx_bindgen=error";
+const DEFAULT_LOG_FILTER: &str =
+    "warn,autocxx=info,autocxx_engine::vendored_bindgen=error";
 
 /// Installs the logger which the suite's own `info!` output goes through.
 ///

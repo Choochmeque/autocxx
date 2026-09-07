@@ -10,8 +10,23 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid` so that `vendored_bindgen` can allow it back:
+// bindgen calls libclang and is full of `unsafe`. Nothing autocxx writes may
+// use it, which is what this is for, and `forbid` cannot be lifted per module.
+#![deny(unsafe_code)]
 #![cfg_attr(feature = "nightly", feature(doc_cfg))]
+
+// Declares `mod vendored_bindgen`, autocxx's copy of bindgen. The sources are a
+// git submodule pinned at an upstream tag; `build.rs` applies
+// `third_party/patches` to them and rewrites the result into a module. The
+// patches add what autocxx needs and upstream does not report: C++ access
+// specifiers, special members, virtualness, the original C++ spelling of a
+// nested name, and markers on opaque types and references.
+//
+// The declaration is generated rather than written here because `#[path]` takes
+// a string literal and nothing else, so `concat!(env!("OUT_DIR"), ..)` cannot
+// be spelled at this end.
+include!(concat!(env!("OUT_DIR"), "/vendored_bindgen_mount.rs"));
 
 mod ast_discoverer;
 mod clang_target;
@@ -30,7 +45,7 @@ mod builder;
 #[cfg(any(test, feature = "build"))]
 mod cxx_version_parity;
 
-use autocxx_bindgen::BindgenError;
+use crate::vendored_bindgen::BindgenError;
 use autocxx_parser::{EnumStyle, IncludeCppConfig, UnsafePolicy};
 use conversion::BridgeConverter;
 use miette::{SourceOffset, SourceSpan};
@@ -62,9 +77,7 @@ use known_types::known_types;
 use log::info;
 use miette::Diagnostic;
 
-/// We use a forked version of bindgen - for now.
-/// We hope to unfork.
-use autocxx_bindgen as bindgen;
+use crate::vendored_bindgen as bindgen;
 
 #[cfg(any(test, feature = "build"))]
 pub use builder::{
@@ -403,7 +416,7 @@ impl IncludeCppEngine {
             .represent_cxx_operators(true)
             .use_distinct_char16_t(true)
             .generate_deleted_functions(true)
-            .generate_pure_virtuals(true)
+            .generate_pure_virtual_functions(true)
             .raw_line(raw_line)
             .every_module_raw_line(all_module_raw_line)
             .generate_private_functions(true)

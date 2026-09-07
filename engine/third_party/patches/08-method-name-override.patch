@@ -1,0 +1,23 @@
+Subject: Let `generated_name_override` rename methods
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -3199,6 +3199,18 @@
+             _ => function.name().to_owned(),
+         };
+ 
++        // A method's name never reaches `Item::real_canonical_name`, so
++        // `generated_name_override` has to be consulted here for methods to be
++        // renamed at all.
++        if let Some(nm) = ctx.options().last_callback(|callbacks| {
++            callbacks.generated_name_override(ItemInfo {
++                name: name.as_str(),
++                kind: crate::callbacks::ItemKind::Function,
++            })
++        }) {
++            name = nm;
++        }
++
+         let TypeKind::Function(ref signature) =
+             *signature_item.expect_type().kind()
+         else {

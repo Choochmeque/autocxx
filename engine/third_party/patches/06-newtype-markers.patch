@@ -1,0 +1,233 @@
+Subject: Mark opaque types and C++ references with newtype wrappers
+
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -86,6 +86,20 @@
+     layout: Layout,
+     ffi_safe: bool,
+ ) -> syn::Type {
++    let inner_blob = blob_inner(ctx, layout, ffi_safe);
++    if ctx.options().use_opaque_newtype_wrapper {
++        syn::parse_quote! { __bindgen_marker_Opaque < #inner_blob > }
++    } else {
++        inner_blob
++    }
++}
++
++/// The blob type itself, without the marker wrapper `blob` may put round it.
++pub(crate) fn blob_inner(
++    ctx: &BindgenContext,
++    layout: Layout,
++    ffi_safe: bool,
++) -> syn::Type {
+     let align = layout.align.max(1);
+     // For alignments <= 4, it holds that the integer type of the same size aligns to that same
+     // size. For bigger alignments that's not guaranteed, e.g. on x86 u64 is aligned to 4 bytes.
+@@ -134,6 +148,24 @@
+     }
+ 
+     ty
++}
++
++/// A C++ reference, wrapped in a marker newtype if one was asked for.
++pub(crate) fn reference(
++    ty_ptr: syn::TypePtr,
++    is_rvalue: bool,
++    ctx: &BindgenContext,
++) -> syn::Type {
++    let ptr = syn::Type::Ptr(ty_ptr);
++    if ctx.options().use_reference_newtype_wrapper {
++        if is_rvalue {
++            syn::parse_quote! { __bindgen_marker_RValueReference < #ptr > }
++        } else {
++            syn::parse_quote! { __bindgen_marker_Reference < #ptr > }
++        }
++    } else {
++        ptr
++    }
+ }
+ 
+ pub(crate) mod ast_ty {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -4541,7 +4541,7 @@
+                 utils::build_path(item, ctx)
+             }
+             TypeKind::Opaque => self.try_to_opaque(ctx, item),
+-            TypeKind::Pointer(inner) | TypeKind::Reference(inner) => {
++            TypeKind::Pointer(inner) | TypeKind::Reference(inner, _) => {
+                 // Check that this type has the same size as the target's pointer type.
+                 let size = self.get_layout(ctx, item).size;
+                 if size != ctx.target_pointer_size() {
+@@ -4574,13 +4574,24 @@
+                 {
+                     Ok(ty)
+                 } else if ctx.options().generate_cxx_nonnull_references &&
+-                    matches!(self.kind(), TypeKind::Reference(_))
++                    matches!(self.kind(), TypeKind::Reference(..))
+                 {
+                     // It's UB to pass null values in place of C++ references
+                     let prefix = ctx.trait_prefix();
+                     Ok(syn::parse_quote! { ::#prefix::ptr::NonNull<#ty> })
+                 } else {
+-                    Ok(ty.to_ptr(is_const))
++                    let ty_ptr = ty.to_ptr(is_const);
++                    match (&ty_ptr, self.kind()) {
++                        (
++                            syn::Type::Ptr(ty_ptr_inside),
++                            TypeKind::Reference(_, rvalue),
++                        ) => Ok(helpers::reference(
++                            ty_ptr_inside.clone(),
++                            *rvalue,
++                            ctx,
++                        )),
++                        _ => Ok(ty_ptr),
++                    }
+                 }
+             }
+             TypeKind::TypeParam => {
+--- a/ir/analysis/has_vtable.rs
++++ b/ir/analysis/has_vtable.rs
+@@ -158,7 +158,7 @@
+             TypeKind::TemplateAlias(t, _) |
+             TypeKind::Alias(t) |
+             TypeKind::ResolvedTypeRef(t) |
+-            TypeKind::Reference(t) => {
++            TypeKind::Reference(t, _) => {
+                 trace!(
+                     "    aliases and references forward to their inner type"
+                 );
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -271,7 +271,9 @@
+     ) -> Option<Cow<'a, str>> {
+         let name_info = match *self.kind() {
+             TypeKind::Pointer(inner) => Some((inner, Cow::Borrowed("ptr"))),
+-            TypeKind::Reference(inner) => Some((inner, Cow::Borrowed("ref"))),
++            TypeKind::Reference(inner, _) => {
++                Some((inner, Cow::Borrowed("ref")))
++            }
+             TypeKind::Array(inner, length) => {
+                 Some((inner, format!("array{length}").into()))
+             }
+@@ -556,7 +558,7 @@
+             TypeKind::Enum(_) |
+             TypeKind::Pointer(_) |
+             TypeKind::BlockPointer(_) |
+-            TypeKind::Reference(_) |
++            TypeKind::Reference(..) |
+             TypeKind::UnresolvedTypeRef(..) |
+             TypeKind::TypeParam |
+             TypeKind::Alias(_) |
+@@ -636,7 +638,8 @@
+     BlockPointer(TypeId),
+ 
+     /// A reference to a type, as in: int& `foo()`.
+-    Reference(TypeId),
++    /// The bool represents whether it's rvalue.
++    Reference(TypeId, bool),
+ 
+     /// An instantiation of an abstract template definition with a set of
+     /// concrete template arguments.
+@@ -1033,15 +1036,24 @@
+                 }
+                 // XXX: RValueReference is most likely wrong, but I don't think we
+                 // can even add bindings for that, so huh.
+-                CXType_RValueReference | CXType_LValueReference => {
++                CXType_LValueReference => {
+                     let inner = Item::from_ty_or_ref(
+                         ty.pointee_type().unwrap(),
+                         location,
+                         None,
+                         ctx,
+                     );
+-                    TypeKind::Reference(inner)
++                    TypeKind::Reference(inner, false)
+                 }
++                CXType_RValueReference => {
++                    let inner = Item::from_ty_or_ref(
++                        ty.pointee_type().unwrap(),
++                        location,
++                        None,
++                        ctx,
++                    );
++                    TypeKind::Reference(inner, true)
++                }
+                 // XXX DependentSizedArray is wrong
+                 CXType_VariableArray | CXType_DependentSizedArray => {
+                     let inner = Item::from_ty(
+@@ -1253,7 +1265,7 @@
+         }
+         match *self.kind() {
+             TypeKind::Pointer(inner) |
+-            TypeKind::Reference(inner) |
++            TypeKind::Reference(inner, _) |
+             TypeKind::Array(inner, _) |
+             TypeKind::Vector(inner, _) |
+             TypeKind::BlockPointer(inner) |
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -689,6 +689,8 @@
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
+         represent_cxx_operators,
++        use_opaque_newtype_wrapper,
++        use_reference_newtype_wrapper,
+         vtable_generation,
+         sort_semantically,
+         merge_extern_blocks,
+@@ -995,6 +997,8 @@
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
+             represent_cxx_operators,
++            use_opaque_newtype_wrapper,
++            use_reference_newtype_wrapper,
+             vtable_generation,
+             sort_semantically,
+             merge_extern_blocks,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -168,6 +168,43 @@
+         as_args: "--use-specific-virtual-function-receiver",
+     },
+ 
++    /// Use a newtype wrapper to denote "opaque" types: types where bindgen
++    /// generated something matching the size and alignment of the C++ type
++    /// without knowing what is inside it. The wrapper is a fake type called
++    /// `__bindgen_marker_Opaque`, to be replaced by post-processing the output
++    /// or by a `use` injected with `--every-module-raw-line` or similar.
++    use_opaque_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap opaque types in a fake newtype
++            /// wrapper which post-processors can replace with something
++            /// more sensible.
++            pub fn use_opaque_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_opaque_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-opaque-newtype-wrapper",
++    },
++
++    /// Use a newtype wrapper to denote C++ reference types. References are
++    /// always generated as raw Rust pointers, so otherwise there is no way to
++    /// tell a reference from a pointer. The wrapper is a fake type called
++    /// `__bindgen_marker_Reference` or `__bindgen_marker_RValueReference`, to
++    /// be replaced by post-processing the output or by a `use` injected with
++    /// `--every-module-raw-line` or similar.
++    use_reference_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap C++ references in a fake newtype
++            /// wrapper which post-processors can replace with something
++            /// more sensible.
++            pub fn use_reference_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_reference_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-reference-newtype-wrapper",
++    },
++
+     /// Whether we should distinguish between C++'s `char16_t` and `u16`.
+     /// The C++ type `char16_t` is its own special type; it's not a typedef
+     /// of some other integer (this differs from C).

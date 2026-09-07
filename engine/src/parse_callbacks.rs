@@ -9,12 +9,12 @@
 use std::{cell::RefCell, fmt::Display, panic::UnwindSafe, rc::Rc};
 
 use crate::types::{strip_bindgen_original_suffix, Namespace};
-use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
-use autocxx_bindgen::callbacks::Virtualness;
-use autocxx_bindgen::callbacks::{
+use crate::vendored_bindgen::callbacks::Virtualness;
+use crate::vendored_bindgen::callbacks::{
     DiscoveredItem, DiscoveredItemId, Explicitness, SpecialMemberKind, Visibility,
 };
-use autocxx_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks};
+use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
+use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
 use indexmap::IndexMap as HashMap;
 use indexmap::IndexSet as HashSet;
 use quote::quote;
@@ -374,7 +374,15 @@ impl ParseCallbacks for AutocxxParseCallbacks {
         self.results.borrow_mut().virtuals.insert(id, virtualness);
     }
 
-    fn new_item_found(&self, id: DiscoveredItemId, item: DiscoveredItem) {
+    fn new_item_found(
+        &self,
+        id: DiscoveredItemId,
+        item: DiscoveredItem,
+        // Where in the headers the item was written. autocxx locates items by
+        // name and parentage instead - see `ParseCallbackResults::id_by_name` -
+        // so it has no use for this.
+        _source_location: Option<&SourceLocation>,
+    ) {
         match item {
             DiscoveredItem::Struct { final_name, .. }
             | DiscoveredItem::Enum { final_name, .. }

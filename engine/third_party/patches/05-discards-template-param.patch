@@ -1,0 +1,88 @@
+Subject: Report types whose template parameters bindgen dropped
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -492,7 +492,7 @@
+             TypeKind::ObjCSel |
+             TypeKind::TemplateInstantiation(..) => None,
+             _ => {
+-                let params = item.used_template_params(ctx);
++                let (params, _) = item.used_template_params(ctx);
+                 if params.is_empty() {
+                     None
+                 } else {
+@@ -1020,7 +1020,8 @@
+                     return;
+                 }
+ 
+-                let mut outer_params = item.used_template_params(ctx);
++                let (mut outer_params, has_unused_template_args) =
++                    item.used_template_params(ctx);
+ 
+                 let is_opaque = item.is_opaque(ctx, &());
+                 let inner_rust_type = if is_opaque {
+@@ -2305,7 +2306,9 @@
+ 
+         let mut generic_param_names = vec![];
+ 
+-        for (idx, ty) in item.used_template_params(ctx).iter().enumerate() {
++        let (used_template_params, unused_template_params) =
++            item.used_template_params(ctx);
++        for (idx, ty) in used_template_params.iter().enumerate() {
+             let param = ctx.resolve_type(*ty);
+             let name = param.name().unwrap();
+             let ident = ctx.rust_ident(name);
+@@ -4512,11 +4515,11 @@
+                     return Ok(void.to_ptr(/* is_const = */ false));
+                 }
+ 
+-                if item.is_opaque(ctx, &()) &&
+-                    item.used_template_params(ctx)
+-                        .into_iter()
+-                        .any(|param| param.is_template_param(ctx, &()))
+-                {
++                let (used_template_params, _) = item.used_template_params(ctx);
++                let has_used_template_params = used_template_params
++                    .into_iter()
++                    .any(|param| param.is_template_param(ctx, &()));
++                if item.is_opaque(ctx, &()) && has_used_template_params {
+                     self.try_to_opaque(ctx, item)
+                 } else if let Some(ty) = self
+                     .name()
+--- a/ir/template.rs
++++ b/ir/template.rs
+@@ -139,8 +139,9 @@
+ 
+     /// Get only the set of template parameters that this item uses. This is a
+     /// subset of `all_template_params` and does not necessarily contain any of
+-    /// `self_template_params`.
+-    fn used_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId>
++    /// `self_template_params`. If any are unused, true will be returned
++    /// in the second tuple element.
++    fn used_template_params(&self, ctx: &BindgenContext) -> (Vec<TypeId>, bool)
+     where
+         Self: AsRef<ItemId>,
+     {
+@@ -150,11 +151,17 @@
+         );
+ 
+         let id = *self.as_ref();
+-        ctx.resolve_item(id)
+-            .all_template_params(ctx)
+-            .into_iter()
+-            .filter(|p| ctx.uses_template_parameter(id, *p))
+-            .collect()
++        let all = ctx.resolve_item(id).all_template_params(ctx);
++        let mut used = Vec::with_capacity(all.len());
++        let mut any_unused = false;
++        for param in all {
++            if ctx.uses_template_parameter(id, param) {
++                used.push(param);
++            } else {
++                any_unused = true;
++            }
++        }
++        (used, any_unused)
+     }
+ }
+ 

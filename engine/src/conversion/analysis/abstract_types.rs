@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use autocxx_bindgen::callbacks::Virtualness;
+use crate::vendored_bindgen::callbacks::Virtualness;
 use indexmap::map::IndexMap as HashMap;
 use syn::{punctuated::Punctuated, token::Comma};
 

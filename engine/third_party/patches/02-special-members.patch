@@ -1,0 +1,181 @@
+Subject: Identify C++ special members, `= delete` and `= default`
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -1,6 +1,7 @@
+ //! A public API for more fine-grained customization of bindgen behavior.
+ 
+ pub use crate::ir::analysis::DeriveTrait;
++pub use crate::ir::comp::SpecialMemberKind;
+ pub use crate::ir::derive::CanDerive as ImplementsTrait;
+ pub use crate::ir::function::Visibility;
+ pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
+--- a/clang.rs
++++ b/clang.rs
+@@ -927,6 +927,21 @@
+         unsafe { clang_isVirtualBase(self.x) != 0 }
+     }
+ 
++    /// Is this cursor's referent a default constructor?
++    pub(crate) fn is_default_constructor(&self) -> bool {
++        unsafe { clang_CXXConstructor_isDefaultConstructor(self.x) != 0 }
++    }
++
++    /// Is this cursor's referent a copy constructor?
++    pub(crate) fn is_copy_constructor(&self) -> bool {
++        unsafe { clang_CXXConstructor_isCopyConstructor(self.x) != 0 }
++    }
++
++    /// Is this cursor's referent a move constructor?
++    pub(crate) fn is_move_constructor(&self) -> bool {
++        unsafe { clang_CXXConstructor_isMoveConstructor(self.x) != 0 }
++    }
++
+     /// Try to evaluate this cursor.
+     pub(crate) fn evaluate(&self) -> Option<EvalResult> {
+         EvalResult::new(*self)
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -73,6 +73,23 @@
+     }
+ }
+ 
++/// The kind of C++ special member.
++// Copy assignment and move assignment are not covered: libclang offers no way
++// to query for them.
++#[derive(Debug, Copy, Clone, PartialEq)]
++pub enum SpecialMemberKind {
++    /// The default constructor.
++    DefaultConstructor,
++    /// A copy constructor.
++    CopyConstructor,
++    /// A move constructor.
++    MoveConstructor,
++    /// A destructor.
++    Destructor,
++    /// The assignment operator.
++    AssignmentOperator,
++}
++
+ /// A struct representing a C++ method, either static, normal, or virtual.
+ #[derive(Debug)]
+ pub(crate) struct Method {
+--- a/ir/function.rs
++++ b/ir/function.rs
+@@ -1,6 +1,6 @@
+ //! Intermediate representation for C/C++ functions and methods.
+ 
+-use super::comp::MethodKind;
++use super::comp::{MethodKind, SpecialMemberKind};
+ use super::context::{BindgenContext, TypeId};
+ use super::dot::DotAttributes;
+ use super::item::Item;
+@@ -72,6 +72,55 @@
+     Internal,
+ }
+ 
++/// Extra C++ facts autocxx needs which vanilla bindgen does not record.
++#[derive(Debug)]
++pub(crate) struct AutocxxFuncInfo {
++    /// C++ special member kind, if applicable.
++    special_member: Option<SpecialMemberKind>,
++    /// C++ access specifier.
++    visibility: Visibility,
++    /// `= delete`
++    is_deleted: bool,
++    /// `= default`
++    is_defaulted: bool,
++}
++
++impl AutocxxFuncInfo {
++    fn new(
++        special_member: Option<SpecialMemberKind>,
++        visibility: Visibility,
++        is_deleted: bool,
++        is_defaulted: bool,
++    ) -> Self {
++        Self {
++            special_member,
++            visibility,
++            is_deleted,
++            is_defaulted,
++        }
++    }
++
++    /// Get this function's C++ special member kind.
++    pub fn special_member(&self) -> Option<SpecialMemberKind> {
++        self.special_member
++    }
++
++    /// This function's C++ access specifier.
++    pub fn visibility(&self) -> Visibility {
++        self.visibility
++    }
++
++    /// Whether this function is `= delete`.
++    pub fn deleted_fn(&self) -> bool {
++        self.is_deleted
++    }
++
++    /// Whether this function is `= default`.
++    pub fn defaulted_fn(&self) -> bool {
++        self.is_defaulted
++    }
++}
++
+ /// C++ visibility.
+ #[derive(Debug, Clone, Copy)]
+ pub enum Visibility {
+@@ -118,6 +167,9 @@
+ 
+     /// The linkage of the function.
+     linkage: Linkage,
++
++    /// Extra C++ facts autocxx needs.
++    autocxx: AutocxxFuncInfo,
+ }
+ 
+ impl Function {
+@@ -129,6 +181,7 @@
+         signature: TypeId,
+         kind: FunctionKind,
+         linkage: Linkage,
++        autocxx: AutocxxFuncInfo,
+     ) -> Self {
+         Function {
+             name,
+@@ -137,6 +190,7 @@
+             signature,
+             kind,
+             linkage,
++            autocxx,
+         }
+     }
+ 
+@@ -168,6 +222,26 @@
+     /// Get this function's linkage.
+     pub(crate) fn linkage(&self) -> Linkage {
+         self.linkage
++    }
++
++    /// Get this function's C++ special member kind.
++    pub fn special_member(&self) -> Option<SpecialMemberKind> {
++        self.autocxx.special_member()
++    }
++
++    /// This function's C++ access specifier.
++    pub fn visibility(&self) -> Visibility {
++        self.autocxx.visibility()
++    }
++
++    /// Whether this function is `= delete`.
++    pub fn deleted_fn(&self) -> bool {
++        self.autocxx.deleted_fn()
++    }
++
++    /// Whether this function is `= default`.
++    pub fn defaulted_fn(&self) -> bool {
++        self.autocxx.defaulted_fn()
+     }
+ }
+ 

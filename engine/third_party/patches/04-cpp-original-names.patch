@@ -1,0 +1,43 @@
+Subject: Reconstruct an item's original C++ name
+
+--- a/ir/item.rs
++++ b/ir/item.rs
+@@ -826,6 +826,38 @@
+         }
+     }
+ 
++    /// Get this item's original C++ name, including any containing types but
++    /// not the namespace. For nested types the C++ name differs from the Rust
++    /// name: C++ `A::B` is Rust `A_B`. `None` if the item or any containing
++    /// type is anonymous.
++    pub(crate) fn original_name(&self, ctx: &BindgenContext) -> Option<String> {
++        let target = ctx.resolve_item(self.name_target(ctx));
++
++        // Get item and all ancestors until the first enclosing namespace.
++        let ancestors: Vec<_> = target
++            .ancestors(ctx)
++            .map(|id| ctx.resolve_item(id))
++            .take_while(|item| !item.is_module())
++            .collect();
++
++        if ancestors.iter().any(|item| item.is_anon()) {
++            return None;
++        }
++
++        let mut names: Vec<_> = ancestors
++            .iter()
++            .map(|item| {
++                let target = ctx.resolve_item(item.name_target(ctx));
++                target.base_name(ctx)
++            })
++            .filter(|name| !name.is_empty())
++            .collect();
++
++        names.reverse();
++
++        Some(names.join("::"))
++    }
++
+     /// Get the canonical name without taking into account the replaces
+     /// annotation.
+     ///
