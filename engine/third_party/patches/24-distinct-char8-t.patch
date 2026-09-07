@@ -1,0 +1,182 @@
+Subject: Add `--use-distinct-char8-t`, recognising `char8_t` by its spelling
+
+C++20's `char8_t` is the one builtin type bindgen cannot see. libclang has no
+`CXType_Char8` - the kinds run `CXType_UChar = 5`, `CXType_Char16 = 6`,
+`CXType_Char32 = 7`, and nothing was added for it - so `build_builtin_ty`
+returns `None`, `Type::from_clang_ty` falls through to the unexposed arm, and a
+`char8_t` parameter comes out as an opaque one-byte blob. That is the same
+outcome bindgen produces for a type it genuinely does not understand, which is
+misleading: it understands this one perfectly, it just has no enumerator to
+match on.
+
+It does not need one. clang spells the type `char8_t`, and bindgen already
+wraps `clang_getTypeSpelling` as `Type::spelling` and already stores the
+spelling on every builtin it constructs. `Type::is_char8_t` uses that, checked
+against libclang 17 and 21 on the way in. Qualifiers are part of a spelling, so
+the comparison is against the last word, and the type's layout is checked as
+well: before C++20 `char8_t` is an ordinary identifier, so a template type
+parameter can be named that and arrives spelled and kinded identically, and
+`spelling` strips a `T::` qualification too. clang gives the real type a
+one-byte layout and answers `CXTypeLayoutError_Dependent` for either of those.
+
+`--use-distinct-char8-t` then emits a fake type called `bindgen_cchar8_t`, in
+the same shape as `--use-distinct-char16-t`'s `bindgen_cchar16_t`, for a
+downstream post-processor to replace. `IntKind::Char8` is unsigned and one byte
+wide by [basic.fundamental]/7, so `is_signed` and `known_size` answer for it
+directly.
+
+Off by default, so no existing output changes - including the opaque blob,
+which is what a caller who does not ask still gets.
+
+--- a/clang.rs
++++ b/clang.rs
+@@ -1430,6 +1430,31 @@
+         unsafe { clang_isConstQualifiedType(self.x) != 0 }
+     }
+ 
++    /// Is this C++20's `char8_t`?
++    ///
++    /// There is no `CXType_Char8` to compare against: libclang's kinds go
++    /// `CXType_UChar`, `CXType_Char16`, `CXType_Char32`, with no slot for the
++    /// type C++20 added, so `char8_t` arrives as `CXType_Unexposed` and only
++    /// its spelling says what it is. Qualifiers are part of that spelling -
++    /// `const char8_t` - so the last word is what is compared.
++    ///
++    /// The spelling alone would not be enough. Before C++20 `char8_t` is an
++    /// ordinary identifier, so a template type parameter can be named that,
++    /// and such a parameter is unexposed and spelled `char8_t` as well;
++    /// `spelling` drops a qualification whose every segment is an identifier,
++    /// so a dependent `T::char8_t` arrives spelled the same way too. What
++    /// separates them is the layout: clang answers one byte for the real type
++    /// and `CXTypeLayoutError_Dependent` for either of those.
++    pub(crate) fn is_char8_t(&self, ctx: &BindgenContext) -> bool {
++        if self.kind() != CXType_Unexposed {
++            return false;
++        }
++        if !matches!(self.spelling().rsplit(' ').next(), Some("char8_t")) {
++            return false;
++        }
++        matches!(self.fallible_size(ctx), Ok(1))
++    }
++
+     #[inline]
+     fn is_non_deductible_auto_type(&self) -> bool {
+         debug_assert_eq!(self.kind(), CXType_Auto);
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -270,6 +270,8 @@
+             // As `Char16`, and only reachable the same way: `char32_t` is
+             // collapsed to `u32` unless `use_distinct_char32_t` asks for it.
+             IntKind::Char32 => syn::parse_quote! { bindgen_cchar32_t },
++            // As `Char32`, and reached only under `use_distinct_char8_t`.
++            IntKind::Char8 => syn::parse_quote! { bindgen_cchar8_t },
+             IntKind::SChar => raw_type(ctx, "c_schar"),
+             IntKind::UChar => raw_type(ctx, "c_uchar"),
+             IntKind::Short => raw_type(ctx, "c_short"),
+--- a/ir/context.rs
++++ b/ir/context.rs
+@@ -2053,6 +2053,12 @@
+                 };
+                 TypeKind::Complex(float_kind)
+             }
++            // `char8_t` is the one builtin libclang cannot name: it arrives
++            // unexposed, so it is recognised by spelling instead. See
++            // `Type::is_char8_t`.
++            _ if self.options().use_distinct_char8_t && ty.is_char8_t(self) => {
++                TypeKind::Int(IntKind::Char8)
++            }
+             _ => return None,
+         };
+ 
+--- a/ir/int.rs
++++ b/ir/int.rs
+@@ -63,6 +63,10 @@
+     /// The C++ type `char32_t`, which is its own type (unlike in C).
+     Char32,
+ 
++    /// The C++ type `char8_t`, which is its own type (and has no C
++    /// equivalent at all).
++    Char8,
++
+     /// A 32-bit signed integer.
+     I32,
+ 
+@@ -100,7 +104,7 @@
+             // to know whether it is or not right now (unlike char, there's no
+             // WChar_S / WChar_U).
+             Bool | UChar | UShort | UInt | ULong | ULongLong | U8 | U16 |
+-            Char16 | Char32 | WChar | U32 | U64 | U128 => false,
++            Char16 | Char32 | Char8 | WChar | U32 | U64 | U128 => false,
+ 
+             SChar | Short | Int | Long | LongLong | I8 | I16 | I32 | I64 |
+             I128 => true,
+@@ -115,7 +119,7 @@
+     pub(crate) fn known_size(&self) -> Option<usize> {
+         use self::IntKind::*;
+         Some(match *self {
+-            Bool | UChar | SChar | U8 | I8 | Char { .. } => 1,
++            Bool | UChar | SChar | U8 | I8 | Char8 | Char { .. } => 1,
+             U16 | I16 | Char16 => 2,
+             U32 | I32 | Char32 => 4,
+             U64 | I64 => 8,
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -487,6 +487,9 @@
+     /// Use distinct char32_t
+     #[arg(long)]
+     use_distinct_char32_t: bool,
++    /// Use distinct char8_t
++    #[arg(long)]
++    use_distinct_char8_t: bool,
+     /// Output C++ overloaded operators
+     #[arg(long)]
+     represent_cxx_operators: bool,
+@@ -700,6 +703,7 @@
+         use_distinct_char16_t,
+         use_distinct_wchar_t,
+         use_distinct_char32_t,
++        use_distinct_char8_t,
+         represent_cxx_operators,
+         use_opaque_newtype_wrapper,
+         use_reference_newtype_wrapper,
+@@ -1012,6 +1016,7 @@
+             use_distinct_char16_t,
+             use_distinct_wchar_t,
+             use_distinct_char32_t,
++            use_distinct_char8_t,
+             represent_cxx_operators,
+             use_opaque_newtype_wrapper,
+             use_reference_newtype_wrapper,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -313,6 +313,30 @@
+         },
+         as_args: "--use-distinct-char32-t",
+     },
++
++    /// Whether we should recognise C++20's `char8_t` at all.
++    ///
++    /// libclang has no `CXType_Char8` - its kinds go `CXType_UChar`,
++    /// `CXType_Char16`, `CXType_Char32`, with no slot for the type C++20
++    /// added - so `char8_t` reaches bindgen as an unexposed type and comes out
++    /// as an opaque blob of one byte. It is nonetheless identifiable, because
++    /// clang spells it `char8_t`, which is what this option matches on.
++    ///
++    /// When this option is enabled, such a type generates a fake type called
++    /// `bindgen_cchar8_t`, exactly as `use_distinct_char16_t` generates
++    /// `bindgen_cchar16_t`. Downstream code post-processors should arrange to
++    /// replace this with a real type.
++    use_distinct_char8_t: bool {
++        methods: {
++            /// If this is true, denote `char8_t` as its own type rather than
++            /// leaving it opaque. Disabled by default.
++            pub fn use_distinct_char8_t(mut self, doit: bool) -> Builder {
++                self.options.use_distinct_char8_t = doit;
++                self
++            }
++        },
++        as_args: "--use-distinct-char8-t",
++    },
+     /// Whether we should output C++ overloaded operators. By itself,
+     /// this option is not sufficient to produce valid output, because
+     /// such operators will have names that are not acceptable Rust
