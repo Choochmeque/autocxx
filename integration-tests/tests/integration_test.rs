@@ -23179,3 +23179,31 @@ fn test_generated_method_names_its_receiver_the_same_in_cpp_and_rust() {
         None,
     );
 }
+
+/// A method whose name is the class's name followed by digits reads exactly
+/// like one of that class's constructors, which is how autocxx used to
+/// classify it. See google/autocxx#995.
+#[test]
+fn test_method_named_like_a_constructor_overload() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Widget {
+        public:
+            Widget() : a(3) {}
+            Widget(uint32_t a) : a(a) {}
+            uint32_t Widget3() const { return a; }
+            static uint32_t Widget1() { return 1; }
+            uint32_t a;
+        };
+    "};
+    let rs = quote! {
+        let w = ffi::Widget::new().within_unique_ptr();
+        assert_eq!(w.Widget3(), 3);
+        // A constructor which is not a special member, so it is classified
+        // by the kind bindgen reported rather than by being one.
+        let w = ffi::Widget::new1(7).within_unique_ptr();
+        assert_eq!(w.Widget3(), 7);
+        assert_eq!(ffi::Widget::Widget1(), 1);
+    };
+    run_test("", hdr, rs, &["Widget"], &[]);
+}
