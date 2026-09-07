@@ -1,0 +1,254 @@
+Subject: Report a C++ alias template's discarded template parameters
+
+`TypeKind::TemplateAlias` keeps only the template *type* parameters of an alias
+template: a non-type or template template parameter has no `TypeId`, falls into
+the catch-all of the `CXCursor_TypeAliasTemplateDecl` visitor and is dropped.
+bindgen then emits the alias as a plain `pub type X = Y;`, which is a lie about
+`X`: naming it in C++ still takes the arguments the typedef has lost. Nothing in
+`ParseCallbacks` distinguishes it from an ordinary typedef -
+`DiscoveredItem::Alias` covers both, and `used_template_params` sees only the
+parameters that survived, so an alias whose every parameter was dropped looks
+like one that has none.
+
+Count the parameters the declaration actually had while the visitor is already
+walking them, carry the count on the variant, and report it alongside the count
+of type parameters through an additive
+`ParseCallbacks::denote_alias_template`. Reporting both numbers rather than a
+boolean keeps the callback descriptive: it states what the declaration had and
+what survived into the IR, and leaves the consumer to decide what that means
+for it.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -275,6 +275,27 @@
+     /// syntax of its own.
+     fn denote_method_kind(&self, _id: DiscoveredItemId, _kind: MethodKind) {}
+ 
++    /// Report that an item is a C++ alias template, with the number of
++    /// template parameters its declaration had and the number of those which
++    /// are template *type* parameters.
++    ///
++    /// The two differ when C++ declared a non-type or a template template
++    /// parameter: neither is a type, so neither survives into
++    /// `TypeKind::TemplateAlias`, and bindgen emits the alias as a plain
++    /// `pub type`, which has lost the parameters that naming the alias in C++
++    /// still takes. Nothing else distinguishes that from an ordinary typedef,
++    /// so a consumer which has to emit C++ naming the alias needs to be told.
++    /// Both counts are of what C++ declared: bindgen may still drop one of the
++    /// type parameters for being unused, which it reports through
++    /// [`ParseCallbacks::denote_discards_template_param`] instead.
++    fn denote_alias_template(
++        &self,
++        _id: DiscoveredItemId,
++        _declared_params: usize,
++        _type_params: usize,
++    ) {
++    }
++
+     // TODO add callback for ResolvedTypeRef
+ }
+ 
+
+--- a/codegen/impl_debug.rs
++++ b/codegen/impl_debug.rs
+@@ -195,7 +195,7 @@
+             }
+ 
+             TypeKind::ResolvedTypeRef(t) |
+-            TypeKind::TemplateAlias(t, _) |
++            TypeKind::TemplateAlias(t, ..) |
+             TypeKind::Alias(t) |
+             TypeKind::BlockPointer(t) => {
+                 // We follow the aliases
+
+--- a/codegen/impl_partialeq.rs
++++ b/codegen/impl_partialeq.rs
+@@ -104,7 +104,7 @@
+         }
+ 
+         TypeKind::ResolvedTypeRef(t) |
+-        TypeKind::TemplateAlias(t, _) |
++        TypeKind::TemplateAlias(t, ..) |
+         TypeKind::Alias(t) |
+         TypeKind::BlockPointer(t) => {
+             let inner_item = ctx.resolve_item(t);
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -996,7 +996,7 @@
+                 result.saw_block();
+             }
+             TypeKind::Comp(ref ci) => ci.codegen(ctx, result, item),
+-            TypeKind::TemplateAlias(inner, _) | TypeKind::Alias(inner) => {
++            TypeKind::TemplateAlias(inner, ..) | TypeKind::Alias(inner) => {
+                 let inner_item =
+                     inner.into_resolver().through_type_refs().resolve(ctx);
+                 let name = item.canonical_name(ctx);
+@@ -1106,6 +1106,18 @@
+                         ),
+                     }
+                 });
++                if let TypeKind::TemplateAlias(_, ref params, declared_params) =
++                    *self.kind()
++                {
++                    let id = DiscoveredItemId::new(item.id().as_usize());
++                    ctx.options().for_each_callback(|cb| {
++                        cb.denote_alias_template(
++                            id,
++                            declared_params,
++                            params.len(),
++                        );
++                    });
++                }
+ 
+                 let mut tokens = if let Some(comment) = item.comment(ctx) {
+                     attributes::doc(&comment)
+
+--- a/ir/analysis/has_destructor.rs
++++ b/ir/analysis/has_destructor.rs
+@@ -98,7 +98,7 @@
+         };
+ 
+         match *ty.kind() {
+-            TypeKind::TemplateAlias(t, _) |
++            TypeKind::TemplateAlias(t, ..) |
+             TypeKind::Alias(t) |
+             TypeKind::ResolvedTypeRef(t) => {
+                 if self.have_destructor.contains(&t.into()) {
+
+--- a/ir/analysis/has_float.rs
++++ b/ir/analysis/has_float.rs
+@@ -155,7 +155,7 @@
+             }
+ 
+             TypeKind::ResolvedTypeRef(t) |
+-            TypeKind::TemplateAlias(t, _) |
++            TypeKind::TemplateAlias(t, ..) |
+             TypeKind::Alias(t) |
+             TypeKind::BlockPointer(t) => {
+                 if self.has_float.contains(&t.into()) {
+
+--- a/ir/analysis/has_type_param_in_array.rs
++++ b/ir/analysis/has_type_param_in_array.rs
+@@ -151,7 +151,7 @@
+             }
+ 
+             TypeKind::ResolvedTypeRef(t) |
+-            TypeKind::TemplateAlias(t, _) |
++            TypeKind::TemplateAlias(t, ..) |
+             TypeKind::Alias(t) |
+             TypeKind::BlockPointer(t) => {
+                 if self.has_type_parameter_in_array.contains(&t.into()) {
+
+--- a/ir/analysis/has_vtable.rs
++++ b/ir/analysis/has_vtable.rs
+@@ -155,7 +155,7 @@
+ 
+         // TODO #851: figure out a way to handle deriving from template type parameters.
+         match *ty.kind() {
+-            TypeKind::TemplateAlias(t, _) |
++            TypeKind::TemplateAlias(t, ..) |
+             TypeKind::Alias(t) |
+             TypeKind::ResolvedTypeRef(t) |
+             TypeKind::Reference(t, _) => {
+
+--- a/ir/analysis/sizedness.rs
++++ b/ir/analysis/sizedness.rs
+@@ -258,7 +258,7 @@
+                 self.insert(id, SizednessResult::NonZeroSized)
+             }
+ 
+-            TypeKind::TemplateAlias(t, _) |
++            TypeKind::TemplateAlias(t, ..) |
+             TypeKind::Alias(t) |
+             TypeKind::BlockPointer(t) |
+             TypeKind::ResolvedTypeRef(t) => {
+
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -329,7 +329,7 @@
+ 
+             TypeKind::ResolvedTypeRef(inner) |
+             TypeKind::Alias(inner) |
+-            TypeKind::TemplateAlias(inner, _) => {
++            TypeKind::TemplateAlias(inner, ..) => {
+                 ctx.resolve_type(inner).safe_canonical_type(ctx)
+             }
+             TypeKind::TemplateInstantiation(ref inst) => ctx
+@@ -543,7 +543,7 @@
+                 ctx.resolve_type(id).self_template_params(ctx)
+             }
+             TypeKind::Comp(ref comp) => comp.self_template_params(ctx),
+-            TypeKind::TemplateAlias(_, ref args) => args.clone(),
++            TypeKind::TemplateAlias(_, ref args, _) => args.clone(),
+ 
+             TypeKind::Opaque |
+             TypeKind::TemplateInstantiation(..) |
+@@ -615,8 +615,11 @@
+     Alias(TypeId),
+ 
+     /// A templated alias, pointing to an inner type, just as `Alias`, but with
+-    /// template parameters.
+-    TemplateAlias(TypeId, Vec<TypeId>),
++    /// its template type parameters, and the number of template parameters the
++    /// C++ declaration had. The two disagree when C++ declared a non-type or
++    /// template template parameter, neither of which is a type and so neither
++    /// of which can appear in the vector.
++    TemplateAlias(TypeId, Vec<TypeId>, usize),
+ 
+     /// A packed vector type: element type, number of elements
+     Vector(TypeId, usize),
+@@ -894,6 +897,7 @@
+                                 // We need to manually unwind this one.
+                                 let mut inner = Err(ParseError::Continue);
+                                 let mut args = vec![];
++                                let mut declared_params = 0;
+ 
+                                 location.visit(|cur| {
+                                     match cur.kind() {
+@@ -918,6 +922,7 @@
+                                             ));
+                                         }
+                                         CXCursor_TemplateTypeParameter => {
++                                            declared_params += 1;
+                                             let param = Item::type_param(
+                                                 None, cur, ctx,
+                                             )
+@@ -928,6 +933,15 @@
+                                             );
+                                             args.push(param);
+                                         }
++                                        CXCursor_NonTypeTemplateParameter |
++                                        CXCursor_TemplateTemplateParameter => {
++                                            // Not a type, so it has no
++                                            // `TypeId` and cannot join `args`.
++                                            // Count it, so that a consumer can
++                                            // see the alias is parameterized
++                                            // by more than `args` describes.
++                                            declared_params += 1;
++                                        }
+                                         _ => {}
+                                     }
+                                     CXChildVisit_Continue
+@@ -941,7 +955,11 @@
+                                     return Err(ParseError::Continue);
+                                 };
+ 
+-                                TypeKind::TemplateAlias(inner_type, args)
++                                TypeKind::TemplateAlias(
++                                    inner_type,
++                                    args,
++                                    declared_params,
++                                )
+                             }
+                             CXCursor_TemplateRef => {
+                                 let referenced = location.referenced().unwrap();
+@@ -1273,7 +1291,7 @@
+             TypeKind::ResolvedTypeRef(inner) => {
+                 tracer.visit_kind(inner.into(), EdgeKind::TypeReference);
+             }
+-            TypeKind::TemplateAlias(inner, ref template_params) => {
++            TypeKind::TemplateAlias(inner, ref template_params, _) => {
+                 tracer.visit_kind(inner.into(), EdgeKind::TypeReference);
+                 for param in template_params {
+                     tracer.visit_kind(

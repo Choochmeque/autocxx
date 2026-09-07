@@ -10403,10 +10403,9 @@ fn test_alias_template_typedef_ignored() {
     // Guard for the google/autocxx#1094/#1501 family: alias
     // templates with type parameters are flagged by bindgen and must
     // be ignored (not declared to cxx), while instantiations of them
-    // must keep working. Note the literal #1094 reproduction (an
-    // alias template with only NON-type parameters) is
-    // indistinguishable from a plain typedef in the information
-    // bindgen currently surfaces, and remains unfixable engine-side.
+    // must keep working. `g_user` is an ordinary typedef naming such
+    // an alias template, which nothing reports directly - the fixed
+    // point in `ignore_typedefs_to_alias_templates` exists for it.
     let hdr = indoc! {"
         namespace b {
             template <typename> struct c;
@@ -10434,10 +10433,10 @@ fn test_alias_template_make_index_sequence_style() {
 
 #[test]
 fn test_alias_template_two_hop_chain() {
-    // A two-hop chain of bindgen-erased alias templates: ignoring
-    // must propagate to a fixed point, or the outermost alias is
-    // promoted to a first-class type and cxx emits an invalid
-    // argument-less using declaration.
+    // A two-hop chain of bindgen-erased alias templates. Every hop
+    // here declares a parameter which is not a type, so each is now
+    // refused on its own report, where the chain used to be ignored
+    // only by propagation from the innermost.
     let hdr = indoc! {"
         template <typename T, T N> struct seq {};
         template <typename T, T N> using A = seq<T, N>;
@@ -15945,17 +15944,19 @@ fn test_issue_1089() {
     run_generate_all_test(hdr);
 }
 
-/// The problem here is that 'g' doesn't get annotated with
-/// the unused_template semantic attribute.
-/// This seems to be because both g and f have template
-/// parameters, so they're all "used", but effectively cancel
-/// out and thus bindgen generates
-///   pub type g = root::b::f;
-/// So, what we should do here is spot any typedef depending
-/// on a template which takes template args, and reject that too.
-/// Probably.
+/// google/autocxx#1094's own repro: `g` is an alias template whose only
+/// template parameter is a non-type one, which bindgen drops, so `g` reaches
+/// autocxx as `pub type g = root::b::f;` - a plain typedef naming a template
+/// without arguments. autocxx handles that now, and `test_issue_1094b` is the
+/// same shape written so that it runs everywhere.
+///
+/// This one does not run everywhere, and not for an autocxx reason: the repro
+/// is written around `__make_integer_seq`, which is a Clang builtin, so the
+/// C++ autocxx generates from it compiles only where the C++ compiler is
+/// Clang. The libclang matrix pins libclang and leaves the runner's g++ in
+/// place, where this is `'__make_integer_seq' does not name a type`.
 #[test]
-#[ignore] // https://github.com/google/autocxx/pull/1094
+#[ignore] // the repro is written around a Clang builtin - see above
 fn test_issue_1094() {
     let hdr = indoc! {"
         namespace {
@@ -15965,6 +15966,39 @@ fn test_issue_1094() {
         template <typename> struct c;
         template <typename d, d e> using f = __make_integer_seq<c, d, e>;
         template <a e> using g = f<a, e>;
+        } // namespace b
+    "};
+    run_generate_all_test(hdr);
+}
+
+/// The residual half of google/autocxx#1094: an alias template whose target is
+/// an ordinary alias template with nothing else wrong with it, so nothing but
+/// the dropped non-type parameter says the emitted typedef is unusable. Before
+/// bindgen reported the parameter counts this generated C++ naming `b::g` bare,
+/// which C++ rejects with "use of alias template 'b::g' requires template
+/// arguments".
+#[test]
+fn test_issue_1094b() {
+    let hdr = indoc! {"
+        namespace b {
+        template <typename> struct c { int x; };
+        template <typename d, d e> using f = c<d>;
+        template <int e> using g = f<int, e>;
+        } // namespace b
+    "};
+    run_generate_all_test(hdr);
+}
+
+/// As `test_issue_1094b`, but with the alias template actually used as a
+/// field's type, which is how google/autocxx#1094 was originally found.
+#[test]
+fn test_issue_1094c() {
+    let hdr = indoc! {"
+        namespace b {
+        template <typename> struct c { int x; };
+        template <typename d, d e> using f = c<d>;
+        template <int e> using g = f<int, e>;
+        struct uses { g<3> member; };
         } // namespace b
     "};
     run_generate_all_test(hdr);
