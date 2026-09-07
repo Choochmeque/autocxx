@@ -27,6 +27,16 @@ fn main() {
 )
 ```
 
+### Inside a `unique_ptr`
+
+`cxx` will not put one of its own integer types inside a `UniquePtr`, so a
+`std::unique_ptr<uint32_t>` arrives as a `UniquePtr<autocxx::c_u32>` rather
+than a `UniquePtr<u32>`. There is one of these wrappers per fixed width -
+`c_u8` through `c_u64` and `c_i8` through `c_i64` - and each is a transparent
+newtype over the Rust integer of that width, so `.0` or `.into()` gets the
+value back. Anywhere else - by value, in a `std::vector`, in a
+`std::shared_ptr` - a `uint32_t` is a plain `u32` as before.
+
 ## Character types
 
 C++'s `char16_t`, `char32_t`, `char8_t` and `wchar_t` are distinct types - a

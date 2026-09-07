@@ -48,7 +48,12 @@ enum Behavior {
     CByValue,
     CChar,
     CByValueVecSafe,
-    CVariableLengthByValue,
+    /// A C integer which reaches Rust as one of the `autocxx::c_*` newtypes
+    /// and the generated C++ as a typedef, because cxx has no atom for it
+    /// under that name: the variable-length ones, which cxx cannot spell at
+    /// all, and the fixed-width ones, whose own spelling is an atom cxx will
+    /// not put in a `unique_ptr`.
+    CIntegerWrapper,
     CVoid,
     /// One of [`CXX_CHARACTER_TYPES`]: a C++ character type which no Rust
     /// primitive is, so we wrap it in a newtype of our own and emit a C++
@@ -69,7 +74,7 @@ impl Behavior {
             Behavior::CByValue
             | Behavior::CChar
             | Behavior::CByValueVecSafe
-            | Behavior::CVariableLengthByValue
+            | Behavior::CIntegerWrapper
             | Behavior::CCharacter
             | Behavior::CVoid
             | Behavior::RustByValue
@@ -100,6 +105,15 @@ struct TypeDetails {
     extra_non_canonical_name: Option<String>,
     has_const_copy_constructor: bool,
     has_move_constructor: bool,
+    /// Whether [`Self::cpp_name`] is also a name this entry answers to.
+    ///
+    /// It normally is - `int` is `autocxx::c_int` and nothing else - and
+    /// [`TypeDatabase::insert`] records it as such, which is how a C++
+    /// spelling reaches the entry at all. The fixed-width wrappers are the
+    /// exception: `autocxx::c_u32` is a `uint32_t`, but that spelling belongs
+    /// to `u32`, and claiming it would turn every `uint32_t` in the header
+    /// into the wrapper instead of only a `unique_ptr` payload.
+    owns_cpp_name: bool,
 }
 
 impl TypeDetails {
@@ -118,7 +132,15 @@ impl TypeDetails {
             extra_non_canonical_name,
             has_const_copy_constructor,
             has_move_constructor,
+            owns_cpp_name: true,
         }
+    }
+
+    /// Records that another entry owns this one's C++ spelling. See
+    /// [`Self::owns_cpp_name`].
+    fn sharing_cpp_name(mut self) -> Self {
+        self.owns_cpp_name = false;
+        self
     }
 
     /// Whether and how to include this in the prelude given to bindgen.
@@ -192,6 +214,11 @@ impl TypeDetails {
 pub(crate) struct TypeDatabase {
     by_rs_name: HashMap<QualifiedName, TypeDetails>,
     canonical_names: HashMap<QualifiedName, QualifiedName>,
+    /// For each cxx atom which cannot be a `std::unique_ptr` payload, the
+    /// `autocxx::c_*` wrapper naming the same C++ type, which can.
+    ///
+    /// See [`Self::unique_ptr_payload_wrapper`].
+    unique_ptr_payload_wrappers: HashMap<QualifiedName, QualifiedName>,
 }
 
 /// Returns a database of known types.
@@ -275,7 +302,7 @@ impl TypeDatabase {
                         | Behavior::CByValueVecSafe
                         | Behavior::CByValue
                         | Behavior::CChar
-                        | Behavior::CVariableLengthByValue
+                        | Behavior::CIntegerWrapper
                         | Behavior::CCharacter
                         | Behavior::RustContainerByValueSafe => true,
                         Behavior::CxxString | Behavior::CxxContainerVector | Behavior::CVoid => {
@@ -380,7 +407,7 @@ impl TypeDatabase {
             .filter(|td| {
                 matches!(
                     td.behavior,
-                    Behavior::CVariableLengthByValue | Behavior::CVoid | Behavior::CCharacter
+                    Behavior::CIntegerWrapper | Behavior::CVoid | Behavior::CCharacter
                 )
             })
             .map(|td| td.to_typename())
@@ -404,7 +431,7 @@ impl TypeDatabase {
     /// `CxxVector<ty>`.
     ///
     /// [`Behavior::CByValueVecSafe`] types are cxx's own built-in vector
-    /// elements. [`Behavior::CVariableLengthByValue`] types - the
+    /// elements. [`Behavior::CIntegerWrapper`] types - the
     /// `autocxx::c_int` family - are not, but we ask cxx to make them so by
     /// emitting `impl CxxVector<c_int> {}` into the generated bridge alongside
     /// the `type c_int = autocxx::c_int;` alias. See google/autocxx#422.
@@ -416,9 +443,7 @@ impl TypeDatabase {
             .map(|x| {
                 matches!(
                     x.behavior,
-                    Behavior::CxxString
-                        | Behavior::CByValueVecSafe
-                        | Behavior::CVariableLengthByValue
+                    Behavior::CxxString | Behavior::CByValueVecSafe | Behavior::CIntegerWrapper
                 )
             })
             .unwrap_or(true)
@@ -430,7 +455,7 @@ impl TypeDatabase {
     /// `CxxVector<T>` and the opaque C++ types a bridge declares - and it
     /// rejects, in its own macro, any `unique_ptr` whose target is one of its
     /// built-in atoms, so `UniquePtr<u32>` is out of reach from here.
-    /// [`Behavior::CVariableLengthByValue`] types - the `autocxx::c_int`
+    /// [`Behavior::CIntegerWrapper`] types - the `autocxx::c_int`
     /// family - are not atoms as far as cxx is concerned, so the explicit shim
     /// trait impls this crate writes in `autocxx::c_type_vectors` make them
     /// work like any other named type. See google/autocxx#422.
@@ -442,9 +467,7 @@ impl TypeDatabase {
             .map(|x| {
                 matches!(
                     x.behavior,
-                    Behavior::CxxString
-                        | Behavior::CxxContainerVector
-                        | Behavior::CVariableLengthByValue
+                    Behavior::CxxString | Behavior::CxxContainerVector | Behavior::CIntegerWrapper
                 )
             })
             .unwrap_or(true)
@@ -472,10 +495,28 @@ impl TypeDatabase {
                     Behavior::CxxString
                         | Behavior::CByValue
                         | Behavior::CByValueVecSafe
-                        | Behavior::CVariableLengthByValue
+                        | Behavior::CIntegerWrapper
                 )
             })
             .unwrap_or(true)
+    }
+
+    /// The `autocxx::c_*` wrapper to name a `std::unique_ptr` payload of `ty`
+    /// with, where `ty` is a cxx atom which cannot be one.
+    ///
+    /// cxx turns down a `unique_ptr` of any of its own atoms, so
+    /// `std::unique_ptr<uint32_t>` has no cxx spelling - even though
+    /// `std::unique_ptr<unsigned int>`, which on most targets is the same C++
+    /// type, has one as `UniquePtr<c_uint>`. The wrapper mirrors the width C++
+    /// wrote rather than a width the target happens to agree with, so the
+    /// generated shim says `uint32_t` and binds against the real signature
+    /// wherever `uint32_t` is not an `unsigned int`.
+    ///
+    /// Only `unique_ptr` asks. A `uint32_t` by value, in a `std::vector` or in
+    /// a `std::shared_ptr` keeps its atom, which cxx supports natively there
+    /// and which is what callers have always received.
+    pub(crate) fn unique_ptr_payload_wrapper(&self, ty: &QualifiedName) -> Option<&QualifiedName> {
+        self.unique_ptr_payload_wrappers.get(ty)
     }
 
     pub(crate) fn conflicts_with_built_in_type(&self, ty: &QualifiedName) -> bool {
@@ -506,10 +547,12 @@ impl TypeDatabase {
                 rs_name.clone(),
             );
         }
-        self.canonical_names.insert(
-            QualifiedName::new_from_cpp_name(&td.cpp_name),
-            rs_name.clone(),
-        );
+        if td.owns_cpp_name {
+            self.canonical_names.insert(
+                QualifiedName::new_from_cpp_name(&td.cpp_name),
+                rs_name.clone(),
+            );
+        }
         self.by_rs_name.insert(rs_name, td);
     }
 
@@ -622,6 +665,37 @@ fn create_type_database() -> TypeDatabase {
             true,
         ));
     }
+
+    // The same eight C++ types under names cxx has no atom for, so that a
+    // `std::unique_ptr` of one has a payload cxx will accept. Nothing reaches
+    // these by their C++ spelling - `sharing_cpp_name` keeps `uint8_t` and
+    // friends meaning the atoms inserted above - only
+    // `unique_ptr_payload_wrapper`, which is asked in the one position where
+    // the atom is refused. See google/autocxx#422.
+    for (cpp_type, atom) in (3..7).map(|x| 2i32.pow(x)).flat_map(|x| {
+        vec![
+            (format!("uint{x}_t"), format!("u{x}")),
+            (format!("int{x}_t"), format!("i{x}")),
+        ]
+    }) {
+        let wrapper = format!("autocxx::c_{atom}");
+        db.insert(
+            TypeDetails::new(
+                wrapper.clone(),
+                cpp_type,
+                Behavior::CIntegerWrapper,
+                None,
+                true,
+                true,
+            )
+            .sharing_cpp_name(),
+        );
+        db.unique_ptr_payload_wrappers.insert(
+            QualifiedName::new_from_cpp_name(&atom),
+            QualifiedName::new_from_cpp_name(&wrapper),
+        );
+    }
+
     db.insert(TypeDetails::new(
         "bool",
         "bool",
@@ -645,7 +719,7 @@ fn create_type_database() -> TypeDatabase {
         db.insert(TypeDetails::new(
             format!("autocxx::c_{concatenated_name}"),
             cname,
-            Behavior::CVariableLengthByValue,
+            Behavior::CIntegerWrapper,
             Some(format!("std::os::raw::c_{concatenated_name}")),
             true,
             true,
@@ -653,7 +727,7 @@ fn create_type_database() -> TypeDatabase {
         db.insert(TypeDetails::new(
             format!("autocxx::c_u{concatenated_name}"),
             format!("unsigned {cname}"),
-            Behavior::CVariableLengthByValue,
+            Behavior::CIntegerWrapper,
             Some(format!("std::os::raw::c_u{concatenated_name}")),
             true,
             true,

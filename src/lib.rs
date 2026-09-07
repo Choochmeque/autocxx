@@ -605,13 +605,14 @@ pub use autocxx_macro::include_cpp_impl;
 #[doc(hidden)]
 pub use autocxx_macro::cpp_semantics;
 
-macro_rules! ctype_wrapper {
-    ($r:ident, $c:expr, $d:expr) => {
+/// A transparent newtype over `$p` which cxx sees as the named C++ type `$c`.
+macro_rules! ctype_newtype {
+    ($r:ident, $c:expr, $p:ty, $d:expr) => {
         #[doc=$d]
         #[derive(Debug, Eq, Copy, Clone, PartialEq, Hash)]
         #[allow(non_camel_case_types)]
         #[repr(transparent)]
-        pub struct $r(pub ::std::os::raw::$r);
+        pub struct $r(pub $p);
 
         /// # Safety
         ///
@@ -622,17 +623,25 @@ macro_rules! ctype_wrapper {
             type Kind = cxx::kind::Trivial;
         }
 
-        impl From<::std::os::raw::$r> for $r {
-            fn from(val: ::std::os::raw::$r) -> Self {
+        impl From<$p> for $r {
+            fn from(val: $p) -> Self {
                 Self(val)
             }
         }
 
-        impl From<$r> for ::std::os::raw::$r {
+        impl From<$r> for $p {
             fn from(val: $r) -> Self {
                 val.0
             }
         }
+    };
+}
+
+/// One of the variable-length C integers, whose Rust width is whatever
+/// `std::os::raw` says it is on this target.
+macro_rules! ctype_wrapper {
+    ($r:ident, $c:expr, $d:expr) => {
+        ctype_newtype!($r, $c, ::std::os::raw::$r, $d);
     };
 }
 
@@ -653,6 +662,27 @@ ctype_wrapper!(c_short, "c_short", "Newtype wrapper for an short");
 ctype_wrapper!(c_uint, "c_uint", "Newtype wrapper for an unsigned int");
 ctype_wrapper!(c_int, "c_int", "Newtype wrapper for an int");
 ctype_wrapper!(c_uchar, "c_uchar", "Newtype wrapper for an unsigned char");
+
+// The fixed-width C integers, under names cxx has no atom for.
+//
+// cxx spells `uint32_t` as its `u32` atom and turns down a `unique_ptr` of any
+// of its atoms - `check_type_unique_ptr` - so `std::unique_ptr<uint32_t>` has
+// no cxx spelling at all. It is the same C++ type as some `unsigned` something
+// which does have a wrapper above, so autocxx names a `unique_ptr` payload
+// with the wrapper of the width C++ actually wrote, and cxx sees a named type
+// it will emit shims for on request. See google/autocxx#422.
+//
+// These are not substituted anywhere else: a `uint32_t` by value, in a
+// `std::vector` or in a `std::shared_ptr` is a plain `u32`, which is what cxx
+// wants there and what callers have always seen.
+ctype_newtype!(c_u8, "c_u8", u8, "Newtype wrapper for a uint8_t");
+ctype_newtype!(c_i8, "c_i8", i8, "Newtype wrapper for an int8_t");
+ctype_newtype!(c_u16, "c_u16", u16, "Newtype wrapper for a uint16_t");
+ctype_newtype!(c_i16, "c_i16", i16, "Newtype wrapper for an int16_t");
+ctype_newtype!(c_u32, "c_u32", u32, "Newtype wrapper for a uint32_t");
+ctype_newtype!(c_i32, "c_i32", i32, "Newtype wrapper for an int32_t");
+ctype_newtype!(c_u64, "c_u64", u64, "Newtype wrapper for a uint64_t");
+ctype_newtype!(c_i64, "c_i64", i64, "Newtype wrapper for an int64_t");
 
 /// Newtype wrapper for a C void. Only useful as a `*c_void`
 #[allow(non_camel_case_types)]
@@ -1059,10 +1089,18 @@ pub mod prelude {
     pub use crate::as_copy;
     pub use crate::as_mov;
     pub use crate::as_new;
+    pub use crate::c_i16;
+    pub use crate::c_i32;
+    pub use crate::c_i64;
+    pub use crate::c_i8;
     pub use crate::c_int;
     pub use crate::c_long;
     pub use crate::c_longlong;
     pub use crate::c_short;
+    pub use crate::c_u16;
+    pub use crate::c_u32;
+    pub use crate::c_u64;
+    pub use crate::c_u8;
     pub use crate::c_uchar;
     pub use crate::c_uint;
     pub use crate::c_ulong;
