@@ -7388,8 +7388,14 @@ fn test_defines_effective() {
     );
 }
 
+/// A method whose parameter is a class template instantiated with a *function*
+/// type, `std::b<int()>`, reached through two typedefs - the reduction attached
+/// to the bug reported upstream as google/autocxx#227.
+///
+/// bindgen cannot represent that template argument, so it makes the typedef's
+/// target opaque and autocxx turns `Solver::e` down, emitting the rest of the
+/// class. What this pins is that the whole `include_cpp!` survives it.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/227
 fn test_function_pointer_template() {
     let hdr = indoc! {"
         typedef int a;
