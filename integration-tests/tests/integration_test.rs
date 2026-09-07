@@ -19381,8 +19381,8 @@ fn test_absent_constructors_explain_themselves() {
              its member initializer list."
                 .to_string(),
             "autocxx has not given this type a default constructor, because its field `c` is \
-             `const` and so an implicitly declared constructor would have no way to give it its \
-             one and only value."
+             `const`, has no default member initializer, and so an implicitly declared \
+             constructor would have no way to give it its one and only value."
                 .to_string(),
             "C++ gives this type no copy constructor, because its base class `PrivateCopy` has \
              no accessible copy constructor."
@@ -19863,12 +19863,10 @@ fn test_const_field_through_typedef_deletes_default_constructor() {
 /// A `const` alias for another alias. bindgen resolves an alias's target
 /// through the wrapper which held the constness before rendering it, so
 /// `typedef int I; typedef const I CI;` comes out as `pub type CI = root::I;`
-/// with no marker anywhere - the same erasure as `test_const_enum_typedef`,
-/// and the reason the engine only has to look at the last link of a chain.
-/// Closing it needs bindgen to keep the qualifier across that resolution,
-/// which for an enum alias also means not taking the `pub use` shortcut.
+/// with no marker anywhere. The per-member report is the other channel: it
+/// reads the member's type in bindgen's own IR, where the qualifier is still
+/// on whichever link of the chain C++ put it.
 #[test]
-#[ignore] // bindgen erases const when an alias's target is itself a type-ref
 fn test_const_field_through_typedef_chain_deletes_default_constructor() {
     let hdr = indoc! {"
         typedef int fx_I;
@@ -19898,14 +19896,13 @@ fn test_const_field_through_alias_of_const_alias() {
 /// reaches the `pub use` it emits for an enum alias - which is just as well,
 /// because `pub use path::Marker<E> as CE;` would not be a legal `use`.
 ///
-/// C++ does delete `fx_HasConstEnum`'s default constructor, and the const-field
-/// rule does not see it here. Nothing is generated which fails to build, but
-/// only because a coarser rule already declines: autocxx does not credit an
-/// enum with a default constructor, so the field is refused as
-/// `DependencyLacksIt` rather than as a `const` one. The `const` half of this
-/// case rides on that, and would be exposed by any field type autocxx does
-/// credit - see `test_const_field_through_typedef_chain_deletes_default_constructor`,
-/// which is the same erasure with an `int` behind it and is `#[ignore]`d.
+/// What this pins is that the alias compiles and the field is refused, not
+/// which rule refused it: autocxx credits no enum with a default constructor,
+/// so the field is turned down as `DependencyLacksIt` before its constness is
+/// consulted at all. The const channel for an alias chain is pinned by
+/// `test_const_field_through_typedef_chain_deletes_default_constructor`,
+/// which puts an `int` behind the alias so that nothing coarser declines
+/// first.
 #[test]
 fn test_const_enum_typedef() {
     let hdr = indoc! {"
@@ -19924,20 +19921,194 @@ fn test_const_enum_typedef() {
 }
 
 /// A `const` bitfield deletes the default constructor like any other `const`
-/// member, and autocxx does not notice. bindgen emits no field of the
-/// member's own type for a bitfield - the struct gets one allocation unit for
-/// the whole run, and the member survives only as accessors - so the const
-/// marker has nowhere to land that `find_constructors_present` reads. Closing
-/// it needs bindgen to report a bitfield's own type, which is the same
-/// missing per-field report as google/autocxx#816's initializers.
+/// member. bindgen emits no field of the member's own type for a bitfield -
+/// the struct gets one allocation unit for the whole run, and the member
+/// survives only as accessors - so the const marker has nowhere to land that
+/// `find_constructors_present` reads. The per-member report is where the
+/// constness arrives instead.
 #[test]
-#[ignore] // needs bindgen to report a bitfield's own type, not just its accessors
 fn test_const_bitfield_deletes_default_constructor() {
     let hdr = indoc! {"
         struct fx_ConstBf { const int a : 3; };
         inline int fx_read_bf_only(const fx_ConstBf& h) { return h.a; }
     "};
     run_test("", hdr, quote! {}, &["fx_ConstBf", "fx_read_bf_only"], &[]);
+}
+
+/// `typedef const int ci;` puts the qualifier on the alias's target, so a
+/// bitfield declared with it is `const` without its own type saying so. The
+/// per-member report has to follow the alias, since a bitfield reaches the
+/// analysis through nothing else.
+#[test]
+fn test_const_bitfield_through_typedef_deletes_default_constructor() {
+    let hdr = indoc! {"
+        typedef const int fx_pci;
+        struct fx_TdConstBf { fx_pci a : 3; };
+        inline int fx_read_tdbf(const fx_TdConstBf& h) { return h.a; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_TdConstBf", "fx_read_tdbf"], &[]);
+}
+
+/// A bitfield and an ordinary field whose bindgen names collide: C++ `type` is
+/// a Rust keyword, so bindgen calls the bitfield's accessors `type_`, which is
+/// also the name of the field next to it. The initializer belongs to the
+/// bitfield alone, and crediting the `const` field with it would offer a
+/// `new()` C++ deletes.
+#[test]
+fn test_bitfield_name_collision_keeps_const_field_blocking() {
+    let hdr = indoc! {"
+        struct fx_Collide { int type : 3 = 1; const int type_; };
+        inline int fx_read_collide(const fx_Collide& h) { return h.type_; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_Collide", "fx_read_collide"], &[], None),
+        make_cpp20_adder(),
+        None,
+        None,
+    );
+}
+
+/// google/autocxx#816: a member whose own type has no default constructor
+/// does not stop C++ declaring one for the class, so long as the member has a
+/// default member initializer to construct it with.
+#[test]
+fn test_member_initializer_supplies_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_NoDefault {
+            fx_NoDefault(int v) : v(v) {}
+            int v;
+        };
+        struct fx_HasInitializer { fx_NoDefault m = fx_NoDefault(3); };
+        inline int fx_read_init(const fx_HasInitializer& h) { return h.m.v; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_HasInitializer::new().within_unique_ptr();
+        assert_eq!(ffi::fx_read_init(&h), autocxx::c_int(3));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_HasInitializer", "fx_read_init", "fx_NoDefault"],
+        &[],
+    );
+}
+
+/// The initializer excuses the member's own default constructor and nothing
+/// else. C++ still has to be able to destroy the member, so a class holding an
+/// initialized member with an inaccessible destructor keeps no default
+/// constructor of its own.
+#[test]
+fn test_member_initializer_does_not_excuse_a_missing_destructor() {
+    let hdr = indoc! {"
+        struct fx_Undestroyable {
+            fx_Undestroyable(int v) : v(v) {}
+            int v;
+          private:
+            ~fx_Undestroyable() {}
+        };
+        struct fx_HoldsUndestroyable { fx_Undestroyable m{1}; };
+        inline int fx_read_hu(const fx_HoldsUndestroyable& h) { return h.m.v; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(
+            &["fx_HoldsUndestroyable", "fx_read_hu", "fx_Undestroyable"],
+            &[],
+            None,
+        ),
+        // C4624 says `fx_HoldsUndestroyable`'s destructor is implicitly
+        // deleted, which is this fixture's premise rather than a defect in
+        // it: a class holding a member it cannot destroy is exactly what has
+        // to be put to the analysis here, and no version of this header both
+        // says that and avoids the warning. Scoped to this one fixture, the
+        // way the note beside `/WX` in `configure_builder` describes for the
+        // other C4624 test.
+        make_clang_optional_arg_adder(&[], &["/wd4624"]),
+        None,
+        None,
+    );
+}
+
+/// An initializer speaks for the member it initializes and for nothing else,
+/// so a base class which has no default constructor still withdraws the
+/// derived class's - including an empty base, which contributes no field and
+/// so reaches this analysis only through bindgen's base-class report.
+#[test]
+fn test_member_initializer_does_not_excuse_a_base() {
+    let hdr = indoc! {"
+        struct fx_NoDefaultBase { fx_NoDefaultBase() = delete; };
+        struct fx_InitMemberOnBase : public fx_NoDefaultBase { int m = 4; };
+        inline int fx_read_imb(const fx_InitMemberOnBase& h) { return h.m; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_InitMemberOnBase", "fx_read_imb", "fx_NoDefaultBase"],
+        &[],
+    );
+}
+
+/// A `const` member with a default member initializer has its one and only
+/// value already, so C++ keeps the default constructor it would otherwise
+/// have deleted.
+#[test]
+fn test_const_field_with_initializer_keeps_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_ConstInit { const int m = 5; };
+        inline int fx_read_ci(const fx_ConstInit& h) { return h.m; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_ConstInit::new().within_unique_ptr();
+        assert_eq!(ffi::fx_read_ci(&h), autocxx::c_int(5));
+    };
+    run_test("", hdr, rs, &["fx_ConstInit", "fx_read_ci"], &[]);
+}
+
+/// The same for a reference member: the initializer is what an implicitly
+/// declared constructor binds it to, so there is one.
+#[test]
+fn test_reference_field_with_initializer_keeps_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_RefInit { int x; int& r = x; };
+        inline int fx_read_ri(const fx_RefInit& h) { return h.r; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_RefInit::new().within_unique_ptr();
+        ffi::fx_read_ri(&h);
+    };
+    run_test("", hdr, rs, &["fx_RefInit", "fx_read_ri"], &[]);
+}
+
+/// A bitfield may carry a default member initializer too, since C++20. clang
+/// exposes no cursor for one - its visitor stops at the width expression -
+/// so this is the case which decides that the fact has to be read off the
+/// declaration's tokens rather than its child cursors.
+#[test]
+fn test_const_bitfield_with_initializer_keeps_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_ConstBfInit { const int a : 3 = 2; };
+        inline int fx_read_bfi(const fx_ConstBfInit& h) { return h.a; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_ConstBfInit::new().within_unique_ptr();
+        assert_eq!(ffi::fx_read_bfi(&h), autocxx::c_int(2));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_ConstBfInit", "fx_read_bfi"], &[], None),
+        make_cpp20_adder(),
+        None,
+        None,
+    );
 }
 
 /// A `const` member of class type also deletes the copy constructor, when the

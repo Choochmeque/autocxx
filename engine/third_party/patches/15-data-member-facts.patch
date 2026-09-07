@@ -1,0 +1,452 @@
+Subject: Report each data member's own C++ facts through `ParseCallbacks`
+
+The Rust rendering of a struct drops things C++ said about its data members,
+and two of the omissions decide whether the class has an implicitly declared
+default constructor.
+
+The first is the default member initializer. `struct S { int x = 5; };` and
+`struct S { int x; };` generate the same Rust, and C++ tells them apart: an
+initializer is what gives a `const` member its one and only value, what binds
+a reference member, and what stands in for a member type's missing default
+constructor. A generator which cannot see one either offers a constructor C++
+has deleted or withholds one C++ declares.
+
+The second is a bitfield's own type. A run of bitfields shares one allocation
+unit and each member survives only as accessors over it, so `const int a : 3`
+leaves no field for `--use-const-newtype-wrapper`'s marker to land on; the
+marker reaches the accessors' signatures and nothing else.
+
+`denote_data_member` reports both, for each member bindgen laid out, whether
+or not a field of the member's own type is generated for it. Purely additive:
+no generated code changes.
+
+Finding the initializer is the interesting half. libclang has no query for one
+and the child cursors do not answer it: they carry expressions belonging to
+the *type* as well - an array bound - and clang's cursor visitor stops at a
+bitfield's width expression without ever visiting the initializer which may
+follow it, so a bitfield's is not among the children at all.
+`Cursor::has_default_member_initializer` reads the declaration's tokens
+instead: it scans from past the declarator-id - past the width expression too,
+for a bitfield - and takes a `=` outside any bracket as an initializer, since
+nothing in a declarator spells one there. A `{` counts only while everything
+passed at bracket depth zero has been part of the declarator, which is what
+tells it from the brace of a braced template argument in a trailing return
+type. It answers `None` for a member declared by a macro expansion, whose
+token range spans the macro's definition as well as its use and so is not the
+field's own to read.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -325,6 +325,22 @@ pub trait ParseCallbacks: fmt::Debug {
+     ) {
+     }
+ 
++    /// Report one data member of a struct or union, with the facts about it
++    /// which the Rust rendering of that struct or union does not carry.
++    ///
++    /// Called for the members bindgen laid out, which includes the ones it
++    /// generates no field of their own type for: a run of bitfields shares
++    /// one allocation unit, and each member of it survives only as accessors
++    /// over that unit. A member bindgen could not lay out is not reported,
++    /// and neither is an unnamed zero-width bitfield, which is padding rather
++    /// than a member.
++    fn denote_data_member(
++        &self,
++        _parent: DiscoveredItemId,
++        _member: DataMemberInfo<'_>,
++    ) {
++    }
++
+     // TODO add callback for ResolvedTypeRef
+ }
+ 
+@@ -513,6 +529,38 @@ pub struct FieldAttributeInfo<'a> {
+     pub field_type_name: Option<&'a str>,
+ }
+ 
++/// What [`ParseCallbacks::denote_data_member`] reports about one data member
++/// of a struct or union.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[non_exhaustive]
++pub struct DataMemberInfo<'a> {
++    /// The member's C++ name, put through the same mangling as the field
++    /// bindgen generates for it. That is the field's name where one is
++    /// generated; a bitfield gets accessors instead, whose names are derived
++    /// from this one but may carry a suffix to avoid colliding with a method.
++    /// `None` for an unnamed bitfield, which gets neither.
++    pub name: Option<&'a str>,
++
++    /// Whether C++ qualified the member's own type `const`, as opposed to it
++    /// pointing at something `const`. Rust has no spelling for the former, so
++    /// it is otherwise lost - and for a bitfield it is lost even with
++    /// `--use-const-newtype-wrapper`, which can only reach the accessors.
++    pub is_const: bool,
++
++    /// The member's width in bits, if it is a bitfield.
++    pub bitfield_width: Option<u32>,
++
++    /// Whether the member has a default member initializer: `int x = 5;` and
++    /// `int x{5};` do, `int x;` does not. It is one of the things C++ weighs
++    /// when deciding whether the class has an implicitly declared default
++    /// constructor, and nothing in the generated Rust says which way it went.
++    ///
++    /// `None` where clang could not be asked, which is so for a member
++    /// declared by a macro expansion. Consumers should read that as "assume
++    /// the worst" rather than as `false`.
++    pub has_default_member_initializer: Option<bool>,
++}
++
+ /// Whether a method is virtual or pure virtual.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Virtualness {
+--- a/clang.rs
++++ b/clang.rs
+@@ -718,6 +718,97 @@ impl Cursor {
+         }
+     }
+ 
++    /// Whether this field declaration carries a default member initializer:
++    /// `int x = 5;` and `int x{5};` do, `int x;` does not. `None` means the
++    /// question could not be put to clang, which is so for a declaration
++    /// produced by a macro expansion.
++    ///
++    /// libclang exposes no query for one, and the child cursors do not answer
++    /// it either. They include expressions which belong to the *type* rather
++    /// than to the field - an array bound - and clang's cursor visitor stops
++    /// at a bitfield's width expression without ever visiting the initializer
++    /// which may follow it, so a bitfield's is not among them at all.
++    ///
++    /// The tokens do answer it. The scan starts past the declarator-id - past
++    /// the width expression as well for a bitfield - and takes a `=` outside
++    /// any bracket as an initializer, because nothing in a declarator spells
++    /// one there. A `{` is not so simple, since a braced template argument in
++    /// a trailing return type is one too, so it counts only while everything
++    /// passed at bracket depth zero has been part of the declarator.
++    ///
++    /// A macro expansion is excluded rather than answered because the token
++    /// range clang gives such a declaration spans the macro's definition as
++    /// well as its use, and so contains tokens which are not the field's. A
++    /// declarator whose brackets come out of macros is not excluded by that,
++    /// and reads as an unrecognised token at depth zero, so it answers "no
++    /// initializer" - the direction which costs a consumer a constructor
++    /// rather than inventing one.
++    pub(crate) fn has_default_member_initializer(&self) -> Option<bool> {
++        if self.is_from_macro_expansion() {
++            return None;
++        }
++
++        let mut anchor = unsafe {
++            spelling_location(clang_getRangeEnd(self.name_extent())).1
++        };
++        if self.is_bit_field() {
++            // The width expression is the last cursor clang visits for a
++            // bitfield, so anything past it belongs to the initializer.
++            if let Some(width) = self.collect_children().last() {
++                let width_end = unsafe {
++                    spelling_location(clang_getRangeEnd(width.extent())).1
++                };
++                anchor = anchor.max(width_end);
++            }
++        }
++
++        let tokens = self.tokens();
++        let mut depth = 0usize;
++        let mut declarator_only = true;
++        for token in tokens.iter() {
++            if token.kind == CXToken_Comment {
++                continue;
++            }
++            let start = unsafe {
++                spelling_location(clang_getRangeStart(token.extent)).1
++            };
++            if start < anchor {
++                continue;
++            }
++            match token.spelling() {
++                b"(" | b"[" | b"<:" => depth += 1,
++                b")" | b"]" | b":>" => depth = depth.saturating_sub(1),
++                b"=" if depth == 0 => return Some(true),
++                b"{" | b"<%" if depth == 0 && declarator_only => {
++                    return Some(true)
++                }
++                // Part of the declarator, and its operand is parenthesised.
++                b"noexcept" => {}
++                _ if depth == 0 => declarator_only = false,
++                _ => {}
++            }
++        }
++        Some(false)
++    }
++
++    /// The source range of the name this cursor declares.
++    fn name_extent(&self) -> CXSourceRange {
++        unsafe { clang_Cursor_getSpellingNameRange(self.x, 0, 0) }
++    }
++
++    /// Whether this cursor's location was produced by expanding a macro, as
++    /// opposed to being written where it is used.
++    fn is_from_macro_expansion(&self) -> bool {
++        unsafe {
++            let location = clang_getCursorLocation(self.x);
++            let (spelling_file, spelling_offset) = spelling_location(location);
++            let (expansion_file, expansion_offset) =
++                expansion_location(location);
++            spelling_offset != expansion_offset ||
++                clang_File_isEqual(spelling_file, expansion_file) == 0
++        }
++    }
++
+     /// Get the integer representation type used to hold this cursor's referent
+     /// enum type.
+     pub(crate) fn enum_type(&self) -> Option<Type> {
+@@ -1641,6 +1732,38 @@ impl SourceLocation {
+     }
+ }
+ 
++/// The file a source location's text is written in, and its byte offset
++/// within it. For something a macro produced that is inside the macro's
++/// definition, not where it was used.
++unsafe fn spelling_location(location: CXSourceLocation) -> (CXFile, c_uint) {
++    let mut file = ptr::null_mut();
++    let (mut line, mut column, mut offset) = (0, 0, 0);
++    clang_getSpellingLocation(
++        location,
++        &mut file,
++        &mut line,
++        &mut column,
++        &mut offset,
++    );
++    (file, offset)
++}
++
++/// The file a source location appears in, and its byte offset within it. For
++/// something a macro produced that is where the macro was used, so it differs
++/// from [`spelling_location`] exactly when a macro was involved.
++unsafe fn expansion_location(location: CXSourceLocation) -> (CXFile, c_uint) {
++    let mut file = ptr::null_mut();
++    let (mut line, mut column, mut offset) = (0, 0, 0);
++    clang_getExpansionLocation(
++        location,
++        &mut file,
++        &mut line,
++        &mut column,
++        &mut offset,
++    );
++    (file, offset)
++}
++
+ impl fmt::Display for SourceLocation {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+         let (file, line, col, _) = self.location();
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2390,6 +2390,8 @@ impl CodeGenerator for CompInfo {
+             },
+         });
+ 
++        utils::report_data_members(ctx, id, self);
++
+         // Don't output classes with template parameters that aren't types, and
+         // also don't output template specializations, neither total or partial.
+         if self.has_non_type_template_params() {
+@@ -5634,7 +5636,8 @@ pub(crate) mod utils {
+     use super::helpers::BITFIELD_UNIT;
+     use super::serialize::CSerialize;
+     use super::{error, CodegenError, CodegenResult, ToRustTyOrOpaque};
+-    use crate::callbacks::DiscoveredItemId;
++    use crate::callbacks::{DataMemberInfo, DiscoveredItemId};
++    use crate::ir::comp::{CompInfo, Field, FieldMethods};
+     use crate::ir::context::BindgenContext;
+     use crate::ir::context::TypeId;
+     use crate::ir::function::{Abi, ClangAbi, FunctionSig};
+@@ -6365,6 +6368,44 @@ pub(crate) mod utils {
+         true
+     }
+ 
++    /// Report the data members of a struct or union through
++    /// [`crate::callbacks::ParseCallbacks::denote_data_member`], the
++    /// bitfields included.
++    pub(super) fn report_data_members(
++        ctx: &BindgenContext,
++        parent: DiscoveredItemId,
++        comp: &CompInfo,
++    ) {
++        let report = |member: &dyn FieldMethods| {
++            let name =
++                member.name().map(|name| ctx.rust_mangle(name).into_owned());
++            // The member's own type, unresolved: `through_type_refs()` would
++            // resolve away the wrapper which holds the `const` qualifier.
++            let is_const =
++                ctx.resolve_type(member.ty()).is_const_through_aliases(ctx);
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_data_member(
++                    parent,
++                    DataMemberInfo {
++                        name: name.as_deref(),
++                        is_const,
++                        bitfield_width: member.bitfield_width(),
++                        has_default_member_initializer: member
++                            .has_default_member_initializer(),
++                    },
++                );
++            });
++        };
++        for field in comp.fields() {
++            match field {
++                Field::DataMember(data) => report(data),
++                Field::Bitfields(unit) => {
++                    unit.bitfields().iter().for_each(|bf| report(bf));
++                }
++            }
++        }
++    }
++
+     pub(super) fn callback_with_cpp_name(
+         ctx: &BindgenContext,
+         item: &Item,
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -173,6 +173,11 @@ pub(crate) trait FieldMethods {
+ 
+     /// The offset of the field (in bits)
+     fn offset(&self) -> Option<usize>;
++
++    /// Whether the field has a default member initializer, `int x = 5;`.
++    /// `None` where clang could not be asked; see
++    /// [`clang::Cursor::has_default_member_initializer`].
++    fn has_default_member_initializer(&self) -> Option<bool>;
+ }
+ 
+ /// A contiguous set of logical bitfields that live within the same physical
+@@ -428,6 +433,10 @@ impl FieldMethods for Bitfield {
+     fn offset(&self) -> Option<usize> {
+         self.data.offset()
+     }
++
++    fn has_default_member_initializer(&self) -> Option<bool> {
++        self.data.has_default_member_initializer()
++    }
+ }
+ 
+ /// A raw field might be either of a plain data member or a bitfield within a
+@@ -447,6 +456,7 @@ impl RawField {
+         bitfield_width: Option<u32>,
+         public: bool,
+         offset: Option<usize>,
++        has_default_member_initializer: Option<bool>,
+     ) -> RawField {
+         RawField(FieldData {
+             name,
+@@ -456,6 +466,7 @@ impl RawField {
+             bitfield_width,
+             public,
+             offset,
++            has_default_member_initializer,
+         })
+     }
+ }
+@@ -488,6 +499,9 @@ impl FieldMethods for RawField {
+     fn offset(&self) -> Option<usize> {
+         self.0.offset()
+     }
++    fn has_default_member_initializer(&self) -> Option<bool> {
++        self.0.has_default_member_initializer()
++    }
+ }
+ 
+ /// Convert the given ordered set of raw fields into a list of either plain data
+@@ -933,6 +947,10 @@ pub(crate) struct FieldData {
+ 
+     /// The offset of the field (in bits)
+     offset: Option<usize>,
++
++    /// Whether the field has a default member initializer, `None` where clang
++    /// could not be asked.
++    has_default_member_initializer: Option<bool>,
+ }
+ 
+ impl FieldMethods for FieldData {
+@@ -963,6 +981,10 @@ impl FieldMethods for FieldData {
+     fn offset(&self) -> Option<usize> {
+         self.offset
+     }
++
++    fn has_default_member_initializer(&self) -> Option<bool> {
++        self.has_default_member_initializer
++    }
+ }
+ 
+ impl FieldData {
+@@ -1376,7 +1398,7 @@ impl CompInfo {
+                         // nothing.
+                     } else {
+                         let field = RawField::new(
+-                            None, ty, None, None, None, public, offset,
++                            None, ty, None, None, None, public, offset, None,
+                         );
+                         ci.fields.append_raw_field(field);
+                     }
+@@ -1399,6 +1421,7 @@ impl CompInfo {
+                         if !used {
+                             let field = RawField::new(
+                                 None, ty, None, None, None, public, offset,
++                                None,
+                             );
+                             ci.fields.append_raw_field(field);
+                         }
+@@ -1431,6 +1454,8 @@ impl CompInfo {
+                     let name = cur.spelling();
+                     let is_public = cur.public_accessible();
+                     let offset = cur.offset_of_field().ok();
++                    let has_default_member_initializer =
++                        cur.has_default_member_initializer();
+ 
+                     // Name can be empty if there are bitfields, for example,
+                     // see tests/headers/struct_with_bitfields.h
+@@ -1449,6 +1474,7 @@ impl CompInfo {
+                         bit_width,
+                         is_public,
+                         offset,
++                        has_default_member_initializer,
+                     );
+                     ci.fields.append_raw_field(field);
+ 
+@@ -1662,8 +1688,9 @@ impl CompInfo {
+         });
+ 
+         if let Some((ty, _, public, offset)) = maybe_anonymous_struct_field {
+-            let field =
+-                RawField::new(None, ty, None, None, None, public, offset);
++            let field = RawField::new(
++                None, ty, None, None, None, public, offset, None,
++            );
+             ci.fields.append_raw_field(field);
+         }
+ 
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -192,6 +192,24 @@ impl Type {
+         self.is_const
+     }
+ 
++    /// Is this a `const` qualified type, or an alias for one? `typedef const
++    /// int ci;` puts the qualifier on the alias's target, so something
++    /// declared `ci` is `const` without its own type saying so.
++    pub(crate) fn is_const_through_aliases(
++        &self,
++        ctx: &BindgenContext,
++    ) -> bool {
++        self.is_const ||
++            match self.kind {
++                TypeKind::ResolvedTypeRef(inner) |
++                TypeKind::Alias(inner) |
++                TypeKind::TemplateAlias(inner, ..) => {
++                    ctx.resolve_type(inner).is_const_through_aliases(ctx)
++                }
++                _ => false,
++            }
++    }
++
+     /// Is this an unresolved reference?
+     pub(crate) fn is_unresolved_ref(&self) -> bool {
+         matches!(self.kind, TypeKind::UnresolvedTypeRef(_, _, _))
