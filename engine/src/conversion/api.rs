@@ -48,7 +48,9 @@ pub(crate) enum TypeKind {
     // know what fields it has.
     // NB you might not find references to this in the codebase - that's
     // because `implicit_constructor.rs` acts on all the other types of TypeKind
-    Abstract, // has pure virtual members - can't even generate UniquePtr.
+    Abstract, // has pure virtual members - can't be constructed, and can only be
+              // held in a UniquePtr if its destructor is virtual; see
+              // `PublicConstructors::abstract_without_virtual_destructor`.
               // It's possible that the type itself isn't pure virtual, but it inherits from
               // some other type which is pure virtual. Alternatively, maybe we just don't
               // know if the base class is pure virtual because it wasn't on the allowlist,
