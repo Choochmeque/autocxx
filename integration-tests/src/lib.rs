@@ -46,11 +46,9 @@ const KEEP_TEMPDIRS: bool = false;
 /// bind. A test which fails is then reported somewhere inside a hundred
 /// thousand lines of that. Nothing is being swept away permanently:
 /// `RUST_LOG=autocxx_engine::vendored_bindgen=warn` puts it all back for anyone
-/// who wants it,
-/// which is the right way round, because it is worth reading when you are
-/// debugging bindgen and worth nothing when you are not.
-const DEFAULT_LOG_FILTER: &str =
-    "warn,autocxx=info,autocxx_engine::vendored_bindgen=error";
+/// who wants it, which is the right way round, because it is worth reading when
+/// you are debugging bindgen and worth nothing when you are not.
+const DEFAULT_LOG_FILTER: &str = "warn,autocxx=info,autocxx_engine::vendored_bindgen=error";
 
 /// Installs the logger which the suite's own `info!` output goes through.
 ///
