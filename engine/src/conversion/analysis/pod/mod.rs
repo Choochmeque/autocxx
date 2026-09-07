@@ -26,7 +26,7 @@ use crate::{
         type_helpers::array_element_type,
         ConvertErrorFromCpp,
     },
-    parse_callbacks::BaseClass,
+    parse_callbacks::{BaseClass, DataMember},
     types::{Namespace, QualifiedName},
     ParseCallbackResults,
 };
@@ -45,8 +45,13 @@ pub(crate) struct FieldInfo {
     pub(crate) bindgen_opaque_data: bool,
     /// Whether C++ declared the field itself `const`, as opposed to it
     /// pointing at something const. Deletes the implicitly declared default
-    /// constructor; see `find_constructors_present`.
+    /// constructor unless the field also has a default member initializer;
+    /// see `find_constructors_present`.
     pub(crate) is_const: bool,
+    /// Whether C++ gave the field a default member initializer, `int x = 5;`.
+    /// One stands in for whatever an implicitly declared default constructor
+    /// would otherwise have had to do with the field.
+    pub(crate) has_default_initializer: bool,
 }
 
 #[derive(std::fmt::Debug)]
@@ -79,6 +84,11 @@ pub(crate) struct PodAnalysis {
     /// std::unique_ptr<A> it would just be std::unique_ptr.
     pub(crate) field_definition_deps: HashSet<QualifiedName>,
     pub(crate) field_info: Vec<FieldInfo>,
+    /// The class's bitfield members. `field_info` has no entry for one:
+    /// bindgen gives a run of bitfields a single allocation unit and accessors
+    /// over it, so the only thing which says a bitfield exists, let alone what
+    /// its own type was, is bindgen's per-member report.
+    pub(crate) bitfields: Vec<DataMember>,
     pub(crate) num_generics: usize,
     pub(crate) in_anonymous_namespace: bool,
 }
@@ -181,6 +191,9 @@ fn analyze_struct(
     let id = name.name.get_final_ident();
     check_for_fatal_attrs(parse_callback_results, &name.name)?;
     let (bases, has_unnamed_base) = get_bases(&name.name, &details.item, parse_callback_results);
+    let data_members = parse_callback_results
+        .data_members(&name.name)
+        .unwrap_or_default();
     let mut field_deps = HashSet::new();
     let mut field_definition_deps = HashSet::new();
     let mut field_info = Vec::new();
@@ -193,6 +206,12 @@ fn analyze_struct(
         &mut field_info,
         extra_apis,
     );
+    add_reported_field_facts(&mut field_info, data_members);
+    let bitfields = data_members
+        .iter()
+        .filter(|member| member.is_bitfield)
+        .cloned()
+        .collect();
     let type_kind = if field_info.iter().any(|fi| fi.bindgen_opaque_data) {
         TypeKind::Opaque
     } else if byvalue_checker.is_pod(&name.name) {
@@ -243,6 +262,7 @@ fn analyze_struct(
             field_deps,
             field_definition_deps,
             field_info,
+            bitfields,
             num_generics,
             in_anonymous_namespace,
         },
@@ -296,6 +316,7 @@ fn get_struct_field_types(
                         ty: r.ty,
                         type_kind: r.kind,
                         is_const: r.is_const,
+                        has_default_initializer: false,
                         bindgen_opaque_data: f
                             .ident
                             .as_ref()
@@ -308,6 +329,34 @@ fn get_struct_field_types(
         };
     }
     convert_errors
+}
+
+/// Fills in what bindgen reported about each member rather than rendered into
+/// the field it emitted, joined on the name bindgen generated for it.
+///
+/// Bitfields are excluded from the join because they have no field here at
+/// all, and their reported name is the one their *accessors* are built from -
+/// which a real field may also hold, since C++ lets a member called `type`
+/// and a member called `type_` coexist and bindgen mangles the first into the
+/// second.
+fn add_reported_field_facts(field_info: &mut [FieldInfo], data_members: &[DataMember]) {
+    for field in field_info.iter_mut() {
+        let Some(name) = field.name.as_ref() else {
+            continue;
+        };
+        let Some(reported) = data_members
+            .iter()
+            .find(|member| !member.is_bitfield && member.name.as_ref() == Some(name))
+        else {
+            continue;
+        };
+        field.has_default_initializer = reported.has_default_member_initializer;
+        // Two channels for the same fact, and each sees cases the other does
+        // not. The marker survives an alias bindgen renders with it; the
+        // report reads the member's type in bindgen's IR, where the qualifier
+        // is still on whichever link of an alias chain C++ put it.
+        field.is_const |= reported.is_const;
+    }
 }
 
 /// The base classes of a type.

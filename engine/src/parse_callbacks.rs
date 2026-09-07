@@ -11,8 +11,8 @@ use std::{cell::RefCell, fmt::Display, panic::UnwindSafe, rc::Rc};
 use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
-    BaseClassInfo, BaseKind, DiscoveredItem, DiscoveredItemId, Explicitness, MethodKind,
-    SpecialMemberKind, Visibility,
+    BaseClassInfo, BaseKind, DataMemberInfo, DiscoveredItem, DiscoveredItemId, Explicitness,
+    MethodKind, SpecialMemberKind, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -171,6 +171,28 @@ pub(crate) struct AliasTemplateParams {
     pub(crate) type_params: usize,
 }
 
+/// One C++ data member of a struct or union, as bindgen reported it.
+///
+/// bindgen reports every member, including the ones it generates no field of
+/// their own type for: a run of bitfields shares one allocation unit, and each
+/// member of it survives only as accessors over that unit. So this is the only
+/// channel which says anything at all about a bitfield's own type.
+#[derive(Debug, Clone)]
+pub(crate) struct DataMember {
+    /// The name of the Rust field bindgen generates for the member, or of the
+    /// accessors where it is a bitfield. `None` for an unnamed bitfield.
+    pub(crate) name: Option<String>,
+    /// Whether C++ declared the member's own type `const`.
+    pub(crate) is_const: bool,
+    /// Whether the member is a bitfield, and so has no field of its own in the
+    /// struct bindgen emitted.
+    pub(crate) is_bitfield: bool,
+    /// Whether the member has a default member initializer. A member whose
+    /// initializer bindgen could not see counts as having none, which is the
+    /// direction that costs a `new()` rather than one which C++ deletes.
+    pub(crate) has_default_member_initializer: bool,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct NameAndParent {
     parent: DiscoveredItemId,
@@ -231,6 +253,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     names: HashMap<DiscoveredItemId, String>,
     mods_for_items: HashMap<DiscoveredItemId, DiscoveredItemId>,
     bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
+    data_members: HashMap<DiscoveredItemId, Vec<DataMember>>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -419,6 +442,13 @@ impl ParseCallbackResults {
     ) -> Option<AliasTemplateParams> {
         self.id_by_name(name)
             .and_then(|id| self.results.alias_templates.get(&id).cloned())
+    }
+
+    /// The C++ data members of a struct or union, in declaration order.
+    pub(crate) fn data_members(&self, name: &QualifiedName) -> Option<&[DataMember]> {
+        self.id_by_name(name)
+            .and_then(|id| self.results.data_members.get(&id))
+            .map(Vec::as_slice)
     }
 
     pub(crate) fn discards_template_param(&self, name: &QualifiedName) -> bool {
@@ -621,6 +651,25 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                 base: base.base,
                 is_virtual: matches!(base.kind, BaseKind::Virtual),
                 is_public: matches!(base.visibility, Visibility::Public),
+            });
+    }
+
+    fn denote_data_member(&self, parent: DiscoveredItemId, member: DataMemberInfo<'_>) {
+        self.results
+            .borrow_mut()
+            .data_members
+            .entry(parent)
+            .or_default()
+            .push(DataMember {
+                name: member.name.map(str::to_string),
+                is_const: member.is_const,
+                is_bitfield: member.bitfield_width.is_some(),
+                // bindgen answers `None` where it could not ask clang - a
+                // member declared by a macro expansion - and its own
+                // documentation says to read that as "assume the worst".
+                has_default_member_initializer: member
+                    .has_default_member_initializer
+                    .unwrap_or(false),
             });
     }
 }
