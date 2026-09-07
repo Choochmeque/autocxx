@@ -630,7 +630,7 @@ impl<'a> TypeConverter<'a> {
         //
         // All three of the smart pointers are lowered, and each gets the
         // accessors its C++ type has (see `HolderSurface`).
-        let payload_is_const = generic_args_are_const_qualified(&typ);
+        let payload_is_const = self.generic_args_are_const_qualified(&typ)?;
         if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppPtr && payload_is_const {
             let mut extra_apis = ApiVec::new();
             let surface = self.const_smart_pointer_surface(&tn, &typ, ns, &mut extra_apis)?;
@@ -995,29 +995,101 @@ impl<'a> TypeConverter<'a> {
         }
     }
 
+    /// Whether any of `typ`'s template arguments is `const`-qualified in its
+    /// own right, as `std::shared_ptr<const T>`'s is.
+    ///
+    /// Only the argument's own qualifier counts, which is the one cxx has no
+    /// room for; a `const` on something the argument points at is already in
+    /// the type, as `*const T`.
+    ///
+    /// A record argument used to be invisible here: bindgen kept the marker
+    /// only on an argument it rendered directly, and resolved a class
+    /// argument's `TypeKind::ResolvedTypeRef` past the node the qualifier was
+    /// on, so `std::shared_ptr<const Foo>` arrived indistinguishable from
+    /// `std::shared_ptr<Foo>`.
+    /// `third_party/patches/18-const-template-argument.patch` carries the
+    /// qualifier across that resolution, so every argument C++ wrote `const`
+    /// is one [`Self::arg_is_const_qualified`] can see.
+    fn generic_args_are_const_qualified(
+        &self,
+        typ: &TypePath,
+    ) -> Result<bool, ConvertErrorFromCpp> {
+        let Some(PathArguments::AngleBracketed(args)) =
+            typ.path.segments.last().map(|seg| &seg.arguments)
+        else {
+            return Ok(false);
+        };
+        for arg in args.args.iter() {
+            if let GenericArgument::Type(Type::Path(inner)) = arg {
+                if self.arg_is_const_qualified(inner)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether one template argument is `const`-qualified in its own right,
+    /// however C++ spelt it.
+    ///
+    /// Written at the instantiation, the qualifier is bindgen's marker on the
+    /// argument. Written on an alias it is not there at all: `typedef const
+    /// int CI` comes out `pub type CI = __bindgen_marker_Const<c_int>`, and
+    /// the argument of `std::shared_ptr<CI>` is the bare path `CI`. C++ makes
+    /// no distinction between the two spellings - both name
+    /// `std::shared_ptr<const int>` - so neither does this, and the alias is
+    /// resolved by the same walk which reads the constness of an alias used
+    /// anywhere else.
+    ///
+    /// A `const` alias whose target is a *record* or an enum is still
+    /// invisible, and that gap is bindgen's: it erases the qualifier when it
+    /// resolves the alias, which is the remaining gap recorded in
+    /// `11-const-newtype-marker.patch`.
+    fn arg_is_const_qualified(&self, arg: &TypePath) -> Result<bool, ConvertErrorFromCpp> {
+        if unwrap_const(arg).is_some() {
+            return Ok(true);
+        }
+        Ok(self
+            .resolve_typedef(&QualifiedName::from_type_path(arg))?
+            .is_some_and(|target| target.is_const))
+    }
+
     /// The `T` of a `std::shared_ptr<const T>`, converted as the `cxx::bridge`
     /// would spell it, for the accessor the holder gets.
     ///
     /// `None` where the instantiation has no single `const`-qualified type
-    /// argument to read - which is nothing `std::shared_ptr` can be written
+    /// argument to read - which is nothing the smart pointers can be written
     /// with today, but the pattern match rather than an `unwrap` is what keeps
     /// it that way. The holder is still generated in that case; it simply has
     /// no accessor.
+    ///
+    /// Where the qualifier is on an alias, the argument is handed to the
+    /// conversion as it stands: naming the alias is what carries the `const`,
+    /// and converting the alias is what resolves it. Where it is written at
+    /// the instantiation, bindgen's marker is peeled off first, because
+    /// nothing downstream knows what to do with one.
     fn convert_const_payload(
         &mut self,
         typ: &TypePath,
         ns: &Namespace,
-    ) -> Option<Result<Annotated<Type>, ConvertErrorFromCpp>> {
-        let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
-            return None;
+    ) -> Result<Option<Annotated<Type>>, ConvertErrorFromCpp> {
+        let Some(PathArguments::AngleBracketed(args)) =
+            typ.path.segments.last().map(|seg| &seg.arguments)
+        else {
+            return Ok(None);
         };
         let [GenericArgument::Type(Type::Path(payload))] =
             args.args.iter().collect::<Vec<_>>().as_slice()
         else {
-            return None;
+            return Ok(None);
         };
-        let payload = unwrap_const(payload)?.clone();
-        Some(self.convert_type(payload, ns, &TypeConversionContext::WithinContainer))
+        let payload = match unwrap_const(payload) {
+            Some(inner) => inner.clone(),
+            None if self.arg_is_const_qualified(payload)? => Type::Path((*payload).clone()),
+            None => return Ok(None),
+        };
+        self.convert_type(payload, ns, &TypeConversionContext::WithinContainer)
+            .map(Some)
     }
 
     /// Which accessors the holder for a `const`-payload smart pointer gets.
@@ -1043,7 +1115,7 @@ impl<'a> TypeConverter<'a> {
         ns: &Namespace,
         extra_apis: &mut ApiVec<NullPhase>,
     ) -> Result<Option<HolderSurface>, ConvertErrorFromCpp> {
-        let Some(mut payload) = self.convert_const_payload(typ, ns).transpose()? else {
+        let Some(mut payload) = self.convert_const_payload(typ, ns)? else {
             return Ok(None);
         };
         extra_apis.append(&mut payload.extra_apis);
@@ -1315,52 +1387,14 @@ impl<'a> TypeConverter<'a> {
     }
 }
 
-/// Whether any of `typ`'s template arguments carries bindgen's `const` marker,
-/// as `std::shared_ptr<const T>` does.
-///
-/// Only the argument's own qualifier counts, which is the one cxx has no room
-/// for; a `const` on something the argument points at is already in the type,
-/// as `*const T`.
-///
-/// A record argument used to be invisible here: bindgen kept the marker only
-/// on an argument it rendered directly, and resolved a class argument's
-/// `TypeKind::ResolvedTypeRef` past the node the qualifier was on, so
-/// `std::shared_ptr<const Foo>` arrived indistinguishable from
-/// `std::shared_ptr<Foo>`. `third_party/patches/18-const-template-argument.patch`
-/// carries the qualifier across that resolution, so every argument C++ wrote
-/// `const` is one this can see.
-///
-/// One kind still is not, and this time the gap is here rather than in
-/// bindgen: a `const` reached through an alias. bindgen keeps the marker on
-/// the alias - `typedef const int CI` comes out
-/// `pub type CI = __bindgen_marker_Const<c_int>` - but the argument of
-/// `std::shared_ptr<CI>` is the path `CI` with nothing on it, and this looks
-/// no further. Resolving the alias would mean asking `resolve_typedef` here,
-/// where every other reader of that constness asks after conversion instead;
-/// until it does, that one spelling is not lowered and the C++ cxx generates
-/// fails to bind, which is the pre-lowering symptom. (A `const` alias whose
-/// target is a *record* or an enum is a different matter: bindgen erases the
-/// qualifier from those, which is the remaining gap recorded in
-/// `11-const-newtype-marker.patch`.)
-fn generic_args_are_const_qualified(typ: &TypePath) -> bool {
-    let Some(PathArguments::AngleBracketed(args)) =
-        typ.path.segments.last().map(|seg| &seg.arguments)
-    else {
-        return false;
-    };
-    args.args.iter().any(|arg| {
-        matches!(arg, GenericArgument::Type(Type::Path(inner)) if unwrap_const(inner).is_some())
-    })
-}
-
 /// `typ`'s one template argument, where it is a raw pointer, as
 /// `std::vector<T*>`'s is.
 ///
 /// A pointer is one of the arguments bindgen renders directly rather than
 /// through a type reference, so `std::vector<Foo*>` arrives as
 /// `vector<*mut Foo>` with the pointer intact - see
-/// [`generic_args_are_const_qualified`] for the same mechanism and where it
-/// stops. `const Foo*` needs nothing extra from the marker to survive: it
+/// [`TypeConverter::arg_is_const_qualified`] for the same mechanism and where
+/// it stops. `const Foo*` needs nothing extra from the marker to survive: it
 /// arrives as `*const Foo`, because pointee constness is part of a Rust type
 /// already.
 ///

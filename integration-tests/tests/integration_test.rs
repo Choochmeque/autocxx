@@ -9403,6 +9403,78 @@ fn test_shared_ptr_const_payload_is_const() {
     );
 }
 
+/// A payload whose `const` is on an alias rather than written at the
+/// instantiation: `typedef const int CI; std::shared_ptr<CI>`.
+///
+/// C++ makes no distinction - `std::shared_ptr<CI>` *is*
+/// `std::shared_ptr<const int>`, and cxx's `SharedPtr<CI>` fails to bind
+/// against it in exactly the same way - but nothing in the type as bindgen
+/// writes it says so: the marker is on the alias, and the argument is a bare
+/// path. Reading the argument alone therefore missed this spelling entirely,
+/// and it was the one shape of `const` payload which was not lowered.
+///
+/// All three ways of writing the alias, because they are three different
+/// things to resolve: `typedef`, `using`, and an alias to an alias.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_payload_through_an_alias() {
+    let hdr = indoc! {"
+        #include <memory>
+        typedef const int fx_CI;
+        using fx_CU = const int;
+        typedef fx_CI fx_CI2;
+        inline std::shared_ptr<fx_CI> fx_hold_typedef() {
+            return std::make_shared<fx_CI>(3);
+        }
+        inline std::shared_ptr<fx_CU> fx_hold_using() {
+            return std::make_shared<fx_CU>(4);
+        }
+        inline std::shared_ptr<fx_CI2> fx_hold_chain() {
+            return std::make_shared<fx_CI2>(5);
+        }
+    "};
+    let rs = quote! {
+        let by_typedef = ffi::fx_hold_typedef();
+        assert_eq!(unsafe { *by_typedef.get() }, autocxx::c_int(3));
+        assert_eq!(by_typedef.use_count(), 1);
+        let by_using = ffi::fx_hold_using();
+        assert_eq!(unsafe { *by_using.get() }, autocxx::c_int(4));
+        let by_chain = ffi::fx_hold_chain();
+        assert_eq!(unsafe { *by_chain.get() }, autocxx::c_int(5));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &["fx_hold_typedef", "fx_hold_using", "fx_hold_chain"],
+            &[],
+            None,
+        ),
+        None,
+        Some(make_checks(vec![
+            // The typedef names the alias, which is how the header spelt the
+            // specialization and is the same C++ type either way.
+            Box::new(CppMatcher::new(
+                &[
+                    "typedef std::shared_ptr<fx_CI>",
+                    "typedef std::shared_ptr<fx_CU>",
+                    "typedef std::shared_ptr<fx_CI2>",
+                ],
+                &[],
+            )),
+            // The alias is resolved on the Rust side, where there is nothing
+            // for it to name: the accessor is the same `*const` a payload
+            // written `const int` gets.
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self) -> * const autocxx :: c_int
+            }]),
+        ])),
+        None,
+    );
+}
+
 /// An empty holder, and one built with the aliasing constructor. Both are
 /// ordinary `std::shared_ptr` states which the generated docs promise nothing
 /// about beyond what C++ does, and both have to survive being cloned, counted
