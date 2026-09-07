@@ -1769,24 +1769,43 @@ fn shared_ptr_holder_doc() -> String {
      Ownership works as it does in C++: dropping the `UniquePtr` holding one of \
      these runs `~shared_ptr()` and releases one reference, and `clone` takes \
      another. What it does not have is cxx's `SharedPtr` API - `null`, \
-     `Deref`, and the rest - because it is not one."
+     `Deref`, and the rest - because it is not one.\n\n\
+     The `const` is C++'s, and describes the access path this type gives you \
+     rather than the payload. C++ may hold a `std::shared_ptr<T>` to the same \
+     object and write through it, so treat what `get` returns as you would any \
+     other pointer into C++.\n\n\
+     Nothing here makes the holder `Send` or `Sync`: the reference count is \
+     atomic, which says nothing about whether the payload may be touched from \
+     another thread."
         .to_string()
 }
 
 /// What the generated docs say about each of the holder's three methods.
 fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
+    // The two `Get` arms describe the same C++ call and differ only in what
+    // Rust receives, so they say the same things about it.
+    let get_caveats = "It may be null, and this does not check. Holding the \
+         holder does not by itself establish that the pointer refers to a live \
+         object either: `std::shared_ptr` has an aliasing constructor, and one \
+         built with it stores a pointer whose lifetime is not the managed \
+         object's.";
     match shim {
-        SharedPtrShim::Get if wrapped => "The payload, as a `CppRef` - `std::shared_ptr::get`.\n\n\
-             The payload is `const` in C++, so there is no method here yielding \
-             anything mutable. The reference is null where the `shared_ptr` is \
-             empty, which `CppRef` does not check for you."
-            .to_string(),
-        SharedPtrShim::Get => "The payload - `std::shared_ptr::get`.\n\n\
-             The payload is `const` in C++, so this is a `*const` and there is \
-             no method here yielding a `*mut`. It is null where the \
-             `shared_ptr` is empty, and it is valid only while some owner of \
-             the payload - this holder among them - is alive."
-            .to_string(),
+        SharedPtrShim::Get if wrapped => format!(
+            "The stored pointer, as a `CppRef` - `std::shared_ptr::get`.\n\n\
+             {get_caveats} A `CppRef` is never dereferenced except through an \
+             `unsafe` the caller vouches for, which is where both of those \
+             become the caller's business.\n\n\
+             The payload's C++ type is `const`, so no method here yields \
+             anything mutable - though `CppRef::const_cast` will hand you a \
+             `CppMutRef` if you ask, exactly as C++'s `const_cast` would."
+        ),
+        SharedPtrShim::Get => format!(
+            "The stored pointer - `std::shared_ptr::get`.\n\n\
+             {get_caveats} Both are why dereferencing it is `unsafe`.\n\n\
+             The payload's C++ type is `const`, so this is a `*const` and no \
+             method here yields a `*mut` - though Rust will let you cast one, \
+             exactly as C++'s `const_cast` would."
+        ),
         SharedPtrShim::Clone => {
             "Another owner of the same payload, raising the reference count.\n\n\
              This is C++ copy-construction of the `shared_ptr`, not a copy of \

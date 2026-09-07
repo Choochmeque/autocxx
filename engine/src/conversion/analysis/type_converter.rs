@@ -639,6 +639,13 @@ impl<'a> TypeConverter<'a> {
             let mut extra_apis = ApiVec::new();
             // Only `std::shared_ptr` gets an accessor surface, and only when
             // its payload is a type the bridge can name in one.
+            //
+            // The payload's dependency is recorded here, on whatever is being
+            // converted, rather than on the holder: `Api::ConcreteType` has no
+            // arm in `deps.rs` to carry one. That is enough while the payload
+            // is a builtin, which is all the marker ever reaches us for, since
+            // an `Api::CType` is not something the GC can take away from under
+            // the holder. It would need revisiting alongside class payloads.
             let payload = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
                 match self.convert_const_payload(&typ, ns) {
                     Some(Ok(mut payload)) => {
@@ -725,6 +732,14 @@ impl<'a> TypeConverter<'a> {
                         &TypeConversionContext::WithinContainer,
                     )?;
                     ab.args = innerty.ty;
+                    // Converting the payload may have manufactured a type -
+                    // the opaque holder of a `std::shared_ptr<const T>`, or
+                    // any other concrete instantiation - and the bridge names
+                    // it in this container's own declaration, so its `Api` has
+                    // to travel out with the type. Dropping it left the
+                    // enclosing function refused for depending on a type
+                    // nothing declared. See google/autocxx#799.
+                    extra_apis.append(&mut innerty.extra_apis);
                     kind = self.confirm_inner_type_is_acceptable_generic_payload(
                         &ab.args,
                         &tn,

@@ -93,6 +93,15 @@ impl SharedPtrShim {
     }
 
     /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    ///
+    /// Built rather than allocated, so unlike every other bridge name it is not
+    /// reserved against the user's own: `BridgeNameTracker` and
+    /// `fixed_bridge_names` run during analysis, and the holder these belong to
+    /// is manufactured after that. A header declaring a function called
+    /// `<holder>_autocxx_get` would collide, where `<holder>` is the mangled
+    /// spelling of a `std::shared_ptr<const T>` instantiation - so the name to
+    /// collide with is one nobody writes by accident, and a collision is a Rust
+    /// compile error in generated code rather than anything silent.
     pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
         format!("{}_autocxx_{}", holder.get_final_item(), self.rust_name())
     }

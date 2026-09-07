@@ -209,10 +209,19 @@ impl CppNameMap {
             Type::Path(typ) => {
                 // bindgen's `const` marker is an alias, not a C++ name: it
                 // records a qualifier Rust cannot spell, so it has to be
-                // written back as one rather than looked up. See
-                // google/autocxx#799.
+                // written back as one rather than looked up.
+                //
+                // Where it qualifies a pointer the qualifier goes after it -
+                // `int* const` is a const pointer to a mutable int, where
+                // `const int*` is the opposite type entirely, and the marker
+                // means the first. Everywhere else C++ takes the prefix.
+                // See google/autocxx#799.
                 if let Some(inner) = unwrap_const(typ) {
-                    return Ok(format!("const {}", self.type_to_cpp(inner)?));
+                    let inner_cpp = self.type_to_cpp(inner)?;
+                    return Ok(match inner {
+                        Type::Ptr(_) => format!("{inner_cpp} const"),
+                        _ => format!("const {inner_cpp}"),
+                    });
                 }
                 // If this is a std::unique_ptr we do need to pass
                 // its argument through.
