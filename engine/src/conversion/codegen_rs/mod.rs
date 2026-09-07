@@ -2122,8 +2122,10 @@ fn unique_ptr_holder_doc() -> String {
 /// holder's two methods.
 fn unique_ptr_method_doc(shim: UniquePtrShim, wrapped: bool) -> String {
     let get_caveats = "It may be null - a `std::unique_ptr` need not hold \
-         anything, and `is_null` is how to find out - and it is only as good \
-         as the holder: the payload dies with the `unique_ptr`.";
+         anything, and `payload_is_null` is how to find out; note that the \
+         `cxx::UniquePtr` this arrives in has an `is_null` of its own, which \
+         answers about that outer pointer instead. Beyond null, the pointer is \
+         only as good as the holder: the payload dies with the `unique_ptr`.";
     match shim {
         UniquePtrShim::Get if wrapped => format!(
             "The stored pointer, as a `CppRef` - `std::unique_ptr::get`.\n\n\
@@ -2134,8 +2136,8 @@ fn unique_ptr_method_doc(shim: UniquePtrShim, wrapped: bool) -> String {
              `unsafe` on your part - so producing one is where the promise has \
              to be made. The caller must establish what the C++ header would \
              otherwise have promised: that the stored pointer is non-null - \
-             [`Self::is_null`] answers that - aligned, and refers to a live \
-             object for as long as the `CppRef` is used.\n\n\
+             [`Self::payload_is_null`] answers that - aligned, and refers to a \
+             live object for as long as the `CppRef` is used.\n\n\
              The payload's C++ type is `const`, so no method here yields \
              anything mutable - though `CppRef::const_cast` will hand you a \
              `CppMutRef` if you ask, exactly as C++'s `const_cast` would."
