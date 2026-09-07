@@ -1,0 +1,77 @@
+Subject: Restore the `unsafe` block and `bool` handling on union bitfields
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2165,36 +2165,55 @@
+         let access_spec = access_specifier(*bitfield_visibility);
+ 
+         if parent.is_union() && !struct_layout.is_rust_union() {
++            // `__BindgenUnionField::as_ref` and `as_mut` are `unsafe fn`, so
++            // every one of these bodies needs a block, and a `bool` field needs
++            // a comparison rather than a cast to a type no integer casts to.
++            // Both are as the sibling branch below has them.
++            let get = quote! {
++                self.#unit_field_ident.as_ref().get(#offset, #width)
++                    as #bitfield_int_ty
++            };
++            let raw_get = quote! {
++                <#unit_field_ty>::raw_get(
++                    (*::#prefix::ptr::addr_of!((*this).#unit_field_ident)).as_ref() as *const _,
++                    #offset,
++                    #width,
++                ) as #bitfield_int_ty
++            };
++            let (getter_inner, raw_getter_inner) = match bitfield_ty_kind {
++                TypeKind::Int(IntKind::Bool) => {
++                    (quote! { #get != 0 }, quote! { #raw_get != 0 })
++                }
++                TypeKind::Enum(..) => (
++                    quote! { ::#prefix::mem::transmute(#get) },
++                    quote! { ::#prefix::mem::transmute(#raw_get) },
++                ),
++                _ => (quote! { #get as _ }, quote! { #raw_get as _ }),
++            };
++
+             methods.extend(Some(quote! {
+                 #[inline]
+                 #access_spec fn #getter_name(&self) -> #bitfield_ty {
+-                    self.#unit_field_ident.as_ref().get(#offset, #width)
+-                        as #bitfield_int_ty
+-                        as _
++                    unsafe { #getter_inner }
+                 }
+ 
+                 #[inline]
+                 #access_spec fn #setter_name(&mut self, val: #bitfield_ty) {
+-                    let val: #bitfield_int_ty = val as _;
+-                    self.#unit_field_ident.as_mut().set(
+-                        #offset,
+-                        #width,
+-                        val as u64
+-                    )
++                    unsafe {
++                        let val: #bitfield_int_ty = val as _;
++                        self.#unit_field_ident.as_mut().set(
++                            #offset,
++                            #width,
++                            val as u64
++                        )
++                    }
+                 }
+             }));
+ 
+             methods.extend(Some(quote! {
+                 #[inline]
+                 #access_spec unsafe fn #raw_getter_name(this: *const Self) -> #bitfield_ty {
+-                    unsafe {
+-                        <#unit_field_ty>::raw_get(
+-                            (*::#prefix::ptr::addr_of!((*this).#unit_field_ident)).as_ref() as *const _,
+-                            #offset,
+-                            #width,
+-                        ) as #bitfield_int_ty
+-                          as _
+-                    }
++                    unsafe { #raw_getter_inner }
+                 }
+ 
+                 #[inline]

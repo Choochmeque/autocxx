@@ -17455,7 +17455,8 @@ fn test_give_bitfield() {
             `__BindgenBitfieldUnit::get` returns the raw bits in a u64 and the getter \
             casts them straight to the field's signed type, so `signed3` holding -3 \
             reads back as 5. See https://github.com/rust-lang/rust-bindgen/issues/1160. \
-            Nothing in autocxx can fix it; autocxx-bindgen 0.73.0 does not carry a fix."]
+            Nothing in autocxx can fix it; bindgen 0.73.1 does not carry a fix - it \
+            reimplemented the accessors for speed, not for sign extension."]
 /// The signed half of [`test_give_bitfield`]. Kept as a live (if ignored) test
 /// rather than commented out, so that whoever picks up the bindgen fix can
 /// just delete the `#[ignore]` and see whether it passes.

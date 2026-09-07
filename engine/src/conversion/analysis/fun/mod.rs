@@ -1173,14 +1173,15 @@ impl<'a> FnAnalyzer<'a> {
         // meaning it cannot tell, which changes which of that class's *other*
         // special members autocxx believes C++ implicitly defines.
         //
-        // Nothing has reached any of the three with the autocxx-bindgen this
-        // crate pins, 0.73.0: bindgen reports the special member kind of every
-        // constructor and destructor it finds and never that of an `operator=`,
-        // so no function arrives carrying this kind - not even one whose class
-        // declares an assignment operator explicitly, and not even at the
-        // callback which records the kind. They stay because the classification
-        // is right either way and is what the reader-back needs the moment
-        // bindgen does report one.
+        // Nothing reaches any of the three, and the reason is mechanical.
+        // bindgen tags an `operator=` as an assignment operator in the same
+        // block that renames it to something spellable in Rust, and that block
+        // runs after `ParseCallbacks::generated_name_override` - which autocxx
+        // implements for every function. So bindgen sees
+        // `operator=_bindgen_original`, not `operator=`, matches no arm, and
+        // drops the function rather than reporting it. The classification
+        // stays because it is right either way and is what the reader-back
+        // needs the moment such a function does arrive.
         let is_assignment_operator = matches!(
             fun.special_member,
             Some(SpecialMemberKind::AssignmentOperator)

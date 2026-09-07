@@ -45,7 +45,11 @@ mod builder;
 #[cfg(any(test, feature = "build"))]
 mod cxx_version_parity;
 
-use crate::vendored_bindgen::BindgenError;
+// Public because `Error::Bindgen` carries one and a caller matching on it has
+// to be able to name the payload. It used to be nameable as
+// `autocxx_bindgen::BindgenError`; `vendored_bindgen` is private, so autocxx
+// re-exports the one type of bindgen's that reaches its own API.
+pub use crate::vendored_bindgen::BindgenError;
 use autocxx_parser::{EnumStyle, IncludeCppConfig, UnsafePolicy};
 use conversion::BridgeConverter;
 use miette::{SourceOffset, SourceSpan};
@@ -197,9 +201,9 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
 ///
 /// # Build time
 ///
-/// Everything here runs inside `autocxx_engine`, except the `libclang` parse
-/// (which belongs to `autocxx_bindgen`) and the final C++ codegen (which
-/// belongs to `cxx_gen`).
+/// Everything here runs inside `autocxx_engine`, including the `libclang` parse
+/// - bindgen is vendored as [`vendored_bindgen`] rather than depended upon -
+/// except the final C++ codegen, which belongs to `cxx_gen`.
 ///
 /// ```text
 ///   .rs input (your source, containing include_cpp!)
@@ -209,7 +213,7 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
 ///                             |                              |
 ///                             | configures                   |
 ///                             v                              |
-///   C++ headers --> +-- autocxx_bindgen --------------+      |
+///   C++ headers --> +-- vendored_bindgen -------------+      |
 ///                   |  libclang parse --> bindgen IR  |      |
 ///                   +----------------|----------------+      |
 ///                                    v                       |

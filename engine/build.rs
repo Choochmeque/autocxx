@@ -34,9 +34,8 @@ const SUBMODULE_LIB: &str = "third_party/rust-bindgen/bindgen";
 /// a `Cargo.toml`, treating it as a separate package, and neither `include` nor
 /// `exclude` lifts that. bindgen's sources sit under two such manifests, so the
 /// submodule cannot reach crates.io as it stands. `AUTOCXX_VENDOR_BINDGEN=1`
-/// copies them here with the manifests renamed, and this directory wins when it
-/// exists - which in a published crate is always, and in a git checkout is only
-/// if someone asked for it.
+/// copies them here with the manifests renamed, and this directory is read only
+/// where there is no submodule to read instead - see `bindgen_sources`.
 const VENDORED_LIB: &str = "third_party/bindgen-src";
 
 /// What a `Cargo.toml` is called in `VENDORED_LIB`, so that cargo does not read
@@ -120,11 +119,11 @@ const DROPPED_ATTRS: &[&str] = &[
 
 /// Prepended to the vendored module root.
 ///
-/// The `allow`s are about whose code this is: autocxx forbids `unsafe` in its
-/// own sources and lints them, but bindgen calls libclang and is linted by
-/// bindgen's own CI against bindgen's own configuration. A warning here is not
-/// something autocxx can fix without diverging from upstream, which is the one
-/// thing this arrangement exists to avoid.
+/// The `allow`s are about whose code this is: autocxx denies `unsafe` in its own
+/// sources and lints them, but bindgen calls libclang and is linted by bindgen's
+/// own CI against bindgen's own configuration. A warning here is not something
+/// autocxx can fix without diverging from upstream, which is the one thing this
+/// arrangement exists to avoid.
 const MODULE_PREAMBLE: &str = "\
 #![allow(unsafe_code)]
 #![allow(clippy::all, clippy::pedantic)]
@@ -145,6 +144,24 @@ fn main() {
     // is not itself being run from a build script.
     let target = std::env::var("TARGET").expect("cargo sets TARGET for every build script");
     println!("cargo:rustc-env=AUTOCXX_COMPILED_TARGET={target}");
+
+    // Carried over from the build script bindgen has of its own, which this one
+    // replaces: on behalf of clang-sys, rebuild when the configuration naming
+    // which libclang to use changes, so that bindings get regenerated rather
+    // than kept from a different clang.
+    for var in [
+        "LLVM_CONFIG_PATH",
+        "LIBCLANG_PATH",
+        "LIBCLANG_STATIC_PATH",
+        "BINDGEN_EXTRA_CLANG_ARGS",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    println!("cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_{target}");
+    println!(
+        "cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_{}",
+        target.replace('-', "_")
+    );
 
     let manifest =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
@@ -203,22 +220,28 @@ fn vendor_bindgen(manifest: &Path, out: &Path, target: &str) {
     }
 }
 
-/// Where bindgen's sources are: the flattened copy if the crate was published
-/// with one, otherwise the submodule.
+/// Where bindgen's sources are.
+///
+/// The submodule wins whenever it is checked out, which is the whole of the
+/// difference between a git checkout and a published crate. The other way round
+/// would be worse than a wrong answer: `flatten_for_publishing` leaves its copy
+/// behind, so preferring it would mean that everyone who had once prepared a
+/// release silently kept building that copy, and a submodule bumped to a new
+/// tag would compile as if nothing had changed.
 fn bindgen_sources(manifest: &Path) -> PathBuf {
-    let vendored = manifest.join(VENDORED_LIB);
-    if vendored.join("lib.rs").is_file() {
-        return vendored;
-    }
     let submodule = manifest.join(SUBMODULE_LIB);
+    if submodule.join("lib.rs").is_file() {
+        return submodule;
+    }
+    let vendored = manifest.join(VENDORED_LIB);
     assert!(
-        submodule.join("lib.rs").is_file(),
+        vendored.join("lib.rs").is_file(),
         "{} is empty. It is a git submodule holding the bindgen sources \
          autocxx builds against; run `git submodule update --init --recursive` \
          and build again.",
         submodule.display()
     );
-    submodule
+    vendored
 }
 
 /// Copy the submodule's sources to `VENDORED_LIB` so that `cargo package` can
@@ -296,10 +319,14 @@ fn patch_series(dir: &Path) -> Vec<PathBuf> {
 
 /// Apply one patch file, which may touch several sources.
 ///
-/// The whole point of applying a patch rather than committing a patched copy is
-/// that a mismatch is loud: if the submodule moves to a tag the series was not
-/// rebased onto, the build stops here naming the file and the patch, rather
-/// than compiling something nobody wrote.
+/// The point of applying a patch rather than committing a patched copy is that a
+/// hunk whose surroundings moved stops the build here, naming the file and the
+/// patch, rather than compiling something nobody wrote. What that does not catch
+/// is a release which changed the code around a hunk without changing the hunk's
+/// own context, or which changed something no hunk touches: the series still
+/// applies, correctly, to different code. Nothing pins the tag, so diffing
+/// generated output across a submodule bump is the check that catches those -
+/// see `book/src/contributing.md`.
 fn apply_patch(patch: &Path, files: &mut BTreeMap<PathBuf, String>) {
     let text = fs::read_to_string(patch)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", patch.display()));
@@ -422,7 +449,15 @@ fn rewrite(relative: &Path, text: &str, target: &str) -> String {
 }
 
 /// Rewrite `name!` to `path!`, leaving `name` alone anywhere it is not a macro
-/// invocation - including `macro_rules! name`, which defines rather than calls.
+/// invocation - including `macro_rules! name`, which defines rather than calls,
+/// and `r#name!`, which is a different identifier.
+///
+/// This is text, not tokens, so it cannot tell a macro call from the same
+/// spelling inside a string literal or inside a `quote!` body destined for a
+/// user's crate. No such spelling exists in the bindgen release the submodule is
+/// pinned at, and if one arrives in a later release the generated-output diff
+/// across the bump is what shows it - which is why that diff is in the rolling
+/// checklist rather than optional.
 fn replace_macro_invocation(text: &str, name: &str, path: &str) -> String {
     let needle = format!("{name}!");
     let mut out = String::with_capacity(text.len());
@@ -430,14 +465,16 @@ fn replace_macro_invocation(text: &str, name: &str, path: &str) -> String {
     while let Some(at) = rest.find(&needle) {
         let (before, after) = rest.split_at(at);
         // A macro name is one identifier: if what precedes it could continue an
-        // identifier or a path, this is some other name ending in `name`.
+        // identifier or a path, or makes it a raw identifier, this is some other
+        // name.
+        let raw = before.ends_with("r#");
         let preceded_by_ident = before
             .chars()
             .next_back()
             .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':');
         let defines = before.trim_end().ends_with("macro_rules!");
         out.push_str(before);
-        if preceded_by_ident || defines {
+        if raw || preceded_by_ident || defines {
             out.push_str(&needle);
         } else {
             out.push_str(path);
