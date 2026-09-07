@@ -15,8 +15,9 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            extract_pinned_mutable_reference_type, unwrap_bitfield, unwrap_const,
-            unwrap_function_pointer, unwrap_has_opaque, unwrap_reference,
+            extract_pinned_mutable_reference_type, mentions_long_double, unwrap_bitfield,
+            unwrap_const, unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double,
+            unwrap_reference,
         },
         ConvertErrorFromCpp,
     },
@@ -339,6 +340,23 @@ impl<'a> TypeConverter<'a> {
                 return Err(ConvertErrorFromCpp::BindgenOpaqueBlob(
                     ty.to_token_stream().to_string(),
                 ));
+            }
+            self.convert_type(ty.clone(), ns, ctx)
+        } else if let Some(ty) = unwrap_long_double(&typ) {
+            // C++ `long double`. bindgen substituted a Rust type of the right
+            // size - `f64` where the type is 8 bytes, an integer of the same
+            // width where it is 16 - and no Rust type has both that size and
+            // `long double`'s calling convention, so a signature mentioning
+            // one would compile and pass the wrong bytes. Turn it down; the
+            // error says what to do instead.
+            //
+            // As field data the substitute is fine, because Rust only carries
+            // those bytes around. Such a struct still cannot be passed by
+            // value, for the same ABI reason - `ByValueChecker` refuses it,
+            // because it reads the field types before this unwrapping and so
+            // sees the marker rather than what it wraps.
+            if !ctx.within_struct_field() {
+                return Err(ConvertErrorFromCpp::LongDouble);
             }
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ty) = unwrap_bitfield(&typ) {
@@ -790,6 +808,14 @@ impl<'a> TypeConverter<'a> {
                 let qn = QualifiedName::from_type_path(&typ); // ignores generic params
                 if self.ignored_types.contains(&qn) {
                     return Err(ConvertErrorFromCpp::ConcreteVersionOfIgnoredTemplate);
+                }
+                // The concrete instantiation is named in C++ by writing its
+                // arguments out again, and this branch does not convert them
+                // first - so a `long double` argument would reach the header
+                // as a literal `__bindgen_marker_LongDouble<double>` rather
+                // than being turned down like one anywhere else.
+                if mentions_long_double(&Type::Path(typ.clone())) {
+                    return Err(ConvertErrorFromCpp::LongDouble);
                 }
                 let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
                 extra_apis.extend(api.into_iter());

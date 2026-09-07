@@ -674,11 +674,16 @@ fn create_type_database() -> TypeDatabase {
         // depending on a type we've never heard of.
         db.insert_alias(bindgen_name, rs_name);
     }
-    // TODO: `long double` has no entry here and cannot be given one from this
-    // side. It renders by layout size, so where it is 8 bytes (MSVC, Apple Arm)
-    // it is indistinguishable from `double`, and where it is 16 (x86-64 System
-    // V) `FloatKind::LongDouble` becomes `integer_type(layout)`, i.e. `u128` -
-    // which is not registered here at all, so on those targets the function is
-    // rejected during our own analysis rather than by the C++ compiler.
+    // `long double` is the fifth C++ built-in with no Rust equivalent, and the
+    // one which gets no entry here, because what to put in it differs by
+    // target: `double` under another name on MSVC and Apple Arm, an 80-bit x87
+    // float in 16 bytes on x86-64 System V, an IEEE binary128 on AArch64
+    // Linux. Rust has no type for the last two, and for the first it has one
+    // which is the wrong C++ type - which cxx catches, because it checks a
+    // function's exact type. So the answer is a refusal rather than a newtype,
+    // and `25-long-double-newtype-marker.patch` is what makes the refusal
+    // possible: it marks the type so that `type_converter` can name what it is
+    // turning down instead of seeing bindgen's same-sized substitute. See
+    // `ConvertErrorFromCpp::LongDouble`.
     db
 }
