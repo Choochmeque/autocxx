@@ -17888,7 +17888,6 @@ fn test_issue_1125() {
 // for the wchar_t half.
 
 #[test]
-#[ignore] // case 1 above: codegen renders IntKind::WChar by layout size
 fn test_wchar_issue_1141() {
     let cxx = indoc! {"
         wchar_t next_wchar(wchar_t c) {
@@ -17901,6 +17900,44 @@ fn test_wchar_issue_1141() {
     "};
     let rs = quote! {};
     run_test(cxx, hdr, rs, &["next_wchar"], &[]);
+}
+
+/// `wchar_t` values crossing the bridge, and the two things about `wchar_t`
+/// which are the target's to decide asked of both languages at once.
+///
+/// `autocxx::c_wchar_t` wraps a Rust integer picked by `cfg`, and nothing in
+/// the generated code would notice if that pick disagreed with the C++
+/// compiler's - a value would simply be read from the wrong bytes. So the test
+/// asks C++ what `sizeof(wchar_t)` and its signedness are and compares them
+/// with what the Rust side chose, on whichever target it is running.
+#[test]
+fn test_wchar_t_values() {
+    let hdr = indoc! {"
+        inline wchar_t next_wchar(wchar_t c) { return c + 1; }
+        inline void bump(wchar_t& c) { c = c + 1; }
+        inline int wchar_width() { return static_cast<int>(sizeof(wchar_t)); }
+        inline bool wchar_is_signed() { return static_cast<wchar_t>(-1) < 0; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_wchar(autocxx::c_wchar_t(65)), autocxx::c_wchar_t(66));
+        // The newtype is transparent over the target's integer both ways.
+        assert_eq!(autocxx::wchar_t::from(ffi::next_wchar(65.into())), 66);
+        let mut c = autocxx::c_wchar_t(70);
+        ffi::bump(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        assert_eq!(
+            ::std::mem::size_of::<autocxx::c_wchar_t>(),
+            ffi::wchar_width().0 as usize
+        );
+        assert_eq!(autocxx::wchar_t::MIN < 0, ffi::wchar_is_signed());
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["next_wchar", "bump", "wchar_width", "wchar_is_signed"],
+        &[],
+    );
 }
 
 #[test]
