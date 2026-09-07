@@ -1,4 +1,4 @@
-Fuzz target for `autocxx-parser`, tracking [issue #1244](https://github.com/google/autocxx/issues/1244).
+Fuzz target for `autocxx-parser`, tracking [google/autocxx#1244](https://github.com/google/autocxx/issues/1244).
 
 `fuzz_targets/parse_include_cpp.rs` feeds arbitrary strings to
 `autocxx_parser::IncludeCppConfig`'s `syn::parse::Parse` implementation - the

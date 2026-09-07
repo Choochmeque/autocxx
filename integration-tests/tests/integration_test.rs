@@ -1149,10 +1149,10 @@ fn test_make_up_with_args() {
 /// The book puts it plainly: "There is no access to fields (yet)". The
 /// established workaround is to write the getter in C++ by hand.
 ///
-/// Closing that gap is a feature rather than a fix. #53 sketches generated
-/// accessors - getters, then setters, then sugar to hide the call - and #21
-/// sketches a rival design computing offsets with `offsetof`. Neither is
-/// settled, and the choice is user-visible API.
+/// Closing that gap is a feature rather than a fix. google/autocxx#53
+/// sketches generated accessors - getters, then setters, then sugar to hide
+/// the call - and google/autocxx#21 sketches a rival design computing offsets
+/// with `offsetof`. Neither is settled, and the choice is user-visible API.
 ///
 /// This test's own intent, that a constructor argument reaches the object, is
 /// already covered by `test_make_up_with_args` directly above, which reads the
@@ -4383,8 +4383,9 @@ fn test_class_static_const_int() {
     run_test("", hdr, rs, &["Anna_SIZE"], &["Anna"]);
 }
 
-/// google/autocxx#94, the "much harder" follow-up to #93, which names this
-/// very test. `test_pod_constant` covers the POD case; a variable of non-POD
+/// google/autocxx#94, the "much harder" follow-up to google/autocxx#93, which
+/// names this very test. `test_pod_constant` covers the POD case; a variable
+/// of non-POD
 /// type still fails the type gate with `StaticDataOfNonPodType`, because we
 /// expose a variable by re-exporting `bindgen`'s declaration of it, and our
 /// output mod shows a non-POD type as an opaque wrapper rather than as
@@ -4400,9 +4401,10 @@ fn test_class_static_const_int() {
 /// * `CppRef<Bob>` sidesteps lifetimes, but it exists only under
 ///   `unsafe_references_wrapped`. Emitting it regardless would make a crate's
 ///   API shape depend on something its author never opted into.
-/// * `UniquePtr<Bob>`, which is what #94 proposes, we could emit today - but
-///   it hands back a *copy*, so it demands the type be copy-constructible and
-///   it quietly stops being the constant that was asked for.
+/// * `UniquePtr<Bob>`, which is what google/autocxx#94 proposes, we could emit
+///   today - but it hands back a *copy*, so it demands the type be
+///   copy-constructible and it quietly stops being the constant that was asked
+///   for.
 ///
 /// The header spells the variable `extern` so that linkage is not what stops
 /// us (see `test_pod_constant_internal_linkage`): the question here is the
@@ -7663,8 +7665,30 @@ fn test_issue_506() {
         hdr,
         rs,
         directives_from_lists(&["spanner::Database", "spanner::Row"], &[], None),
-        // This is normally a valid warning for generating bindings for this code, but we're doing
-        // it on purpose as a regression test on minimized code so we'll just ignore it.
+        // `be::bh` inherits `bf`'s pure virtual and overrides nothing, so it is
+        // abstract, and nothing gives it a virtual destructor. Deleting one is
+        // -Wdelete-abstract-non-virtual-dtor on clang and C5205 on cl. Nothing
+        // in this header deletes anything: the warning is raised inside
+        // `<memory>`, instantiated by the smart-pointer and vector support
+        // autocxx generates for `be::bh`. Which of those routes reaches it
+        // first differs by standard library.
+        //
+        // The obvious repair - a virtual destructor on `bf`, which is what
+        // test_virtual_methods_additional got - is not available here, because
+        // it does not leave the bindings alone. It drops `std::vector<be::bh>`
+        // and its `unique_ptr` from the generated C++ (ten symbols) and
+        // renames the synthesized move constructor from
+        // `spanner_Row_new_synthetic_move_ctor_*` to a bare
+        // `new_synthetic_move_ctor_*`, `BridgeNameTracker` no longer having a
+        // collision to qualify. google/autocxx#506 was filed as "to be
+        // characterized" and this test asserts only that the shape builds, so
+        // there is no way to show a reshaped fixture still covers it. Scoped
+        // off rather than reduced further.
+        //
+        // What the examination did establish is that this diagnostic, alone
+        // among the suite's scopes, is not about the fixture: a `-Werror` user
+        // whose own abstract class gets the same generated support meets the
+        // same warning, with nothing to scope it off. Unfixed.
         make_clang_optional_arg_adder(&[], &["-Wno-delete-abstract-non-virtual-dtor", "/wd5205"]),
         None,
         None,
@@ -8563,7 +8587,7 @@ fn test_take_nonpod_rvalue_from_stack() {
     run_test("", hdr, rs, &["A", "take_a"], &[]);
 }
 
-/// Upstream #770 asked us to test against `std::pin::pin!`, the official
+/// google/autocxx#770 asked us to test against `std::pin::pin!`, the official
 /// pin macro stabilized in Rust 1.68, once it existed, as a possible
 /// replacement for the `moveit!` macro when emplacing a non-POD object on
 /// the stack.
@@ -9968,8 +9992,8 @@ fn test_discarded_wrapper_method_error_stub_uses_user_facing_name() {
 #[test]
 fn test_overload_rename_collision() {
     // https://github.com/google/autocxx/issues/1316, reproducer from
-    // upstream PR #1317 (credit: sdroege). The third byteSwap overload
-    // must not be renamed onto the real byteSwap2; it skips to the
+    // upstream PR google/autocxx#1317 (credit: sdroege). The third byteSwap
+    // overload must not be renamed onto the real byteSwap2; it skips to the
     // next free suffix instead.
     let cxx = indoc! {"
         uint64_t Image::byteSwap(uint64_t, bool) { return 1; }
@@ -10215,8 +10239,9 @@ fn test_issue_1366_int_field_control() {
 
 #[test]
 fn test_issue_1366_reference_field_still_has_no_default_ctor() {
-    // Guard against over-fixing #1366: a reference field *does* delete the
-    // implicit default constructor, so `new()` must not be generated here.
+    // Guard against over-fixing google/autocxx#1366: a reference field *does*
+    // delete the implicit default constructor, so `new()` must not be
+    // generated here.
     let hdr = indoc! {"
         #include <string>
         struct A {
@@ -10400,7 +10425,7 @@ fn test_issue_1269_explicit_generate_still_works() {
 
 #[test]
 fn test_alias_template_typedef_ignored() {
-    // Guard for the google/autocxx#1094/#1501 family: alias
+    // Guard for the google/autocxx#1094 and google/autocxx#1501 family: alias
     // templates with type parameters are flagged by bindgen and must
     // be ignored (not declared to cxx), while instantiations of them
     // must keep working. `g_user` is an ordinary typedef naming such
@@ -15036,8 +15061,8 @@ fn test_implicit_constructor_rules() {
         test_call_a![ffi::TwoCopy];
 
         // Pointers and references are now treated differently
-        // (upstream #865/#1366), so pointer members permit a default
-        // constructor:
+        // (google/autocxx#865 and google/autocxx#1366), so pointer members
+        // permit a default constructor:
         test_constructible![ffi::MemberPointerDeleted];
         test_make_unique![ffi::MemberPointerDeleted];
         test_copyable![ffi::MemberPointerDeleted];
@@ -15427,9 +15452,11 @@ fn test_implicit_constructor_rules() {
         directives_from_lists(generate, &[], None),
         // The private, protected and deleted destructors this matrix exists
         // to exercise implicitly delete other destructors, which is cl's
-        // C4624. The warning is describing the fixture's whole subject, so
-        // it is scoped off for this one test; flag_if_supported drops the
-        // MSVC spelling everywhere else.
+        // C4624. It is emitted against this header rather than against
+        // anything autocxx wrote, and dropping the types that draw it would
+        // drop the destructor half of the matrix - the warning is what those
+        // rows are, so it is scoped off for this one test; flag_if_supported
+        // drops the MSVC spelling everywhere else.
         make_clang_optional_arg_adder(&[], &["/wd4624"]),
         None,
         None,
@@ -16286,6 +16313,7 @@ fn test_issue_1125() {
           typedef a c;
           struct {
             c : sizeof(c);
+            int d;
           };
         };
         } // namespace
@@ -16300,9 +16328,18 @@ fn test_issue_1125() {
         },
         combine_modifiers(
             make_cpp17_adder(),
-            // The nameless struct with no members is this creduce-reduced
-            // repro's whole point; cl calls it C4201/C4408.
-            make_clang_optional_arg_adder(&[], &["/wd4201", "/wd4408"]),
+            // The anonymous struct is what makes bindgen mint
+            // `b__bindgen_ty_1`, and having that reserved-`__` name refused is
+            // what this creduce reduction is for: name the struct and the name
+            // leaves the output, taking the refusal with it. So C4201, which
+            // is cl on the anonymous struct itself, stays scoped off.
+            //
+            // C4408 - anonymous struct with no data members - did not have to
+            // stay. `int d` is not in the reduction; it is here because
+            // without it cl warns, and with it the bindings generated for this
+            // header are byte-identical to the ones without. The unnamed
+            // bitfield beside it is the reduction.
+            make_clang_optional_arg_adder(&[], &["/wd4201"]),
         ),
         None,
         None,
@@ -16675,9 +16712,10 @@ fn test_issue_1229() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
-/// Upstream #1239, following on from #1229/#1235: two separate
+/// google/autocxx#1239, following on from google/autocxx#1229 and
+/// google/autocxx#1235: two separate
 /// `include_cpp!` bridges (mods) in the same crate, each generating a class
-/// with an identically-named ordinary method, here `foo()`. #1229/#1235 was
+/// with an identically-named ordinary method, here `foo()`. Those two were
 /// about the *constructor* wrapper symbol colliding, because that wrapper's
 /// name didn't depend on which type it constructed - literally
 /// `cxxbridge1$new_autocxx_autocxx_wrapper` in both bridges, so the linker
@@ -16731,15 +16769,15 @@ fn test_issue_1239() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
-/// Upstream #1239 again, for the kind of method whose wrapper symbol really
-/// could collide. An ordinary method needs no wrapper, so the test above
+/// google/autocxx#1239 again, for the kind of method whose wrapper symbol
+/// really could collide. An ordinary method needs no wrapper, so the test above
 /// exercises a name cxx derives per class; a static method does need one, and
 /// its name is minted by the same code that minted the constructor wrapper
-/// #1229 was about.
+/// google/autocxx#1229 was about.
 ///
 /// The first time a bridge sees a given short name it uses it bare, so both
 /// bridges here call their static method `foo` at that stage - exactly the
-/// situation which gave #1229 two definitions of
+/// situation which gave google/autocxx#1229 two definitions of
 /// `cxxbridge1$new_autocxx_autocxx_wrapper`. What separates them now is the
 /// per-bridge hash `IncludeCppConfig::uniquify_name_per_mod` appends, which
 /// every wrapper-needing function goes through, not just constructors.
@@ -16779,7 +16817,7 @@ fn test_issue_1239_static_methods() {
     do_run_test_manual("", hdr, rs, None, None).unwrap();
 }
 
-/// The C++ side of upstream #1265: a class whose only member is a
+/// The C++ side of google/autocxx#1265: a class whose only member is a
 /// `std::string`, i.e. a type that is emphatically not trivially relocatable.
 fn issue_1265_header() -> &'static str {
     indoc! {"
@@ -16803,8 +16841,8 @@ fn issue_1265_header() -> &'static str {
     "}
 }
 
-/// Upstream #1265: safe Rust must not be able to bitwise-move a non-POD C++
-/// object.
+/// google/autocxx#1265: safe Rust must not be able to bitwise-move a non-POD
+/// C++ object.
 ///
 /// `Test` owns a `std::string`. In libstdc++ a short string stores a pointer to
 /// the object's *own* inline SSO buffer, so relocating a `Test` bytewise leaves

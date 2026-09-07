@@ -774,7 +774,7 @@ pub(super) fn find_constructors_present(
                     // here, and this arm follows the `None` one above. Deciding
                     // it properly needs the same thing the surrounding
                     // conservatism needs: understanding these field types in the
-                    // first place. Remaining #815 scope.
+                    // first place. Remaining google/autocxx#815 scope.
                     destructor: match find_explicit(ExplicitKind::Destructor) {
                         None => SpecialMemberFound::Implicit,
                         // If there are multiple destructors, assume that one of them will be
