@@ -9,7 +9,8 @@
 use crate::{
     conversion::{
         api::{
-            AnalysisPhase, Api, ApiName, NullPhase, OpaqueTypedefReason, TypedefKind, UnanalyzedApi,
+            AnalysisPhase, Api, ApiName, HolderSurface, NullPhase, OpaqueTypedefReason,
+            TypedefKind, UnanalyzedApi,
         },
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
@@ -628,7 +629,7 @@ impl<'a> TypeConverter<'a> {
         // google/autocxx#799.
         //
         // `std::shared_ptr` is the only one of the three which gets an
-        // accessor surface generated for it (see `shared_ptr_payload`). A
+        // accessor surface generated for it (see `HolderSurface`). A
         // `std::unique_ptr<const T>` or `std::weak_ptr<const T>` is lowered to
         // the same opaque holder, which builds and round-trips where today it
         // is a hard C++ error, but Rust can do nothing with one but hand it
@@ -658,12 +659,14 @@ impl<'a> TypeConverter<'a> {
             // the queued follow-up to the lowering rather than part of it; a
             // builtin payload, which is all the marker used to reach us for,
             // cannot be ignored, which is why nothing has hit this yet.
-            let payload = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
+            let surface = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
                 match self.convert_const_payload(&typ, ns) {
                     Some(Ok(mut payload)) => {
                         deps.extend(payload.types_encountered.drain(..));
                         extra_apis.append(&mut payload.extra_apis);
-                        Some(Box::new(payload.ty.into()))
+                        Some(HolderSurface::SharedPtr {
+                            payload: Box::new(payload.ty.into()),
+                        })
                     }
                     Some(Err(err)) => return Err(err),
                     None => None,
@@ -671,31 +674,52 @@ impl<'a> TypeConverter<'a> {
             } else {
                 None
             };
-            let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
-            deps.insert(new_tn.clone());
-            // `None` where this instantiation already had a holder, which
-            // carries the payload it was first created with.
-            if let Some(Api::ConcreteType {
-                name,
-                rs_definition,
-                cpp_definition,
-                ..
-            }) = api
-            {
-                extra_apis.push(Api::ConcreteType {
-                    name,
-                    rs_definition,
-                    cpp_definition,
-                    shared_ptr_payload: payload,
+            return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
+        }
+
+        // A `std::vector` of pointers has no cxx spelling either.
+        // `CxxVector<T>` needs a `T: VectorElement`, which cxx implements for
+        // its own types and for opaque `ExternType`s and could not implement
+        // for a raw pointer even if Rust had a way to write `vector<T*>`'s
+        // element as one. autocxx never got that far: a pointer is not a path,
+        // so `confirm_inner_type_is_acceptable_generic_payload` refused the
+        // whole signature as `TemplatedTypeContainingNonPathArg`. Lower the
+        // instantiation to the same kind of opaque holder the branch above
+        // uses - definition `std::vector<T*>`, so the element type stays where
+        // C++ can see it - and give it a read-only accessor surface. See
+        // google/autocxx#330.
+        if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppVector {
+            if let Some(element) = sole_pointer_generic_arg(&typ) {
+                // Conversion is what turns bindgen's spelling of the pointee
+                // into the bridge's, and what turns down a pointee the bridge
+                // could not name - a pointer to a pointer, above all.
+                //
+                // The names it met are recorded on whatever is being
+                // converted rather than on the holder, because
+                // `Api::ConcreteType` has no arm in `deps.rs` - the same
+                // arrangement the smart-pointer branch above describes, and
+                // sound here for the same reason: `lower_to_holder` adds the
+                // holder's own name to this same `deps` set, and every route
+                // to the holder is a conversion of the vector which passes
+                // through here, so nothing can come to depend on the holder
+                // without depending on the element in the same breath.
+                //
+                // The `generate_all!` hole that branch records is this
+                // branch's too, and reaches it sooner: a holder rooted by
+                // `generate_all!` survives whether or not anything names it,
+                // and an element class which ended up an `IgnoredItem` would
+                // leave the accessors naming a type nothing declares. A
+                // dependency arm on `Api::ConcreteType` closes both, and is
+                // the queued follow-up rather than part of either.
+                let mut element =
+                    self.convert_type(element, ns, &TypeConversionContext::WithinContainer)?;
+                deps.extend(element.types_encountered.drain(..));
+                let extra_apis = std::mem::take(&mut element.extra_apis);
+                let surface = Some(HolderSurface::VectorOfPointers {
+                    element: Box::new(element.ty.into()),
                 });
+                return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
             }
-            return Ok(Annotated::new(
-                Type::Path(new_tn.to_type_path()),
-                deps,
-                extra_apis,
-                TypeKind::Regular,
-            )
-            .marked_const_if(target_is_const));
         }
 
         // Now let's see if it's a known type.
@@ -1050,6 +1074,48 @@ impl<'a> TypeConverter<'a> {
         Some(self.convert_type(payload, ns, &TypeConversionContext::WithinContainer))
     }
 
+    /// Divert a template instantiation cxx cannot spell to the opaque C++
+    /// holder autocxx already manufactures for such things, with `surface`
+    /// saying which accessors the holder gets.
+    ///
+    /// `typ` is the instantiation as bindgen wrote it, before any substitution
+    /// of cxx's own container names: it is the C++ spelling of the template -
+    /// not cxx's - that the generated typedef has to name.
+    fn lower_to_holder(
+        &mut self,
+        typ: TypePath,
+        surface: Option<HolderSurface>,
+        mut deps: HashSet<QualifiedName>,
+        mut extra_apis: ApiVec<NullPhase>,
+        target_is_const: bool,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
+        deps.insert(new_tn.clone());
+        // `None` where this instantiation already had a holder, which carries
+        // the surface it was first created with.
+        if let Some(Api::ConcreteType {
+            name,
+            rs_definition,
+            cpp_definition,
+            ..
+        }) = api
+        {
+            extra_apis.push(Api::ConcreteType {
+                name,
+                rs_definition,
+                cpp_definition,
+                holder_surface: surface,
+            });
+        }
+        Ok(Annotated::new(
+            Type::Path(new_tn.to_type_path()),
+            deps,
+            extra_apis,
+            TypeKind::Regular,
+        )
+        .marked_const_if(target_is_const))
+    }
+
     fn get_templated_typename(
         &mut self,
         rs_definition: &Type,
@@ -1086,7 +1152,7 @@ impl<'a> TypeConverter<'a> {
                     name: ApiName::new_in_root_namespace(make_ident(synthetic_ident)),
                     cpp_definition: cpp_definition.clone(),
                     rs_definition: Some(Box::new(rs_definition.clone().into())),
-                    shared_ptr_payload: None,
+                    holder_surface: None,
                 };
                 self.concrete_templates
                     .insert(cpp_definition, api.name().clone());
@@ -1271,6 +1337,36 @@ fn generic_args_are_const_qualified(typ: &TypePath) -> bool {
     })
 }
 
+/// `typ`'s one template argument, where it is a raw pointer, as
+/// `std::vector<T*>`'s is.
+///
+/// A pointer is one of the arguments bindgen renders directly rather than
+/// through a type reference, so `std::vector<Foo*>` arrives as
+/// `vector<*mut Foo>` with the pointer intact - see
+/// [`generic_args_are_const_qualified`] for the same mechanism and where it
+/// stops. `const Foo*` needs nothing extra from the marker to survive: it
+/// arrives as `*const Foo`, because pointee constness is part of a Rust type
+/// already.
+///
+/// One argument, because that is all a `std::vector` ever reaches us with:
+/// bindgen erases the allocator whether or not the header let it default, so
+/// `std::vector<Foo*, MyAlloc<Foo*>>` arrives as `vector<*mut Foo>` too and is
+/// lowered to a holder whose typedef names the default-allocator
+/// specialization. C++ then refuses to build the wrapper - which is exactly
+/// what `std::vector<Foo, MyAlloc<Foo>>` already does without any of this, the
+/// erasure being bindgen's and older than the lowering. So the match here is
+/// what keeps a single pointer argument the only shape that arrives, and not
+/// what decides which allocators are in reach.
+fn sole_pointer_generic_arg(typ: &TypePath) -> Option<Type> {
+    let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
+        return None;
+    };
+    match args.args.iter().collect::<Vec<_>>().as_slice() {
+        [GenericArgument::Type(elem @ Type::Ptr(_))] => Some((*elem).clone()),
+        _ => None,
+    }
+}
+
 /// Processing functions sometimes results in new types being materialized.
 /// These types haven't been through the analysis phases (chicken and egg
 /// problem) but fortunately, don't need to. We need to keep the type
@@ -1282,12 +1378,12 @@ pub(crate) fn add_analysis<A: AnalysisPhase>(api: UnanalyzedApi) -> Api<A> {
             name,
             rs_definition,
             cpp_definition,
-            shared_ptr_payload,
+            holder_surface,
         } => Api::ConcreteType {
             name,
             rs_definition,
             cpp_definition,
-            shared_ptr_payload,
+            holder_surface,
         },
         Api::IgnoredItem { name, err, ctx } => Api::IgnoredItem { name, err, ctx },
         _ => panic!("Function analysis created an unexpected type of extra API"),
