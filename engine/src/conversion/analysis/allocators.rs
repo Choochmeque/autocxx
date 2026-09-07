@@ -81,6 +81,7 @@ fn create_alloc_and_free(ty_name: QualifiedName) -> impl Iterator<Item = Api<Pod
                     virtualness: None,
                     cpp_vis: CppVisibility::Public,
                     special_member: None,
+                    method_kind: None,
                     original_name: None,
                     self_ty: None,
                     synthesized_this_type: None,

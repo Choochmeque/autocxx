@@ -104,6 +104,7 @@ fn create_cast(from: &QualifiedName, to: &QualifiedName, mutable: CastMutability
             virtualness: None,
             cpp_vis: crate::conversion::api::CppVisibility::Public,
             special_member: None,
+            method_kind: None,
             original_name: None,
             self_ty: Some(from.clone()),
             synthesized_this_type: None,

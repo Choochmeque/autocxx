@@ -13,7 +13,9 @@ mod overload_tracker;
 mod subclass;
 
 use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
-use crate::vendored_bindgen::callbacks::{Explicitness, SpecialMemberKind, Virtualness};
+use crate::vendored_bindgen::callbacks::{
+    Explicitness, MethodKind as CppMethodKind, SpecialMemberKind, Virtualness,
+};
 use crate::{
     conversion::{
         analysis::{
@@ -1115,7 +1117,7 @@ impl<'a> FnAnalyzer<'a> {
                 )
             } else {
                 let method_kind = if let Some(constructor_suffix) =
-                    constructor_with_suffix(&rust_name, nested_type_ident)
+                    constructor_with_suffix(&rust_name, nested_type_ident, fun.method_kind)
                 {
                     // It's a constructor. bindgen generates
                     // fn Type(this: *mut Type, ...args)
@@ -1126,8 +1128,9 @@ impl<'a> FnAnalyzer<'a> {
                     // fn make_unique(...args) -> Type
                     // which later code will convert to
                     // fn make_unique(...args) -> UniquePtr<Type>
-                    // If there are multiple constructors, bindgen generates
-                    // new, new1, new2 etc. and we'll keep those suffixes.
+                    // A type's several constructors all arrive under the type's
+                    // own name, so the suffix is empty and `get_overload_name`
+                    // below numbers them as it numbers every other overload.
                     rust_name = format!("new{constructor_suffix}");
                     MethodKind::Constructor {
                         is_default: matches!(
@@ -2744,6 +2747,7 @@ impl<'a> FnAnalyzer<'a> {
                         virtualness: None,
                         cpp_vis: CppVisibility::Public,
                         special_member: Some(special_member),
+                        method_kind: None,
                         original_name: None,
                         synthesized_this_type: None,
                         is_deleted: None,
@@ -2772,12 +2776,40 @@ fn special_member_to_string(special_member: SpecialMemberKind) -> &'static str {
     }
 }
 
-/// Attempts to determine whether this function name is a constructor, and if so,
-/// returns the suffix.
-fn constructor_with_suffix<'a>(rust_name: &'a str, nested_type_ident: &str) -> Option<&'a str> {
-    rust_name
-        .strip_prefix(nested_type_ident)
-        .filter(|suffix| suffix.is_empty() || suffix.parse::<u32>().is_ok())
+/// Whether this function is a constructor, and if so the suffix which
+/// distinguishes it from the type's other constructors.
+///
+/// bindgen classifies every method it saw, so `method_kind` answers the first
+/// question outright. The suffix is then whatever the name has beyond the
+/// type's own, which is nothing for every constructor bindgen reports - their
+/// names are the type's - leaving them to be numbered by the overload tracker
+/// which numbers everything else.
+///
+/// A name is consulted only where there is no kind, which means a function
+/// autocxx synthesized and bindgen never saw. (A free function arrives without
+/// one too, but this is reached only once a receiver type has been found.)
+/// That fallback is a guess - a method C++ calls `Widget3` on class `Widget`
+/// reads exactly like `Widget`'s fourth constructor - and google/autocxx#995
+/// is that guess being wrong. Nothing autocxx synthesizes has a name it can be
+/// wrong about: a synthesized constructor is named for its type on purpose
+/// (see [`CppOriginalName::from_type_name_for_constructor`]), and every other
+/// synthesized function is a wrapper whose name autocxx also chose.
+fn constructor_with_suffix<'a>(
+    rust_name: &'a str,
+    nested_type_ident: &str,
+    method_kind: Option<CppMethodKind>,
+) -> Option<&'a str> {
+    match method_kind {
+        Some(CppMethodKind::Constructor) => Some(
+            rust_name
+                .strip_prefix(nested_type_ident)
+                .unwrap_or_default(),
+        ),
+        Some(_) => None,
+        None => rust_name
+            .strip_prefix(nested_type_ident)
+            .filter(|suffix| suffix.is_empty() || suffix.parse::<u32>().is_ok()),
+    }
 }
 
 impl Api<FnPhase> {

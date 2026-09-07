@@ -6,7 +6,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::vendored_bindgen::callbacks::{Explicitness, SpecialMemberKind, Virtualness};
+use crate::vendored_bindgen::callbacks::{
+    Explicitness, MethodKind as CppMethodKind, SpecialMemberKind, Virtualness,
+};
 
 use syn::{
     punctuated::Punctuated,
@@ -236,6 +238,10 @@ pub(crate) struct FuncToConvert {
     pub(crate) virtualness: Option<Virtualness>,
     pub(crate) cpp_vis: CppVisibility,
     pub(crate) special_member: Option<SpecialMemberKind>,
+    /// What C++ says this is: a constructor, a destructor, a static method or
+    /// an ordinary one. `None` for a free function, which has no method kind,
+    /// and for a function autocxx synthesized, which bindgen never saw.
+    pub(crate) method_kind: Option<CppMethodKind>,
     pub(crate) original_name: Option<CppOriginalName>,
     /// Used for static functions only. For all other functons,
     /// this is figured out from the receiver type in the inputs.
