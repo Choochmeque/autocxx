@@ -25,6 +25,7 @@ use syn::{parse_quote, TypePath};
 pub(crate) const CXX_CHARACTER_TYPES: &[(&str, &str, &str)] = &[
     ("char16_t", "bindgen_cchar16_t", "autocxx::c_char16_t"),
     ("wchar_t", "bindgen_cwchar_t", "autocxx::c_wchar_t"),
+    ("char32_t", "bindgen_cchar32_t", "autocxx::c_char32_t"),
 ];
 
 /// The behavior of the type.
@@ -672,17 +673,10 @@ fn create_type_database() -> TypeDatabase {
         // depending on a type we've never heard of.
         db.insert_alias(bindgen_name, rs_name);
     }
-    // TODO: three more C++ built-ins belong in the table above and cannot be
+    // TODO: two more C++ built-ins belong in the table above and cannot be
     // given an entry from this side, because nothing distinguishing reaches us:
-    // a `char32_t` and a `uint32_t` are the same token by the time we see them,
-    // and we cannot even refuse the function cleanly. Each is blocked in
-    // bindgen, but by a different thing:
     //
-    // - `char32_t` is collapsed on purpose: `CXType_Char32 =>
-    //   TypeKind::Int(IntKind::U32)` in `build_builtin_ty`. It needs exactly
-    //   the edit `wchar_t` just had.
-    //
-    // - `char8_t` is not collapsed but unrecognised: libclang has no
+    // - `char8_t` is unrecognised rather than collapsed: libclang has no
     //   `CXType_Char8` (the kinds go `CXType_UChar`, `CXType_Char16`,
     //   `CXType_Char32`), so `build_builtin_ty` returns `None` and bindgen
     //   falls back to an opaque type of the right layout.

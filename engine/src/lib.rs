@@ -456,6 +456,7 @@ impl IncludeCppEngine {
             .represent_cxx_operators(true)
             .use_distinct_char16_t(true)
             .use_distinct_wchar_t(true)
+            .use_distinct_char32_t(true)
             .generate_deleted_functions(true)
             .generate_pure_virtual_functions(true)
             .raw_line(raw_line)

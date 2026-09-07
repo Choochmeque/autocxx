@@ -810,6 +810,35 @@ impl From<c_wchar_t> for wchar_t {
     }
 }
 
+/// A C++ `char32_t`. Like the other C type wrappers here, this is a
+/// transparent newtype over the Rust integer of the same width, so a value
+/// crosses between the two with `.0` or [`From`].
+#[derive(Debug, Eq, Copy, Clone, PartialEq, Hash)]
+#[allow(non_camel_case_types)]
+#[repr(transparent)]
+pub struct c_char32_t(pub u32);
+
+/// # Safety
+///
+/// We assert that the namespace and type ID refer to a C++
+/// type which is equivalent to this Rust type.
+unsafe impl cxx::ExternType for c_char32_t {
+    type Id = cxx::type_id!(c_char32_t);
+    type Kind = cxx::kind::Trivial;
+}
+
+impl From<u32> for c_char32_t {
+    fn from(val: u32) -> Self {
+        Self(val)
+    }
+}
+
+impl From<c_char32_t> for u32 {
+    fn from(val: c_char32_t) -> Self {
+        val.0
+    }
+}
+
 /// autocxx couldn't generate these bindings.
 /// If you come across a method, type or function which refers to this type,
 /// it indicates that autocxx couldn't generate that binding. A documentation
