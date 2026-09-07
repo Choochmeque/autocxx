@@ -27,6 +27,34 @@ fn main() {
 )
 ```
 
+## Character types
+
+C++'s `char16_t`, `char32_t`, `char8_t` and `wchar_t` are distinct types - a
+`char32_t` is not a `uint32_t`, and a C++ compiler asked for the exact type of a
+function says so - and Rust has no equivalent of any of them. `autocxx` gives
+each one a transparent newtype:
+[`c_char16_t`](https://docs.rs/autocxx/latest/autocxx/struct.c_char16_t.html),
+[`c_char32_t`](https://docs.rs/autocxx/latest/autocxx/struct.c_char32_t.html),
+[`c_char8_t`](https://docs.rs/autocxx/latest/autocxx/struct.c_char8_t.html) and
+[`c_wchar_t`](https://docs.rs/autocxx/latest/autocxx/struct.c_wchar_t.html), each
+wrapping the Rust integer of the same width, so a value crosses with `.0` or
+`From`.
+
+`wchar_t` is the one whose width and signedness are the target's to choose -
+`unsigned short` on Windows, `int` on Linux and macOS, `unsigned int` under
+AAPCS - so its payload is
+[`autocxx::wchar_t`](https://docs.rs/autocxx/latest/autocxx/type.wchar_t.html),
+which is picked per target. `char8_t` only exists from C++20 onwards.
+
+`long double` has no such newtype and is not supported, for a reason which
+differs by target: on MSVC and Apple Arm it is a `double` under another name, so
+a Rust `f64` has the right layout but is still the wrong C++ type and `cxx`'s
+signature check says so; on x86-64 Linux it is an 80-bit x87 float in 16 bytes,
+and on AArch64 Linux an IEEE binary128, and Rust has no type for either. A
+function whose signature mentions one is refused with an error saying that. A
+`long double` *field* is fine - those bytes are carried around, not passed
+between the languages - though a struct with one cannot be `generate_pod!`.
+
 ## Strings
 
 `autocxx` uses [`cxx::CxxString`](https://docs.rs/cxx/latest/cxx/struct.CxxString.html). However, as noted above, we can't
