@@ -633,19 +633,31 @@ impl<'a> TypeConverter<'a> {
         // the same opaque holder, which builds and round-trips where today it
         // is a hard C++ error, but Rust can do nothing with one but hand it
         // back to C++.
-        if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppPtr
-            && generic_args_are_const_qualified(&typ)
-        {
+        let payload_is_const = generic_args_are_const_qualified(&typ);
+        if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppPtr && payload_is_const {
             let mut extra_apis = ApiVec::new();
             // Only `std::shared_ptr` gets an accessor surface, and only when
             // its payload is a type the bridge can name in one.
             //
             // The payload's dependency is recorded here, on whatever is being
             // converted, rather than on the holder: `Api::ConcreteType` has no
-            // arm in `deps.rs` to carry one. That is enough while the payload
-            // is a builtin, which is all the marker ever reaches us for, since
-            // an `Api::CType` is not something the GC can take away from under
-            // the holder. It would need revisiting alongside class payloads.
+            // arm in `deps.rs` to carry one. Wherever the holder is reached
+            // through something else - a function, an alias, another container
+            // - that is enough, because the conversion which yielded the
+            // holder recorded the payload on that same something, so the
+            // holder outlives the payload only if nothing names the holder at
+            // all. `test_shared_ptr_const_class_payload_survives_through_an_alias`
+            // walks the longest of those chains.
+            //
+            // It is not enough under `generate_all!`, which makes every API a
+            // garbage-collection root, holders included. A holder rooted that
+            // way survives on its own, and if its payload class is an
+            // `IgnoredItem` the accessor generated below names a type nothing
+            // declares, and the generated code does not compile. Giving
+            // `Api::ConcreteType` a dependency of its own is the fix, and is
+            // the queued follow-up to the lowering rather than part of it; a
+            // builtin payload, which is all the marker used to reach us for,
+            // cannot be ignored, which is why nothing has hit this yet.
             let payload = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
                 match self.convert_const_payload(&typ, ns) {
                     Some(Ok(mut payload)) => {
@@ -726,6 +738,22 @@ impl<'a> TypeConverter<'a> {
                 // this is a type of generic understood by cxx (e.g. CxxVector)
                 // so let's convert any generic type arguments. This recurses.
                 if let PathArguments::AngleBracketed(ref mut ab) = last_seg.arguments {
+                    // The smart pointers were lowered above. The rest of what
+                    // cxx spells generically - `CxxVector<T>`, `rust::Box<T>` -
+                    // names its payload as a plain type with no room for a
+                    // qualifier, and is not lowered. For `std::vector` it
+                    // cannot be: an opaque holder has to be a complete type
+                    // for cxx, and completing a `std::vector<const T>` is
+                    // ill-formed. `rust::Box<const T>` would complete, but
+                    // nothing else about it is worked out - cxx's Rust-side
+                    // `Box<T>` has no room for the qualifier either - so it is
+                    // turned down alongside. Either way, say what is wrong
+                    // rather than declare a container of a mutable payload and
+                    // leave the C++ compiler to complain about a
+                    // specialization nobody wrote.
+                    if payload_is_const {
+                        return Err(ConvertErrorFromCpp::ConstCxxContainerPayload(tn.clone()));
+                    }
                     let mut innerty = self.convert_punctuated(
                         ab.args.clone(),
                         ns,
@@ -1212,20 +1240,26 @@ impl<'a> TypeConverter<'a> {
 /// for; a `const` on something the argument points at is already in the type,
 /// as `*const T`.
 ///
-/// What this can see is narrower than what C++ wrote, and the difference
-/// decides the whole reach of the lowering downstream. bindgen keeps the marker
-/// on a template argument it renders directly - a builtin or a pointer, so
-/// `std::shared_ptr<const int>` arrives as
-/// `shared_ptr<__bindgen_marker_Const<c_int>>` - but not on a record one.
-/// `TemplateInstantiation::try_to_rust_ty` resolves each argument
-/// `.through_type_refs()` before rendering it, which walks a class argument's
-/// `TypeKind::ResolvedTypeRef` to the record it names and leaves the qualifier
-/// behind on the reference. So `std::shared_ptr<const Foo>` arrives
-/// indistinguishable from `std::shared_ptr<Foo>` and nothing here can lower it.
-/// `engine/third_party/patches/11-const-newtype-marker.patch` records the
-/// erasure in its commit message; that it spares builtins is what makes this
-/// predicate worth having.
-/// `test_shared_ptr_const_class_payload_is_still_unseen` pins the gap.
+/// A record argument used to be invisible here: bindgen kept the marker only
+/// on an argument it rendered directly, and resolved a class argument's
+/// `TypeKind::ResolvedTypeRef` past the node the qualifier was on, so
+/// `std::shared_ptr<const Foo>` arrived indistinguishable from
+/// `std::shared_ptr<Foo>`. `third_party/patches/18-const-template-argument.patch`
+/// carries the qualifier across that resolution, so every argument C++ wrote
+/// `const` is one this can see.
+///
+/// One kind still is not, and this time the gap is here rather than in
+/// bindgen: a `const` reached through an alias. bindgen keeps the marker on
+/// the alias - `typedef const int CI` comes out
+/// `pub type CI = __bindgen_marker_Const<c_int>` - but the argument of
+/// `std::shared_ptr<CI>` is the path `CI` with nothing on it, and this looks
+/// no further. Resolving the alias would mean asking `resolve_typedef` here,
+/// where every other reader of that constness asks after conversion instead;
+/// until it does, that one spelling is not lowered and the C++ cxx generates
+/// fails to bind, which is the pre-lowering symptom. (A `const` alias whose
+/// target is a *record* or an enum is a different matter: bindgen erases the
+/// qualifier from those, which is the remaining gap recorded in
+/// `11-const-newtype-marker.patch`.)
 fn generic_args_are_const_qualified(typ: &TypePath) -> bool {
     let Some(PathArguments::AngleBracketed(args)) =
         typ.path.segments.last().map(|seg| &seg.arguments)

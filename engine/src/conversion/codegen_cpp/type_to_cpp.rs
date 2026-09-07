@@ -216,20 +216,13 @@ impl CppNameMap {
                 // `const int*` is the opposite type entirely, and the marker
                 // means the first. Everywhere else C++ takes the prefix.
                 //
-                // That is the right qualifier at this level and no deeper. The
-                // `Type::Ptr` arm below still prefixes its own `const` to
-                // whatever its pointee rendered as, so a marker *inside* a
-                // pointer - a C++ `int* const*` - would come out as
-                // `const int* const*`, a different type. Getting that right
-                // means rendering qualifiers per declarator rather than by
-                // wrapping strings, which is a rewrite of this function and
-                // not of a piece with the smart-pointer lowering it was
-                // written for. Nothing reaches it today: a marked type is
-                // rendered either as a smart-pointer payload, which is the top
-                // level of a template argument, or in a position where the
-                // qualifier is the outermost thing about it.
-                // `test_shared_ptr_const_pointer_payload` covers the one
-                // pointer shape which does arrive.
+                // A marker *inside* a pointer - a C++ `int* const*` - arrives
+                // as a `*const` whose pointee carries the marker, which is one
+                // fact written twice: the `Type::Ptr` arm below says it once
+                // more, and drops its own `const` when the pointee has already
+                // said it. A plain template class reaches that shape, which is
+                // why it is handled rather than described -
+                // `test_template_class_with_const_pointer_argument`.
                 // See google/autocxx#799.
                 if let Some(inner) = unwrap_const(typ) {
                     let inner_cpp = self.type_to_cpp(inner)?;
@@ -280,11 +273,26 @@ impl CppNameMap {
                     self.type_to_cpp(typr.elem.as_ref())?
                 )),
             },
-            Type::Ptr(typp) => Ok(format!(
-                "{}{}*",
-                get_mut_string(&typp.mutability),
-                self.type_to_cpp(typp.elem.as_ref())?
-            )),
+            Type::Ptr(typp) => {
+                // A `const` pointee reaches us twice when bindgen marked it:
+                // as `*const`, and as the marker on the pointee itself. They
+                // are one fact, so say it once, and say it where the marker
+                // puts it - after what it qualifies, which is the only place
+                // that stays right as pointers nest. For `Foo* const*` the
+                // pointee spells itself `Foo* const`, and a leading `const`
+                // here would qualify `Foo` rather than the pointer.
+                let pointee_says_const = matches!(&*typp.elem,
+                    Type::Path(inner) if unwrap_const(inner).is_some());
+                let qualifier = if pointee_says_const {
+                    ""
+                } else {
+                    get_mut_string(&typp.mutability)
+                };
+                Ok(format!(
+                    "{qualifier}{}*",
+                    self.type_to_cpp(typp.elem.as_ref())?
+                ))
+            }
             Type::Array(_)
             | Type::BareFn(_)
             | Type::Group(_)
