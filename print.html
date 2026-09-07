@@ -2233,7 +2233,9 @@ and <a href="https://github.com/rust-lang/rust-bindgen/issues/3278">rust-lang/ru
 checked out at a release tag. Nothing in it is edited, and no upstream code is committed to
 this repository.</li>
 <li><code>engine/third_party/patches/*.patch</code> is autocxx's delta, one file per feature, applied in
-numeric order. Each patch applies to the submodule's <code>bindgen/</code> directory.</li>
+filename order. Each patch applies to the submodule's <code>bindgen/</code> directory. Two patches
+that landed in parallel share a number under letter suffixes (<code>12a</code>, <code>12b</code>) rather than
+renumbering the tail, which would churn every later patch and every branch citing one.</li>
 <li><code>engine/build.rs</code> copies the submodule sources into <code>OUT_DIR</code>, applies the patches, and
 rewrites the result so it compiles as a module rather than a crate: bindgen's cargo
 features become fixed <code>cfg</code>s, macros reached through <code>#[macro_use] extern crate</code> become
