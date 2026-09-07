@@ -32,6 +32,8 @@ static INPUT2_H: &str = include_str!("data/input2.h");
 static INPUT3_H: &str = include_str!("data/input3.h");
 static CXX_VOCABULARY_H: &str = include_str!("data/cxx_vocabulary.h");
 static CXX_VOCABULARY_RS: &str = include_str!("data/cxx_vocabulary.rs");
+static RESERVED_RUST_TYPE_H: &str = include_str!("data/reserved_rust_type.h");
+static RESERVED_RUST_TYPE_RS: &str = include_str!("data/reserved_rust_type.rs");
 
 const KEEP_TEMPDIRS: bool = true;
 
@@ -410,21 +412,18 @@ fn test_gen_repro() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A C++ class called `String` collides with cxx's reserved vocabulary types,
-/// so cxx refuses the bridge we generate for it (google/autocxx#1371). We can't
-/// yet generate bindings for such a class, but we must say so rather than
-/// panicking with a backtrace.
-#[test]
-fn test_reports_cxx_rejection_without_panicking() -> Result<(), Box<dyn std::error::Error>> {
+/// Runs `autocxx-gen` over a header and a Rust file from `tests/data`, and
+/// answers what it printed and whether it succeeded.
+fn run_gen_over_fixture(
+    header_name: &str,
+    header: &str,
+    rust: &str,
+) -> Result<(bool, String), Box<dyn std::error::Error>> {
     let tmp_dir = tempdir()?;
     let demo_code_dir = tmp_dir.path().join("demo");
     std::fs::create_dir(&demo_code_dir).unwrap();
-    write_to_file(
-        &demo_code_dir,
-        "cxx_vocabulary.h",
-        CXX_VOCABULARY_H.as_bytes(),
-    );
-    write_to_file(&demo_code_dir, "main.rs", CXX_VOCABULARY_RS.as_bytes());
+    write_to_file(&demo_code_dir, header_name, header.as_bytes());
+    write_to_file(&demo_code_dir, "main.rs", rust.as_bytes());
     let mut cmd = Command::cargo_bin("autocxx-gen")?;
     cmd.arg("--inc")
         .arg(demo_code_dir.to_str().unwrap())
@@ -434,12 +433,35 @@ fn test_reports_cxx_rejection_without_panicking() -> Result<(), Box<dyn std::err
         .arg("--gen-rs-include")
         .arg(demo_code_dir.join("main.rs"));
     let output = cmd.output()?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     eprintln!("Cmd stderr: {stderr}");
-    assert!(
-        !output.status.success(),
-        "autocxx-gen unexpectedly succeeded"
-    );
+    Ok((output.status.success(), stderr))
+}
+
+/// A C++ class called `String` used to collide with cxx's reserved vocabulary
+/// and get the whole bridge refused - the bug reported upstream as
+/// google/autocxx#1371. The bridge now renames it, so this is an end-to-end
+/// check that the command generates bindings for such a class at all.
+#[test]
+fn test_class_named_after_cxx_vocabulary_generates() -> Result<(), Box<dyn std::error::Error>> {
+    let (success, stderr) =
+        run_gen_over_fixture("cxx_vocabulary.h", CXX_VOCABULARY_H, CXX_VOCABULARY_RS)?;
+    assert!(success, "autocxx-gen failed: {stderr}");
+    Ok(())
+}
+
+/// cxx can still refuse a bridge we generate: the `extern "Rust"` half is
+/// named by the user's own Rust type, which we are not free to rename, and
+/// cxx applies `check_reserved_name` to it. We must say so rather than
+/// panicking with a backtrace.
+#[test]
+fn test_reports_cxx_rejection_without_panicking() -> Result<(), Box<dyn std::error::Error>> {
+    let (success, stderr) = run_gen_over_fixture(
+        "reserved_rust_type.h",
+        RESERVED_RUST_TYPE_H,
+        RESERVED_RUST_TYPE_RS,
+    )?;
+    assert!(!success, "autocxx-gen unexpectedly succeeded");
     assert!(
         !stderr.contains("panicked at"),
         "autocxx-gen panicked instead of reporting an error"
