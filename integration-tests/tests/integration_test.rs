@@ -24068,3 +24068,592 @@ fn test_method_named_like_a_constructor_overload() {
     };
     run_test("", hdr, rs, &["Widget"], &[]);
 }
+
+// The layout tests below all ask the same question in the same way: what Rust
+// computes for the generated type against what the C++ compiler computes for
+// the original. Which bytes a class occupies is the ABI's business rather than
+// the language's - the Itanium ABI lends a base class's tail padding to the
+// members laid out after it and the MSVC ABI does not, and the two disagree
+// about how wide a class deriving from two empty ones is - so a number written
+// down here would be right on one CI leg and wrong on another. The compiler
+// under the test is the oracle instead.
+//
+// For a type autocxx makes POD the Rust struct is bindgen's, so its fields'
+// offsets are checkable too. For a non-POD type Rust holds a
+// `#[repr(transparent)]` wrapper around that struct and has no field access,
+// so the size and the alignment are the whole of what Rust claims - and the
+// whole of what has to be right for autocxx to allocate storage for one.
+
+/// An empty class is not always one byte wide. Two subobjects of the same type
+/// need distinct addresses, so a class deriving from two classes which each
+/// derive from the same empty class holds two copies of it and the Itanium ABI
+/// makes it two bytes. bindgen wrote such a class out as its one `_address`
+/// byte whatever the target said, which is smaller than the object C++ hands
+/// over - see the patch series' `16-empty-class-size.patch`.
+#[test]
+fn test_empty_diamond_is_as_wide_as_cpp_makes_it() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_LayEmpty {};
+        struct fx_LayLeft : public fx_LayEmpty {};
+        struct fx_LayRight : public fx_LayEmpty {};
+        struct fx_LayMiddle : public fx_LayEmpty {};
+        struct fx_LayDiamond : public fx_LayLeft, public fx_LayRight {};
+        struct fx_LayDeeper : public fx_LayDiamond {};
+        struct fx_LayThree : public fx_LayLeft, public fx_LayRight, public fx_LayMiddle {};
+        inline size_t fx_lay_sizeof_diamond() { return sizeof(fx_LayDiamond); }
+        inline size_t fx_lay_alignof_diamond() { return alignof(fx_LayDiamond); }
+        inline size_t fx_lay_sizeof_deeper() { return sizeof(fx_LayDeeper); }
+        inline size_t fx_lay_sizeof_three() { return sizeof(fx_LayThree); }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_LayDiamond>(),
+            ffi::fx_lay_sizeof_diamond()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_LayDiamond>(),
+            ffi::fx_lay_alignof_diamond()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_LayDeeper>(),
+            ffi::fx_lay_sizeof_deeper()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_LayThree>(),
+            ffi::fx_lay_sizeof_three()
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_lay_sizeof_diamond",
+            "fx_lay_alignof_diamond",
+            "fx_lay_sizeof_deeper",
+            "fx_lay_sizeof_three",
+        ],
+        &["fx_LayDiamond", "fx_LayDeeper", "fx_LayThree"],
+    );
+}
+
+/// The other direction, so that the fix is not just "make empty classes
+/// bigger": a chain of empty bases collapses onto one byte on every ABI, and a
+/// class deriving from a single empty class is that class's size.
+#[test]
+fn test_chain_of_empty_bases_is_as_wide_as_cpp_makes_it() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_ChainEmpty {};
+        struct fx_ChainOne : public fx_ChainEmpty {};
+        struct fx_ChainTwo : public fx_ChainOne {};
+        struct fx_ChainThree : public fx_ChainTwo {};
+        inline size_t fx_chain_sizeof() { return sizeof(fx_ChainThree); }
+        inline size_t fx_chain_alignof() { return alignof(fx_ChainThree); }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_ChainThree>(),
+            ffi::fx_chain_sizeof()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_ChainThree>(),
+            ffi::fx_chain_alignof()
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_chain_sizeof", "fx_chain_alignof"],
+        &["fx_ChainThree"],
+    );
+}
+
+/// An empty class can also be wider than a byte because it was asked to be:
+/// `alignas` applies to a class with nothing in it, and so does the size that
+/// alignment forces.
+///
+/// MSVC warns C4324, "structure was padded due to alignment specifier", and the
+/// harness builds fixtures with `/WX`. That warning is this test's subject
+/// rather than something wrong with it: the padding it announces is the size
+/// the class is being asked to keep, so a fixture which did not provoke it
+/// would not be testing anything. It is turned off for the two declarations
+/// which earn it and nowhere else, and only for the compiler which issues it.
+#[test]
+fn test_over_aligned_empty_class_keeps_the_alignment_cpp_gives_it() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #ifdef _MSC_VER
+        #pragma warning(push)
+        #pragma warning(disable : 4324)
+        #endif
+        struct alignas(8) fx_AlignedEmpty {};
+        struct fx_OverAligned : public fx_AlignedEmpty {};
+        #ifdef _MSC_VER
+        #pragma warning(pop)
+        #endif
+        inline size_t fx_aligned_sizeof() { return sizeof(fx_OverAligned); }
+        inline size_t fx_aligned_alignof() { return alignof(fx_OverAligned); }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_OverAligned>(),
+            ffi::fx_aligned_sizeof()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_OverAligned>(),
+            ffi::fx_aligned_alignof()
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_aligned_sizeof", "fx_aligned_alignof"],
+        &["fx_OverAligned"],
+    );
+}
+
+/// A class deriving from an empty diamond, and a class holding one as a
+/// member: the first gets the empty base optimisation and the second does not,
+/// so the member's offset differs between them and both have to agree with
+/// C++. Written against POD types so that the offsets are Rust's own.
+#[test]
+fn test_empty_diamond_as_base_and_as_member_matches_cpp() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_DmEmpty {};
+        struct fx_DmLeft : public fx_DmEmpty {};
+        struct fx_DmRight : public fx_DmEmpty {};
+        struct fx_DmDiamond : public fx_DmLeft, public fx_DmRight {};
+        struct fx_DmOverBase : public fx_DmDiamond { int x; };
+        struct fx_DmHolder { fx_DmDiamond d; int x; };
+        struct fx_DmArray { fx_DmDiamond a[3]; int x; };
+        inline size_t fx_dm_offset_over_base() {
+            fx_DmOverBase v{};
+            return reinterpret_cast<const char*>(&v.x) - reinterpret_cast<const char*>(&v);
+        }
+        inline size_t fx_dm_offset_holder() {
+            fx_DmHolder v{};
+            return reinterpret_cast<const char*>(&v.x) - reinterpret_cast<const char*>(&v);
+        }
+        inline size_t fx_dm_offset_array() {
+            fx_DmArray v{};
+            return reinterpret_cast<const char*>(&v.x) - reinterpret_cast<const char*>(&v);
+        }
+        inline size_t fx_dm_sizeof_array() { return sizeof(fx_DmArray); }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::offset_of!(ffi::fx_DmOverBase, x),
+            ffi::fx_dm_offset_over_base()
+        );
+        assert_eq!(
+            std::mem::offset_of!(ffi::fx_DmHolder, x),
+            ffi::fx_dm_offset_holder()
+        );
+        assert_eq!(
+            std::mem::offset_of!(ffi::fx_DmArray, x),
+            ffi::fx_dm_offset_array()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_DmArray>(),
+            ffi::fx_dm_sizeof_array()
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_dm_offset_over_base",
+            "fx_dm_offset_holder",
+            "fx_dm_offset_array",
+            "fx_dm_sizeof_array",
+        ],
+        &["fx_DmOverBase", "fx_DmHolder", "fx_DmArray"],
+    );
+}
+
+/// A class which is not a POD for the purpose of layout lends its tail padding
+/// to whatever the derived class puts after it, on the ABIs which do that.
+/// bindgen stored the base in a field of the base's own type, which is
+/// `sizeof(base)` bytes wide whatever the target chose, so the derived class
+/// came out too wide and every member after the base was at the wrong offset.
+/// This addresses the bug reported upstream as
+/// rust-lang/rust-bindgen#380.
+#[test]
+fn test_base_tail_padding_holds_the_derived_class_members() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_TailBase { fx_TailBase(); int i; char c; };
+        struct fx_TailOne : public fx_TailBase { char d; };
+        struct fx_TailTwo : public fx_TailBase { char d; char e; };
+        struct fx_TailWide { fx_TailWide(); long long l; char c; };
+        struct fx_TailWideDer : public fx_TailWide { char d; };
+        inline size_t fx_tail_sizeof_one() { return sizeof(fx_TailOne); }
+        inline size_t fx_tail_alignof_one() { return alignof(fx_TailOne); }
+        inline size_t fx_tail_sizeof_two() { return sizeof(fx_TailTwo); }
+        inline size_t fx_tail_sizeof_wide() { return sizeof(fx_TailWideDer); }
+        inline size_t fx_tail_alignof_wide() { return alignof(fx_TailWideDer); }
+    "};
+    let cxx = indoc! {"
+        fx_TailBase::fx_TailBase() : i(0), c(0) {}
+        fx_TailWide::fx_TailWide() : l(0), c(0) {}
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_TailOne>(),
+            ffi::fx_tail_sizeof_one()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_TailOne>(),
+            ffi::fx_tail_alignof_one()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_TailTwo>(),
+            ffi::fx_tail_sizeof_two()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_TailWideDer>(),
+            ffi::fx_tail_sizeof_wide()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_TailWideDer>(),
+            ffi::fx_tail_alignof_wide()
+        );
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "fx_tail_sizeof_one",
+            "fx_tail_alignof_one",
+            "fx_tail_sizeof_two",
+            "fx_tail_sizeof_wide",
+            "fx_tail_alignof_wide",
+            "fx_TailOne",
+            "fx_TailTwo",
+            "fx_TailWideDer",
+        ],
+        &[],
+    );
+}
+
+/// The same thing between one base and the next, where there is no member of
+/// the derived class to notice it with, and again where there is one.
+#[test]
+fn test_base_tail_padding_between_two_bases_matches_cpp() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_TwoFirst { fx_TwoFirst(); int i; char c; };
+        struct fx_TwoSecond { fx_TwoSecond(); char x; };
+        struct fx_TwoBases : public fx_TwoFirst, public fx_TwoSecond {};
+        struct fx_TwoBasesField : public fx_TwoFirst, public fx_TwoSecond { char f; };
+        inline size_t fx_two_sizeof() { return sizeof(fx_TwoBases); }
+        inline size_t fx_two_alignof() { return alignof(fx_TwoBases); }
+        inline size_t fx_two_sizeof_field() { return sizeof(fx_TwoBasesField); }
+    "};
+    let cxx = indoc! {"
+        fx_TwoFirst::fx_TwoFirst() : i(0), c(0) {}
+        fx_TwoSecond::fx_TwoSecond() : x(0) {}
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_TwoBases>(),
+            ffi::fx_two_sizeof()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_TwoBases>(),
+            ffi::fx_two_alignof()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_TwoBasesField>(),
+            ffi::fx_two_sizeof_field()
+        );
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "fx_two_sizeof",
+            "fx_two_alignof",
+            "fx_two_sizeof_field",
+            "fx_TwoBases",
+            "fx_TwoBasesField",
+        ],
+        &[],
+    );
+}
+
+/// The overshoot guard. A base which *is* a POD for the purpose of layout
+/// keeps its tail padding on every ABI, so the derived class's own member
+/// comes after the whole of it and the base stays a field of its own type -
+/// which is what makes the derived class usable as a POD at all.
+#[test]
+fn test_pod_base_keeps_its_tail_padding() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_PodTailBase { int i; char c; };
+        struct fx_PodTailDer : public fx_PodTailBase { char d; };
+        inline size_t fx_pod_tail_offset() {
+            fx_PodTailDer v{};
+            return reinterpret_cast<const char*>(&v.d) - reinterpret_cast<const char*>(&v);
+        }
+        inline size_t fx_pod_tail_sizeof() { return sizeof(fx_PodTailDer); }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::offset_of!(ffi::fx_PodTailDer, d),
+            ffi::fx_pod_tail_offset()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_PodTailDer>(),
+            ffi::fx_pod_tail_sizeof()
+        );
+        let mut v = ffi::fx_PodTailDer::default();
+        v.d = 7;
+        assert_eq!(v.d, 7);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_pod_tail_offset", "fx_pod_tail_sizeof"],
+        &["fx_PodTailDer"],
+    );
+}
+
+/// A packed base has no tail padding to lend, so the derived class's member
+/// follows its last byte on every ABI and the base stays a field of its own
+/// type. The packing has to survive the fix.
+///
+/// The second pair is the other way round: bases which are not packed, packed
+/// into a class which is. `fx_PackTight` gives its second base a byte the base
+/// class's own alignment would not have allowed, which is a class bindgen does
+/// not call packed and so cannot lay out as fields of the bases' types at all.
+///
+/// `#pragma pack` rather than `__attribute__((packed))` because the Windows leg
+/// builds these headers with cl.exe, which has no GNU attributes. The derived
+/// class's member is an `int` so that bindgen calls that class packed too:
+/// autocxx asks for `derive_copy(false)` and `derive_default(true)`, and
+/// bindgen writes no derives at all on a packed struct which cannot derive
+/// `Copy`, so a class it does not call packed which holds one it does gets a
+/// `#[derive(Default)]` its field cannot satisfy and the bindings do not
+/// compile. That is nothing to do with layout - it reproduces on this branch's
+/// parent - and is recorded as its own item.
+#[test]
+fn test_packed_base_layout_matches_cpp() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #pragma pack(push, 1)
+        struct fx_PackBase { fx_PackBase(); int i; char c; };
+        struct fx_PackDer : public fx_PackBase { int d; };
+        #pragma pack(pop)
+        struct fx_PackLoose1 { char a; };
+        struct fx_PackLoose2 { int b; };
+        #pragma pack(push, 1)
+        struct fx_PackTight : public fx_PackLoose1, public fx_PackLoose2 { char d; };
+        #pragma pack(pop)
+        inline size_t fx_pack_sizeof() { return sizeof(fx_PackDer); }
+        inline size_t fx_pack_alignof() { return alignof(fx_PackDer); }
+        inline size_t fx_pack_offset() {
+            fx_PackDer v;
+            return reinterpret_cast<const char*>(&v.d) - reinterpret_cast<const char*>(&v);
+        }
+        inline size_t fx_pack_sizeof_tight() { return sizeof(fx_PackTight); }
+        inline size_t fx_pack_alignof_tight() { return alignof(fx_PackTight); }
+    "};
+    let cxx = indoc! {"
+        fx_PackBase::fx_PackBase() : i(0), c(0) {}
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_PackDer>(),
+            ffi::fx_pack_sizeof()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_PackDer>(),
+            ffi::fx_pack_alignof()
+        );
+        // Reading `d` at all is the check that the base is still a field of
+        // its own type: a class whose bases were collapsed cannot be a `pod!`.
+        assert_eq!(
+            std::mem::offset_of!(ffi::fx_PackDer, d),
+            ffi::fx_pack_offset()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_PackTight>(),
+            ffi::fx_pack_sizeof_tight()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_PackTight>(),
+            ffi::fx_pack_alignof_tight()
+        );
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "fx_pack_sizeof",
+            "fx_pack_alignof",
+            "fx_pack_offset",
+            "fx_pack_sizeof_tight",
+            "fx_pack_alignof_tight",
+            "fx_PackTight",
+        ],
+        &["fx_PackDer"],
+    );
+}
+
+/// A base which introduces a vtable, and a base which holds a virtual base of
+/// its own: in both the derived class's member goes inside the room the base's
+/// own type claims, for the same reason and with the same consequence.
+#[test]
+fn test_virtual_bases_leave_members_where_cpp_puts_them() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_VtBase { virtual ~fx_VtBase(); int i; char c; };
+        struct fx_VtDer : public fx_VtBase { char d; };
+        struct fx_VirtEmpty { fx_VirtEmpty(); int i; char c; };
+        struct fx_VirtHolder : public virtual fx_VirtEmpty {};
+        struct fx_VirtDer : public fx_VirtHolder { char d; };
+        inline size_t fx_vt_sizeof() { return sizeof(fx_VtDer); }
+        inline size_t fx_vt_alignof() { return alignof(fx_VtDer); }
+        inline size_t fx_virt_sizeof() { return sizeof(fx_VirtDer); }
+        inline size_t fx_virt_alignof() { return alignof(fx_VirtDer); }
+    "};
+    let cxx = indoc! {"
+        fx_VtBase::~fx_VtBase() {}
+        fx_VirtEmpty::fx_VirtEmpty() : i(0), c(0) {}
+    "};
+    let rs = quote! {
+        assert_eq!(std::mem::size_of::<ffi::fx_VtDer>(), ffi::fx_vt_sizeof());
+        assert_eq!(std::mem::align_of::<ffi::fx_VtDer>(), ffi::fx_vt_alignof());
+        assert_eq!(std::mem::size_of::<ffi::fx_VirtDer>(), ffi::fx_virt_sizeof());
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_VirtDer>(),
+            ffi::fx_virt_alignof()
+        );
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "fx_vt_sizeof",
+            "fx_vt_alignof",
+            "fx_virt_sizeof",
+            "fx_virt_alignof",
+            "fx_VtDer",
+            "fx_VirtDer",
+        ],
+        &[],
+    );
+}
+
+/// Bitfields on both sides of the base. The padding the derived class's member
+/// goes into is the rest of the base's bitfield allocation unit, and where the
+/// derived class's own first member is a bitfield it is a unit which has to be
+/// measured against the bases in its own right - bindgen tracks those
+/// separately from ordinary fields.
+#[test]
+fn test_bitfield_base_tail_padding_matches_cpp() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_BitBase { fx_BitBase(); int a : 3; char c; };
+        struct fx_BitDer : public fx_BitBase { char z; };
+        struct fx_BitDerBits : public fx_BitBase { unsigned z : 3; };
+        inline size_t fx_bit_sizeof() { return sizeof(fx_BitDer); }
+        inline size_t fx_bit_alignof() { return alignof(fx_BitDer); }
+        inline size_t fx_bit_sizeof_bits() { return sizeof(fx_BitDerBits); }
+        inline size_t fx_bit_alignof_bits() { return alignof(fx_BitDerBits); }
+    "};
+    let cxx = indoc! {"
+        fx_BitBase::fx_BitBase() : a(0), c(0) {}
+    "};
+    let rs = quote! {
+        assert_eq!(std::mem::size_of::<ffi::fx_BitDer>(), ffi::fx_bit_sizeof());
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_BitDer>(),
+            ffi::fx_bit_alignof()
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_BitDerBits>(),
+            ffi::fx_bit_sizeof_bits()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_BitDerBits>(),
+            ffi::fx_bit_alignof_bits()
+        );
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "fx_bit_sizeof",
+            "fx_bit_alignof",
+            "fx_bit_sizeof_bits",
+            "fx_bit_alignof_bits",
+            "fx_BitDer",
+            "fx_BitDerBits",
+        ],
+        &[],
+    );
+}
+
+/// What a class whose bases were left less room than their own types costs.
+/// The bases have no Rust type - they are the bytes the target gave them - so
+/// no field of the class can be read from Rust and `pod!` has to be refused.
+/// It used to be accepted, with every field after the base at an offset C++
+/// does not use, which is the unsoundness this trades away.
+///
+/// Which classes those are is the ABI's answer, not autocxx's: the Itanium ABI
+/// lends `fx_NoPodBase`'s tail padding to `d` and the MSVC ABI does not, so
+/// under MSVC the base is a field of its own type and `pod!` is right to be
+/// granted. The test asks for whichever of the two the compiler running it
+/// produces.
+#[test]
+fn test_class_whose_bases_hold_its_members_is_refused_as_pod() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_NoPodBase { fx_NoPodBase(); int i; char c; };
+        struct fx_NoPodDer : public fx_NoPodBase { char d; };
+        inline size_t fx_nopod_offset() {
+            fx_NoPodDer v;
+            return reinterpret_cast<const char*>(&v.d) - reinterpret_cast<const char*>(&v);
+        }
+    "};
+    let cxx = indoc! {"
+        fx_NoPodBase::fx_NoPodBase() : i(0), c(0) {}
+    "};
+    if cfg!(target_env = "msvc") {
+        run_test(
+            cxx,
+            hdr,
+            quote! {
+                assert_eq!(
+                    std::mem::offset_of!(ffi::fx_NoPodDer, d),
+                    ffi::fx_nopod_offset()
+                );
+            },
+            &["fx_nopod_offset"],
+            &["fx_NoPodDer"],
+        );
+    } else {
+        run_test_expect_fail_with_error(
+            cxx,
+            hdr,
+            quote! {},
+            &["fx_nopod_offset"],
+            &["fx_NoPodDer"],
+            "leaves its base classes less room",
+        );
+    }
+}

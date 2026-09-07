@@ -1,0 +1,95 @@
+Subject: Size an empty C++ class the way the target sizes it
+
+A class whose fields and bases are all empty reaches codegen as `zero_sized`,
+and bindgen writes it out as one `_address` byte: the address every distinct
+object needs, and the whole of what the class was assumed to need. The target
+does not always agree. Two subobjects of the same type need distinct addresses
+of their own, so a class deriving from two classes which each derive from the
+same empty class holds two copies of it - `struct E {}; struct L : E {}; struct
+R : E {}; struct D : L, R {};` makes `sizeof(D)` two under the Itanium ABI, and
+three where a third such base is added. An empty class can also be
+over-aligned: `struct alignas(8) E {};` is eight bytes wide, and so is anything
+deriving from it.
+
+bindgen's own layout assertions are written from the size clang reports, so for
+either shape the bindings it writes do not compile. With `--no-layout-tests`
+they do, and a Rust caller then holds an object smaller than the one C++ hands
+it - the bytes past the first belong to the next object as far as Rust is
+concerned.
+
+The size and alignment are already in hand; they are what those assertions are
+written from. Pad the class out to that size and give it that alignment, the
+two steps every other struct already gets, rather than stopping at the address
+byte.
+
+`pad_struct` had to become exact for that to hold. It asks `blob` for
+`padding_bytes` bytes at the struct's own alignment, and `blob` hands back
+whole units of the alignment it is asked for: seven bytes at alignment four is
+one `u32`, three bytes short, and Rust's own alignment padding happens to make
+up exactly the difference in every case which could reach it before. Seven
+bytes at alignment eight is a wrapper which rounds its own size back up to
+eight, which is one byte too many and which nothing makes up. Ask for byte
+units where the run is not a whole number of alignment units, and the field is
+the run; the struct's alignment is `requires_explicit_align`'s business either
+way.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2583,15 +2583,33 @@
+             };
+ 
+             if has_address {
+-                let layout = Layout::new(1, 1);
++                let address_layout = Layout::new(1, 1);
+                 struct_layout.saw_field_with_layout(
+                     "_address",
+-                    layout,
++                    address_layout,
+                     /* offset = */ Some(0),
+                 );
+                 fields.push(quote! {
+                     pub _address: u8,
+                 });
++
++                // One byte is the usual answer, not the only one. Two
++                // subobjects of the same type need distinct addresses, so a
++                // class deriving from two classes which each derive from the
++                // same empty class holds two of it and is two bytes wide,
++                // and an empty class can be over-aligned besides. Take the
++                // size and alignment the target gives the class rather than
++                // assuming the address byte accounts for both.
++                if let Some(layout) = layout {
++                    if let Some(padding_field) =
++                        struct_layout.pad_struct(layout)
++                    {
++                        fields.push(padding_field);
++                    }
++                    if struct_layout.requires_explicit_align(layout) {
++                        explicit_align = Some(layout.align);
++                    }
++                }
+             }
+         }
+ 
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -330,8 +330,18 @@
+             {
+                 // We've already given up on alignment here.
+                 Layout::for_size(self.ctx, padding_bytes)
+-            } else {
++            } else if padding_bytes % layout.align == 0 {
+                 Layout::new(padding_bytes, layout.align)
++            } else {
++                // `blob` hands back whole units of the alignment it is asked
++                // for, so a run of bytes which is not a whole number of them
++                // does not come back as itself: up to 4-byte alignment the
++                // type is short by the remainder, and at 8 the wrapper rounds
++                // its own size up and the type is longer than the run instead.
++                // Byte units are the run exactly, and the struct's alignment
++                // is `requires_explicit_align`'s business rather than this
++                // field's.
++                Layout::new(padding_bytes, 1)
+             };
+ 
+             debug!("pad bytes to struct {}, {layout:?}", self.name);

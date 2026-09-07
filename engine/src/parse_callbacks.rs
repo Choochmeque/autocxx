@@ -476,6 +476,14 @@ impl ParseCallbackResults {
             .filter(|(_, bases)| bases.any_virtual)
             .map(|(name, _)| name)
     }
+
+    /// The types bindgen reported any base class for at all.
+    pub(crate) fn types_with_bases(&self) -> impl Iterator<Item = &QualifiedName> {
+        self.bases
+            .iter()
+            .filter(|(_, bases)| !bases.named.is_empty() || bases.any_unnamed)
+            .map(|(name, _)| name)
+    }
 }
 
 #[derive(Debug)]
