@@ -10459,9 +10459,10 @@ fn test_shared_ptr_const_holder_follows_an_ignored_payload() {
         quote! { generate_all!() },
         None,
         Some(make_checks_without_building(vec![
-            // No accessor for the holder, which is the whole of what it would
-            // have contributed to the bridge.
-            make_string_absence_finder(vec!["_autocxx_get".to_string()]),
+            // The accessor's return type, which is the only place the payload
+            // would be named. Its own error stub carries the name, so the
+            // absence to look for is the accessor rather than the name.
+            make_string_absence_finder(vec!["* const output :: fx_Keeper_fx_Hidden".to_string()]),
         ])),
         None,
     );
@@ -10488,7 +10489,7 @@ fn test_vector_of_pointers_holder_follows_an_ignored_element() {
         quote! { generate_all!() },
         None,
         Some(make_checks_without_building(vec![
-            make_string_absence_finder(vec!["_autocxx_len".to_string()]),
+            make_string_absence_finder(vec!["* mut output :: fx_Warden_fx_Ward".to_string()]),
         ])),
         None,
     );
