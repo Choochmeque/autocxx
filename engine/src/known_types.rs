@@ -26,6 +26,7 @@ pub(crate) const CXX_CHARACTER_TYPES: &[(&str, &str, &str)] = &[
     ("char16_t", "bindgen_cchar16_t", "autocxx::c_char16_t"),
     ("wchar_t", "bindgen_cwchar_t", "autocxx::c_wchar_t"),
     ("char32_t", "bindgen_cchar32_t", "autocxx::c_char32_t"),
+    ("char8_t", "bindgen_cchar8_t", "autocxx::c_char8_t"),
 ];
 
 /// The behavior of the type.
@@ -673,19 +674,11 @@ fn create_type_database() -> TypeDatabase {
         // depending on a type we've never heard of.
         db.insert_alias(bindgen_name, rs_name);
     }
-    // TODO: two more C++ built-ins belong in the table above and cannot be
-    // given an entry from this side, because nothing distinguishing reaches us:
-    //
-    // - `char8_t` is unrecognised rather than collapsed: libclang has no
-    //   `CXType_Char8` (the kinds go `CXType_UChar`, `CXType_Char16`,
-    //   `CXType_Char32`), so `build_builtin_ty` returns `None` and bindgen
-    //   falls back to an opaque type of the right layout.
-    //
-    // - `long double` renders by layout size, so where it is 8 bytes (MSVC,
-    //   Apple Arm) it is indistinguishable from `double`, and where it is 16
-    //   (x86-64 System V) `FloatKind::LongDouble` becomes
-    //   `integer_type(layout)`, i.e. `u128` - which is not registered here at
-    //   all, so on those targets the function is rejected during our own
-    //   analysis rather than by the C++ compiler.
+    // TODO: `long double` has no entry here and cannot be given one from this
+    // side. It renders by layout size, so where it is 8 bytes (MSVC, Apple Arm)
+    // it is indistinguishable from `double`, and where it is 16 (x86-64 System
+    // V) `FloatKind::LongDouble` becomes `integer_type(layout)`, i.e. `u128` -
+    // which is not registered here at all, so on those targets the function is
+    // rejected during our own analysis rather than by the C++ compiler.
     db
 }
