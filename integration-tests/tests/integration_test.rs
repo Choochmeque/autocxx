@@ -152,7 +152,6 @@ fn test_nested_module() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/681
 #[cfg(target_pointer_width = "64")]
 fn test_return_big_ints() {
     let cxx = indoc! {"
@@ -171,24 +170,110 @@ fn test_return_big_ints() {
         inline int64_t give_i64() {
             return 5;
         }
-        inline __int128 give_i128() {
-            return 5;
-        }
     "};
     let rs = quote! {
         assert_eq!(ffi::give_u32(), 5);
         assert_eq!(ffi::give_u64(), 5);
         assert_eq!(ffi::give_i32(), 5);
         assert_eq!(ffi::give_i64(), 5);
-        assert_eq!(ffi::give_i128(), 5);
     };
     run_test(
         cxx,
         hdr,
         rs,
-        &["give_u32", "give_u64", "give_i32", "give_i64", "give_i128"],
+        &["give_u32", "give_u64", "give_i32", "give_i64"],
         &[],
     );
+}
+
+/// `__int128`, which was the rest of `test_return_big_ints` while it was
+/// ignored. cxx has no atom that wide, so it travels under a name of its own
+/// exactly as `autocxx::c_int` does. Rust settled `i128`'s C ABI in 1.78,
+/// which "completed the announced `u128`/`i128` ABI change for x86-32 and
+/// x86-64 targets" and closed rust-lang/rust#54341 - the thing the upstream
+/// report was waiting for.
+///
+/// Not compiled for MSVC, which has no `__int128` at all.
+#[test]
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_return_int128() {
+    let hdr = indoc! {"
+        inline __int128 give_i128() {
+            return 5;
+        }
+        inline __int128 round_trip_i128(__int128 x) {
+            return x;
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::give_i128(), autocxx::c_i128(5));
+        assert_eq!(ffi::round_trip_i128(autocxx::c_i128(i128::MIN + 7)).0, i128::MIN + 7);
+    };
+    run_test("", hdr, rs, &["give_i128", "round_trip_i128"], &[]);
+}
+
+/// `unsigned __int128` is not one type by the time it reaches us: bindgen
+/// renders it and a `__float128` as the same bare `u128` token, and nothing
+/// that survives to this side says which was written. (A 16-byte `long
+/// double` used to be a third claimant; it is now marked and refused by name
+/// of its own.) Binding it would mean picking one of the three and emitting C++
+/// that says so, which is a miscompile for the other two - so the token is
+/// refused with that as the reason instead. See the note beside the ctypes in
+/// `engine/src/known_types.rs`.
+///
+/// `__int128` has no such problem: `i128` means that and nothing else, which
+/// is why `test_return_int128` above works.
+#[test]
+#[ignore] // Two C++ types share this token; see the doc comment.
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_return_uint128() {
+    let hdr = indoc! {"
+        inline unsigned __int128 give_u128() {
+            return 5;
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::give_u128(), 5);
+    };
+    run_test("", hdr, rs, &["give_u128"], &[]);
+}
+
+/// What that refusal looks like today, so that it stays a refusal which says
+/// why rather than reverting to a bare "unknown type".
+#[test]
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_uint128_is_refused_by_name() {
+    let hdr = indoc! {"
+        inline unsigned __int128 give_u128() {
+            return 5;
+        }
+    "};
+    run_test_expect_fail_with_error("", hdr, quote! {}, &["give_u128"], &[], "unsigned __int128");
+}
+
+/// A container of a `__int128` is refused: `autocxx::c_type_vectors` is
+/// compiled on every target autocxx supports and MSVC has no `__int128`, so
+/// there is no `UniquePtrTarget` for `c_i128` to be had and letting the
+/// signature through would buy a missing `cxxbridge1$unique_ptr$...` symbol at
+/// link time.
+#[test]
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_int128_containers_are_refused() {
+    let hdr = indoc! {"
+        #include <memory>
+        #include <vector>
+        class Thing {
+        public:
+            Thing() {}
+            std::unique_ptr<__int128> up() const { return nullptr; }
+            const std::vector<__int128>& vec() const;
+            __int128 plain() const { return 3; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().plain(), autocxx::c_i128(3));
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
 }
 
 /// `cxx::UniquePtr<T>` needs `T: UniquePtrTarget`, and that trait's methods

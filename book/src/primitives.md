@@ -65,6 +65,15 @@ function whose signature mentions one is refused with an error saying that. A
 `long double` *field* is fine - those bytes are carried around, not passed
 between the languages - though a struct with one cannot be `generate_pod!`.
 
+### 128-bit integers
+
+A C++ `__int128` is [`c_i128`](https://docs.rs/autocxx/latest/autocxx/struct.c_i128.html),
+another transparent newtype. There is no `c_u128`: `bindgen` cannot tell an
+`unsigned __int128` from a 16-byte `long double` or a `__float128`, so
+`autocxx` refuses any function which mentions one rather than guess. Neither
+128-bit type may go inside a `UniquePtr` or a `CxxVector`, because MSVC has no
+`__int128` and the glue which would make that work is compiled everywhere.
+
 ## Strings
 
 `autocxx` uses [`cxx::CxxString`](https://docs.rs/cxx/latest/cxx/struct.CxxString.html). However, as noted above, we can't

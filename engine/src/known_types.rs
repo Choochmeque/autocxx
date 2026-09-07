@@ -114,6 +114,16 @@ struct TypeDetails {
     /// to `u32`, and claiming it would turn every `uint32_t` in the header
     /// into the wrapper instead of only a `unique_ptr` payload.
     owns_cpp_name: bool,
+    /// Whether a cxx container of this type has the trait impls it needs.
+    ///
+    /// For everything else in this database it does: cxx implements them for
+    /// its own types, and `autocxx::c_type_vectors` writes the explicit shim
+    /// trait impls for the `autocxx::c_*` integers. `autocxx::c_i128` is the
+    /// exception - `c_type_vectors.h` is compiled on every target autocxx
+    /// supports and MSVC has no `__int128` - so a `unique_ptr` of one would
+    /// compile into a call to a `cxxbridge1$unique_ptr$...` symbol nobody
+    /// emits. Enforced by the three `permissible_within_*` predicates below.
+    has_container_glue: bool,
 }
 
 impl TypeDetails {
@@ -133,6 +143,7 @@ impl TypeDetails {
             has_const_copy_constructor,
             has_move_constructor,
             owns_cpp_name: true,
+            has_container_glue: true,
         }
     }
 
@@ -140,6 +151,13 @@ impl TypeDetails {
     /// [`Self::owns_cpp_name`].
     fn sharing_cpp_name(mut self) -> Self {
         self.owns_cpp_name = false;
+        self
+    }
+
+    /// Records that no cxx container of this type can be built. See
+    /// [`Self::has_container_glue`].
+    fn without_container_glue(mut self) -> Self {
+        self.has_container_glue = false;
         self
     }
 
@@ -441,10 +459,11 @@ impl TypeDatabase {
     pub(crate) fn permissible_within_vector(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
-                matches!(
-                    x.behavior,
-                    Behavior::CxxString | Behavior::CByValueVecSafe | Behavior::CIntegerWrapper
-                )
+                x.has_container_glue
+                    && matches!(
+                        x.behavior,
+                        Behavior::CxxString | Behavior::CByValueVecSafe | Behavior::CIntegerWrapper
+                    )
             })
             .unwrap_or(true)
     }
@@ -465,10 +484,13 @@ impl TypeDatabase {
     pub(crate) fn permissible_within_unique_ptr(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
-                matches!(
-                    x.behavior,
-                    Behavior::CxxString | Behavior::CxxContainerVector | Behavior::CIntegerWrapper
-                )
+                x.has_container_glue
+                    && matches!(
+                        x.behavior,
+                        Behavior::CxxString
+                            | Behavior::CxxContainerVector
+                            | Behavior::CIntegerWrapper
+                    )
             })
             .unwrap_or(true)
     }
@@ -490,13 +512,14 @@ impl TypeDatabase {
     pub(crate) fn permissible_within_shared_or_weak_ptr(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
-                matches!(
-                    x.behavior,
-                    Behavior::CxxString
-                        | Behavior::CByValue
-                        | Behavior::CByValueVecSafe
-                        | Behavior::CIntegerWrapper
-                )
+                x.has_container_glue
+                    && matches!(
+                        x.behavior,
+                        Behavior::CxxString
+                            | Behavior::CByValue
+                            | Behavior::CByValueVecSafe
+                            | Behavior::CIntegerWrapper
+                    )
             })
             .unwrap_or(true)
     }
@@ -739,6 +762,26 @@ fn create_type_database() -> TypeDatabase {
     insert_ctype("short");
     insert_ctype("long long");
 
+    // `__int128`, which reaches us as a bare `i128` and means nothing else.
+    // cxx has no atom that wide, so it travels as a named type exactly like
+    // `autocxx::c_int` - but without the container glue, because
+    // `autocxx::c_type_vectors` compiles on every target autocxx supports and
+    // MSVC has no `__int128`.
+    //
+    // There is deliberately no `unsigned __int128` beside it; see the note at
+    // the end of this function.
+    db.insert(
+        TypeDetails::new(
+            "autocxx::c_i128",
+            "__int128",
+            Behavior::CIntegerWrapper,
+            Some("i128".into()),
+            true,
+            true,
+        )
+        .without_container_glue(),
+    );
+
     db.insert(TypeDetails::new(
         "f32",
         "float",
@@ -812,5 +855,20 @@ fn create_type_database() -> TypeDatabase {
     // possible: it marks the type so that `type_converter` can name what it is
     // turning down instead of seeing bindgen's same-sized substitute. See
     // `ConvertErrorFromCpp::LongDouble`.
+    //
+    // DECIDED: `u128` is not registered here, and is not to be. Two C++ types
+    // still arrive as that one token - `unsigned __int128`, and `__float128`,
+    // which `FloatKind::Float128` renders as a literal `u128` - and nothing
+    // which survives to this side tells them apart. An entry would have to
+    // name one of the two in the C++ it generates, which is a miscompile
+    // wherever the header meant the other: they are a different size class, a
+    // different register class and a different value.
+    // `remove_ignored.rs` refuses the token by name and says so, which is the
+    // most that can honestly be done from here. `long double`, which used to
+    // be a third claimant on 16-byte targets, is now marked and refused by
+    // name above.
+    //
+    // `__int128` has no such problem: `i128` is that and nothing else, and it
+    // is registered above.
     db
 }
