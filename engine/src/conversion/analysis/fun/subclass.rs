@@ -75,6 +75,7 @@ pub(super) fn create_subclass_fn_wrapper(
         original_name: None,
         add_to_trait: fun.add_to_trait.clone(),
         is_deleted: fun.is_deleted,
+        deprecation: fun.deprecation.clone(),
         synthetic_cpp: None,
         provenance: Provenance::SynthesizedOther,
         variadic: fun.variadic,
@@ -166,6 +167,7 @@ pub(super) fn create_subclass_function(
     unsafe_policy: &UnsafePolicy,
     ref_qualifier: CppRefQualifier,
     cpp_super_fn_name: Option<Ident>,
+    superclass_fn_is_deprecated: bool,
 ) -> Api<FnPrePhase1> {
     let cpp = sub.cpp();
     let holder_name = sub.holder();
@@ -218,6 +220,11 @@ pub(super) fn create_subclass_function(
                 // ref-qualified then this one must be too.
                 ref_qualifier,
                 is_virtual_override: true,
+                // The override's own body calls into Rust and names the
+                // superclass method nowhere, but the `_super` helper generated
+                // from this same `CppFunction` calls it by name, and declaring
+                // an override of a deprecated method is itself a use of it.
+                calls_deprecated: superclass_fn_is_deprecated,
             },
             superclass: superclass.clone(),
             receiver_mutability: *receiver_mutability,
@@ -261,6 +268,8 @@ pub(super) fn create_subclass_constructor(
         ref_qualifier: CppRefQualifier::None,
         // A constructor overrides nothing.
         is_virtual_override: false,
+        // The body calls the superclass constructor by name.
+        calls_deprecated: fun.deprecation.is_some(),
     };
     let subclass_constructor_details = Box::new(SubclassConstructorDetails {
         subclass: sub.clone(),
@@ -307,6 +316,7 @@ pub(super) fn create_subclass_constructor(
         self_ty: Some(cpp),
         add_to_trait: None,
         is_deleted: fun.is_deleted,
+        deprecation: fun.deprecation.clone(),
         synthetic_cpp: None,
         provenance: Provenance::SynthesizedSubclassConstructor(subclass_constructor_details),
         variadic: fun.variadic,

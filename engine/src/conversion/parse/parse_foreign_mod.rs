@@ -100,6 +100,7 @@ impl<'a> ParseForeignMod<'a> {
                     synthesized_this_type: None,
                     add_to_trait: None,
                     is_deleted: self.parse_callback_results.get_deleted_or_defaulted(&qn),
+                    deprecation: self.parse_callback_results.get_deprecation(&qn),
                     synthetic_cpp: None,
                     variadic: item.sig.variadic.is_some(),
                     ref_qualifier: ref_qualifier_from_attrs(&item.attrs),

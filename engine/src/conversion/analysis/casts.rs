@@ -114,6 +114,7 @@ fn create_cast(from: &QualifiedName, to: &QualifiedName, mutable: CastMutability
             }),
             synthetic_cpp: Some((CppFunctionBody::Cast, CppFunctionKind::Function)),
             is_deleted: None,
+            deprecation: None,
             provenance: Provenance::SynthesizedOther,
             variadic: false,
             ref_qualifier: CppRefQualifier::None,

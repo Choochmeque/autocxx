@@ -108,6 +108,13 @@ pub(super) fn gen_function(
     let kind = analysis.kind;
     let may_throw = analysis.may_throw;
     let doc_attrs = minisynize_vec(fun.doc_attrs);
+    let deprecation = fun
+        .deprecation
+        .as_ref()
+        .map(|deprecation| match deprecation.message() {
+            Some(note) => parse_quote! { #[deprecated(note = #note)] },
+            None => parse_quote! { #[deprecated] },
+        });
 
     let mut cpp_name_attr = Vec::new();
     let mut impl_entry = None;
@@ -118,6 +125,7 @@ pub(super) fn gen_function(
         rust_name,
         unsafety: &analysis.requires_unsafe,
         doc_attrs: &doc_attrs,
+        deprecation: &deprecation,
         non_pod_types,
         ret_type: &ret_type,
         ret_conversion: &ret_conversion,
@@ -326,6 +334,12 @@ struct FnGenerator<'a> {
     rust_name: &'a str,
     unsafety: &'a UnsafetyNeeded,
     doc_attrs: &'a Vec<Attribute>,
+    /// `#[deprecated]` carrying the message C++ wrote, where C++ marked the
+    /// function deprecated. It goes on the Rust item a caller names, and
+    /// deliberately not on the `cxx::bridge` declaration: the wrapper here
+    /// calls that declaration, so the attribute there would warn inside
+    /// autocxx's own generated code rather than at the call the user wrote.
+    deprecation: &'a Option<Attribute>,
     non_pod_types: &'a HashSet<QualifiedName>,
     may_throw: bool,
 }
@@ -537,11 +551,13 @@ impl<'a> FnGenerator<'a> {
         let rust_name = make_ident(self.rust_name);
         let unsafety = self.unsafety.wrapper_token();
         let doc_attrs = self.doc_attrs;
+        let deprecation = self.deprecation;
         let must_use = must_use_attr_if_impl_new(&ret_type);
         let ty = impl_block_type_name.get_final_ident();
         Box::new(ImplBlockDetails {
             item: ImplItem::Fn(parse_quote! {
                 #(#doc_attrs)*
+                #deprecation
                 #must_use
                 pub #unsafety fn #rust_name #lifetime_tokens ( #wrapper_params ) #ret_type {
                     #call_body
@@ -559,6 +575,13 @@ impl<'a> FnGenerator<'a> {
     /// becoming a hard error). Today no such method returns one - the moveit
     /// traits construct into a placement parameter and return `()` - so nothing
     /// is lost, but if one ever does, its callers will not be warned.
+    ///
+    /// It adds no `#[deprecated]` either, for the same reason: rustc ignores
+    /// the attribute on a trait impl item and says so through
+    /// `useless_deprecated`, also on its way to becoming a hard error. A
+    /// deprecated special member - a copy or move constructor, a destructor -
+    /// therefore reaches Rust unmarked. The generated C++ still gets the
+    /// pragma which keeps its own build clean.
     fn generate_trait_impl(&self, details: &TraitMethodDetails) -> Box<TraitImplBlockDetails> {
         let (lifetime_tokens, wrapper_params, ret_type, call_body) =
             self.common_parts(details.avoid_self, &details.parameter_reordering, None);
@@ -586,12 +609,14 @@ impl<'a> FnGenerator<'a> {
             self.common_parts(true, &None, Some(ret_type));
         let rust_name = make_ident(self.rust_name);
         let doc_attrs = self.doc_attrs;
+        let deprecation = self.deprecation;
         let unsafety = self.unsafety.wrapper_token();
         let must_use = must_use_attr_if_impl_new(&ret_type);
         let ty = impl_block_type_name.get_final_ident();
         let ty = parse_quote! { #ty };
         let stuff = quote! {
                 #(#doc_attrs)*
+                #deprecation
                 #must_use
                 pub #unsafety fn #rust_name #lifetime_tokens ( #wrapper_params ) #ret_type {
                     #call_body
@@ -609,10 +634,12 @@ impl<'a> FnGenerator<'a> {
             self.common_parts(false, &None, None);
         let rust_name = make_ident(self.rust_name);
         let doc_attrs = self.doc_attrs;
+        let deprecation = self.deprecation;
         let unsafety = self.unsafety.wrapper_token();
         let must_use = must_use_attr_if_impl_new(&ret_type);
         Item::Fn(parse_quote! {
             #(#doc_attrs)*
+            #deprecation
             #must_use
             pub #unsafety fn #rust_name #lifetime_tokens ( #wrapper_params ) #ret_type {
                 #call_body

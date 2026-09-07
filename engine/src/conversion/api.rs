@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use crate::vendored_bindgen::callbacks::{
-    Explicitness, MethodKind as CppMethodKind, SpecialMemberKind, Virtualness,
+    Deprecation, Explicitness, MethodKind as CppMethodKind, SpecialMemberKind, Virtualness,
 };
 
 use syn::{
@@ -370,6 +370,9 @@ pub(crate) struct FuncToConvert {
     pub(crate) synthetic_cpp: Option<(CppFunctionBody, CppFunctionKind)>,
     /// =delete or =default
     pub(crate) is_deleted: Option<Explicitness>,
+    /// What C++ marked this function `[[deprecated]]` with, where it did.
+    /// `None` for a function autocxx synthesized, which C++ never declared.
+    pub(crate) deprecation: Option<Deprecation>,
     /// Whether this is a `void foo() &` or `void foo() &&` method. Recovered
     /// from the mangled name, because bindgen doesn't tell us; see
     /// [`crate::conversion::parse::CppRefQualifier`]. Always
