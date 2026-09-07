@@ -985,10 +985,12 @@ fn test_subclass_const_rvalue_ref_return_cpprefs() {
 /// and the rest of the holder is unaffected, because ownership is the
 /// `UniquePtr`'s business and has nothing to do with references.
 ///
-/// `CppRef` promises no more here than it does anywhere else: it is not
-/// dereferenced except through an `unsafe` the caller vouches for, which is
-/// what makes it the right shape for a pointer that is null whenever the
-/// `shared_ptr` is empty.
+/// `get` is `unsafe` in this mode alone, and that is the point of covering it
+/// here. A `CppRef` is what a C++ `const T&` parameter takes under this policy,
+/// and the generated C++ dereferences it with no further `unsafe` from the
+/// caller - so a `CppRef` built from `std::shared_ptr::get`, which may be null
+/// or (through the aliasing constructor) not owned by this holder at all,
+/// has to be vouched for where it is made rather than where it is used.
 ///
 /// Addresses the bug reported upstream as google/autocxx#799.
 #[test]
@@ -1002,7 +1004,9 @@ fn test_shared_ptr_const_cpprefs() {
     "};
     let rs = quote! {
         let held = ffi::fx_hold();
-        let payload: autocxx::CppRef<autocxx::c_int> = held.get();
+        // Safe: `fx_hold` returns a `make_shared` result, which owns a live
+        // payload, and `held` keeps it alive across the use below.
+        let payload: autocxx::CppRef<autocxx::c_int> = unsafe { held.get() };
         assert_eq!(*unsafe { payload.as_ref() }, autocxx::c_int(3));
         assert_eq!(held.use_count(), 1);
         let second = held.clone();

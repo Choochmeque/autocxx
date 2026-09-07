@@ -1075,6 +1075,18 @@ impl<'a> RsCodeGenerator<'a> {
         for shim in SharedPtrShim::ALL {
             let shim_id = make_ident(shim.cpp_name(name));
             let method_id = make_ident(shim.rust_name());
+            // A `CppRef` is the one return here which safe code may go on to
+            // *dereference*: under this policy it is what a C++ `const T&`
+            // parameter takes, and the generated C++ wrapper turns it back
+            // into a reference with `(*p)` - no `unsafe` anywhere in the
+            // caller. Every other function which hands one out got it from a
+            // C++ function returning a real reference; `std::shared_ptr::get`
+            // is documented to return null, and with the aliasing constructor
+            // may return a pointer this holder does not keep alive. So this
+            // one method is `unsafe`, and its safety comment is where the
+            // caller vouches for what the C++ header would have promised.
+            let unsafety: Option<syn::token::Unsafe> =
+                matches!(shim, SharedPtrShim::Get if wrapped).then(|| parse_quote! { unsafe });
             let (bridge_ret, method_ret, body): (Type, Type, Expr) = match shim {
                 SharedPtrShim::Get if wrapped => (
                     parse_quote! { *const #bridge_payload },
@@ -1103,7 +1115,7 @@ impl<'a> RsCodeGenerator<'a> {
             let doc = shared_ptr_method_doc(shim, wrapped);
             methods.push(parse_quote! {
                 #[doc = #doc]
-                pub fn #method_id(&self) -> #method_ret {
+                pub #unsafety fn #method_id(&self) -> #method_ret {
                     #body
                 }
             });
@@ -1766,10 +1778,15 @@ fn shared_ptr_holder_doc() -> String {
      against the real signature. autocxx therefore declares this instantiation \
      to cxx as an opaque extern type whose C++ definition is exactly \
      `std::shared_ptr<const T>`, and gives it the methods below.\n\n\
-     Ownership works as it does in C++: dropping the `UniquePtr` holding one of \
-     these runs `~shared_ptr()` and releases one reference, and `clone` takes \
-     another. What it does not have is cxx's `SharedPtr` API - `null`, \
-     `Deref`, and the rest - because it is not one.\n\n\
+     Ownership works as it does in C++, which is to say it is the C++ object's \
+     and not this wrapper's: dropping the `UniquePtr` holding one of these \
+     destroys a `shared_ptr`, releasing a reference to whatever ownership \
+     group it belonged to, and `clone` copy-constructs one into the same \
+     group. A `shared_ptr` need not belong to a group at all - an empty one \
+     does not, and neither does one built with the aliasing constructor - and \
+     for those there is no count to move. What this type does not have is \
+     cxx's `SharedPtr` API - `null`, `Deref`, and the rest - because it is not \
+     one.\n\n\
      The `const` is C++'s, and describes the access path this type gives you \
      rather than the payload. C++ may hold a `std::shared_ptr<T>` to the same \
      object and write through it, so treat what `get` returns as you would any \
@@ -1787,14 +1804,20 @@ fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
     let get_caveats = "It may be null, and this does not check. Holding the \
          holder does not by itself establish that the pointer refers to a live \
          object either: `std::shared_ptr` has an aliasing constructor, and one \
-         built with it stores a pointer whose lifetime is not the managed \
-         object's.";
+         built with it stores a pointer whose lifetime is not tied to the \
+         ownership group it shares.";
     match shim {
         SharedPtrShim::Get if wrapped => format!(
             "The stored pointer, as a `CppRef` - `std::shared_ptr::get`.\n\n\
-             {get_caveats} A `CppRef` is never dereferenced except through an \
-             `unsafe` the caller vouches for, which is where both of those \
-             become the caller's business.\n\n\
+             {get_caveats}\n\n\
+             # Safety\n\n\
+             Under this policy a `CppRef` is what a C++ `const T&` parameter \
+             takes, and the generated C++ dereferences it without any further \
+             `unsafe` on your part - so producing one is where the promise has \
+             to be made. The caller must establish what the C++ header would \
+             otherwise have promised: that the stored pointer is non-null, \
+             aligned, and refers to a live object for as long as the `CppRef` \
+             is used.\n\n\
              The payload's C++ type is `const`, so no method here yields \
              anything mutable - though `CppRef::const_cast` will hand you a \
              `CppMutRef` if you ask, exactly as C++'s `const_cast` would."
@@ -1806,16 +1829,20 @@ fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
              method here yields a `*mut` - though Rust will let you cast one, \
              exactly as C++'s `const_cast` would."
         ),
-        SharedPtrShim::Clone => {
-            "Another owner of the same payload, raising the reference count.\n\n\
-             This is C++ copy-construction of the `shared_ptr`, not a copy of \
-             the payload."
-                .to_string()
-        }
+        SharedPtrShim::Clone => "A copy of this `shared_ptr`, sharing whatever it owns.\n\n\
+             This is C++ copy-construction, not a copy of the payload: the two \
+             join the same ownership group and the group's count rises by one. \
+             A `shared_ptr` which owns nothing - an empty one, or one built \
+             with the aliasing constructor - has no group and no count, and \
+             copying it produces another of the same."
+            .to_string(),
         SharedPtrShim::UseCount => {
-            "`std::shared_ptr::use_count` - how many owners the payload has.\n\n\
-             As in C++, this is for diagnostics: in the presence of other \
-             threads the answer may already be stale."
+            "`std::shared_ptr::use_count` - the number of `shared_ptr`s sharing \
+             ownership with this one, itself included.\n\n\
+             Zero where this one owns nothing, which does not mean `get` is \
+             null: the aliasing constructor produces exactly that pair. As in \
+             C++, the answer is for diagnostics - in the presence of other \
+             threads it may already be stale."
                 .to_string()
         }
     }

@@ -215,6 +215,18 @@ impl CppNameMap {
                 // `int* const` is a const pointer to a mutable int, where
                 // `const int*` is the opposite type entirely, and the marker
                 // means the first. Everywhere else C++ takes the prefix.
+                //
+                // That is the right qualifier at this level and no deeper. The
+                // `Type::Ptr` arm below still prefixes its own `const` to
+                // whatever its pointee rendered as, so a marker *inside* a
+                // pointer - a C++ `int* const*` - would come out as
+                // `const int* const*`, a different type. Getting that right
+                // means rendering qualifiers per declarator rather than by
+                // wrapping strings, which is a rewrite of this function and
+                // not of a piece with the smart-pointer lowering it was
+                // written for. Nothing reaches it today: the marker arrives
+                // only on a builtin, and the smart-pointer payload is rendered
+                // at the top level of a template argument.
                 // See google/autocxx#799.
                 if let Some(inner) = unwrap_const(typ) {
                     let inner_cpp = self.type_to_cpp(inner)?;

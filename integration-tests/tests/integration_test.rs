@@ -9330,6 +9330,10 @@ fn test_shared_ptr_const_payload_is_const() {
             make_rust_code_finder(vec![quote! {
                 pub fn get (& self) -> * const autocxx :: c_int
             }]),
+            // The payload is mentioned nowhere in this header but the holder's
+            // accessor, so its absence as a `*mut` is the absence of a mutable
+            // accessor anywhere in the generated code.
+            make_string_absence_finder(vec!["* mut autocxx :: c_int".to_string()]),
         ])),
         None,
     );
@@ -9373,7 +9377,13 @@ fn test_shared_ptr_const_empty_and_aliasing() {
         assert!(!aliasing.get().is_null());
         assert_eq!(unsafe { *aliasing.get() }, autocxx::c_int(42));
         // Owns nothing, so it counts nothing - while `get` is perfectly good.
+        // This is the pair that stops a caller reading liveness off either.
         assert_eq!(aliasing.use_count(), 0);
+        let cloned = aliasing.clone();
+        assert_eq!(unsafe { *cloned.get() }, autocxx::c_int(42));
+        assert_eq!(cloned.use_count(), 0);
+        drop(cloned);
+        drop(aliasing);
     };
     run_test("", hdr, rs, &["fx_empty", "fx_aliasing"], &[]);
 }
@@ -9476,7 +9486,18 @@ fn test_shared_ptr_const_class_payload_is_still_unseen() {
             return std::make_shared<const fx_Held>(fx_Held { 3 });
         }
     "};
-    run_test_expect_fail("", hdr, quote! {}, &["fx_Held", "fx_hold_class"], &[]);
+    // Matched on the C++ compiler's own words rather than on "it failed
+    // somehow", so that an unrelated breakage cannot keep this passing. Each
+    // compiler words the complaint differently; the type and the two
+    // specializations it cannot reconcile are what they share.
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_Held", "fx_hold_class"],
+        &[],
+        &["shared_ptr<const fx_Held>", "fx_hold_class"],
+    );
 }
 
 #[test]
