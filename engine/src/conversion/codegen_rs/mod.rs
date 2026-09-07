@@ -32,7 +32,7 @@ use syn::{
 use utils::{find_output_mod_root, generate_cxx_use_stmt, generate_cxx_use_stmt_for_id};
 
 use crate::{
-    conversion::codegen_rs::unqualify::{unqualify_params, unqualify_ret_type},
+    conversion::codegen_rs::unqualify::{unqualify_params, unqualify_ret_type, unqualify_type},
     minisyn::minisynize_punctuated,
     types::{make_ident, Namespace, QualifiedName},
 };
@@ -50,7 +50,7 @@ use super::{
         fun::{FnKind, FnPhase, PodAndDepAnalysis, ReceiverMutability, SubclassAnalysis},
         pod::PodAnalysis,
     },
-    api::{AnalysisPhase, Api, SubclassName, TypeKind, SUPER_FN_SUFFIX},
+    api::{AnalysisPhase, Api, SharedPtrShim, SubclassName, TypeKind, SUPER_FN_SUFFIX},
     convert_error::ErrorContextType,
     derives::DeriveRequests,
     doc_attr::get_doc_attrs,
@@ -622,16 +622,24 @@ impl<'a> RsCodeGenerator<'a> {
                     0,
                 )
             }
-            Api::ConcreteType { .. } => self.generate_type(
-                &name,
-                bridge_id,
-                TypeKind::Abstract,
-                false, // assume for now that these types can't be kept in a Vector
-                true,  // assume for now that these types can be put in a smart pointer
-                || None,
-                associated_methods,
-                0,
-            ),
+            Api::ConcreteType {
+                shared_ptr_payload, ..
+            } => {
+                let mut result = self.generate_type(
+                    &name,
+                    bridge_id.clone(),
+                    TypeKind::Abstract,
+                    false, // assume for now that these types can't be kept in a Vector
+                    true,  // assume for now that these types can be put in a smart pointer
+                    || None,
+                    associated_methods,
+                    0,
+                );
+                if let Some(payload) = shared_ptr_payload {
+                    self.generate_shared_ptr_surface(&name, &bridge_id, &payload, &mut result);
+                }
+                result
+            }
             Api::ForwardDeclaration { .. } | Api::OpaqueTypedef { .. } => self.generate_type(
                 &name,
                 bridge_id,
@@ -1032,6 +1040,93 @@ impl<'a> RsCodeGenerator<'a> {
                 _ => None,
             },
         })
+    }
+
+    /// Declare the three C++ helpers of a `std::shared_ptr<const T>` holder in
+    /// the bridge, and put a method for each on the holder itself.
+    ///
+    /// The holder is opaque, so these are what make it usable at all: without
+    /// them a caller could receive one and hand it back to C++, and nothing
+    /// else. They are written here rather than synthesized as `Api::Function`s
+    /// because the holder is manufactured during function analysis, which is
+    /// over by the time such a function could be analysed - see
+    /// `FnAnalyzer::analyze_functions`, whose extra APIs are added with
+    /// `add_analysis` and so can only be types.
+    ///
+    /// See google/autocxx#799.
+    fn generate_shared_ptr_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        payload: &Type,
+        result: &mut RsCodegenResult,
+    ) {
+        // The bridge mod has a flat namespace and spells cxx's own types
+        // unqualified, so every type in a declaration there needs the same
+        // treatment a function signature gets. The output mod, where the
+        // methods go, uses the qualified spellings instead.
+        let holder = name.get_final_ident();
+        let bridge_payload = unqualify_type(payload.clone(), self.bridge_type_names);
+        let wrapped = matches!(
+            self.unsafe_policy,
+            UnsafePolicy::ReferencesWrappedAllFunctionsSafe
+        );
+        let mut methods: Vec<ImplItem> = Vec::new();
+        for shim in SharedPtrShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name));
+            let method_id = make_ident(shim.rust_name());
+            // A `CppRef` is the one return here which safe code may go on to
+            // *dereference*: under this policy it is what a C++ `const T&`
+            // parameter takes, and the generated C++ wrapper turns it back
+            // into a reference with `(*p)` - no `unsafe` anywhere in the
+            // caller. Every other function which hands one out got it from a
+            // C++ function returning a real reference; `std::shared_ptr::get`
+            // is documented to return null, and with the aliasing constructor
+            // may return a pointer this holder does not keep alive. So this
+            // one method is `unsafe`, and its safety comment is where the
+            // caller vouches for what the C++ header would have promised.
+            let unsafety: Option<syn::token::Unsafe> =
+                matches!(shim, SharedPtrShim::Get if wrapped).then(|| parse_quote! { unsafe });
+            let (bridge_ret, method_ret, body): (Type, Type, Expr) = match shim {
+                SharedPtrShim::Get if wrapped => (
+                    parse_quote! { *const #bridge_payload },
+                    parse_quote! { autocxx::CppRef<#payload> },
+                    parse_quote! { autocxx::CppRef::from_ptr(cxxbridge::#shim_id(self)) },
+                ),
+                SharedPtrShim::Get => (
+                    parse_quote! { *const #bridge_payload },
+                    parse_quote! { *const #payload },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+                SharedPtrShim::Clone => (
+                    parse_quote! { UniquePtr<#bridge_id> },
+                    parse_quote! { cxx::UniquePtr<#holder> },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+                SharedPtrShim::UseCount => (
+                    parse_quote! { i64 },
+                    parse_quote! { i64 },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+            };
+            result.extern_c_mod_items.push(parse_quote! {
+                fn #shim_id(self_: &#bridge_id) -> #bridge_ret;
+            });
+            let doc = shared_ptr_method_doc(shim, wrapped);
+            methods.push(parse_quote! {
+                #[doc = #doc]
+                pub #unsafety fn #method_id(&self) -> #method_ret {
+                    #body
+                }
+            });
+        }
+        let doc = shared_ptr_holder_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #doc]
+            impl #holder {
+                #(#methods)*
+            }
+        });
     }
 
     #[allow(clippy::too_many_arguments)] // currently the least unclear way
@@ -1665,6 +1760,91 @@ impl HasNs for (QualifiedName, RsCodegenResult) {
 impl<T: AnalysisPhase> HasNs for Api<T> {
     fn get_namespace(&self) -> &Namespace {
         self.name().get_namespace()
+    }
+}
+
+/// What the generated docs say about a `std::shared_ptr<const T>` holder, on
+/// the impl block carrying its three methods.
+///
+/// The point of saying it in the generated code is that the type's name gives
+/// no clue: a caller who expected `cxx::SharedPtr` needs to know both that this
+/// is a real `std::shared_ptr` and why it isn't spelt as one. See
+/// google/autocxx#799.
+fn shared_ptr_holder_doc() -> String {
+    "This type is a C++ `std::shared_ptr<const T>`, held opaquely.\n\n\
+     `cxx::SharedPtr<T>` cannot stand for it. cxx spells that specialization \
+     `std::shared_ptr<T>`, dropping the `const`, because Rust has no `const T` \
+     to put in the `T`; the C++ which cxx then generates does not compile \
+     against the real signature. autocxx therefore declares this instantiation \
+     to cxx as an opaque extern type whose C++ definition is exactly \
+     `std::shared_ptr<const T>`, and gives it the methods below.\n\n\
+     Ownership works as it does in C++, which is to say it is the C++ object's \
+     and not this wrapper's: dropping the `UniquePtr` holding one of these \
+     destroys a `shared_ptr`, releasing a reference to whatever ownership \
+     group it belonged to, and `clone` copy-constructs one into the same \
+     group. A `shared_ptr` need not belong to a group at all - an empty one \
+     does not, and neither does one built with the aliasing constructor - and \
+     for those there is no count to move. What this type does not have is \
+     cxx's `SharedPtr` API - `null`, `Deref`, and the rest - because it is not \
+     one.\n\n\
+     The `const` is C++'s, and describes the access path this type gives you \
+     rather than the payload. C++ may hold a `std::shared_ptr<T>` to the same \
+     object and write through it, so treat what `get` returns as you would any \
+     other pointer into C++.\n\n\
+     Nothing here makes the holder `Send` or `Sync`: the reference count is \
+     atomic, which says nothing about whether the payload may be touched from \
+     another thread."
+        .to_string()
+}
+
+/// What the generated docs say about each of the holder's three methods.
+fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
+    // The two `Get` arms describe the same C++ call and differ only in what
+    // Rust receives, so they say the same things about it.
+    let get_caveats = "It may be null, and this does not check. Holding the \
+         holder does not by itself establish that the pointer refers to a live \
+         object either: `std::shared_ptr` has an aliasing constructor, and one \
+         built with it stores a pointer whose lifetime is not tied to the \
+         ownership group it shares.";
+    match shim {
+        SharedPtrShim::Get if wrapped => format!(
+            "The stored pointer, as a `CppRef` - `std::shared_ptr::get`.\n\n\
+             {get_caveats}\n\n\
+             # Safety\n\n\
+             Under this policy a `CppRef` is what a C++ `const T&` parameter \
+             takes, and the generated C++ dereferences it without any further \
+             `unsafe` on your part - so producing one is where the promise has \
+             to be made. The caller must establish what the C++ header would \
+             otherwise have promised: that the stored pointer is non-null, \
+             aligned, and refers to a live object for as long as the `CppRef` \
+             is used.\n\n\
+             The payload's C++ type is `const`, so no method here yields \
+             anything mutable - though `CppRef::const_cast` will hand you a \
+             `CppMutRef` if you ask, exactly as C++'s `const_cast` would."
+        ),
+        SharedPtrShim::Get => format!(
+            "The stored pointer - `std::shared_ptr::get`.\n\n\
+             {get_caveats} Both are why dereferencing it is `unsafe`.\n\n\
+             The payload's C++ type is `const`, so this is a `*const` and no \
+             method here yields a `*mut` - though Rust will let you cast one, \
+             exactly as C++'s `const_cast` would."
+        ),
+        SharedPtrShim::Clone => "A copy of this `shared_ptr`, sharing whatever it owns.\n\n\
+             This is C++ copy-construction, not a copy of the payload: the two \
+             join the same ownership group and the group's count rises by one. \
+             A `shared_ptr` which owns nothing - an empty one, or one built \
+             with the aliasing constructor - has no group and no count, and \
+             copying it produces another of the same."
+            .to_string(),
+        SharedPtrShim::UseCount => {
+            "`std::shared_ptr::use_count` - the number of `shared_ptr`s sharing \
+             ownership with this one, itself included.\n\n\
+             Zero where this one owns nothing, which does not mean `get` is \
+             null: the aliasing constructor produces exactly that pair. As in \
+             C++, the answer is for diagnostics - in the presence of other \
+             threads it may already be stale."
+                .to_string()
+        }
     }
 }
 

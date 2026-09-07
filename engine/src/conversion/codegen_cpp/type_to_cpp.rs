@@ -7,7 +7,9 @@
 // except according to those terms.
 
 use crate::{
-    conversion::{api::Api, apivec::ApiVec, AnalysisPhase, ConvertErrorFromCpp},
+    conversion::{
+        api::Api, apivec::ApiVec, type_helpers::unwrap_const, AnalysisPhase, ConvertErrorFromCpp,
+    },
     parse_callbacks::CppOriginalName,
     types::QualifiedName,
 };
@@ -205,6 +207,37 @@ impl CppNameMap {
     pub(crate) fn type_to_cpp(&self, ty: &Type) -> Result<String, ConvertErrorFromCpp> {
         match ty {
             Type::Path(typ) => {
+                // bindgen's `const` marker is an alias, not a C++ name: it
+                // records a qualifier Rust cannot spell, so it has to be
+                // written back as one rather than looked up.
+                //
+                // Where it qualifies a pointer the qualifier goes after it -
+                // `int* const` is a const pointer to a mutable int, where
+                // `const int*` is the opposite type entirely, and the marker
+                // means the first. Everywhere else C++ takes the prefix.
+                //
+                // That is the right qualifier at this level and no deeper. The
+                // `Type::Ptr` arm below still prefixes its own `const` to
+                // whatever its pointee rendered as, so a marker *inside* a
+                // pointer - a C++ `int* const*` - would come out as
+                // `const int* const*`, a different type. Getting that right
+                // means rendering qualifiers per declarator rather than by
+                // wrapping strings, which is a rewrite of this function and
+                // not of a piece with the smart-pointer lowering it was
+                // written for. Nothing reaches it today: a marked type is
+                // rendered either as a smart-pointer payload, which is the top
+                // level of a template argument, or in a position where the
+                // qualifier is the outermost thing about it.
+                // `test_shared_ptr_const_pointer_payload` covers the one
+                // pointer shape which does arrive.
+                // See google/autocxx#799.
+                if let Some(inner) = unwrap_const(typ) {
+                    let inner_cpp = self.type_to_cpp(inner)?;
+                    return Ok(match inner {
+                        Type::Ptr(_) => format!("{inner_cpp} const"),
+                        _ => format!("const {inner_cpp}"),
+                    });
+                }
                 // If this is a std::unique_ptr we do need to pass
                 // its argument through.
                 let qual_name = QualifiedName::from_type_path(typ);

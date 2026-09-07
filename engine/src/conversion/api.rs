@@ -55,6 +55,58 @@ pub(crate) enum TypeKind {
               // in which case we'll err on the side of caution.
 }
 
+/// One of the C++ helper functions autocxx generates beside the opaque holder
+/// it lowers a `std::shared_ptr<const T>` to.
+///
+/// cxx sees that holder as an ordinary opaque extern type, so nothing about it
+/// being a smart pointer reaches Rust by itself: these three shims are the
+/// whole of what a caller can do with one. Their names are derived from the
+/// holder's, here, because the Rust and C++ halves of the codegen each write
+/// one end of the same declaration and have to agree on it. See
+/// google/autocxx#799.
+#[derive(Copy, Clone)]
+pub(crate) enum SharedPtrShim {
+    /// `std::shared_ptr::get`. The payload is `const` in C++, so this reaches
+    /// Rust as a `*const T` - or a `CppRef<T>` under
+    /// `ReferencesWrappedAllFunctionsSafe` - and never as a `&mut`.
+    Get,
+    /// Copy-construction of the holder, which is what makes a second owner of
+    /// the same payload and raises the reference count.
+    Clone,
+    /// `std::shared_ptr::use_count`, returned as an `int64_t` rather than the
+    /// `long` C++ declares: `long` is 32 bits on Windows, and cxx would
+    /// typecheck the shim against the wrong signature there.
+    UseCount,
+}
+
+impl SharedPtrShim {
+    pub(crate) const ALL: [Self; 3] = [Self::Get, Self::Clone, Self::UseCount];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Clone => "clone",
+            Self::UseCount => "use_count",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    ///
+    /// Built rather than allocated, so unlike every other bridge name it is not
+    /// reserved against the user's own: `BridgeNameTracker` and
+    /// `fixed_bridge_names` run during analysis, and the holder these belong to
+    /// is manufactured after that. A header declaring a function called
+    /// `<holder>_autocxx_get` would collide, where `<holder>` is the mangled
+    /// spelling of a `std::shared_ptr<const T>` instantiation - so the name to
+    /// collide with is one nobody writes by accident, and a collision is a Rust
+    /// compile error in generated code rather than anything silent.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
+        format!("{}_autocxx_{}", holder.get_final_item(), self.rust_name())
+    }
+}
+
 /// Details about a C++ struct.
 #[derive(Debug)]
 pub(crate) struct StructDetails {
@@ -568,6 +620,10 @@ pub(crate) enum Api<T: AnalysisPhase> {
         name: ApiName,
         rs_definition: Option<Box<Type>>,
         cpp_definition: String,
+        /// Where this concrete type is the opaque holder we lower a
+        /// `std::shared_ptr<const T>` to, the `T` as the `cxx::bridge` spells
+        /// it. `None` for every other concrete type. See google/autocxx#799.
+        shared_ptr_payload: Option<Box<Type>>,
     },
     /// A simple note that we want to make a constructor for
     /// a `std::string` on the heap.

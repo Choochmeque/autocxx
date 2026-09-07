@@ -979,6 +979,44 @@ fn test_subclass_const_rvalue_ref_return_cpprefs() {
     );
 }
 
+/// The opaque holder autocxx lowers a `std::shared_ptr<const T>` to, in this
+/// mode. Its payload accessor is a C++ reference like any other the mode deals
+/// in, so it hands back a `CppRef` rather than the `*const` plain mode gives -
+/// and the rest of the holder is unaffected, because ownership is the
+/// `UniquePtr`'s business and has nothing to do with references.
+///
+/// `get` is `unsafe` in this mode alone, and that is the point of covering it
+/// here. A `CppRef` is what a C++ `const T&` parameter takes under this policy,
+/// and the generated C++ dereferences it with no further `unsafe` from the
+/// caller - so a `CppRef` built from `std::shared_ptr::get`, which may be null
+/// or (through the aliasing constructor) not owned by this holder at all,
+/// has to be vouched for where it is made rather than where it is used.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_cpprefs() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<const int> fx_hold() {
+            return std::make_shared<const int>(3);
+        }
+        inline int fx_peek(std::shared_ptr<const int> p) { return *p; }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_hold();
+        // Safe: `fx_hold` returns a `make_shared` result, which owns a live
+        // payload, and `held` keeps it alive across the use below.
+        let payload: autocxx::CppRef<autocxx::c_int> = unsafe { held.get() };
+        assert_eq!(*unsafe { payload.as_ref() }, autocxx::c_int(3));
+        assert_eq!(held.use_count(), 1);
+        let second = held.clone();
+        assert_eq!(held.use_count(), 2);
+        assert_eq!(ffi::fx_peek(second), autocxx::c_int(3));
+        assert_eq!(held.use_count(), 1);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_hold", "fx_peek"], &[]);
+}
+
 /// A copy constructor in this mode. Its source is a `const T&`, which the mode
 /// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
 /// `&Self` and that is not negotiable - so the source stays a Rust reference

@@ -76,7 +76,7 @@ where
     new_pun
 }
 
-fn unqualify_type(typ: Type, bridge_type_names: &BridgeTypeNames) -> Type {
+pub(super) fn unqualify_type(typ: Type, bridge_type_names: &BridgeTypeNames) -> Type {
     match typ {
         Type::Path(typ) => Type::Path(unqualify_type_path(typ, bridge_type_names)),
         Type::Reference(mut typeref) => {

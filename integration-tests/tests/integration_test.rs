@@ -9169,18 +9169,16 @@ fn test_shared_ptr() {
     );
 }
 
-/// google/autocxx#799. Re-run when bindgen learned to mark a `const` type
-/// (`test_return_const_int`): still fails. The marker does not reach a template
-/// argument, whose constness bindgen's instantiation codegen resolves away -
-/// but even with it there would be nowhere to put the answer. cxx spells this
-/// `SharedPtr<T>`, autocxx picks that by name, and Rust has no `const T` for
-/// the `T`. Preserving the fact in bindgen would still be worth doing, so that
-/// autocxx could refuse the signature deliberately rather than mis-declare it;
-/// it would not make this pass. The gate on passing is cxx's:
-/// `::std::shared_ptr< ::c_int> (*make_shared_int$)() = ::make_shared_int;`
-/// is rejected against a `std::shared_ptr<const int> ()`.
+/// Addresses the bug reported upstream as google/autocxx#799.
+///
+/// cxx has no `SharedPtr<const T>` and cannot be given one - it spells the
+/// specialization `std::shared_ptr<T>`, and Rust has no `const T` to put in the
+/// `T` - so this passes by not asking cxx for one. The instantiation is lowered
+/// to an opaque extern type whose C++ definition is exactly
+/// `std::shared_ptr<const int>`, which is why `a` here is a `UniquePtr` of that
+/// holder rather than a `cxx::SharedPtr`. `clone` is the holder's own method,
+/// reached through `UniquePtr`'s `Deref`, and copies the `shared_ptr`.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/799 - cxx has no SharedPtr<const T>
 fn test_shared_ptr_const() {
     let hdr = indoc! {"
         #include <memory>
@@ -9196,6 +9194,356 @@ fn test_shared_ptr_const() {
         assert_eq!(ffi::take_shared_int(a.clone()), autocxx::c_int(3));
     };
     run_test("", hdr, rs, &["make_shared_int", "take_shared_int"], &[]);
+}
+
+/// That the opaque holder really is a `std::shared_ptr<const T>`: it shares
+/// ownership, it releases it, and what it points at is the object C++ has.
+///
+/// Every count here is read from C++ - `use_count` through the alias C++ kept,
+/// and the deleter's own tally - so the test is about what the C++ runtime did
+/// rather than about what the Rust wrapper claims. The last two assertions are
+/// the ones which would catch a leak or a double free: after the final Rust
+/// owner is dropped the deleter must have run exactly once, and not before.
+///
+/// The payload is an `int` rather than a class because that is the whole of
+/// what this reaches today - see
+/// [`test_shared_ptr_const_class_payload_is_still_unseen`].
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_shares_and_releases() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+
+        inline uint32_t& fx_dtor_count() { static uint32_t c = 0; return c; }
+
+        // A non-const owner of the very same object, kept on the C++ side. It
+        // is how the test proves Rust is looking at that object rather than at
+        // a copy, and it is a second owner whose arrival and departure the
+        // reference count has to reflect.
+        inline std::shared_ptr<int>& fx_mutable_alias() {
+            static std::shared_ptr<int> p;
+            return p;
+        }
+
+        inline std::shared_ptr<const int> fx_make_counted(int v) {
+            fx_dtor_count() = 0;
+            std::shared_ptr<int> p(new int(v), [](int* q) {
+                fx_dtor_count()++;
+                delete q;
+            });
+            fx_mutable_alias() = p;
+            return p;
+        }
+        inline int fx_peek(std::shared_ptr<const int> p) { return *p; }
+        inline void fx_mutate(int v) { *fx_mutable_alias() = v; }
+        inline void fx_release_cpp_alias() { fx_mutable_alias().reset(); }
+        inline uint32_t fx_use_count_from_cpp() {
+            return static_cast<uint32_t>(fx_mutable_alias().use_count());
+        }
+        inline uint32_t fx_dtors() { return fx_dtor_count(); }
+    "};
+    let rs = quote! {
+        let a = ffi::fx_make_counted(autocxx::c_int(7));
+        // The payload, through the holder's `const` view.
+        assert_eq!(unsafe { *a.get() }, autocxx::c_int(7));
+        // C++ writes through its own non-const alias and Rust sees it, so the
+        // two are looking at one object rather than at copies.
+        ffi::fx_mutate(autocxx::c_int(9));
+        assert_eq!(unsafe { *a.get() }, autocxx::c_int(9));
+        // Two owners: this holder, and the alias C++ kept.
+        assert_eq!(a.use_count(), 2);
+        assert_eq!(ffi::fx_use_count_from_cpp(), 2);
+        let b = a.clone();
+        assert_eq!(a.use_count(), 3);
+        assert_eq!(ffi::fx_use_count_from_cpp(), 3);
+        // Handed back to C++ by value, which is the round trip.
+        assert_eq!(ffi::fx_peek(b.clone()), autocxx::c_int(9));
+        drop(b);
+        assert_eq!(a.use_count(), 2);
+        ffi::fx_release_cpp_alias();
+        assert_eq!(a.use_count(), 1);
+        // Rust holds the last owner, so nothing has been freed yet.
+        assert_eq!(ffi::fx_dtors(), 0);
+        drop(a);
+        // Dropping it ran the deleter once - not never, and not twice.
+        assert_eq!(ffi::fx_dtors(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_make_counted",
+            "fx_peek",
+            "fx_mutate",
+            "fx_release_cpp_alias",
+            "fx_use_count_from_cpp",
+            "fx_dtors",
+        ],
+        &[],
+    );
+}
+
+/// What makes the constness real is that it is C++'s own: the holder's
+/// definition names `const int`, so the access path this type gives Rust is
+/// the one C++ gives anyone holding a `std::shared_ptr<const int>`.
+///
+/// Pinned on both halves of the output. In C++ the generated typedef keeps the
+/// qualifier, which is the entire reason for lowering rather than letting cxx
+/// spell it; in Rust the accessor hands back a `*const`. There is no `*mut`
+/// counterpart, because the holder's methods are exactly
+/// [`SharedPtrShim::ALL`] and only one of the three reads the payload at all.
+///
+/// That is a claim about what autocxx generates, not a claim that the payload
+/// cannot be written: `*const T` has a safe `cast_mut`, and `CppRef` a safe
+/// `const_cast`, so a caller who wants a mutable pointer has one. Neither
+/// gives safe *access* - writing through either still needs `unsafe`, and the
+/// payload may anyway be mutable to C++ through an alias, which
+/// `test_shared_ptr_const_shares_and_releases` relies on.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_payload_is_const() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<const int> fx_hold() {
+            return std::make_shared<const int>(3);
+        }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_hold();
+        assert_eq!(unsafe { *held.get() }, autocxx::c_int(3));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_hold"], &[], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(
+                &["typedef std::shared_ptr<const int>"],
+                &["typedef std::shared_ptr<int>"],
+            )),
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self) -> * const autocxx :: c_int
+            }]),
+            // The payload is mentioned nowhere in this header but the holder's
+            // accessor, so its absence as a `*mut` is the absence of a mutable
+            // accessor anywhere in the generated code.
+            make_string_absence_finder(vec!["* mut autocxx :: c_int".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// An empty holder, and one built with the aliasing constructor. Both are
+/// ordinary `std::shared_ptr` states which the generated docs promise nothing
+/// about beyond what C++ does, and both have to survive being cloned, counted
+/// and dropped rather than crashing on the way.
+///
+/// The aliasing case is the reason `get` is documented as the *stored* pointer:
+/// here it is non-null while `use_count` is zero, so a caller cannot read
+/// liveness off either one.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_empty_and_aliasing() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<const int> fx_empty() {
+            return std::shared_ptr<const int>();
+        }
+        // Owns nothing, points somewhere: `use_count` is 0 and `get` is not
+        // null. Static storage, so the pointer stays valid for the test.
+        inline std::shared_ptr<const int> fx_aliasing() {
+            static const int value = 42;
+            return std::shared_ptr<const int>(std::shared_ptr<const int>(), &value);
+        }
+    "};
+    let rs = quote! {
+        let empty = ffi::fx_empty();
+        assert!(empty.get().is_null());
+        assert_eq!(empty.use_count(), 0);
+        let cloned = empty.clone();
+        assert!(cloned.get().is_null());
+        assert_eq!(cloned.use_count(), 0);
+        drop(cloned);
+        drop(empty);
+
+        let aliasing = ffi::fx_aliasing();
+        assert!(!aliasing.get().is_null());
+        assert_eq!(unsafe { *aliasing.get() }, autocxx::c_int(42));
+        // Owns nothing, so it counts nothing - while `get` is perfectly good.
+        // This is the pair that stops a caller reading liveness off either.
+        assert_eq!(aliasing.use_count(), 0);
+        let cloned = aliasing.clone();
+        assert_eq!(unsafe { *cloned.get() }, autocxx::c_int(42));
+        assert_eq!(cloned.use_count(), 0);
+        drop(cloned);
+        drop(aliasing);
+    };
+    run_test("", hdr, rs, &["fx_empty", "fx_aliasing"], &[]);
+}
+
+/// `std::unique_ptr<const T>` and `std::weak_ptr<const T>`, which fail cxx's
+/// typecheck for exactly the reason `std::shared_ptr<const T>` does and are
+/// lowered to the same opaque holder.
+///
+/// They get no accessors - only `std::shared_ptr` does - so what this pins is
+/// the whole of what they can do: they build, and they round-trip through Rust
+/// back into C++. That is worth having as a test because it is worth
+/// remembering as a limitation.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_unique_and_weak_ptr_const_round_trip() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::unique_ptr<const int> fx_make_unique() {
+            return std::unique_ptr<const int>(new int(3));
+        }
+        inline int fx_take_unique(std::unique_ptr<const int> p) { return *p; }
+        inline std::weak_ptr<const int> fx_make_weak() {
+            static std::shared_ptr<const int> keep = std::make_shared<const int>(4);
+            return std::weak_ptr<const int>(keep);
+        }
+        inline int fx_take_weak(std::weak_ptr<const int> p) {
+            auto locked = p.lock();
+            return locked ? *locked : 0;
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::fx_take_unique(ffi::fx_make_unique()), autocxx::c_int(3));
+        assert_eq!(ffi::fx_take_weak(ffi::fx_make_weak()), autocxx::c_int(4));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_make_unique",
+            "fx_take_unique",
+            "fx_make_weak",
+            "fx_take_weak",
+        ],
+        &[],
+    );
+}
+
+/// A holder nested inside a container cxx *does* understand, which is the
+/// shape that catches whether the holder's own declaration survives the
+/// recursion: `convert_punctuated` manufactures the `Api::ConcreteType` while
+/// converting the inner type, and the enclosing container branch has to carry
+/// it out or the bridge names a type it never declares.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_nested_in_a_container() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::unique_ptr<std::shared_ptr<const int>> fx_hold_nested() {
+            return std::unique_ptr<std::shared_ptr<const int>>(
+                new std::shared_ptr<const int>(std::make_shared<const int>(3)));
+        }
+    "};
+    let rs = quote! {
+        let outer = ffi::fx_hold_nested();
+        assert_eq!(unsafe { *outer.get() }, autocxx::c_int(3));
+        assert_eq!(outer.use_count(), 1);
+    };
+    run_test("", hdr, rs, &["fx_hold_nested"], &[]);
+}
+
+/// A payload which is a `const`-qualified *pointer* rather than a
+/// `const`-qualified value: `std::shared_ptr<int* const>`.
+///
+/// bindgen keeps the marker here for the same reason it keeps it on a builtin -
+/// a pointer is not reached through a type reference - so this shape does reach
+/// the lowering, which makes it the case that tells the two spellings of the
+/// qualifier apart. `int* const` is a const pointer to a mutable `int`;
+/// rendering the marker as a prefix would have manufactured
+/// `std::shared_ptr<const int*>`, a different specialization, and the typedef
+/// would not have bound to the real signature.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_pointer_payload() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<int* const> fx_hold_ptr() {
+            static int value = 3;
+            return std::make_shared<int* const>(&value);
+        }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_hold_ptr();
+        // Two derefs: the holder's payload is the pointer, and the pointer's
+        // pointee is the int.
+        assert_eq!(unsafe { **held.get() }, autocxx::c_int(3));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_hold_ptr"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["typedef std::shared_ptr<int* const>"],
+            &["typedef std::shared_ptr<const int*>"],
+        ))),
+        None,
+    );
+}
+
+/// The reach of the lowering above, stated as a test: a `std::shared_ptr<const
+/// T>` whose `T` is a class still does not build.
+///
+/// Nothing in the engine can help here, because the fact never arrives.
+/// bindgen erases a template argument's `const` before rendering the
+/// instantiation, and the marker `--use-const-newtype-wrapper` adds does not
+/// reach one - `engine/third_party/patches/11-const-newtype-marker.patch` says
+/// so in its own commit message. What that message does not say, and what is
+/// true, is that the erasure is not uniform: a builtin argument keeps the
+/// marker, which is why the tests above work, and a record one does not,
+/// because it is reached through a type reference which `through_type_refs()`
+/// resolves and drops the qualifier from. So autocxx sees plain
+/// `std::shared_ptr<fx_Class>`, spells it `SharedPtr<fx_Class>`, and the C++
+/// cxx generates fails to bind against the real signature exactly as it did
+/// before.
+///
+/// This test exists to fail loudly if that ever changes, since the fix then is
+/// to delete it and extend the tests above.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_class_payload_is_still_unseen() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Held { int a; };
+        inline std::shared_ptr<const fx_Held> fx_hold_class() {
+            return std::make_shared<const fx_Held>(fx_Held { 3 });
+        }
+    "};
+    // Matched on the C++ compiler's own words rather than on "it failed
+    // somehow", so that an unrelated breakage cannot keep this passing.
+    //
+    // One substring, because the three compilers agree on very little here.
+    // clang says the return types differ, MSVC says it cannot convert one
+    // function pointer to the other, and gcc calls that an invalid conversion;
+    // MSVC names neither the function nor the `::`-qualified spelling the
+    // others use. The specialization C++ was asked for and could not have is
+    // what they all print, and is the fact this test is about.
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_Held", "fx_hold_class"],
+        &[],
+        "shared_ptr<const fx_Held>",
+    );
 }
 
 #[test]
