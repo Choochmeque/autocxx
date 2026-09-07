@@ -1049,6 +1049,43 @@ fn test_shared_ptr_const_cpprefs() {
     run_cpprefs_test("", hdr, rs, &["fx_hold", "fx_peek"], &[]);
 }
 
+/// The `std::unique_ptr<const T>` holder in this mode, which takes the same
+/// decision for the same reason: `get` hands back a `CppRef` and is `unsafe`,
+/// because a `std::unique_ptr` may hold nothing and this mode's `CppRef` is
+/// dereferenced by generated C++ with no further `unsafe` from the caller.
+///
+/// What is different is that the promise can be discharged here without any
+/// outside knowledge: `payload_is_null` is a total answer to the only way this
+/// pointer can be bad, where `std::shared_ptr::get` has the aliasing
+/// constructor as well. The test therefore checks first and calls `get`
+/// afterwards, which is the pattern the generated docs recommend.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_unique_ptr_const_cpprefs() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::unique_ptr<const int> fx_own() {
+            return std::unique_ptr<const int>(new int(3));
+        }
+        inline std::unique_ptr<const int> fx_own_nothing() {
+            return std::unique_ptr<const int>();
+        }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_own();
+        assert!(!held.payload_is_null());
+        // Safe: just established that the `unique_ptr` holds something, and
+        // `held` owns it across the use below.
+        let payload: autocxx::CppRef<autocxx::c_int> = unsafe { held.get() };
+        assert_eq!(*unsafe { payload.as_ref() }, autocxx::c_int(3));
+
+        let empty = ffi::fx_own_nothing();
+        assert!(empty.payload_is_null());
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_own", "fx_own_nothing"], &[]);
+}
+
 /// A `std::vector<T*>` holder under `unsafe_references_wrapped`.
 ///
 /// The accessors are unchanged by the policy, which is the decision this test

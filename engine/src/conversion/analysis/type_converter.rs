@@ -628,42 +628,12 @@ impl<'a> TypeConverter<'a> {
         // container - not cxx's - that the typedef has to name. See
         // google/autocxx#799.
         //
-        // `std::shared_ptr` is the only one of the three which gets an
-        // accessor surface generated for it (see `HolderSurface`). A
-        // `std::unique_ptr<const T>` or `std::weak_ptr<const T>` is lowered to
-        // the same opaque holder, which builds and round-trips where today it
-        // is a hard C++ error, but Rust can do nothing with one but hand it
-        // back to C++.
+        // All three of the smart pointers are lowered, and each gets the
+        // accessors its C++ type has (see `HolderSurface`).
         let payload_is_const = generic_args_are_const_qualified(&typ);
         if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppPtr && payload_is_const {
             let mut extra_apis = ApiVec::new();
-            // Only `std::shared_ptr` gets an accessor surface, and only when
-            // its payload is a type the bridge can name in one.
-            //
-            // The names that conversion met are recorded on the holder rather
-            // than on whatever is being converted, because it is the holder's
-            // accessors which name them: a function handling one of these
-            // names the holder and nothing else. `deps.rs` reads them back off
-            // `HolderSurface`, so the garbage collector reaches the payload
-            // through the holder and an ignored payload takes the holder with
-            // it. Both matter under `generate_all!`, where a holder is a
-            // garbage-collection root and survives whether or not anything
-            // names it.
-            let surface = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
-                match self.convert_const_payload(&typ, ns) {
-                    Some(Ok(mut payload)) => {
-                        extra_apis.append(&mut payload.extra_apis);
-                        Some(HolderSurface::SharedPtr {
-                            payload: Box::new(payload.ty.into()),
-                            deps: payload.types_encountered,
-                        })
-                    }
-                    Some(Err(err)) => return Err(err),
-                    None => None,
-                }
-            } else {
-                None
-            };
+            let surface = self.const_smart_pointer_surface(&tn, &typ, ns, &mut extra_apis)?;
             return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
         }
 
@@ -1050,6 +1020,62 @@ impl<'a> TypeConverter<'a> {
         Some(self.convert_type(payload, ns, &TypeConversionContext::WithinContainer))
     }
 
+    /// Which accessors the holder for a `const`-payload smart pointer gets.
+    ///
+    /// `None` where the payload is not a single type the bridge can name in
+    /// one - which is nothing these three can be written with today, but the
+    /// pattern match rather than an `unwrap` is what keeps it that way. The
+    /// holder is generated either way, and can be handed back to C++ either
+    /// way; only the accessors depend on this.
+    ///
+    /// The names the payload's conversion met are recorded on the holder
+    /// rather than on whatever is being converted, because it is the holder's
+    /// accessors which name them: a function handling one of these names the
+    /// holder and nothing else. `deps.rs` reads them back off `HolderSurface`,
+    /// so the garbage collector reaches the payload through the holder and an
+    /// ignored payload takes the holder with it. Both matter under
+    /// `generate_all!`, where a holder is a garbage-collection root and
+    /// survives whether or not anything names it.
+    fn const_smart_pointer_surface(
+        &mut self,
+        tn: &QualifiedName,
+        typ: &TypePath,
+        ns: &Namespace,
+        extra_apis: &mut ApiVec<NullPhase>,
+    ) -> Result<Option<HolderSurface>, ConvertErrorFromCpp> {
+        let Some(mut payload) = self.convert_const_payload(typ, ns).transpose()? else {
+            return Ok(None);
+        };
+        extra_apis.append(&mut payload.extra_apis);
+        let ty = Box::new(payload.ty.into());
+        let deps = payload.types_encountered;
+        Ok(match tn.to_cpp_name().as_str() {
+            "std::shared_ptr" => Some(HolderSurface::SharedPtr { payload: ty, deps }),
+            "std::unique_ptr" => Some(HolderSurface::UniquePtr { payload: ty, deps }),
+            "std::weak_ptr" => {
+                // `lock` answers with a `std::shared_ptr<const T>`, so that
+                // holder has to exist for this one to have a surface at all -
+                // and the header need never have mentioned the specialization.
+                // Manufacture it here, by the same route a header which did
+                // mention it would take, so that the two share one holder
+                // whichever came first.
+                let shared_holder = self.manufacture_holder(
+                    sibling_shared_ptr(typ),
+                    Some(HolderSurface::SharedPtr { payload: ty, deps }),
+                    extra_apis,
+                )?;
+                Some(HolderSurface::WeakPtr {
+                    deps: std::iter::once(shared_holder.clone()).collect(),
+                    shared_holder,
+                })
+            }
+            // Nothing else has `CxxGenericType::CppPtr` behavior, so nothing
+            // else reaches this - but a fourth smart pointer would arrive here
+            // with no accessors rather than with the wrong ones.
+            _ => None,
+        })
+    }
+
     /// Divert a template instantiation cxx cannot spell to the opaque C++
     /// holder autocxx already manufactures for such things, with `surface`
     /// saying which accessors the holder gets.
@@ -1065,10 +1091,30 @@ impl<'a> TypeConverter<'a> {
         mut extra_apis: ApiVec<NullPhase>,
         target_is_const: bool,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
-        let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
+        let new_tn = self.manufacture_holder(typ, surface, &mut extra_apis)?;
         deps.insert(new_tn.clone());
-        // `None` where this instantiation already had a holder, which carries
-        // the surface it was first created with.
+        Ok(Annotated::new(
+            Type::Path(new_tn.to_type_path()),
+            deps,
+            extra_apis,
+            TypeKind::Regular,
+        )
+        .marked_const_if(target_is_const))
+    }
+
+    /// The opaque holder for `typ`, made if this is the first time this
+    /// instantiation has been seen and found if it is not, and its name.
+    ///
+    /// `surface` is used only in the first case: a holder carries the
+    /// accessors it was created with, and everything which arrives at the same
+    /// C++ specialization afterwards shares that one holder.
+    fn manufacture_holder(
+        &mut self,
+        typ: TypePath,
+        surface: Option<HolderSurface>,
+        extra_apis: &mut ApiVec<NullPhase>,
+    ) -> Result<QualifiedName, ConvertErrorFromCpp> {
+        let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
         if let Some(Api::ConcreteType {
             name,
             rs_definition,
@@ -1083,13 +1129,7 @@ impl<'a> TypeConverter<'a> {
                 holder_surface: surface,
             });
         }
-        Ok(Annotated::new(
-            Type::Path(new_tn.to_type_path()),
-            deps,
-            extra_apis,
-            TypeKind::Regular,
-        )
-        .marked_const_if(target_is_const))
+        Ok(new_tn)
     }
 
     fn get_templated_typename(
@@ -1333,6 +1373,22 @@ fn generic_args_are_const_qualified(typ: &TypePath) -> bool {
 /// erasure being bindgen's and older than the lowering. So the match here is
 /// what keeps a single pointer argument the only shape that arrives, and not
 /// what decides which allocators are in reach.
+/// The `std::shared_ptr<const T>` beside a `std::weak_ptr<const T>`: what
+/// `std::weak_ptr::lock` answers with, and so what the weak holder's shim has
+/// to return a holder of.
+///
+/// Built by renaming the last segment, so it stays bindgen's spelling of the
+/// instantiation in every other respect - namespace, template argument and the
+/// `const` marker on it - which is what `type_to_cpp` needs to write the
+/// typedef out as `std::shared_ptr<const T>`.
+fn sibling_shared_ptr(typ: &TypePath) -> TypePath {
+    let mut sibling = typ.clone();
+    if let Some(last) = sibling.path.segments.last_mut() {
+        last.ident = make_ident("shared_ptr").0;
+    }
+    sibling
+}
+
 fn sole_pointer_generic_arg(typ: &TypePath) -> Option<Type> {
     let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
         return None;

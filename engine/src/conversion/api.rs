@@ -71,6 +71,21 @@ pub(crate) enum HolderSurface {
         payload: Box<Type>,
         deps: HashSet<QualifiedName>,
     },
+    /// A `std::unique_ptr<const T>`, carrying the `T` the same way. See
+    /// google/autocxx#799.
+    UniquePtr {
+        payload: Box<Type>,
+        deps: HashSet<QualifiedName>,
+    },
+    /// A `std::weak_ptr<const T>`. It carries no payload of its own: the only
+    /// thing which reads one is `lock`, and what that hands back is the
+    /// `std::shared_ptr<const T>` holder named here - manufactured alongside
+    /// this one, whether or not the header ever mentions that specialization.
+    /// See google/autocxx#799.
+    WeakPtr {
+        shared_holder: QualifiedName,
+        deps: HashSet<QualifiedName>,
+    },
     /// A `std::vector<T*>`, carrying the element - a raw pointer - as the
     /// `cxx::bridge` spells it. See google/autocxx#330.
     VectorOfPointers {
@@ -82,7 +97,8 @@ pub(crate) enum HolderSurface {
 impl HolderSurface {
     /// Every type name the accessors put into the generated bindings: what the
     /// payload was converted from, and anything that conversion passed
-    /// through.
+    /// through. For a `std::weak_ptr` it is the sibling holder, which carries
+    /// the payload in turn.
     ///
     /// This is the holder's whole dependency, and `deps.rs` is where it is
     /// read. Nothing else names the payload - a function handling one of these
@@ -91,7 +107,10 @@ impl HolderSurface {
     /// payload leaves accessors naming a type nothing declares.
     pub(crate) fn deps(&self) -> impl Iterator<Item = &QualifiedName> {
         match self {
-            Self::SharedPtr { deps, .. } | Self::VectorOfPointers { deps, .. } => deps.iter(),
+            Self::SharedPtr { deps, .. }
+            | Self::UniquePtr { deps, .. }
+            | Self::WeakPtr { deps, .. }
+            | Self::VectorOfPointers { deps, .. } => deps.iter(),
         }
     }
 }
@@ -144,6 +163,89 @@ impl SharedPtrShim {
         match self {
             Self::Get => "get",
             Self::Clone => "clone",
+            Self::UseCount => "use_count",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
+        shim_cpp_name(holder, self.rust_name())
+    }
+}
+
+/// One of the C++ helper functions autocxx generates beside the opaque holder
+/// it lowers a `std::unique_ptr<const T>` to.
+///
+/// The reading half of what `std::shared_ptr` gets: there is nothing to
+/// copy-construct and no count to read, and the ownership a `std::unique_ptr`
+/// does have cannot be handed to Rust without a `Pin<&mut>` receiver and a way
+/// to build a holder, neither of which this surface has. See
+/// google/autocxx#799.
+#[derive(Copy, Clone)]
+pub(crate) enum UniquePtrShim {
+    /// `std::unique_ptr::get`. As with `std::shared_ptr`, the payload is
+    /// `const` in C++, so this reaches Rust as a `*const T` - or a `CppRef<T>`
+    /// under `ReferencesWrappedAllFunctionsSafe` - and never as a `&mut`.
+    Get,
+    /// `std::unique_ptr::operator bool`, negated. A `std::unique_ptr` may hold
+    /// nothing, and this is the whole of the question `get` does not answer -
+    /// which under the wrapped-references policy is what a caller has to
+    /// settle before it may call `get` at all.
+    ///
+    /// Not called `is_null`, which is what C++ makes of `!p` and what cxx
+    /// calls the same question about its own smart pointer. That is the
+    /// trouble: a holder usually reaches Rust inside a `cxx::UniquePtr`, whose
+    /// inherent `is_null` would win over this one and quietly answer about the
+    /// wrong pointer - and the two disagree exactly when it matters, since a
+    /// present holder may hold nothing.
+    PayloadIsNull,
+}
+
+impl UniquePtrShim {
+    pub(crate) const ALL: [Self; 2] = [Self::Get, Self::PayloadIsNull];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::PayloadIsNull => "payload_is_null",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
+        shim_cpp_name(holder, self.rust_name())
+    }
+}
+
+/// One of the C++ helper functions autocxx generates beside the opaque holder
+/// it lowers a `std::weak_ptr<const T>` to.
+///
+/// A `std::weak_ptr` gives no access to the payload at all - `lock` is how C++
+/// reads one, and it answers with a `std::shared_ptr` - so these two are the
+/// whole surface, and `expired` is written in Rust as the `use_count() == 0`
+/// C++ defines it to be. See google/autocxx#799.
+#[derive(Copy, Clone)]
+pub(crate) enum WeakPtrShim {
+    /// `std::weak_ptr::lock`, whose result is the sibling
+    /// `std::shared_ptr<const T>` holder. C++ answers with an empty
+    /// `shared_ptr` where the payload is gone, and so does this: the holder is
+    /// always there, and it is `get` on it which is then null.
+    Lock,
+    /// `std::weak_ptr::use_count`, returned as an `int64_t` for the reason
+    /// [`SharedPtrShim::UseCount`] gives.
+    UseCount,
+}
+
+impl WeakPtrShim {
+    pub(crate) const ALL: [Self; 2] = [Self::Lock, Self::UseCount];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
             Self::UseCount => "use_count",
         }
     }

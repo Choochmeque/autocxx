@@ -34,7 +34,10 @@ use super::{
         },
         pod::PodAnalysis,
     },
-    api::{Api, HolderSurface, Provenance, SharedPtrShim, SubclassName, TypeKind, VectorShim},
+    api::{
+        Api, HolderSurface, Provenance, SharedPtrShim, SubclassName, TypeKind, UniquePtrShim,
+        VectorShim, WeakPtrShim,
+    },
     apivec::ApiVec,
     parse::CppRefQualifier,
     ConvertErrorFromCpp, CppEffectiveName,
@@ -283,6 +286,12 @@ impl<'a> CppCodeGenerator<'a> {
                     match holder_surface {
                         Some(HolderSurface::SharedPtr { .. }) => {
                             self.generate_shared_ptr_shims(api.name())
+                        }
+                        Some(HolderSurface::UniquePtr { .. }) => {
+                            self.generate_unique_ptr_shims(api.name())
+                        }
+                        Some(HolderSurface::WeakPtr { shared_holder, .. }) => {
+                            self.generate_weak_ptr_shims(api.name(), shared_holder)
                         }
                         Some(HolderSurface::VectorOfPointers { .. }) => {
                             self.generate_vector_shims(api.name())
@@ -883,6 +892,79 @@ impl<'a> CppCodeGenerator<'a> {
                         "inline ::std::unique_ptr<{holder}> {name}(const {holder}& self) {{ return ::std::unique_ptr<{holder}>(new {holder}(self)); }}"
                     ),
                     SharedPtrShim::UseCount => format!(
+                        "inline ::std::int64_t {name}(const {holder}& self) {{ return self.use_count(); }}"
+                    ),
+                }
+            })
+            .join("\n");
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
+            headers: vec![Header::System("memory"), Header::System("cstdint")],
+            ..Default::default()
+        })
+    }
+
+    /// The two C++ helpers which are the whole of what Rust can do with the
+    /// opaque holder we lower a `std::unique_ptr<const T>` to.
+    ///
+    /// The payload is spelt `H::element_type` for the reason
+    /// [`Self::generate_shared_ptr_shims`] gives. That is the pointee type and
+    /// not `std::unique_ptr`'s `pointer`, which a custom deleter may define
+    /// differently - but a `std::unique_ptr<const T, D>` never reaches here as
+    /// itself in the first place: bindgen erases the deleter argument, so the
+    /// typedef above already names the default-deleter specialization and C++
+    /// refuses to bind it, exactly as it does for `std::vector`'s allocator.
+    /// See google/autocxx#799.
+    fn generate_unique_ptr_shims(&mut self, tn: &QualifiedName) {
+        let holder = tn.get_final_item();
+        let declaration = UniquePtrShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn);
+                match shim {
+                    // A `std::unique_ptr` may hold nothing, so this returns a
+                    // pointer rather than the reference which would be nicer
+                    // to hold, for the reason `std::shared_ptr::get` does.
+                    UniquePtrShim::Get => format!(
+                        "inline {holder}::element_type* {name}(const {holder}& self) {{ return self.get(); }}"
+                    ),
+                    UniquePtrShim::PayloadIsNull => format!(
+                        "inline bool {name}(const {holder}& self) {{ return !self; }}"
+                    ),
+                }
+            })
+            .join("\n");
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
+            headers: vec![Header::System("memory")],
+            ..Default::default()
+        })
+    }
+
+    /// The two C++ helpers which are the whole of what Rust can do with the
+    /// opaque holder we lower a `std::weak_ptr<const T>` to.
+    ///
+    /// `lock` is the only way C++ reads a `std::weak_ptr`, and it answers with
+    /// a `std::shared_ptr` - so this returns the holder for *that*
+    /// specialization, `shared_holder`, which the conversion manufactured
+    /// beside this one. Every typedef is written above every declaration in
+    /// the generated header, so that name is in scope here whichever holder
+    /// was made first. Where the payload has expired, `lock` answers with an
+    /// empty `shared_ptr` and this hands back a holder of one, rather than
+    /// nothing: it is the same object C++ would have got, and `get` on it is
+    /// null. See google/autocxx#799.
+    fn generate_weak_ptr_shims(&mut self, tn: &QualifiedName, shared_holder: &QualifiedName) {
+        let holder = tn.get_final_item();
+        let shared = shared_holder.get_final_item();
+        let declaration = WeakPtrShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn);
+                match shim {
+                    WeakPtrShim::Lock => format!(
+                        "inline ::std::unique_ptr<{shared}> {name}(const {holder}& self) {{ return ::std::unique_ptr<{shared}>(new {shared}(self.lock())); }}"
+                    ),
+                    WeakPtrShim::UseCount => format!(
                         "inline ::std::int64_t {name}(const {holder}& self) {{ return self.use_count(); }}"
                     ),
                 }

@@ -9456,10 +9456,9 @@ fn test_shared_ptr_const_empty_and_aliasing() {
 /// typecheck for exactly the reason `std::shared_ptr<const T>` does and are
 /// lowered to the same opaque holder.
 ///
-/// They get no accessors - only `std::shared_ptr` does - so what this pins is
-/// the whole of what they can do: they build, and they round-trip through Rust
-/// back into C++. That is worth having as a test because it is worth
-/// remembering as a limitation.
+/// This one pins the plainest thing they do: they build, and they round-trip
+/// through Rust back into C++ without Rust looking inside. The accessors each
+/// gets are pinned by the tests below.
 ///
 /// Addresses part of the bug reported upstream as google/autocxx#799.
 #[test]
@@ -9495,6 +9494,121 @@ fn test_unique_and_weak_ptr_const_round_trip() {
         ],
         &[],
     );
+}
+
+/// The accessors a `std::unique_ptr<const T>` holder gets: the reading half of
+/// what `std::shared_ptr` gets, plus the emptiness question a `unique_ptr` can
+/// answer and a `shared_ptr` cannot be asked in the same way.
+///
+/// `payload_is_null` is deliberately not called `is_null`: the holder arrives
+/// inside a `cxx::UniquePtr`, whose own `is_null` would win the method lookup
+/// and answer about the outer pointer instead. The two disagree exactly here,
+/// where the outer one is present and holds a `unique_ptr` which holds
+/// nothing.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_unique_ptr_const_accessors() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Owned {
+            int a;
+            int describe() const { return a * 2; }
+        };
+        inline std::unique_ptr<const fx_Owned> fx_own() {
+            return std::unique_ptr<const fx_Owned>(new fx_Owned { 3 });
+        }
+        inline std::unique_ptr<const fx_Owned> fx_own_nothing() {
+            return std::unique_ptr<const fx_Owned>();
+        }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_own();
+        assert!(!held.payload_is_null());
+        // SAFETY: `fx_own` always returns a `unique_ptr` owning a real
+        // `fx_Owned`, just checked, and `held` keeps it alive across the read.
+        let payload = unsafe { &*held.get() };
+        assert_eq!(payload.describe(), autocxx::c_int(6));
+
+        let empty = ffi::fx_own_nothing();
+        // The holder is there; what it holds is not. `cxx::UniquePtr::is_null`
+        // answers the first question, and this one answers the second.
+        assert!(!empty.is_null());
+        assert!(empty.payload_is_null());
+        assert!(empty.get().is_null());
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Owned", "fx_own", "fx_own_nothing"], &[], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(
+                &["typedef std::unique_ptr<const fx_Owned>"],
+                &["typedef std::unique_ptr<fx_Owned>"],
+            )),
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self) -> * const output :: fx_Owned
+            }]),
+        ])),
+        None,
+    );
+}
+
+/// The accessors a `std::weak_ptr<const T>` holder gets, and the
+/// `std::shared_ptr<const T>` holder which `lock` hands back - manufactured
+/// alongside the weak one, since this header never names that specialization
+/// itself.
+///
+/// The counts are the point: locking joins the ownership group and raises the
+/// count, dropping the lock lowers it again, and once C++ has let go the
+/// `weak_ptr` says so. `lock` still answers with a holder then, of an empty
+/// `shared_ptr`, which is what C++ does.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_weak_ptr_const_accessors() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Watched {
+            int a;
+            int describe() const { return a + 1; }
+        };
+        inline std::shared_ptr<const fx_Watched>& fx_kept() {
+            static std::shared_ptr<const fx_Watched> kept =
+                std::make_shared<const fx_Watched>(fx_Watched { 5 });
+            return kept;
+        }
+        inline std::weak_ptr<const fx_Watched> fx_watch() { return fx_kept(); }
+        inline void fx_let_go() { fx_kept().reset(); }
+    "};
+    let rs = quote! {
+        let weak = ffi::fx_watch();
+        assert!(!weak.expired());
+        // One owner: the `shared_ptr` C++ is keeping. A `weak_ptr` does not
+        // count itself.
+        assert_eq!(weak.use_count(), 1);
+
+        let locked = weak.lock();
+        assert_eq!(weak.use_count(), 2);
+        assert_eq!(locked.use_count(), 2);
+        // SAFETY: `locked` owns a share of the payload for as long as it
+        // lives, so the pointer is to a live object across this read.
+        assert_eq!(unsafe { (*locked.get()).describe() }, autocxx::c_int(6));
+        drop(locked);
+        assert_eq!(weak.use_count(), 1);
+
+        ffi::fx_let_go();
+        assert!(weak.expired());
+        assert_eq!(weak.use_count(), 0);
+        // Still a holder, of the empty `shared_ptr` C++ hands back.
+        let nothing = weak.lock();
+        assert!(!nothing.is_null());
+        assert!(nothing.get().is_null());
+        assert_eq!(nothing.use_count(), 0);
+    };
+    run_test("", hdr, rs, &["fx_Watched", "fx_watch", "fx_let_go"], &[]);
 }
 
 /// A holder nested inside a container cxx *does* understand, which is the
