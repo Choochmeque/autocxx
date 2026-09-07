@@ -617,6 +617,68 @@ impl<'a> TypeConverter<'a> {
             }
         };
 
+        // A cxx smart pointer whose payload C++ qualified `const` -
+        // `std::shared_ptr<const T>` - has no cxx spelling: `SharedPtr<T>`
+        // drops the qualifier, and the C++ typecheck shim cxx then writes
+        // fails to bind against the real signature. Lower the whole
+        // instantiation to an opaque C++ type instead, whose definition is
+        // that exact specialization, so the `const` stays where C++ can see
+        // it. Done before substitution, because it is the C++ spelling of the
+        // container - not cxx's - that the typedef has to name. See
+        // google/autocxx#799.
+        //
+        // `std::shared_ptr` is the only one of the three which gets an
+        // accessor surface generated for it (see `shared_ptr_payload`). A
+        // `std::unique_ptr<const T>` or `std::weak_ptr<const T>` is lowered to
+        // the same opaque holder, which builds and round-trips where today it
+        // is a hard C++ error, but Rust can do nothing with one but hand it
+        // back to C++.
+        if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppPtr
+            && generic_args_are_const_qualified(&typ)
+        {
+            let mut extra_apis = ApiVec::new();
+            // Only `std::shared_ptr` gets an accessor surface, and only when
+            // its payload is a type the bridge can name in one.
+            let payload = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
+                match self.convert_const_payload(&typ, ns) {
+                    Some(Ok(mut payload)) => {
+                        deps.extend(payload.types_encountered.drain(..));
+                        extra_apis.append(&mut payload.extra_apis);
+                        Some(Box::new(payload.ty.into()))
+                    }
+                    Some(Err(err)) => return Err(err),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
+            deps.insert(new_tn.clone());
+            // `None` where this instantiation already had a holder, which
+            // carries the payload it was first created with.
+            if let Some(Api::ConcreteType {
+                name,
+                rs_definition,
+                cpp_definition,
+                ..
+            }) = api
+            {
+                extra_apis.push(Api::ConcreteType {
+                    name,
+                    rs_definition,
+                    cpp_definition,
+                    shared_ptr_payload: payload,
+                });
+            }
+            return Ok(Annotated::new(
+                Type::Path(new_tn.to_type_path()),
+                deps,
+                extra_apis,
+                TypeKind::Regular,
+            )
+            .marked_const_if(target_is_const));
+        }
+
         // Now let's see if it's a known type.
         // (We may entirely reject some types at this point too.)
         let mut typ = match known_types().consider_substitution(&tn) {
@@ -920,6 +982,31 @@ impl<'a> TypeConverter<'a> {
         }
     }
 
+    /// The `T` of a `std::shared_ptr<const T>`, converted as the `cxx::bridge`
+    /// would spell it, for the accessor the holder gets.
+    ///
+    /// `None` where the instantiation has no single `const`-qualified type
+    /// argument to read - which is nothing `std::shared_ptr` can be written
+    /// with today, but the pattern match rather than an `unwrap` is what keeps
+    /// it that way. The holder is still generated in that case; it simply has
+    /// no accessor.
+    fn convert_const_payload(
+        &mut self,
+        typ: &TypePath,
+        ns: &Namespace,
+    ) -> Option<Result<Annotated<Type>, ConvertErrorFromCpp>> {
+        let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
+            return None;
+        };
+        let [GenericArgument::Type(Type::Path(payload))] =
+            args.args.iter().collect::<Vec<_>>().as_slice()
+        else {
+            return None;
+        };
+        let payload = unwrap_const(payload)?.clone();
+        Some(self.convert_type(payload, ns, &TypeConversionContext::WithinContainer))
+    }
+
     fn get_templated_typename(
         &mut self,
         rs_definition: &Type,
@@ -956,6 +1043,7 @@ impl<'a> TypeConverter<'a> {
                     name: ApiName::new_in_root_namespace(make_ident(synthetic_ident)),
                     cpp_definition: cpp_definition.clone(),
                     rs_definition: Some(Box::new(rs_definition.clone().into())),
+                    shared_ptr_payload: None,
                 };
                 self.concrete_templates
                     .insert(cpp_definition, api.name().clone());
@@ -1102,6 +1190,36 @@ impl<'a> TypeConverter<'a> {
     }
 }
 
+/// Whether any of `typ`'s template arguments carries bindgen's `const` marker,
+/// as `std::shared_ptr<const T>` does.
+///
+/// Only the argument's own qualifier counts, which is the one cxx has no room
+/// for; a `const` on something the argument points at is already in the type,
+/// as `*const T`.
+///
+/// What this can see is narrower than what C++ wrote, and the difference
+/// decides the whole reach of the lowering downstream. bindgen keeps the marker
+/// on a *builtin* template argument - `std::shared_ptr<const int>` arrives as
+/// `shared_ptr<__bindgen_marker_Const<c_int>>` - but not on a record one: a
+/// class argument is reached through a type reference, and `through_type_refs()`
+/// resolves that before `TemplateInstantiation::try_to_rust_ty` renders it,
+/// dropping the qualifier on the way. So `std::shared_ptr<const Foo>` arrives
+/// indistinguishable from `std::shared_ptr<Foo>` and nothing here can lower it.
+/// `engine/third_party/patches/11-const-newtype-marker.patch` records the
+/// erasure in its commit message; that it spares builtins is what makes this
+/// predicate worth having.
+/// `test_shared_ptr_const_class_payload_is_still_unseen` pins the gap.
+fn generic_args_are_const_qualified(typ: &TypePath) -> bool {
+    let Some(PathArguments::AngleBracketed(args)) =
+        typ.path.segments.last().map(|seg| &seg.arguments)
+    else {
+        return false;
+    };
+    args.args.iter().any(|arg| {
+        matches!(arg, GenericArgument::Type(Type::Path(inner)) if unwrap_const(inner).is_some())
+    })
+}
+
 /// Processing functions sometimes results in new types being materialized.
 /// These types haven't been through the analysis phases (chicken and egg
 /// problem) but fortunately, don't need to. We need to keep the type
@@ -1113,10 +1231,12 @@ pub(crate) fn add_analysis<A: AnalysisPhase>(api: UnanalyzedApi) -> Api<A> {
             name,
             rs_definition,
             cpp_definition,
+            shared_ptr_payload,
         } => Api::ConcreteType {
             name,
             rs_definition,
             cpp_definition,
+            shared_ptr_payload,
         },
         Api::IgnoredItem { name, err, ctx } => Api::IgnoredItem { name, err, ctx },
         _ => panic!("Function analysis created an unexpected type of extra API"),

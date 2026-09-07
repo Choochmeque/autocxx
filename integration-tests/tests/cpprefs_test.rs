@@ -979,6 +979,40 @@ fn test_subclass_const_rvalue_ref_return_cpprefs() {
     );
 }
 
+/// The opaque holder autocxx lowers a `std::shared_ptr<const T>` to, in this
+/// mode. Its payload accessor is a C++ reference like any other the mode deals
+/// in, so it hands back a `CppRef` rather than the `*const` plain mode gives -
+/// and the rest of the holder is unaffected, because ownership is the
+/// `UniquePtr`'s business and has nothing to do with references.
+///
+/// `CppRef` promises no more here than it does anywhere else: it is not
+/// dereferenced except through an `unsafe` the caller vouches for, which is
+/// what makes it the right shape for a pointer that is null whenever the
+/// `shared_ptr` is empty.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_cpprefs() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<const int> fx_hold() {
+            return std::make_shared<const int>(3);
+        }
+        inline int fx_peek(std::shared_ptr<const int> p) { return *p; }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_hold();
+        let payload: autocxx::CppRef<autocxx::c_int> = held.get();
+        assert_eq!(*unsafe { payload.as_ref() }, autocxx::c_int(3));
+        assert_eq!(held.use_count(), 1);
+        let second = held.clone();
+        assert_eq!(held.use_count(), 2);
+        assert_eq!(ffi::fx_peek(second), autocxx::c_int(3));
+        assert_eq!(held.use_count(), 1);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_hold", "fx_peek"], &[]);
+}
+
 /// A copy constructor in this mode. Its source is a `const T&`, which the mode
 /// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
 /// `&Self` and that is not negotiable - so the source stays a Rust reference

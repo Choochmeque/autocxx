@@ -34,7 +34,7 @@ use super::{
         },
         pod::PodAnalysis,
     },
-    api::{Api, Provenance, SubclassName, TypeKind},
+    api::{Api, Provenance, SharedPtrShim, SubclassName, TypeKind},
     apivec::ApiVec,
     parse::CppRefQualifier,
     ConvertErrorFromCpp, CppEffectiveName,
@@ -235,6 +235,7 @@ impl<'a> CppCodeGenerator<'a> {
                 Api::ConcreteType {
                     rs_definition,
                     cpp_definition,
+                    shared_ptr_payload,
                     ..
                 } => {
                     let effective_cpp_definition = match rs_definition {
@@ -244,7 +245,10 @@ impl<'a> CppCodeGenerator<'a> {
                         None => Cow::Borrowed(cpp_definition),
                     };
 
-                    self.generate_typedef(api.name(), &effective_cpp_definition)
+                    self.generate_typedef(api.name(), &effective_cpp_definition);
+                    if shared_ptr_payload.is_some() {
+                        self.generate_shared_ptr_shims(api.name());
+                    }
                 }
                 Api::CType { typename, .. } => self.generate_ctype_typedef(typename),
                 Api::Subclass { .. } => deferred_apis.push(api),
@@ -800,6 +804,46 @@ impl<'a> CppCodeGenerator<'a> {
     fn generate_ctype_typedef(&mut self, tn: &QualifiedName) {
         let cpp_name = tn.to_cpp_name();
         self.generate_typedef(tn, &cpp_name)
+    }
+
+    /// The three C++ helpers which are the whole of what Rust can do with the
+    /// opaque holder we lower a `std::shared_ptr<const T>` to.
+    ///
+    /// Written against the holder's own typedef rather than against `T`: the
+    /// payload is spelt `H::element_type`, which is exactly the `const T` the
+    /// specialization was made with, so nothing here has to re-derive a C++
+    /// name for it. `element_type` is the one `std::shared_ptr` member which
+    /// says what a `const` payload is without the qualifier being written
+    /// again. See google/autocxx#799.
+    fn generate_shared_ptr_shims(&mut self, tn: &QualifiedName) {
+        let holder = tn.get_final_item();
+        let declaration = SharedPtrShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn);
+                match shim {
+                    // A `std::shared_ptr` may be empty, and `get` says so by
+                    // answering null. That is why this returns a pointer and
+                    // not the reference which would be nicer to hold: `*sp` on
+                    // an empty one is undefined behaviour, and there would be
+                    // no way for the caller to have checked first.
+                    SharedPtrShim::Get => format!(
+                        "inline {holder}::element_type* {name}(const {holder}& self) {{ return self.get(); }}"
+                    ),
+                    SharedPtrShim::Clone => format!(
+                        "inline ::std::unique_ptr<{holder}> {name}(const {holder}& self) {{ return ::std::unique_ptr<{holder}>(new {holder}(self)); }}"
+                    ),
+                    SharedPtrShim::UseCount => format!(
+                        "inline ::std::int64_t {name}(const {holder}& self) {{ return self.use_count(); }}"
+                    ),
+                }
+            })
+            .join("\n");
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
+            headers: vec![Header::System("memory"), Header::System("cstdint")],
+            ..Default::default()
+        })
     }
 
     fn generate_typedef(&mut self, tn: &QualifiedName, definition: &str) {

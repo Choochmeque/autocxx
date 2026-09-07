@@ -7,7 +7,9 @@
 // except according to those terms.
 
 use crate::{
-    conversion::{api::Api, apivec::ApiVec, AnalysisPhase, ConvertErrorFromCpp},
+    conversion::{
+        api::Api, apivec::ApiVec, type_helpers::unwrap_const, AnalysisPhase, ConvertErrorFromCpp,
+    },
     parse_callbacks::CppOriginalName,
     types::QualifiedName,
 };
@@ -205,6 +207,13 @@ impl CppNameMap {
     pub(crate) fn type_to_cpp(&self, ty: &Type) -> Result<String, ConvertErrorFromCpp> {
         match ty {
             Type::Path(typ) => {
+                // bindgen's `const` marker is an alias, not a C++ name: it
+                // records a qualifier Rust cannot spell, so it has to be
+                // written back as one rather than looked up. See
+                // google/autocxx#799.
+                if let Some(inner) = unwrap_const(typ) {
+                    return Ok(format!("const {}", self.type_to_cpp(inner)?));
+                }
                 // If this is a std::unique_ptr we do need to pass
                 // its argument through.
                 let qual_name = QualifiedName::from_type_path(typ);
