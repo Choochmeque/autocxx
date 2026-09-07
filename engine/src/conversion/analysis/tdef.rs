@@ -6,10 +6,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
 use autocxx_parser::IncludeCppConfig;
-use syn::ItemType;
+use syn::{ItemType, Type};
 
 use crate::{
     conversion::{
@@ -299,4 +300,56 @@ fn get_replacement_typedef(
             })
         }
     }
+}
+
+/// Where each typedef in `apis` points.
+///
+/// A base class or a field may be named by a typedef - `typedef Base Alias;
+/// struct D : Alias {};` - and bindgen names the typedef both in the field it
+/// generates for such a base and in the base it reports. C++'s rules about
+/// special members and about pure virtuals run over the class the typedef
+/// names, so the analyses which run them have to follow it.
+pub(crate) fn typedef_targets<P: AnalysisPhase<TypedefAnalysis = TypedefAnalysis>>(
+    apis: &ApiVec<P>,
+) -> HashMap<QualifiedName, QualifiedName> {
+    apis.iter()
+        .filter_map(|api| match api {
+            Api::Typedef {
+                name,
+                analysis: TypedefAnalysis { kind, .. },
+                ..
+            } => {
+                let target = match kind {
+                    TypedefKind::Type(type_item) => type_item.ty.as_ref(),
+                    TypedefKind::Use(ty) => ty,
+                };
+                match target {
+                    Type::Path(typ) => {
+                        Some((name.name.clone(), QualifiedName::from_type_path(typ)))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Follow `targets` from `name` to the type it finally names.
+///
+/// A chain of typedefs is finite, but nothing proves the map built above is
+/// acyclic, so this stops after as many steps as there are typedefs and
+/// answers with whatever it reached.
+pub(crate) fn resolve_typedefs(
+    targets: &HashMap<QualifiedName, QualifiedName>,
+    name: &QualifiedName,
+) -> QualifiedName {
+    let mut name = name.clone();
+    for _ in 0..targets.len() {
+        match targets.get(&name) {
+            Some(target) => name = target.clone(),
+            None => break,
+        }
+    }
+    name
 }

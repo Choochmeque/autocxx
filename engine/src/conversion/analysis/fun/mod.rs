@@ -2645,9 +2645,9 @@ impl<'a> FnAnalyzer<'a> {
             // costs nothing, and `moveit!` on the stack wants it.
             //
             // We are not the last word on whether C++ destroys one trivially:
-            // bindgen cannot see an empty base class, so a class deriving from
-            // one with a destructor looks trivial here. The generated C++
-            // therefore asserts what we assumed - see
+            // where bindgen replaced a field's type with a blob of bytes, the
+            // rules were run over a fiction. The generated C++ therefore
+            // asserts what we assumed - see
             // `codegen_cpp::generate_trivial_destructor_assertion` - which is
             // why the decision has to travel out of this loop.
             let destructor_would_do_nothing =

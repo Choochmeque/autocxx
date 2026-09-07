@@ -6727,27 +6727,27 @@ fn test_derived_abstract_class_no_make_unique() {
     run_test("", hdr, rs, &["A", "B"], &[]);
 }
 
-/// Upstream #1326's own reduced repro: `B` inherits `A` *virtually*, and
-/// only overrides `A`'s pure virtual `f()` implicitly (i.e. not at all), so
-/// `B` remains abstract. bindgen does not surface the virtual-base link from
-/// `B` to `A` at all (confirmed via the issue's bindgen-output excerpt in
-/// its own thread, and unchanged here), so autocxx has no way to know `B` is
-/// still abstract and generates constructor/destructor wrapper code for it
-/// as though it were concrete. Retested 2026-09-05 against
-/// `abstract_types.rs` after fork PR #36 (which fixed pure-virtual
-/// *destructor* propagation, a different code path in the same file): still
-/// fails, now with real-clang diagnostics rather than the bindgen dump the
-/// issue was originally filed with -
-/// `error: allocating an object of abstract class type 'B'` from the
-/// generated `autocxxgen_ffi.h` wrapper, plus several
-/// `-Wdelete-abstract-non-virtual-dtor` errors. Root cause unchanged from
-/// the issue: needs bindgen to expose virtual inheritance (see #124/#1461).
+/// The reduced repro from the bug reported upstream as google/autocxx#1326:
+/// `B` inherits `A` *virtually* and does not override `A`'s pure virtual
+/// `f()`, so `B` is abstract too. The virtual base was the only link between
+/// them, and bindgen used to report no virtual base at all - so autocxx saw a
+/// `B` with no bases, called it concrete, and emitted constructor and
+/// destructor wrappers which C++ then refused: `error: allocating an object of
+/// abstract class type 'B'`. `denote_base_class` reports the link, so `f()`
+/// propagates.
+///
+/// `virtual ~A()` is the one departure from the header the issue was reported
+/// with, which declared no destructor. Without it, the `UniquePtr<B>` autocxx
+/// generates deletes a `B` through a `B*` whose destructor is not virtual,
+/// which is undefined behaviour and which both clang and cl say so of. That is
+/// a defect in the repro rather than anything this test asserts - `B` is
+/// abstract because of `f()`, whatever its destructor does.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/1326
 fn test_issue_1326() {
     let hdr = indoc! {"
         struct A {
             virtual int f() = 0;
+            virtual ~A() {}
         };
         struct B : virtual public A {
             static void i_want_this_function();
@@ -14413,8 +14413,11 @@ fn test_virtual_methods_additional() {
 /// Various combinations of these lead to the default versions being deleted. The move and copy
 /// ones also interact with each other in various ways.
 ///
-/// TODO: Remove all the `int x` members after https://github.com/google/autocxx/issues/832 is
-/// fixed.
+/// Every class here is empty, which is the point of google/autocxx#832: an
+/// empty base gets no field in bindgen's output, so until `denote_base_class`
+/// each `Base*` class had to be given an `int x` member to be seen as deriving
+/// from anything at all. The `test_call_a_as!` cases upcast through those
+/// now-empty bases.
 fn test_implicit_constructor_rules() {
     let cxx = "";
     let hdr = indoc! {"
@@ -14435,30 +14438,22 @@ fn test_implicit_constructor_rules() {
             PublicDeleted(PublicDeleted&&) = delete;
 
             void a() const {}
-
-            int x;
         };
         struct PublicDeletedDefault {
             PublicDeletedDefault() = delete;
 
             void a() const {}
-
-            int x;
         };
         struct PublicDeletedCopy {
             PublicDeletedCopy() = default;
             PublicDeletedCopy(const PublicDeletedCopy&) = delete;
 
             void a() const {}
-
-            int x;
         };
         struct PublicDeletedCopyNoDefault {
             PublicDeletedCopyNoDefault(const PublicDeletedCopyNoDefault&) = delete;
 
             void a() const {}
-
-            int x;
         };
         struct PublicMoveDeletedCopy {
             PublicMoveDeletedCopy() = default;
@@ -14466,38 +14461,28 @@ fn test_implicit_constructor_rules() {
             PublicMoveDeletedCopy(PublicMoveDeletedCopy&&) = default;
 
             void a() const {}
-
-            int x;
         };
         struct PublicDeletedMove {
             PublicDeletedMove() = default;
             PublicDeletedMove(PublicDeletedMove&&) = delete;
 
             void a() const {}
-
-            int x;
         };
         struct PublicDeletedDestructor {
             PublicDeletedDestructor() = default;
             ~PublicDeletedDestructor() = delete;
 
             void a() const {}
-
-            int x;
         };
         struct PublicDestructor {
             PublicDestructor() = default;
             ~PublicDestructor() = default;
 
             void a() const {}
-
-            int x;
         };
 
         struct ProtectedDeleted {
             void a() const {}
-
-            int x;
 
           protected:
             ProtectedDeleted() = delete;
@@ -14507,8 +14492,6 @@ fn test_implicit_constructor_rules() {
         struct ProtectedDeletedDefault {
             void a() const {}
 
-            int x;
-
           protected:
             ProtectedDeletedDefault() = delete;
         };
@@ -14517,15 +14500,11 @@ fn test_implicit_constructor_rules() {
 
             void a() const {}
 
-            int x;
-
           protected:
             ProtectedDeletedCopy(const ProtectedDeletedCopy&) = delete;
         };
         struct ProtectedDeletedCopyNoDefault {
             void a() const {}
-
-            int x;
 
           protected:
             ProtectedDeletedCopyNoDefault(const ProtectedDeletedCopyNoDefault&) = delete;
@@ -14534,8 +14513,6 @@ fn test_implicit_constructor_rules() {
             ProtectedMoveDeletedCopy() = default;
 
             void a() const {}
-
-            int x;
 
           protected:
             ProtectedMoveDeletedCopy(const ProtectedMoveDeletedCopy&) = delete;
@@ -14546,8 +14523,6 @@ fn test_implicit_constructor_rules() {
 
             void a() const {}
 
-            int x;
-
           protected:
             ProtectedDeletedMove(ProtectedDeletedMove&&) = delete;
         };
@@ -14555,8 +14530,6 @@ fn test_implicit_constructor_rules() {
             ProtectedDeletedDestructor() = default;
 
             void a() const {}
-
-            int x;
 
           protected:
             ~ProtectedDeletedDestructor() = delete;
@@ -14566,16 +14539,12 @@ fn test_implicit_constructor_rules() {
 
             void a() const {}
 
-            int x;
-
           protected:
             ~ProtectedDestructor() = default;
         };
 
         struct PrivateDeleted {
             void a() const {}
-
-            int x;
 
           private:
             PrivateDeleted() = delete;
@@ -14585,8 +14554,6 @@ fn test_implicit_constructor_rules() {
         struct PrivateDeletedDefault {
             void a() const {}
 
-            int x;
-
           private:
             PrivateDeletedDefault() = delete;
         };
@@ -14595,15 +14562,11 @@ fn test_implicit_constructor_rules() {
 
             void a() const {}
 
-            int x;
-
           private:
             PrivateDeletedCopy(const PrivateDeletedCopy&) = delete;
         };
         struct PrivateDeletedCopyNoDefault {
             void a() const {}
-
-            int x;
 
           private:
             PrivateDeletedCopyNoDefault(const PrivateDeletedCopyNoDefault&) = delete;
@@ -14612,8 +14575,6 @@ fn test_implicit_constructor_rules() {
             PrivateMoveDeletedCopy() = default;
 
             void a() const {}
-
-            int x;
 
           private:
             PrivateMoveDeletedCopy(const PrivateMoveDeletedCopy&) = delete;
@@ -14624,8 +14585,6 @@ fn test_implicit_constructor_rules() {
 
             void a() const {}
 
-            int x;
-
           private:
             PrivateDeletedMove(PrivateDeletedMove&&) = delete;
         };
@@ -14634,8 +14593,6 @@ fn test_implicit_constructor_rules() {
 
             void a() const {}
 
-            int x;
-
           private:
             ~PrivateDeletedDestructor() = delete;
         };
@@ -14643,8 +14600,6 @@ fn test_implicit_constructor_rules() {
             PrivateDestructor() = default;
 
             void a() const {}
-
-            int x;
 
           private:
             ~PrivateDestructor() = default;
@@ -20030,12 +19985,11 @@ fn test_const_multidimensional_array_field() {
     );
 }
 
-/// An empty base class is laid out at zero size inside the class deriving
-/// from it, so bindgen emits no field for it and the derived class looks like
-/// it has no bases - and its constructors are then synthesized as if the base
-/// had none of its own requirements.
+/// bindgen finds an empty base zero-sized and emits no field for it, so the
+/// derived class used to look like it had no bases at all - and its
+/// constructors were then synthesized as if the base had none of its own
+/// requirements. google/autocxx#832.
 #[test]
-#[ignore] // needs bindgen to report empty bases - see the note on get_bases
 fn test_empty_base_deletes_default_constructor() {
     let hdr = indoc! {"
         struct fx_EmptyBase {
@@ -20047,6 +20001,501 @@ fn test_empty_base_deletes_default_constructor() {
         inline int read_x(const fx_DerivedFromEmpty& d) { return d.x; }
     "};
     run_test("", hdr, quote! {}, &["fx_DerivedFromEmpty", "read_x"], &[]);
+}
+
+/// The layout claim, checked against the compiler rather than assumed. Whether
+/// an empty base takes up space in its derived class is the ABI's business,
+/// not the language's, so the test compares what Rust believes the type is
+/// with what C++ says it is, on whichever ABI it is running.
+#[test]
+fn test_pod_over_an_empty_base_has_the_layout_cpp_gives_it() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fx_EmptyLayoutBase { int describe() const { return 3; } };
+        struct fx_PodOverEmpty : public fx_EmptyLayoutBase { int x; };
+        inline size_t fx_sizeof_pod_over_empty() { return sizeof(fx_PodOverEmpty); }
+        inline size_t fx_alignof_pod_over_empty() { return alignof(fx_PodOverEmpty); }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(
+                std::mem::size_of::<ffi::fx_PodOverEmpty>(),
+                ffi::fx_sizeof_pod_over_empty()
+            );
+            assert_eq!(
+                std::mem::align_of::<ffi::fx_PodOverEmpty>(),
+                ffi::fx_alignof_pod_over_empty()
+            );
+            let p = ffi::fx_PodOverEmpty { x: 1 };
+            assert_eq!(p.x, 1);
+        },
+        &["fx_sizeof_pod_over_empty", "fx_alignof_pod_over_empty"],
+        &["fx_PodOverEmpty"],
+    );
+}
+
+/// The upcast half of google/autocxx#832: a public empty base is a base you
+/// can convert to, and autocxx generates the `AsRef` for it only if it knows
+/// the base is there. Before `denote_base_class` there was no `as_ref` to
+/// call, and the method on the base was unreachable from the derived class.
+#[test]
+fn test_empty_base_is_upcastable() {
+    let hdr = indoc! {"
+        struct fx_EmptyGreeter {
+            int greet() const { return 42; }
+        };
+        struct fx_DerivedGreeter : public fx_EmptyGreeter {
+            int x;
+            fx_DerivedGreeter() : x(1) {}
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_DerivedGreeter::new().within_unique_ptr();
+            let base: &ffi::fx_EmptyGreeter = d.as_ref().unwrap().as_ref();
+            assert_eq!(base.greet(), autocxx::c_int(42));
+        },
+        &["fx_DerivedGreeter", "fx_EmptyGreeter"],
+        &[],
+    );
+}
+
+/// google/autocxx#1466: a class with a virtual base is not laid out as its
+/// fields are - the base sits at an offset the object carries at runtime - so
+/// holding one by value in Rust would copy something else. Nothing in
+/// bindgen's output says so for this shape: the virtual base gets no field,
+/// and because the vtable pointer comes from the base rather than from this
+/// class, all that is written for it is anonymous padding. A class which needs
+/// its own vtable pointer gets a `vtable_` field, which autocxx already
+/// refuses on - so that shape was never the one at risk.
+///
+/// The `static_assert` is what makes this a layout claim rather than a
+/// preference: it pins that this class is bigger than the field it declares,
+/// so its own fields are not the whole story, and the refusal below is the
+/// answer that does not require autocxx to have understood the rest.
+#[test]
+fn test_virtual_base_is_refused_as_pod() {
+    let hdr = indoc! {"
+        struct fx_VirtualBase { virtual int f() const { return 1; } };
+        struct fx_DerivedVirtually : public virtual fx_VirtualBase { int b; };
+        static_assert(sizeof(fx_DerivedVirtually) > sizeof(int),
+                      \"a virtual base costs more than the derived class's own fields\");
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_DerivedVirtually"],
+        "inherits a base class virtually",
+    );
+}
+
+/// The same class is fine as a non-POD type: autocxx reaches it through a
+/// pointer, where C++ does the offset arithmetic itself.
+#[test]
+fn test_virtual_base_is_allowed_as_non_pod() {
+    let hdr = indoc! {"
+        struct fx_VBase2 { int a; fx_VBase2() : a(3) {} };
+        struct fx_DerivedVirtually2 : public virtual fx_VBase2 { int b; fx_DerivedVirtually2() : b(4) {} };
+        inline int fx_sum(const fx_DerivedVirtually2& d) { return d.a + d.b; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_DerivedVirtually2::new().within_unique_ptr();
+            assert_eq!(ffi::fx_sum(d.as_ref().unwrap()), autocxx::c_int(7));
+        },
+        &["fx_DerivedVirtually2", "fx_sum"],
+        &[],
+    );
+}
+
+/// A pure virtual reached through a virtual base, this time overridden. The
+/// google/autocxx#1326 fix must not answer "abstract" to everything which inherits
+/// virtually: this class is concrete and has to stay constructible.
+#[test]
+fn test_pure_virtual_overridden_through_virtual_base() {
+    let hdr = indoc! {"
+        struct fx_VAbstract {
+            virtual int f() const = 0;
+            virtual ~fx_VAbstract() {}
+        };
+        struct fx_VConcrete : public virtual fx_VAbstract {
+            int f() const override { return 7; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::fx_VConcrete::new().within_unique_ptr();
+            assert_eq!(c.f(), autocxx::c_int(7));
+        },
+        &["fx_VConcrete", "fx_VAbstract"],
+        &[],
+    );
+}
+
+/// A virtual diamond, which is the shape virtual inheritance exists for.
+/// `fx_DiaLeft` overrides the pure virtual and `fx_DiaRight` does not, but they
+/// share one `fx_DiaBase` subobject, so `fx_DiaLeft::f` is its final overrider
+/// and `fx_DiaDiamond` is concrete. Cancelling an inherited pure virtual only
+/// against the derived class's own overrides would call it abstract and
+/// withdraw its constructors.
+#[test]
+fn test_virtual_diamond_is_concrete() {
+    let hdr = indoc! {"
+        struct fx_DiaBase {
+            virtual int f() const = 0;
+            virtual ~fx_DiaBase() {}
+        };
+        struct fx_DiaLeft : public virtual fx_DiaBase {
+            int f() const override { return 5; }
+        };
+        struct fx_DiaRight : public virtual fx_DiaBase {};
+        struct fx_DiaDiamond : public fx_DiaLeft, public fx_DiaRight {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_DiaDiamond::new().within_unique_ptr();
+            let left: &ffi::fx_DiaLeft = d.as_ref().unwrap().as_ref();
+            assert_eq!(left.f(), autocxx::c_int(5));
+        },
+        directives_from_lists(
+            &["fx_DiaDiamond", "fx_DiaLeft", "fx_DiaRight", "fx_DiaBase"],
+            &[],
+            None,
+        ),
+        // cl reports `C4250: 'fx_DiaDiamond': inherits 'fx_DiaLeft::f' via
+        // dominance`, which is word for word the proposition this test exists
+        // to assert. It is emitted against the fixture's own header, not
+        // against anything autocxx wrote, so no change to the generator could
+        // remove it, and no shape which does not draw it would exercise the
+        // dominance rule. Scoped off here rather than answered.
+        make_clang_optional_arg_adder(&[], &["/wd4250"]),
+        None,
+        None,
+    );
+}
+
+/// Half of that diamond on its own: a class which inherits a pure virtual
+/// through a virtual base and overrides nothing is abstract, so nothing may
+/// construct it. The `new()` in the diamond above is only meaningful while
+/// this holds - which is what google/autocxx#1326 reported, with a virtual
+/// destructor so that the fixture needs no warning scoped off.
+#[test]
+fn test_virtual_base_leaves_class_abstract() {
+    let hdr = indoc! {"
+        struct fx_AbsBase {
+            virtual int f() const = 0;
+            virtual ~fx_AbsBase() {}
+        };
+        struct fx_AbsDerived : public virtual fx_AbsBase {};
+        inline int fx_call_abs(const fx_AbsBase& b) { return b.f(); }
+    "};
+    run_test("", hdr, quote! {}, &["fx_AbsDerived", "fx_call_abs"], &[]);
+}
+
+/// The virtual diamond again, with the shared base named through a typedef.
+/// Which class's pure virtuals those are is a question for the class the
+/// typedef names; whether the inheritance is virtual is recorded against the
+/// name it was written under.
+#[test]
+fn test_virtual_diamond_through_a_typedef_is_concrete() {
+    let hdr = indoc! {"
+        struct fx_TdBase {
+            virtual int f() const = 0;
+            virtual ~fx_TdBase() {}
+        };
+        typedef fx_TdBase fx_TdAlias;
+        struct fx_TdLeft : public virtual fx_TdAlias {
+            int f() const override { return 9; }
+        };
+        struct fx_TdRight : public virtual fx_TdAlias {};
+        struct fx_TdDiamond : public fx_TdLeft, public fx_TdRight {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_TdDiamond::new().within_unique_ptr();
+            let left: &ffi::fx_TdLeft = d.as_ref().unwrap().as_ref();
+            assert_eq!(left.f(), autocxx::c_int(9));
+        },
+        directives_from_lists(
+            &["fx_TdDiamond", "fx_TdLeft", "fx_TdRight", "fx_TdBase"],
+            &[],
+            None,
+        ),
+        // As above: cl's dominance report is this fixture's subject too.
+        make_clang_optional_arg_adder(&[], &["/wd4250"]),
+        None,
+        None,
+    );
+}
+
+/// A C++ class whose name ends in the suffix autocxx renames *functions* with.
+/// The name bindgen reports a base under is the identity autocxx looks the base
+/// up by, so filing this class under `fx_SuffixB` would make `fx_SuffixA` a
+/// base of `fx_SuffixB` as well as the other way round - a cycle in a hierarchy
+/// which has none, and a panic rather than a diagnostic. Empty base, so the
+/// report is the only channel.
+///
+/// The class is not itself named in the `generate!` list, and cannot usefully
+/// be: the name index cannot tell such a class from the renamed function, so
+/// the C++ name recorded for it is the shortened one and the `#[cxx_name]`
+/// built from it names a class C++ does not have. That is a naming defect of
+/// its own, and this fixture is about the inheritance the name is used for.
+#[test]
+fn test_class_named_like_a_renamed_function_is_not_confused_with_another() {
+    let hdr = indoc! {"
+        struct fx_SuffixB_bindgen_original {};
+        struct fx_SuffixA : public fx_SuffixB_bindgen_original { int a; fx_SuffixA() : a(3) {} };
+        struct fx_SuffixB : public fx_SuffixA { int b; fx_SuffixB() : b(4) {} };
+        inline int fx_read_suffix_b(const fx_SuffixB& s) { return s.a + s.b; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let b = ffi::fx_SuffixB::new().within_unique_ptr();
+            assert_eq!(ffi::fx_read_suffix_b(b.as_ref().unwrap()), autocxx::c_int(7));
+        },
+        &["fx_SuffixB", "fx_SuffixA", "fx_read_suffix_b"],
+        &[],
+    );
+}
+
+/// Two unrelated abstract classes declaring the same signature, both inherited
+/// virtually into one class. `fx_UnrelLeft` overrides `fx_UnrelA::f`, which is
+/// no override of `fx_UnrelB::f`, so `fx_UnrelDiamond` is still abstract. An
+/// overrider recorded by signature alone would settle both.
+#[test]
+fn test_same_signature_in_unrelated_virtual_bases_stays_abstract() {
+    let hdr = indoc! {"
+        struct fx_UnrelA {
+            virtual int f() const = 0;
+            virtual ~fx_UnrelA() {}
+        };
+        struct fx_UnrelB {
+            virtual int f() const = 0;
+            virtual ~fx_UnrelB() {}
+        };
+        struct fx_UnrelLeft : public virtual fx_UnrelA {
+            int f() const override { return 1; }
+        };
+        struct fx_UnrelRight : public virtual fx_UnrelB {};
+        struct fx_UnrelDiamond : public fx_UnrelLeft, public fx_UnrelRight {};
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &[
+            "fx_UnrelDiamond",
+            "fx_UnrelLeft",
+            "fx_UnrelRight",
+            "fx_UnrelA",
+            "fx_UnrelB",
+        ],
+        &[],
+    );
+}
+
+/// A class which makes a function pure again after a base had already
+/// overridden it through a virtual base. `fx_StaleAgain::f` is the final
+/// overrider and it is pure, so `fx_StaleAgain` and anything inheriting it
+/// virtually are abstract - the earlier override does not settle the new
+/// obligation, which belongs to a different class.
+#[test]
+fn test_pure_redeclaration_outlives_an_earlier_shared_override() {
+    let hdr = indoc! {"
+        struct fx_StaleBase {
+            virtual int f() const = 0;
+            virtual ~fx_StaleBase() {}
+        };
+        struct fx_StaleMid : public virtual fx_StaleBase {
+            int f() const override { return 2; }
+        };
+        struct fx_StaleAgain : public fx_StaleMid {
+            int f() const override = 0;
+        };
+        struct fx_FromStaleAgain : public virtual fx_StaleAgain {};
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &[
+            "fx_FromStaleAgain",
+            "fx_StaleAgain",
+            "fx_StaleMid",
+            "fx_StaleBase",
+        ],
+        &[],
+    );
+}
+
+/// The same diamond with one branch inheriting `fx_MixBase` normally. C++
+/// gives `fx_MixDiamond` two `fx_MixBase` subobjects: the one inside
+/// `fx_MixLeft`, which `fx_MixLeft::f` overrides, and the shared one reached
+/// through `fx_MixRight`, which nothing overrides. So it is abstract, and an
+/// override reached through a non-virtual base must not be allowed to settle
+/// a pure virtual reached through a virtual one.
+#[test]
+fn test_mixed_diamond_stays_abstract() {
+    let hdr = indoc! {"
+        struct fx_MixBase {
+            virtual int f() const = 0;
+            virtual ~fx_MixBase() {}
+        };
+        struct fx_MixLeft : public fx_MixBase {
+            int f() const override { return 5; }
+        };
+        struct fx_MixRight : public virtual fx_MixBase {};
+        struct fx_MixDiamond : public fx_MixLeft, public fx_MixRight {};
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_MixDiamond", "fx_MixLeft", "fx_MixRight", "fx_MixBase"],
+        &[],
+    );
+}
+
+/// A class which makes an inherited virtual function pure again. The
+/// definition it overrides is in the hierarchy, so accumulating definitions
+/// across the hierarchy without asking which one is the final overrider would
+/// cancel `fx_PureAgain::f` with the `fx_HasImpl::f` it replaced.
+#[test]
+fn test_pure_virtual_redeclared_through_virtual_base() {
+    let hdr = indoc! {"
+        struct fx_HasImpl {
+            virtual int f() const { return 1; }
+            virtual ~fx_HasImpl() {}
+        };
+        struct fx_PureAgain : public fx_HasImpl {
+            int f() const override = 0;
+        };
+        struct fx_FromPureAgain : public virtual fx_PureAgain {};
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_FromPureAgain", "fx_PureAgain", "fx_HasImpl"],
+        &[],
+    );
+}
+
+/// An abstract base named through a typedef. The base arrives under the
+/// typedef's name, and the pure virtuals which make a class abstract belong to
+/// the class the typedef names.
+#[test]
+fn test_abstract_base_named_through_a_typedef() {
+    let hdr = indoc! {"
+        struct fx_AbstractOriginal {
+            virtual int f() const = 0;
+            virtual ~fx_AbstractOriginal() {}
+        };
+        typedef fx_AbstractOriginal fx_AbstractAlias;
+        struct fx_FromAbstractAlias : public virtual fx_AbstractAlias {};
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_FromAbstractAlias", "fx_AbstractOriginal"],
+        &[],
+    );
+}
+
+/// An empty base named through a typedef whose own constructors are all
+/// usable. Naming the base is not enough - the name is the typedef's, and the
+/// C++ rules have to run over the class it names - so the derived class keeps
+/// the default constructor C++ gives it.
+#[test]
+fn test_empty_base_through_a_typedef_keeps_its_constructor() {
+    let hdr = indoc! {"
+        struct fx_PlainEmpty {};
+        typedef fx_PlainEmpty fx_PlainEmptyAlias;
+        struct fx_DerivedUsable : public fx_PlainEmptyAlias {
+            int x;
+        };
+        inline int fx_read_usable(const fx_DerivedUsable& d) { return d.x; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_DerivedUsable::new().within_unique_ptr();
+            assert_eq!(ffi::fx_read_usable(d.as_ref().unwrap()), autocxx::c_int(0));
+        },
+        &["fx_DerivedUsable", "fx_read_usable"],
+        &[],
+    );
+}
+
+/// A virtual base which is a template instantiation. bindgen announces no item
+/// for an instantiation, so the base it reports has no name autocxx can look
+/// up - but it is still reported as virtual, which is the fact `pod!` has to
+/// refuse on. Nothing else sees this base at all: it contributes no field, and
+/// the vtable pointer comes from the base rather than from this class.
+#[test]
+fn test_virtual_template_base_is_refused_as_pod() {
+    let hdr = indoc! {"
+        template <typename T> struct fx_TBase {
+            virtual int f() const { return 1; }
+            virtual ~fx_TBase() {}
+            T v;
+        };
+        struct fx_DerivedFromTemplate : public virtual fx_TBase<int> { int b; };
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_DerivedFromTemplate"],
+        "inherits a base class virtually",
+    );
+}
+
+/// An *empty* base named through a typedef. bindgen resolves such a base to
+/// the typedef rather than to the class behind it - which is exactly what it
+/// names in the `_base` field it generates for a non-empty one, so the two
+/// channels agree and the class is seen to have one base, not two.
+///
+/// The constructor analysis follows the typedef to the class it names and
+/// finds a deleted default constructor, so it offers none. Before the base was
+/// reported it offered a `new()` which C++ refuses, because
+/// `fx_RealEmptyBase` has no default constructor to run.
+#[test]
+fn test_empty_base_named_through_a_typedef() {
+    let hdr = indoc! {"
+        struct fx_RealEmptyBase { fx_RealEmptyBase() = delete; };
+        typedef fx_RealEmptyBase fx_AliasedEmptyBase;
+        struct fx_DerivedFromAliasedEmpty : public fx_AliasedEmptyBase {
+            int x;
+        };
+        inline int fx_read_aliased_x(const fx_DerivedFromAliasedEmpty& d) { return d.x; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_DerivedFromAliasedEmpty", "fx_read_aliased_x"],
+        &[],
+    );
 }
 
 /// bindgen skips `CXCursor_UsingDeclaration`, so a C++ type which is only
@@ -20431,33 +20880,69 @@ fn test_pod_whose_field_has_a_destructor_keeps_drop_impl() {
     );
 }
 
-/// The analysis above has one blind spot, and this is the backstop for it.
-/// bindgen emits no field for an *empty* base class, so a class deriving from
-/// one which has a destructor looks trivially destructible to autocxx, which
-/// would then leave out the `Drop` impl and never run that destructor.
+/// The analysis above used to have a blind spot here: bindgen emitted no field
+/// for an *empty* base class, so a class deriving from one which has a
+/// destructor looked trivially destructible, and autocxx left the `Drop` impl
+/// out and never ran that destructor. Its own
+/// `std::is_trivially_destructible` assertion existed to catch that.
 ///
-/// cxx's own `IsRelocatable` assertion does not cover this, because a user may
-/// opt into that trait by hand. So the generated C++ asserts the property
-/// autocxx actually relied on - `std::is_trivially_destructible` - and the
-/// build stops here rather than silently skipping cleanup.
+/// The base is reported now, so the destructor is kept and that assertion is
+/// no longer written. What the generated C++ says instead is cxx's
+/// `IsRelocatable`, which for a type nobody has claimed the trait for by hand
+/// asks for trivial move construction and trivial destruction - the accurate
+/// complaint about this header. autocxx's assertion stays as the backstop for
+/// the case it still cannot see: a field whose type bindgen replaced with a
+/// blob of bytes.
+///
+/// The build is not attempted, because that C++ is meant not to compile; what
+/// autocxx wrote is the whole answer.
 #[test]
-fn test_omitted_destructor_is_asserted_in_the_generated_cpp() {
+fn test_pod_whose_empty_base_has_a_destructor_says_why() {
     let hdr = indoc! {"
         #include <cstdint>
         inline uint32_t& fx_dtor_count() { static uint32_t n = 0; return n; }
         struct fx_EmptyNoisy { ~fx_EmptyNoisy() { fx_dtor_count()++; } };
         struct fx_DerivedPod : public fx_EmptyNoisy { uint32_t x; };
     "};
-    run_test_expect_fail_with_errors(
+    run_test_ex(
         "",
         hdr,
         quote! {},
+        directives_from_lists(&[], &["fx_DerivedPod"], None),
+        None,
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(
+                &["::rust::IsRelocatable<fx_DerivedPod>::value"],
+                &["autocxx generated no destructor call for fx_DerivedPod"],
+            ),
+        )])),
+        None,
+    );
+}
+
+/// The other half: a non-POD class deriving from an empty base with a
+/// destructor keeps its `Drop`, and that destructor runs.
+#[test]
+fn test_destructor_of_empty_base_runs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& fx_dtor_count2() { static uint32_t n = 0; return n; }
+        struct fx_EmptyNoisy2 { ~fx_EmptyNoisy2() { fx_dtor_count2()++; } };
+        struct fx_DerivedNonPod : public fx_EmptyNoisy2 { uint32_t x; };
+        inline uint32_t fx_read_dtor_count2() { return fx_dtor_count2(); }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_read_dtor_count2(), 0);
+            {
+                let _d = ffi::fx_DerivedNonPod::new().within_unique_ptr();
+            }
+            assert_eq!(ffi::fx_read_dtor_count2(), 1);
+        },
+        &["fx_read_dtor_count2", "fx_DerivedNonPod"],
         &[],
-        &["fx_DerivedPod"],
-        // Every compiler quotes a failed `static_assert`'s message, but each
-        // words its own part of the diagnostic differently, so pin only the
-        // message.
-        &["autocxx generated no destructor call for fx_DerivedPod"],
     );
 }
 
