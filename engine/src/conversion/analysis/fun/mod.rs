@@ -36,6 +36,7 @@ use crate::{
     },
     known_types::known_types,
     minisyn::{minisynize_punctuated, FnArg},
+    parse_callbacks::UsingDeclaration,
     types::validate_ident_ok_for_rust,
 };
 use indexmap::map::IndexMap as HashMap;
@@ -370,7 +371,23 @@ pub(crate) struct FnAnalyzer<'a> {
     types_in_anonymous_namespace: HashSet<QualifiedName>,
     existing_superclass_trait_api_names: HashSet<QualifiedName>,
     cpp_names_taken_on_peer_classes: HashSet<String>,
+    /// For each class named as the source of a `using Base::foo;`, the classes
+    /// which wrote one and the name each imported. Keyed on the base because
+    /// that is where the member's signature is, and a member is only visible
+    /// here when it is analyzed.
+    using_declarations_by_base: HashMap<QualifiedName, Vec<ImportedMember>>,
     force_wrapper_generation: bool,
+}
+
+/// One `using Base::foo;`: the class which wrote it and the name it imported.
+struct ImportedMember {
+    importer: QualifiedName,
+    name: String,
+    /// The access the using-declaration gives the name, which is the access
+    /// the imported member has on the importer and need not be the access it
+    /// has on the base: widening a `protected` member is one of the things a
+    /// using-declaration is for.
+    visibility: CppVisibility,
 }
 
 impl<'a> FnAnalyzer<'a> {
@@ -396,6 +413,7 @@ impl<'a> FnAnalyzer<'a> {
             existing_superclass_trait_api_names: HashSet::new(),
             cpp_names_taken_on_peer_classes: Self::build_virtual_method_cpp_names(&apis),
             types_in_anonymous_namespace: Self::build_types_in_anonymous_namespace(&apis),
+            using_declarations_by_base: Self::build_using_declarations_by_base(&apis),
             force_wrapper_generation,
         };
         me.reserve_ideal_names(&apis);
@@ -409,6 +427,7 @@ impl<'a> FnAnalyzer<'a> {
             Api::typedef_unchanged,
             Api::subclass_unchanged,
         );
+        let results = me.add_using_declaration_imports(results);
         let results = me.add_constructors_present(results);
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
@@ -514,6 +533,108 @@ impl<'a> FnAnalyzer<'a> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Index every `using Base::foo;` by the base class it names, for the
+    /// declarations whose effect autocxx can be sure of.
+    ///
+    /// Being sure of it means knowing which member `d.foo(args)` would call in
+    /// the C++ shim, and that is only knowable when nothing else contributes a
+    /// `foo` to the derived class's lookup. Every declaration which leaves
+    /// that open is dropped and goes on doing what it did before this map
+    /// existed, which is nothing:
+    ///
+    /// - A name the class writes more than one using-declaration for, which is
+    ///   the C++ idiom for merging two bases' overloads into one set.
+    /// - A name whose declaration names a base autocxx cannot identify:
+    ///   bindgen spells the base as C++ writes it and autocxx flattens a
+    ///   nested class's name, so the two need not agree.
+    /// - A name whose base is not reached exactly once. C++ lets a
+    ///   using-declaration name any base, direct or not, so the whole ancestry
+    ///   is searched, but a class reached twice is two base subobjects and C++
+    ///   rejects the conversion to it at the call rather than at the
+    ///   declaration. Two paths through a *virtual* base do share one
+    ///   subobject and would be callable; they are declined all the same,
+    ///   because bindgen reports which bases are virtual only for the class
+    ///   which declares them.
+    /// - A name the base itself writes a using-declaration for, because the
+    ///   base's own `foo` is then a merged set too and passes the merge on.
+    ///
+    /// Whether the *importer* declares a `foo` of its own is not decided here:
+    /// that needs the analysis which [`Self::add_using_declaration_imports`]
+    /// waits for.
+    fn build_using_declarations_by_base(
+        apis: &ApiVec<PodPhase>,
+    ) -> HashMap<QualifiedName, Vec<ImportedMember>> {
+        let ancestry: HashMap<&QualifiedName, (&HashSet<QualifiedName>, bool)> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct {
+                    name,
+                    analysis:
+                        PodAnalysis {
+                            bases,
+                            has_unnamed_base,
+                            ..
+                        },
+                    ..
+                } => Some((&name.name, (bases, *has_unnamed_base))),
+                _ => None,
+            })
+            .collect();
+        // Grouped by the name each introduces, and by the class which wrote
+        // it, before any is judged: a declaration this cannot use still puts
+        // its base's members in the derived class's lookup, so it has to be
+        // able to veto the others.
+        let mut declarations: HashMap<(&QualifiedName, &str), Vec<&UsingDeclaration>> =
+            HashMap::new();
+        for api in apis.iter() {
+            let Api::Struct {
+                name,
+                analysis: PodAnalysis {
+                    using_declarations, ..
+                },
+                ..
+            } = api
+            else {
+                continue;
+            };
+            for using in using_declarations {
+                // An inherited constructor - `using Base::Base;` - which clang
+                // names after the derived class. Constructing a derived class
+                // through one is a feature of its own, not a member import.
+                if using.name == name.name.get_final_item() {
+                    continue;
+                }
+                declarations
+                    .entry((&name.name, using.name.as_str()))
+                    .or_default()
+                    .push(using);
+            }
+        }
+        let mut by_base: HashMap<QualifiedName, Vec<ImportedMember>> = HashMap::new();
+        for ((importer, name), written) in &declarations {
+            let [using] = written.as_slice() else {
+                continue;
+            };
+            let Some(base) = using
+                .source_scope
+                .as_ref()
+                .filter(|base| reached_exactly_once(&ancestry, importer, base))
+                .filter(|base| !declarations.contains_key(&(*base, *name)))
+            else {
+                continue;
+            };
+            by_base
+                .entry(base.clone())
+                .or_default()
+                .push(ImportedMember {
+                    importer: (*importer).clone(),
+                    name: (*name).to_string(),
+                    visibility: using.visibility,
+                });
+        }
+        by_base
     }
 
     /// Builds a mapping from a qualified type name to the last 'nest'
@@ -855,6 +976,149 @@ impl<'a> FnAnalyzer<'a> {
         });
 
         Ok(Box::new(results.into_iter()))
+    }
+
+    /// Bind, against each class which wrote a `using Base::foo;`, every member
+    /// of that base which the declaration makes reachable through it.
+    ///
+    /// Runs once every class has been through function analysis, because what
+    /// the importer declares for itself decides the answer, and a class whose
+    /// own methods are still being analyzed cannot be asked.
+    ///
+    /// A name the base overloads is not imported either. Which member
+    /// `d.foo(args)` selects is C++'s overload resolution to decide, and
+    /// neither the parameter types nor their number settle it: a longer
+    /// overload may have default arguments which make it callable with fewer,
+    /// and two of the same length may differ only in ways which make the call
+    /// ambiguous, such as `foo(int)` beside `foo(const int&)`. bindgen reports
+    /// neither the default arguments nor enough of the types to tell, so the
+    /// one shim which can be relied on is the one whose name resolves to a
+    /// single member.
+    ///
+    /// A class which declares a member function of the same name gets no
+    /// import at all. The declaration is then the C++ idiom for merging the
+    /// base's overloads into the importer's own set, and which of them is
+    /// still callable through the derived class - and which call the shim's
+    /// `d.foo(args)` would select - turns on hiding, on ref-qualifiers and on
+    /// default arguments, of which bindgen reports only the second. Answering
+    /// from the name and the parameter types alone got each of those wrong in
+    /// turn, and each produced C++ which did not compile rather than a binding
+    /// which was merely missing.
+    ///
+    /// Only member *functions* are imported. A using-declaration may also name
+    /// a static member, whose call needs no receiver and so needs a shim of a
+    /// different shape, or a data member, which is not a function at all;
+    /// neither is bound, exactly as before. Nor does an import chain: a member
+    /// `B` imported from `A` is not imported onward by a `C` which writes
+    /// `using B::foo;`, because the import is made from what bindgen reported
+    /// and bindgen reports no member of `B` for it.
+    fn add_using_declaration_imports(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase1> {
+        if self.using_declarations_by_base.is_empty() {
+            return apis;
+        }
+
+        // The member function names each class declares for itself.
+        let declared: HashSet<(QualifiedName, String)> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Function {
+                    name,
+                    analysis:
+                        FnAnalysis {
+                            kind: FnKind::Method { impl_for, .. },
+                            ..
+                        },
+                    ..
+                } => Some((
+                    impl_for.clone(),
+                    name.cpp_name().to_string_for_cpp_generation().to_string(),
+                )),
+                _ => None,
+            })
+            .collect();
+
+        // How many members of each name a class declares. A name it overloads
+        // is a name the shim cannot call: which member `d.foo(args)` selects
+        // is C++'s overload resolution to decide, and neither the parameter
+        // types nor their number settle it - a longer overload may have
+        // default arguments which make it callable with fewer, and two of the
+        // same length may differ only in ways which make the call ambiguous,
+        // such as `foo(int)` beside `foo(const int&)`. bindgen reports neither
+        // the default arguments nor enough of the types to tell.
+        let mut members_named: HashMap<(QualifiedName, String), usize> = HashMap::new();
+        for api in apis.iter() {
+            if let Api::Function {
+                name,
+                analysis:
+                    FnAnalysis {
+                        kind: FnKind::Method { impl_for, .. },
+                        ..
+                    },
+                ..
+            } = api
+            {
+                *members_named
+                    .entry((
+                        impl_for.clone(),
+                        name.cpp_name().to_string_for_cpp_generation().to_string(),
+                    ))
+                    .or_default() += 1;
+            }
+        }
+
+        let mut imports = Vec::new();
+        for api in apis.iter() {
+            let Api::Function {
+                name,
+                fun,
+                analysis:
+                    FnAnalysis {
+                        kind:
+                            FnKind::Method {
+                                impl_for: base,
+                                method_kind:
+                                    MethodKind::Normal
+                                    | MethodKind::Virtual(_)
+                                    | MethodKind::PureVirtual(_),
+                            },
+                        ..
+                    },
+            } = api
+            else {
+                continue;
+            };
+            let cpp_name = name.cpp_name().to_string_for_cpp_generation().to_string();
+            if members_named.get(&(base.clone(), cpp_name.clone())) != Some(&1) {
+                continue;
+            }
+            for imported in self
+                .using_declarations_by_base
+                .get(base)
+                .into_iter()
+                .flatten()
+                .filter(|imported| imported.name == cpp_name)
+            {
+                if declared.contains(&(imported.importer.clone(), cpp_name.clone())) {
+                    continue;
+                }
+                imports.push((
+                    imported.importer.clone(),
+                    import_member_into(&imported.importer, imported.visibility, name, fun),
+                ));
+            }
+        }
+
+        let mut results = apis;
+        for (_, (name, fun)) in imports {
+            self.analyze_and_add(
+                name,
+                fun,
+                &mut results,
+                TypeConversionSophistication::Regular,
+                None,
+            );
+        }
+        results
     }
 
     /// Adds an API, usually a synthesized API. Returns the final calculated API name, which can be used
@@ -2793,6 +3057,113 @@ fn special_member_to_string(special_member: SpecialMemberKind) -> &'static str {
         SpecialMemberKind::Destructor => "destructor",
         SpecialMemberKind::AssignmentOperator => "assignment operator",
     }
+}
+
+/// Whether exactly one path runs from `derived` up to `ancestor`.
+///
+/// A `using Base::foo;` may name any base, not only a direct one, so a direct
+/// base list does not answer whether it names a base at all; and one path is
+/// what says the member can be called through `derived`, because two paths are
+/// two base subobjects and C++ rejects the conversion between them.
+///
+/// `false` where a class on the way has a base bindgen could not name - a
+/// template instantiation, which it announces through no callback. Such a base
+/// may lead to `ancestor` too, so a path count taken without it would be an
+/// undercount rather than an answer.
+fn reached_exactly_once(
+    ancestry: &HashMap<&QualifiedName, (&HashSet<QualifiedName>, bool)>,
+    derived: &QualifiedName,
+    ancestor: &QualifiedName,
+) -> bool {
+    /// More than one path, or a path which cannot be counted, are the same
+    /// answer here, so both stop the walk.
+    enum Paths {
+        None,
+        One,
+        Unusable,
+    }
+
+    // C++ forbids an inheritance cycle, but this graph is what bindgen
+    // reported rather than the compiler's own, so bound the walk by the number
+    // of classes there are: no path can be longer than that.
+    fn walk(
+        ancestry: &HashMap<&QualifiedName, (&HashSet<QualifiedName>, bool)>,
+        derived: &QualifiedName,
+        ancestor: &QualifiedName,
+        depth: usize,
+    ) -> Paths {
+        let Some((bases, has_unnamed_base)) = ancestry.get(derived).filter(|_| depth > 0) else {
+            return Paths::None;
+        };
+        if *has_unnamed_base {
+            return Paths::Unusable;
+        }
+        let mut found = Paths::None;
+        for base in bases.iter() {
+            let through_here = if base == ancestor {
+                Paths::One
+            } else {
+                walk(ancestry, base, ancestor, depth - 1)
+            };
+            found = match (found, through_here) {
+                (Paths::Unusable, _) | (_, Paths::Unusable) => return Paths::Unusable,
+                (Paths::None, other) | (other, Paths::None) => other,
+                (Paths::One, Paths::One) => return Paths::Unusable,
+            };
+        }
+        found
+    }
+    matches!(
+        walk(ancestry, derived, ancestor, ancestry.len()),
+        Paths::One
+    )
+}
+
+/// The base class member `fun`, as a function reached through a derived class
+/// which named it in a `using Base::foo;`.
+///
+/// The receiver becomes the derived class and the call is forced through a C++
+/// shim of our own. It has to be: the member belongs to the base, so cxx would
+/// declare it by taking the address of `&Derived::foo`, whose type in C++ is
+/// pointer-to-member-of-*Base* and does not match - and the base may be
+/// private, which makes even naming it from outside an error. Letting C++
+/// make the call is also what gets the `this` adjustment right for a base
+/// which does not sit at offset zero within the derived class.
+fn import_member_into(
+    importer: &QualifiedName,
+    visibility: CppVisibility,
+    base_method: &ApiName,
+    fun: &FuncToConvert,
+) -> (ApiName, Box<FuncToConvert>) {
+    // The importer's name in front of the base method's whole bindgen name,
+    // which already names the base: this only has to be unique and to be an
+    // identifier, because the Rust name comes from the C++ name below.
+    let name = ApiName::new_with_cpp_name(
+        importer.get_namespace(),
+        make_ident(format!(
+            "{}_{}",
+            importer.get_final_item(),
+            base_method.name.get_final_item()
+        )),
+        base_method.cpp_name_if_present().cloned(),
+    );
+    let mut fun = fun.clone();
+    fun.provenance = Provenance::SynthesizedOther;
+    // The access the declaration gives it, not the access it has on the base:
+    // widening a `protected` member is one of the things a using-declaration
+    // is for, and the member is only reachable at all because of this one.
+    fun.cpp_vis = visibility;
+    fun.self_ty = Some(importer.clone());
+    fun.synthesized_this_type = Some(importer.clone());
+    // The importer declares no method of its own, so this overrides nothing
+    // and is no special member of the importer either.
+    fun.virtualness = None;
+    fun.special_member = None;
+    fun.synthetic_cpp = Some((
+        CppFunctionBody::FunctionCall(Namespace::new(), base_method.cpp_name()),
+        CppFunctionKind::Method,
+    ));
+    (name, Box::new(fun))
 }
 
 /// Whether this function is a constructor, and if so the suffix which

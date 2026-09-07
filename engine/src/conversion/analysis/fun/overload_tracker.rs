@@ -100,20 +100,22 @@ impl OverloadTracker {
         let offset = scope.offsets.entry(cpp_method_name.clone()).or_default();
         let this_offset = *offset;
         *offset += 1;
-        if this_offset == 0 {
-            // The first occurrence keeps the real name.
+        if this_offset == 0 && !scope.assigned.contains(&cpp_method_name) {
+            // The first occurrence keeps the real name - unless some other
+            // name's suffix already landed on it, which `foo` and `foo1`
+            // between them can do. Handing it out twice would generate two
+            // Rust items of the same name.
             scope.assigned.insert(cpp_method_name.clone());
-            cpp_method_name
-        } else {
-            let mut n = this_offset;
-            loop {
-                let candidate = format!("{cpp_method_name}{n}");
-                if !reserved_names.contains(&candidate) && !scope.assigned.contains(&candidate) {
-                    scope.assigned.insert(candidate.clone());
-                    return candidate;
-                }
-                n += 1;
+            return cpp_method_name;
+        }
+        let mut n = this_offset.max(1);
+        loop {
+            let candidate = format!("{cpp_method_name}{n}");
+            if !reserved_names.contains(&candidate) && !scope.assigned.contains(&candidate) {
+                scope.assigned.insert(candidate.clone());
+                return candidate;
             }
+            n += 1;
         }
     }
 }
