@@ -6308,6 +6308,41 @@ fn test_take_array() {
     run_test("", hdr, rs, &["take_array"], &[]);
 }
 
+/// A `const` member is moved by whatever accepts a `const M&&`, and
+/// `M(const M&&)` is exactly that - C++ counts it as a move constructor, and it
+/// is the one spelling of one a const member can use. `fx_CRM` has no copy
+/// constructor to fall back on, so asking only "is there a copy from a const
+/// source?" would cost `fx_S4` the move constructor C++ gives it. The move sets
+/// `x` to 4, which is how the test tells the move from a copy.
+#[test]
+fn test_const_class_member_with_const_rvalue_constructor_keeps_move() {
+    let hdr = indoc! {"
+    struct fx_CRM {
+        fx_CRM() : x(3) {}
+        fx_CRM(const fx_CRM&&) : x(4) {}
+        fx_CRM(const fx_CRM&) = delete;
+        int x;
+    };
+    struct fx_S4 { const fx_CRM m; };
+    inline fx_S4 fx_make_s4() { return fx_S4{fx_CRM()}; }
+    inline int fx_read_s4(const fx_S4& s) { return s.m.x; }
+    "};
+    let rs = quote! {
+        let s = ffi::fx_make_s4().within_unique_ptr();
+        moveit! {
+            let moved = autocxx::moveit::new::mov(s);
+        }
+        assert_eq!(ffi::fx_read_s4(&moved), autocxx::c_int(4));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_S4", "fx_CRM", "fx_make_s4", "fx_read_s4"],
+        &[],
+    );
+}
+
 #[test]
 fn test_take_array_in_struct() {
     let hdr = indoc! {"
@@ -21449,15 +21484,12 @@ fn test_const_bitfield_with_initializer_keeps_default_constructor() {
     );
 }
 
-/// A `const` member of class type also deletes the copy constructor, when the
-/// class has no copy constructor accepting a const source: the member cannot
-/// be moved from, and the copy it falls back to is not there. autocxx now
-/// knows the field is `const` but does not run that rule - the checks in
-/// `find_constructors_present` ask what the field's type can do, not what can
-/// be done to a `const` one of it - so it offers a copy constructor C++
-/// deletes.
+/// A `const` member of class type deletes the copy *and* the move constructor
+/// when its class has no constructor taking a const source: moving from a
+/// `const fx_M` yields a `const fx_M&&`, which `fx_M(fx_M&&)` cannot take, and
+/// the copy it falls back to is deleted. Asking what the field's *type* can do
+/// said "movable".
 #[test]
-#[ignore] // engine: the copy/move checks ignore field constness
 fn test_const_class_member_deletes_copy() {
     let hdr = indoc! {"
         struct fx_M {
@@ -21470,6 +21502,65 @@ fn test_const_class_member_deletes_copy() {
         inline int fx_read_s(const fx_S& s) { return s.m.x; }
     "};
     run_test("", hdr, quote! {}, &["fx_S", "fx_read_s", "fx_M"], &[]);
+}
+
+/// The other half of the same rule, which must not withdraw what C++ keeps.
+/// `fx_CM` declares a copy constructor, so C++ gives it no move constructor at
+/// all - but the copy it does have takes a const source, which is the one C++
+/// uses to move a `const` member. So `fx_S2` has both a copy and a move
+/// constructor, and returning one by value has to work. Asking `fx_CM` what it
+/// can do would say "no move constructor" and cost `fx_S2` its own.
+#[test]
+fn test_const_class_member_copyable_from_const_keeps_move() {
+    let hdr = indoc! {"
+        struct fx_CM {
+            fx_CM() : x(3) {}
+            fx_CM(const fx_CM& other) : x(other.x) {}
+            int x;
+        };
+        struct fx_S2 { const fx_CM m; };
+        inline fx_S2 fx_make_s2() { return fx_S2{fx_CM()}; }
+        inline int fx_read_s2(const fx_S2& s) { return s.m.x; }
+    "};
+    let rs = quote! {
+        let s = ffi::fx_make_s2().within_unique_ptr();
+        moveit! {
+            let moved = autocxx::moveit::new::mov(s);
+        }
+        assert_eq!(ffi::fx_read_s2(&moved), autocxx::c_int(3));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_S2", "fx_CM", "fx_make_s2", "fx_read_s2"],
+        &[],
+    );
+}
+
+/// A declared `fx_DRM(const fx_DRM&&) = delete` is what a `const` member's
+/// xvalue selects, so C++ defines `fx_S5`'s move constructor as deleted -
+/// however copyable the member is on its own. That has to be the answer for
+/// the field rather than "copyable, so near enough": `fx_S5` also holds an
+/// `fx_N` which cannot be copied, so its copy constructor is deleted too and
+/// `fx_S5(std::move(s))` has nothing left to call. Treating the member as
+/// movable-because-copyable synthesized a move wrapper both compilers refuse.
+#[test]
+fn test_const_class_member_with_deleted_const_rvalue_constructor_deletes_move() {
+    let hdr = indoc! {"
+        struct fx_DRM {
+            fx_DRM();
+            fx_DRM(const fx_DRM&);
+            fx_DRM(const fx_DRM&&) = delete;
+        };
+        struct fx_N {
+            fx_N();
+            fx_N(const fx_N&) = delete;
+            fx_N(fx_N&&);
+        };
+        struct fx_S5 { const fx_DRM m; fx_N n; };
+    "};
+    run_test("", hdr, quote! {}, &["fx_S5", "fx_DRM", "fx_N"], &[]);
 }
 
 /// The marker and the array layers alternate all the way down for a
