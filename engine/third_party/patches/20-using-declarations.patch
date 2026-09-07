@@ -1,0 +1,272 @@
+Subject: Report a class-scope using-declaration through `ParseCallbacks`
+
+`using Base::foo;` in a class is listed among the cursor kinds bindgen
+deliberately does not handle, and a class-scope one does not even reach that
+list: it falls into `CompInfo`'s catch-all and produces a `warn!` about an
+unhandled comp member.
+
+Nothing is generated for it, which is the right answer for bindgen's own
+output - the declaration has no signature and no symbol, being a second name
+for a member which already exists - but the fact is worth reporting, because
+it changes what the derived class exposes. It is how C++ re-exports a member
+of a private base, widens the access of a protected one, and un-hides an
+overload set, and none of that survives into the generated Rust, where a base
+is a field and its members are free functions over the base's own type. A
+consumer emitting code against the derived class cannot otherwise tell that
+the member is reachable through it at all.
+
+`denote_using_declaration` reports the name and the base class it is taken
+from. Purely additive: no generated code changes, and the `warn!` those
+declarations used to produce goes away.
+
+Two things libclang gets wrong here, which is why the report is a name and a
+scope rather than a set of declarations. `clang_getNumOverloadedDecls` on the
+using-declaration cursor answers zero; asked on its `CXCursor_OverloadedDeclRef`
+child it answers with a proper subset of what the declaration introduces - one
+of two overloads for `using Base::foo;`, and the copy and move constructors,
+which are precisely the ones C++ does not inherit, for `using Base::Base;`. And
+clang names an inherited-constructor declaration after the *derived* class
+rather than the base, so `UsingDeclarationInfo::name` says so.
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -341,6 +341,28 @@
+     ) {
+     }
+ 
++    /// Report a `using Base::foo;` written in a class.
++    ///
++    /// bindgen generates nothing for such a declaration: it has no signature
++    /// and no symbol of its own, being a second name for a member which
++    /// already exists on the base. It does change what the derived class
++    /// exposes, though - it is how C++ re-exports a member of a private base,
++    /// widens the access of a protected one, or un-hides an overload set - and
++    /// none of that survives into the generated Rust, where a base is a field
++    /// and its methods are free functions taking the base's own type. A
++    /// consumer emitting code against the derived class therefore cannot tell
++    /// that the member is reachable through it at all.
++    ///
++    /// Called for every class-scope using-declaration of a compound type
++    /// codegen writes out, in declaration order, whether or not bindgen
++    /// generated anything for the member it names.
++    fn denote_using_declaration(
++        &self,
++        _parent: DiscoveredItemId,
++        _using: UsingDeclarationInfo<'_>,
++    ) {
++    }
++
+     /// Report that C++ marked a function or method deprecated, along with the
+     /// message the attribute was written with.
+     ///
+@@ -583,6 +605,35 @@
+     pub has_default_member_initializer: Option<bool>,
+ }
+ 
++/// What [`ParseCallbacks::denote_using_declaration`] reports about one
++/// class-scope using-declaration.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct UsingDeclarationInfo<'a> {
++    /// The name the declaration introduces into the class.
++    ///
++    /// For an inherited constructor - `using Base::Base;` - clang names the
++    /// declaration after the *derived* class rather than the base, so this is
++    /// the derived class's own name.
++    pub name: &'a str,
++
++    /// The base class the name is taken from, as C++ spells it and qualified
++    /// as far as clang qualifies it. `None` where libclang exposed no
++    /// reference to name the base by.
++    ///
++    /// It does not identify which of the base's members the declaration
++    /// introduces: a using-declaration names an overload set, and libclang
++    /// reports a proper subset of it, so the honest answer is the name and the
++    /// scope to look it up in.
++    pub source_scope: Option<&'a str>,
++
++    /// The access the *declaration* was written with, which is the access the
++    /// name has in the derived class. It is what makes `using Base::foo;` in a
++    /// `public:` section the way C++ widens a `protected` member, so it is not
++    /// the member's own access and cannot be read off the member.
++    pub visibility: Visibility,
++}
++
+ /// Whether a method is virtual or pure virtual.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Virtualness {
+--- a/clang.rs
++++ b/clang.rs
+@@ -1401,11 +1401,19 @@
+         } else {
+             None
+         }
++    }
++
++    /// This type's name as clang spells it, qualification and all.
++    ///
++    /// [`Type::spelling`] takes the qualification off again; a caller which
++    /// has to say *which* `Base` a name came from needs it kept.
++    pub(crate) fn qualified_spelling(&self) -> String {
++        unsafe { cxstring_into_string(clang_getTypeSpelling(self.x)) }
+     }
+ 
+     /// Get a raw display name for this type.
+     pub(crate) fn spelling(&self) -> String {
+-        let s = unsafe { cxstring_into_string(clang_getTypeSpelling(self.x)) };
++        let s = self.qualified_spelling();
+         // Clang 5.0 introduced changes in the spelling API so it returned the
+         // full qualified name. Let's undo that here.
+         if s.split("::").all(is_valid_identifier) {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2391,6 +2391,7 @@
+         });
+ 
+         utils::report_data_members(ctx, id, self);
++        utils::report_using_declarations(ctx, id, self);
+ 
+         // Don't output classes with template parameters that aren't types, and
+         // also don't output template specializations, neither total or partial.
+@@ -5772,7 +5773,9 @@
+     use super::helpers::BITFIELD_UNIT;
+     use super::serialize::CSerialize;
+     use super::{error, CodegenError, CodegenResult, ToRustTyOrOpaque};
+-    use crate::callbacks::{DataMemberInfo, DiscoveredItemId};
++    use crate::callbacks::{
++        DataMemberInfo, DiscoveredItemId, UsingDeclarationInfo, Visibility,
++    };
+     use crate::ir::comp::{CompInfo, Field, FieldMethods};
+     use crate::ir::context::BindgenContext;
+     use crate::ir::context::TypeId;
+@@ -6539,6 +6542,27 @@
+                     unit.bitfields().iter().for_each(|bf| report(bf));
+                 }
+             }
++        }
++    }
++
++    /// Report the class-scope using-declarations of a struct or class through
++    /// [`crate::callbacks::ParseCallbacks::denote_using_declaration`].
++    pub(super) fn report_using_declarations(
++        ctx: &BindgenContext,
++        parent: DiscoveredItemId,
++        comp: &CompInfo,
++    ) {
++        for using in comp.using_declarations() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_using_declaration(
++                    parent,
++                    UsingDeclarationInfo {
++                        name: using.name(),
++                        source_scope: using.source_scope(),
++                        visibility: using.visibility(),
++                    },
++                );
++            });
+         }
+     }
+ 
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -90,6 +90,60 @@
+     AssignmentOperator,
+ }
+ 
++/// A `using Base::foo;` written in a class, which makes a base class member
++/// nameable through the derived class.
++///
++/// bindgen generates nothing for one - it has no signature and no symbol of
++/// its own, being a second name for a declaration which already exists - but
++/// it changes what the derived class exposes, so a consumer emitting code
++/// against that class needs to know it is there.
++#[derive(Debug, Clone)]
++pub(crate) struct UsingDeclaration {
++    name: String,
++    source_scope: Option<String>,
++    visibility: Visibility,
++}
++
++impl UsingDeclaration {
++    /// Read one off a `CXCursor_UsingDeclaration`.
++    ///
++    /// The base class comes from the `CXCursor_TypeRef` child which spells the
++    /// nested-name-specifier: `clang_getNumOverloadedDecls` looks like the
++    /// better answer and is not one, because for an overload set it hands back
++    /// a proper subset of the declarations the using-declaration actually
++    /// introduces.
++    fn from_cursor(cursor: &clang::Cursor) -> Self {
++        let mut source_scope = None;
++        cursor.visit(|child| {
++            if child.kind() == clang_sys::CXCursor_TypeRef {
++                source_scope = Some(child.cur_type().qualified_spelling());
++            }
++            clang_sys::CXChildVisit_Continue
++        });
++        Self {
++            name: cursor.spelling(),
++            source_scope,
++            visibility: Visibility::from(cursor.access_specifier()),
++        }
++    }
++
++    /// The name the declaration introduces into the class.
++    pub(crate) fn name(&self) -> &str {
++        &self.name
++    }
++
++    /// The base class the name is taken from, as C++ spells it.
++    pub(crate) fn source_scope(&self) -> Option<&str> {
++        self.source_scope.as_deref()
++    }
++
++    /// The access the declaration gives the name in the derived class, which
++    /// is the declaration's own and not the member's.
++    pub(crate) fn visibility(&self) -> Visibility {
++        self.visibility
++    }
++}
++
+ /// A struct representing a C++ method, either static, normal, or virtual.
+ #[derive(Debug)]
+ pub(crate) struct Method {
+@@ -1115,6 +1169,9 @@
+ 
+     /// Set of static constants declared inside this class.
+     inner_vars: Vec<VarId>,
++
++    /// The `using Base::foo;` declarations written in this class.
++    using_declarations: Vec<UsingDeclaration>,
+ 
+     /// Whether this type should generate an vtable (TODO: Should be able to
+     /// look at the virtual methods and ditch this field).
+@@ -1167,6 +1224,7 @@
+             base_members: vec![],
+             inner_types: vec![],
+             inner_vars: vec![],
++            using_declarations: vec![],
+             has_own_virtual_method: false,
+             has_destructor: false,
+             has_nonempty_base: false,
+@@ -1344,6 +1402,11 @@
+     /// The set of types that this one inherits from.
+     pub(crate) fn base_members(&self) -> &[Base] {
+         &self.base_members
++    }
++
++    /// The `using Base::foo;` declarations written in this class.
++    pub(crate) fn using_declarations(&self) -> &[UsingDeclaration] {
++        &self.using_declarations
+     }
+ 
+     /// Construct a new compound type from a Clang type.
+@@ -1669,6 +1732,10 @@
+                         ci.inner_vars.push(item.as_var_id_unchecked());
+                     }
+                 }
++                CXCursor_UsingDeclaration => {
++                    ci.using_declarations
++                        .push(UsingDeclaration::from_cursor(&cur));
++                }
+                 // Intentionally not handled
+                 CXCursor_CXXAccessSpecifier |
+                 CXCursor_CXXFinalAttr |
