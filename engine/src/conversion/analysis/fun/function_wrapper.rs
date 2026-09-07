@@ -658,6 +658,13 @@ pub(crate) struct CppFunction {
     /// [`CppRefQualifier::None`] in every other case; autocxx never introduces
     /// a ref-qualifier which wasn't in the original C++.
     pub(crate) ref_qualifier: CppRefQualifier,
+    /// Whether the body names a C++ declaration marked `[[deprecated]]`, so
+    /// that the generated function is bracketed by a pragma which silences
+    /// `-Wdeprecated-declarations` for it alone. The signal is not lost: the
+    /// Rust binding carries `#[deprecated]` instead, where the caller who
+    /// asked for the function is the one who hears about it. See
+    /// google/autocxx#1403.
+    pub(crate) calls_deprecated: bool,
     /// Whether this is a subclass peer's override of a superclass virtual
     /// method, and so is declared `override`.
     ///

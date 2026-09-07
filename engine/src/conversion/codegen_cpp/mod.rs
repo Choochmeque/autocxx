@@ -44,6 +44,40 @@ use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 static GENERATED_FILE_HEADER: &str =
     "// Generated using autocxx - do not edit directly.\n// @generated.\n\n";
 
+/// Bracket generated C++ which names a declaration C++ marked `[[deprecated]]`
+/// with a pragma silencing `-Wdeprecated-declarations` for it, and nothing
+/// else.
+///
+/// The warning is right about the code it fires on and useless to the person
+/// reading it: nobody edits this file, and the wrapper is emitted for
+/// everything `generate!` names whether or not any Rust calls it, so a project
+/// building with `-Werror` cannot bind a deprecated function at all. The
+/// signal is not dropped, it moves: the Rust binding carries `#[deprecated]`
+/// with the same message, so the caller who asked for the function is the one
+/// who hears about it. See google/autocxx#1403.
+///
+/// clang defines `__GNUC__` and honours `#pragma GCC diagnostic`, so the two
+/// arms between them cover every compiler autocxx generates for.
+fn silence_deprecation(code: String) -> String {
+    format!(
+        "{}\n{code}\n{}",
+        indoc! {"
+            #if defined(_MSC_VER)
+            #pragma warning(push)
+            #pragma warning(disable : 4996)
+            #elif defined(__GNUC__)
+            #pragma GCC diagnostic push
+            #pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"
+            #endif"},
+        indoc! {"
+            #if defined(_MSC_VER)
+            #pragma warning(pop)
+            #elif defined(__GNUC__)
+            #pragma GCC diagnostic pop
+            #endif"},
+    )
+}
+
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Hash)]
 enum Header {
     System(&'static str),
@@ -766,6 +800,14 @@ impl<'a> CppCodeGenerator<'a> {
                 Some(format!("inline {declaration} {definition_after_sig}")),
                 None,
             )
+        };
+        let (declaration, definition) = if details.calls_deprecated {
+            (
+                declaration.map(silence_deprecation),
+                definition.map(silence_deprecation),
+            )
+        } else {
+            (declaration, definition)
         };
         let mut headers = vec![Header::System("memory")];
         if need_placement_new {

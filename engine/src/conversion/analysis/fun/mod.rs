@@ -823,6 +823,7 @@ impl<'a> FnAnalyzer<'a> {
                     super_fn_cpp_name
                         .as_ref()
                         .map(QualifiedName::get_final_ident),
+                    fun.deprecation.is_some(),
                 ));
 
                 // Create the trait item for the <superclass>_methods and <superclass>_supers
@@ -1649,6 +1650,15 @@ impl<'a> FnAnalyzer<'a> {
             // caller is copying out of C++ anyway - and calls through.
             // google/autocxx#1191.
             _ if ret_type_was_const => true,
+            // cxx names the C++ function in the shim it generates, and a
+            // deprecated function drawn from a file autocxx does not write is
+            // a `-Wdeprecated-declarations` nobody can silence. Our own
+            // wrapper is in a file we do write, so the pragma which silences
+            // it can go around the one line which names the function - and the
+            // marker moves to the Rust side, where `#[deprecated]` warns the
+            // caller who actually asked for it.
+            // google/autocxx#1403.
+            _ if fun.deprecation.is_some() => true,
             _ if cpp_name_incompatible_with_cxx => true,
             _ if fun.synthetic_cpp.is_some() => true,
             _ if self.force_wrapper_generation => true,
@@ -1761,6 +1771,7 @@ impl<'a> FnAnalyzer<'a> {
                 // lvalue, so it never needs a ref-qualifier of its own.
                 ref_qualifier: CppRefQualifier::None,
                 is_virtual_override: false,
+                calls_deprecated: fun.deprecation.is_some(),
             })
         } else {
             None
@@ -1776,6 +1787,13 @@ impl<'a> FnAnalyzer<'a> {
             _ if any_param_needs_rust_conversion || return_needs_rust_conversion => true,
             FnKind::TraitMethod { .. } => true,
             FnKind::Method { .. } => cxxbridge_name != rust_name,
+            // A deprecated function needs a Rust item of its own to carry
+            // `#[deprecated]`: the alternative is a `pub use` of the bridge
+            // declaration, and the attribute on the declaration would warn at
+            // that `use` - inside generated code, for every user, whether or
+            // not anybody calls it, which is the complaint in the first place.
+            // google/autocxx#1403.
+            _ if fun.deprecation.is_some() => true,
             _ if self.force_wrapper_generation => true,
             _ => false,
         };
@@ -2751,6 +2769,7 @@ impl<'a> FnAnalyzer<'a> {
                         original_name: None,
                         synthesized_this_type: None,
                         is_deleted: None,
+                        deprecation: None,
                         add_to_trait: None,
                         synthetic_cpp: None,
                         provenance: Provenance::SynthesizedOther,

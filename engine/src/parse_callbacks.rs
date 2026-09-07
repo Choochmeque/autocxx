@@ -11,8 +11,8 @@ use std::{cell::RefCell, fmt::Display, panic::UnwindSafe, rc::Rc};
 use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
-    BaseClassInfo, BaseKind, DataMemberInfo, DiscoveredItem, DiscoveredItemId, Explicitness,
-    MethodKind, SpecialMemberKind, Visibility,
+    BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
+    Explicitness, MethodKind, SpecialMemberKind, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -254,6 +254,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     mods_for_items: HashMap<DiscoveredItemId, DiscoveredItemId>,
     bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
     data_members: HashMap<DiscoveredItemId, Vec<DataMember>>,
+    deprecations: HashMap<DiscoveredItemId, Deprecation>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -427,6 +428,25 @@ impl ParseCallbackResults {
     pub(crate) fn get_method_kind(&self, name: &QualifiedName) -> Option<MethodKind> {
         self.id_by_name(name)
             .and_then(|id| self.results.method_kinds.get(&id).cloned())
+    }
+
+    /// What C++ marked a function `[[deprecated]]` with, or `None` where it
+    /// marked it not at all.
+    ///
+    /// bindgen reports the marker a function carries itself, so two things
+    /// answer `None` here and are left doing what they did before autocxx read
+    /// any of this: a deprecated *type*, which bindgen does not report at all,
+    /// and a function which is deprecated only because a class or namespace
+    /// enclosing it is. Naming either from the generated C++ still draws
+    /// `-Wdeprecated-declarations`, which a `-Werror` build still fails on,
+    /// and neither is marked on the Rust side. libclang answers for the
+    /// declaration asked about and no other, so covering them means asking
+    /// about the enclosing declaration - and, for a type, silencing every
+    /// place the generated C++ names it rather than the one wrapper a function
+    /// gets.
+    pub(crate) fn get_deprecation(&self, name: &QualifiedName) -> Option<Deprecation> {
+        self.id_by_name(name)
+            .and_then(|id| self.results.deprecations.get(&id).cloned())
     }
 
     pub(crate) fn get_deleted_or_defaulted(&self, name: &QualifiedName) -> Option<Explicitness> {
@@ -628,6 +648,13 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_method_kind(&self, id: DiscoveredItemId, kind: MethodKind) {
         self.results.borrow_mut().method_kinds.insert(id, kind);
+    }
+
+    fn denote_deprecation(&self, id: DiscoveredItemId, deprecation: &Deprecation) {
+        self.results
+            .borrow_mut()
+            .deprecations
+            .insert(id, deprecation.clone());
     }
 
     fn denote_alias_template(

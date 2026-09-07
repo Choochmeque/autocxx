@@ -369,6 +369,7 @@ mod tests {
                 add_to_trait: None,
                 synthetic_cpp: None,
                 is_deleted: None,
+                deprecation: None,
                 ref_qualifier: CppRefQualifier::None,
             }),
             analysis: (),
