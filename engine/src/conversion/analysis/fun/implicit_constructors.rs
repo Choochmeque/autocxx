@@ -6,7 +6,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use autocxx_bindgen::callbacks::{Explicitness, SpecialMemberKind, Visibility as CppVisibility};
+use crate::vendored_bindgen::callbacks::{
+    Explicitness, SpecialMemberKind, Visibility as CppVisibility,
+};
 use indexmap::map::IndexMap as HashMap;
 use indexmap::{map::Entry, set::IndexSet as HashSet};
 use itertools::Itertools;

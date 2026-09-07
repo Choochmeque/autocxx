@@ -36,5 +36,10 @@ This is not an officially supported Google product.
 
 <sup>
 Licensed under either of <a href="LICENSE-APACHE">Apache License, Version
-2.0</a> or <a href="LICENSE-MIT">MIT license</a> at your option.
+2.0</a> or <a href="LICENSE-MIT">MIT license</a> at your option. The one
+exception is the vendored copy of <a
+href="https://github.com/rust-lang/rust-bindgen">bindgen</a> which the
+published <code>autocxx-engine</code> crate carries (and patches at build
+time): that code alone is BSD-3-Clause, with its license included alongside
+the sources. Everything written for autocxx itself remains MIT/Apache-2.0.
 </sup>

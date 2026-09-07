@@ -22,8 +22,8 @@ mod type_helpers;
 mod utilities;
 
 pub(crate) use super::parse_callbacks::CppOriginalName;
+use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use analysis::fun::FnAnalyzer;
-use autocxx_bindgen::callbacks::Visibility as CppVisibility;
 use autocxx_parser::IncludeCppConfig;
 pub(crate) use codegen_cpp::CppCodeGenerator;
 pub(crate) use convert_error::ConvertError;

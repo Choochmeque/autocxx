@@ -1,0 +1,372 @@
+Subject: Report the C++ facts above through `ParseCallbacks`
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -213,6 +213,55 @@
+     ) {
+     }
+ 
++    /// The original C++ name of an item, and the module which reports it.
++    fn denote_cpp_name(
++        &self,
++        _id: DiscoveredItemId,
++        _original_name: Option<&str>,
++        _namespace_mod: Option<DiscoveredItemId>,
++    ) {
++    }
++
++    /// Note that a function is a C++ virtual or pure virtual function.
++    fn denote_virtualness(
++        &self,
++        _id: DiscoveredItemId,
++        _virtualness: Virtualness,
++    ) {
++    }
++
++    /// Note that a C++ function is `= default` or `= delete`.
++    fn denote_explicit(
++        &self,
++        _id: DiscoveredItemId,
++        _explicitness: Explicitness,
++    ) {
++    }
++
++    /// Note that a C++ function is a special member.
++    fn denote_special_member(
++        &self,
++        _id: DiscoveredItemId,
++        _kind: SpecialMemberKind,
++    ) {
++    }
++
++    /// Report the C++ visibility of an item. Unlike [`ParseCallbacks::field_visibility`]
++    /// this only reports; it does not allow changes.
++    fn denote_visibility(
++        &self,
++        _id: DiscoveredItemId,
++        _visibility: Visibility,
++    ) {
++    }
++
++    /// Note that this type does not use all the template params which were
++    /// present in C++. bindgen drops template parameters which do not affect
++    /// the data stored in the type, so its output is not a full description of
++    /// the C++ type; a downstream generator emitting C++ of its own needs to
++    /// know that.
++    fn denote_discards_template_param(&self, _id: DiscoveredItemId) {}
++
+     // TODO add callback for ResolvedTypeRef
+ }
+ 
+@@ -285,8 +334,18 @@
+ 
+         /// Type to which this method belongs.
+         parent: DiscoveredItemId,
+-    }, // modules, etc.
++    },
+ 
++    /// A module, typically representing a C++ namespace.
++    Mod {
++        /// The final name used.
++        final_name: String,
++
++        /// The parent ID. Typically another module, indicating that C++
++        /// namespaces are in use. `None` for the root module.
++        parent_id: Option<DiscoveredItemId>,
++    },
++
+     /// A constant.
+     Constant {
+         /// The final name of the generated binding
+@@ -389,6 +448,24 @@
+ 
+     /// The name of the field's type, if available.
+     pub field_type_name: Option<&'a str>,
++}
++
++/// Whether a method is virtual or pure virtual.
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++pub enum Virtualness {
++    /// Not pure virtual.
++    Virtual,
++    /// Pure virtual.
++    PureVirtual,
++}
++
++/// Whether a C++ method has been explicitly defaulted or deleted.
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++pub enum Explicitness {
++    /// Defaulted function, i.e. `=default`
++    Defaulted,
++    /// Deleted function, i.e. `=delete`
++    Deleted,
+ }
+ 
+ /// Location in the source code. Roughly equivalent to the same type
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -21,8 +21,8 @@
+ use super::BindgenOptions;
+ 
+ use crate::callbacks::{
+-    AttributeInfo, DeriveInfo, DiscoveredItem, DiscoveredItemId,
+-    FieldAttributeInfo, FieldInfo, TypeKind as DeriveTypeKind,
++    AttributeInfo, DeriveInfo, DiscoveredItem, DiscoveredItemId, Explicitness,
++    FieldAttributeInfo, FieldInfo, ItemInfo, TypeKind as DeriveTypeKind,
+ };
+ use crate::codegen::error::Error;
+ use crate::ir::analysis::{HasVtable, Sizedness};
+@@ -678,6 +678,17 @@
+         }
+ 
+         let name = item.canonical_name(ctx);
++
++        let parent_id = if item.id() == item.parent_id() {
++            None // root mod
++        } else {
++            utils::find_reportable_parent_mod(ctx, item)
++        };
++        utils::call_discovered_item_callback(ctx, item, || DiscoveredItem::Mod {
++            final_name: name.clone(),
++            parent_id,
++        });
++
+         let ident = ctx.rust_ident(name);
+         result.push(if item.id() == ctx.root_module() {
+             quote! {
+@@ -1069,6 +1080,20 @@
+ 
+                 let rust_name = ctx.rust_ident(&name);
+ 
++                // Only report unused template params of `X` in `type X<A> = Y`.
++                // Whether `Y` has unused ones is recorded against `Y` itself.
++                if has_unused_template_args {
++                    let id = DiscoveredItemId::new(item.id().as_usize());
++                    ctx.options().for_each_callback(|cb| {
++                        cb.denote_discards_template_param(id);
++                    });
++                }
++                utils::callback_with_cpp_name(
++                    ctx,
++                    item,
++                    item.original_name(ctx).as_deref(),
++                );
++
+                 utils::call_discovered_item_callback(ctx, item, || {
+                     DiscoveredItem::Alias {
+                         alias_name: rust_name.to_string(),
+@@ -2271,19 +2296,41 @@
+         debug!("<CompInfo as CodeGenerator>::codegen: item = {item:?}");
+         debug_assert!(item.is_enabled_for_codegen(ctx));
+ 
+-        // Don't output classes with template parameters that aren't types, and
+-        // also don't output template specializations, neither total or partial.
+-        if self.has_non_type_template_params() {
+-            return;
+-        }
+-
+         let ty = item.expect_type();
+         let layout = ty.layout(ctx);
+         let mut packed = self.is_packed(ctx, layout.as_ref());
+ 
+         let canonical_name = item.canonical_name(ctx);
+         let canonical_ident = ctx.rust_ident(&canonical_name);
++        let id = DiscoveredItemId::new(item.id().as_usize());
+ 
++        // Reported before the bail-out below: a downstream generator still
++        // needs to know the type exists.
++        utils::call_discovered_item_callback(ctx, item, || match self.kind() {
++            CompKind::Struct => DiscoveredItem::Struct {
++                original_name: item
++                    .kind()
++                    .expect_type()
++                    .name()
++                    .map(String::from),
++                final_name: canonical_ident.to_string(),
++            },
++            CompKind::Union => DiscoveredItem::Union {
++                original_name: item
++                    .kind()
++                    .expect_type()
++                    .name()
++                    .map(String::from),
++                final_name: canonical_ident.to_string(),
++            },
++        });
++
++        // Don't output classes with template parameters that aren't types, and
++        // also don't output template specializations, neither total or partial.
++        if self.has_non_type_template_params() {
++            return;
++        }
++
+         // Generate the vtable from the method list if appropriate.
+         //
+         // TODO: I don't know how this could play with virtual methods that are
+@@ -2580,6 +2627,12 @@
+         } else {
+             attributes.push(attributes::repr("C"));
+         }
++        if unused_template_params {
++            ctx.options()
++                .for_each_callback(|cb| cb.denote_discards_template_param(id));
++        }
++        ctx.options()
++            .for_each_callback(|cb| cb.denote_visibility(id, self.visibility()));
+ 
+         // Ensure that the struct has the correct alignment even in presence of alignas and co.
+         if let Some(explicit) = explicit_align {
+@@ -2660,24 +2713,11 @@
+ 
+         let is_rust_union = is_union && struct_layout.is_rust_union();
+ 
+-        utils::call_discovered_item_callback(ctx, item, || match self.kind() {
+-            CompKind::Struct => DiscoveredItem::Struct {
+-                original_name: item
+-                    .kind()
+-                    .expect_type()
+-                    .name()
+-                    .map(String::from),
+-                final_name: canonical_ident.to_string(),
+-            },
+-            CompKind::Union => DiscoveredItem::Union {
+-                original_name: item
+-                    .kind()
+-                    .expect_type()
+-                    .name()
+-                    .map(String::from),
+-                final_name: canonical_ident.to_string(),
+-            },
+-        });
++        utils::callback_with_cpp_name(
++            ctx,
++            item,
++            item.original_name(ctx).as_deref(),
++        );
+ 
+         // The custom derives callback may return a list of derive attributes;
+         // add them to the end of the list.
+@@ -3967,6 +4007,17 @@
+                 final_name: name.clone(),
+             }
+         });
++        utils::callback_with_cpp_name(
++            ctx,
++            item,
++            item.original_name(ctx).as_deref(),
++        );
++        ctx.options().for_each_callback(|cb| {
++            cb.denote_visibility(
++                DiscoveredItemId::new(item.id().as_usize()),
++                self.visibility,
++            );
++        });
+ 
+         let mut builder = EnumBuilder::new(
+             &name,
+@@ -4796,6 +4847,11 @@
+             return None;
+         }
+ 
++        let is_virtual = matches!(
++            self.kind(),
++            FunctionKind::Method(MethodKind::Virtual { .. })
++        );
++
+         let is_dynamic_function = match self.kind() {
+             FunctionKind::Function => {
+                 ctx.options().dynamic_library_name.is_some()
+@@ -4847,6 +4903,26 @@
+             attributes.push(attributes::doc(&comment));
+         }
+ 
++        let discovered_id = DiscoveredItemId::new(item.id().as_usize());
++        if is_pure_virtual {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_virtualness(
++                    discovered_id,
++                    crate::callbacks::Virtualness::PureVirtual,
++                );
++            });
++        } else if is_virtual {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_virtualness(
++                    discovered_id,
++                    crate::callbacks::Virtualness::Virtual,
++                );
++            });
++        }
++        ctx.options().for_each_callback(|cb| {
++            cb.denote_visibility(discovered_id, self.visibility());
++        });
++
+         let abi = match signature.abi(ctx, Some(name)) {
+             Err(err) => {
+                 if matches!(err, Error::UnsupportedAbi(_)) {
+@@ -4880,7 +4956,23 @@
+                 final_name: canonical_name.clone(),
+             }
+         });
++        utils::callback_with_cpp_name(ctx, item, Some(self.name()));
+ 
++        if let Some(special_member_kind) = self.special_member() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_special_member(discovered_id, special_member_kind);
++            });
++        }
++        if self.deleted_fn() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_explicit(discovered_id, Explicitness::Deleted);
++            });
++        } else if self.defaulted_fn() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_explicit(discovered_id, Explicitness::Defaulted);
++            });
++        }
++
+         let link_name_attr = self.link_name().or_else(|| {
+             let mangled_name = mangled_name.unwrap_or(name);
+             (!utils::names_will_be_identical_after_mangling(
+@@ -6154,6 +6246,42 @@
+         }
+ 
+         true
++    }
++
++    pub(super) fn callback_with_cpp_name(
++        ctx: &BindgenContext,
++        item: &Item,
++        original_name: Option<&str>,
++    ) {
++        let id = DiscoveredItemId::new(item.id().as_usize());
++        let parent = find_reportable_parent_mod(ctx, item);
++        ctx.options().for_each_callback(|cb| {
++            cb.denote_cpp_name(id, original_name, parent);
++        });
++    }
++
++    /// The nearest ancestor `ParseCallbacks` was told about. Inline namespaces
++    /// and non-module parents are not reported, so a `parent_id` handed to a
++    /// callback has to skip past them to a module the client has seen.
++    pub(super) fn find_reportable_parent_mod(
++        ctx: &BindgenContext,
++        item: &Item,
++    ) -> Option<DiscoveredItemId> {
++        let mut parent_item = ctx.resolve_item(item.parent_id());
++        while !is_reportable_module(parent_item) {
++            let parent_id = parent_item.parent_id();
++            if parent_id == parent_item.id() {
++                return None;
++            }
++            parent_item = ctx.resolve_item(parent_id);
++        }
++        Some(DiscoveredItemId::new(parent_item.id().as_usize()))
++    }
++
++    /// Full-fat namespaces only: not inline namespaces, and not other layers of
++    /// parentage such as a struct.
++    fn is_reportable_module(item: &Item) -> bool {
++        item.as_module().is_some_and(|item_mod| !item_mod.is_inline())
+     }
+ 
+     pub(super) fn call_discovered_item_callback(

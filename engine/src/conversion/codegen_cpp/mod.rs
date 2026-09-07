@@ -39,7 +39,7 @@ use super::{
     parse::CppRefQualifier,
     ConvertErrorFromCpp, CppEffectiveName,
 };
-use autocxx_bindgen::callbacks::Visibility as CppVisibility;
+use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 
 static GENERATED_FILE_HEADER: &str =
     "// Generated using autocxx - do not edit directly.\n// @generated.\n\n";

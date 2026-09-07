@@ -1,0 +1,73 @@
+Subject: Add a raw line to every generated module
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -661,6 +661,13 @@
+                     );
+                 }
+             }
++            // Lines added to every module leave `found_any` alone: an
++            // otherwise-empty module should still not be generated.
++            result.extend(ctx.options().every_module_raw_lines.iter().map(
++                |raw_line| {
++                    proc_macro2::TokenStream::from_str(raw_line).unwrap()
++                },
++            ));
+ 
+             codegen_self(result, &mut found_any);
+         });
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -364,6 +364,9 @@
+     /// Add a raw line of Rust code at the beginning of output.
+     #[arg(long)]
+     raw_line: Vec<String>,
++    /// Add a raw line of Rust code at the beginning of each module.
++    #[arg(long)]
++    every_module_raw_line: Vec<String>,
+     /// Add a RAW_LINE of Rust code to a given module with name MODULE_NAME.
+     #[arg(long, number_of_values = 2, value_names = ["MODULE_NAME", "RAW_LINE"])]
+     module_raw_line: Vec<String>,
+@@ -651,6 +654,7 @@
+         opaque_type,
+         output,
+         raw_line,
++        every_module_raw_line,
+         module_raw_line,
+         rust_target,
+         rust_edition,
+@@ -967,6 +971,7 @@
+             block_extern_crate,
+             opaque_type,
+             raw_line,
++            every_module_raw_line,
+             use_core => |b, _| b.use_core(),
+             distrust_clang_mangling => |b, _| b.trust_clang_mangling(false),
+             conservative_inline_namespaces => |b, _| b.conservative_inline_namespaces(),
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -1221,6 +1221,24 @@
+             }
+         },
+     },
++    /// The set of raw lines to be prepended to every module of the generated Rust code.
++    every_module_raw_lines: Vec<Box<str>> {
++        methods: {
++            /// Add a line of Rust code at the beginning of each module (i.e.
++            /// C++ namespace) in the generated code. The string is
++            /// passed through without any modification.
++            pub fn every_module_raw_line<T: Into<String>>(mut self, arg: T) -> Self {
++                self.options.every_module_raw_lines.push(arg.into().into_boxed_str());
++                self
++            }
++        },
++        as_args: |every_module_raw_lines, args| {
++            for line in every_module_raw_lines {
++                args.push("--every-module-raw-line".to_owned());
++                args.push(line.clone().into());
++            }
++        },
++    },
+     /// The set of raw lines to prepend to different modules.
+     module_lines: HashMap<Box<str>, Vec<Box<str>>> {
+         methods: {

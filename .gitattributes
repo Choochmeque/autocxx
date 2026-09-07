@@ -1,0 +1,9 @@
+# `engine/build.rs` applies these to the bindgen submodule by matching each
+# hunk's context against the source exactly, so a checkout must not rewrite
+# their line endings. `core.autocrlf` is on by default in Git for Windows and
+# would otherwise do just that.
+#
+# This is belt and braces: `build.rs` normalises to LF as it reads, because the
+# submodule's sources go through the same matching and no `.gitattributes` here
+# can reach inside a submodule.
+engine/third_party/patches/*.patch -text

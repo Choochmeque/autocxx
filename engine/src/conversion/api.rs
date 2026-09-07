@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use autocxx_bindgen::callbacks::{Explicitness, SpecialMemberKind, Virtualness};
+use crate::vendored_bindgen::callbacks::{Explicitness, SpecialMemberKind, Virtualness};
 
 use syn::{
     punctuated::Punctuated,
@@ -26,7 +26,7 @@ use indexmap::map::IndexMap as HashMap;
 use itertools::Itertools;
 use quote::ToTokens;
 
-pub(crate) use autocxx_bindgen::callbacks::Visibility as CppVisibility;
+pub(crate) use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 
 use super::{
     analysis::fun::{

@@ -38,6 +38,8 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       # cargo-fuzz needs nightly: the sanitizer and coverage instrumentation
       # it builds the target with are nightly-only rustc flags.
       - uses: dtolnay/rust-toolchain@master

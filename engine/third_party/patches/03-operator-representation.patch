@@ -1,0 +1,85 @@
+Subject: Give C++ operator functions usable identifiers
+
+--- a/ir/function.rs
++++ b/ir/function.rs
+@@ -834,6 +834,8 @@
+             return Err(ParseError::Continue);
+         }
+ 
++        let visibility = Visibility::from(cursor.access_specifier());
++
+         let linkage = cursor.linkage();
+         let linkage = match linkage {
+             CXLinkage_External | CXLinkage_UniqueExternal => Linkage::External,
+@@ -894,6 +896,35 @@
+         }
+         assert!(!name.is_empty(), "Empty function name.");
+ 
++        // `operatorxx` functions are not valid Rust identifiers, so asking for
++        // them with `represent_cxx_operators` means asking for a name to be
++        // decided here. `generated_name_override` has already run, just above,
++        // so a caller which renames every function sees its own spelling: for
++        // `operator=` renamed to `operator=_bindgen_original`, no arm matches
++        // and the function is dropped, which is the only correct answer left.
++        let special_member = match name.strip_prefix("operator") {
++            Some(operator_suffix)
++                if context.options().represent_cxx_operators =>
++            {
++                let (new_name, special_member) = match operator_suffix {
++                    "=" => (
++                        "operator_equals",
++                        Some(SpecialMemberKind::AssignmentOperator),
++                    ),
++                    _ if clang::is_valid_identifier(&name) => {
++                        (name.as_str(), None)
++                    }
++                    _ => return Err(ParseError::Continue),
++                };
++                name = new_name.to_string();
++                special_member
++            }
++            // Without `represent_cxx_operators` the troublesomely-named
++            // operators were already rejected above; anything reaching here is
++            // something like `operator_information` and is harmless.
++            _ => None,
++        };
++
+         let mangled_name = cursor_mangling(context, &cursor);
+ 
+         let link_name = context.options().last_callback(|callbacks| {
+@@ -903,6 +934,27 @@
+             })
+         });
+ 
++        let special_member = special_member.or_else(|| {
++            if cursor.is_default_constructor() {
++                Some(SpecialMemberKind::DefaultConstructor)
++            } else if cursor.is_copy_constructor() {
++                Some(SpecialMemberKind::CopyConstructor)
++            } else if cursor.is_move_constructor() {
++                Some(SpecialMemberKind::MoveConstructor)
++            } else if cursor.kind() == CXCursor_Destructor {
++                Some(SpecialMemberKind::Destructor)
++            } else {
++                None
++            }
++        });
++
++        let autocxx_info = AutocxxFuncInfo::new(
++            special_member,
++            visibility,
++            cursor.is_deleted_function(),
++            cursor.is_defaulted_function(),
++        );
++
+         let function = Self::new(
+             name.clone(),
+             mangled_name,
+@@ -910,6 +962,7 @@
+             sig,
+             kind,
+             linkage,
++            autocxx_info,
+         );
+ 
+         Ok(ParseResult::New(function, Some(cursor)))

@@ -10509,6 +10509,39 @@ fn test_plain_typedef_to_hopeless_template_still_works() {
 }
 
 #[test]
+fn test_nested_class_defined_out_of_line() {
+    // Red-team test for the clang 22 libclang behavior change:
+    // clang_getTypeDeclaration returns the in-class forward
+    // declaration rather than the out-of-line definition, so bindgen
+    // sees A::I as incomplete, collapses it to an empty stub and
+    // silently drops its methods. See upstream google/autocxx#1509
+    // and rust-lang/rust-bindgen#3278. The vendored bindgen carries the
+    // upstream fix, so this passes on every libclang the CI matrix runs.
+    let cxx = indoc! {"
+        uint32_t A::use_i(const A::I& i) { return i.val + i.get(); }
+        int32_t A::I::get() const { return val * 2; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        class A {
+        public:
+            class I;
+            uint32_t use_i(const I& i);
+        };
+        class A::I {
+        public:
+            int32_t val;
+            int32_t get() const;
+        };
+    "};
+    let rs = quote! {
+        let i = ffi::A_I { val: 21 };
+        assert_eq!(i.get(), 42);
+    };
+    run_test(cxx, hdr, rs, &["A"], &["A_I"]);
+}
+
+#[test]
 fn test_issue_956() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -17422,7 +17455,8 @@ fn test_give_bitfield() {
             `__BindgenBitfieldUnit::get` returns the raw bits in a u64 and the getter \
             casts them straight to the field's signed type, so `signed3` holding -3 \
             reads back as 5. See https://github.com/rust-lang/rust-bindgen/issues/1160. \
-            Nothing in autocxx can fix it; autocxx-bindgen 0.73.0 does not carry a fix."]
+            Nothing in autocxx can fix it; bindgen 0.73.1 does not carry a fix - it \
+            reimplemented the accessors for speed, not for sign extension."]
 /// The signed half of [`test_give_bitfield`]. Kept as a live (if ignored) test
 /// rather than commented out, so that whoever picks up the bindgen fix can
 /// just delete the `#[ignore]` and see whether it passes.
