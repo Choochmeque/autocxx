@@ -107,13 +107,22 @@ pub(crate) fn convert_typedef_targets(
 }
 
 /// An alias template reaches us as a plain typedef, because bindgen discards
-/// its template parameters, and we ignore it above because bindgen tells us
-/// that happened. Where bindgen left a further typedef pointing at such an
-/// alias template - rather than resolving through it to a concrete type - that
-/// typedef is parameterized too, so we must ignore it as well: cxx would
-/// otherwise emit a forward declaration naming the alias template without its
-/// template arguments, which isn't valid C++.
+/// its template parameters, and we ignore it above on either of the two things
+/// bindgen tells us: that it dropped a type parameter as unused, or that the
+/// declaration had parameters which are not types at all. Where bindgen left a
+/// further typedef pointing at such an alias template - rather than resolving
+/// through it to a concrete type - that typedef names a template which still
+/// wants arguments, so we must ignore it as well: cxx would otherwise emit a
+/// forward declaration naming the alias template without its template
+/// arguments, which isn't valid C++. `test_alias_template_typedef_ignored` is
+/// what this exists for: an ordinary `typedef f<int> g;` over an alias template
+/// `f`. A chain of alias templates is now refused hop by hop instead.
 /// See google/autocxx#1094 and google/autocxx#1501.
+///
+/// A `TypedefKind::Use` - which is what bindgen emits for an alias to an enum -
+/// never reaches the check above, so such an alias template is not refused.
+/// Probing `enum class E` aliased by `template <int N> using A = E;`, used as a
+/// field and not, produces valid output either way, so it is left alone.
 /// This must happen here, rather than later, because at this point the only
 /// items ignored for this reason are typedefs.
 fn ignore_typedefs_to_alias_templates(mut apis: ApiVec<TypedefPhase>) -> ApiVec<TypedefPhase> {
@@ -126,7 +135,9 @@ fn ignore_typedefs_to_alias_templates(mut apis: ApiVec<TypedefPhase>) -> ApiVec<
             .iter()
             .filter_map(|api| match api {
                 Api::IgnoredItem {
-                    err: ConvertErrorFromCpp::UnusedTemplateParam,
+                    err:
+                        ConvertErrorFromCpp::UnusedTemplateParam
+                        | ConvertErrorFromCpp::AliasTemplate { .. },
                     ..
                 } => Some(api.name()),
                 _ => None,
@@ -175,6 +186,25 @@ fn get_replacement_typedef(
     }
     let mut converted_type = ity.clone();
     check_for_fatal_attrs(parse_callback_results, &name.name)?;
+    // A C++ alias template whose parameters bindgen could not represent - a
+    // non-type parameter, say - reaches us as a plain `pub type X = Y;`, which
+    // makes `X` look like an ordinary typedef even though naming it in C++
+    // still takes template arguments. cxx would emit C++ naming `X` bare, which
+    // is `use of alias template 'X' requires template arguments`. See
+    // google/autocxx#1094. Where the dropped parameter was a *type* parameter
+    // bindgen says so itself, and `check_for_fatal_attrs` above has already
+    // turned that down.
+    if let Some(params) = parse_callback_results.alias_template_params(&name.name) {
+        if params.declared > params.type_params {
+            return Err(ConvertErrorWithContext(
+                ConvertErrorFromCpp::AliasTemplate {
+                    declared: params.declared,
+                    type_params: params.type_params,
+                },
+                Some(ErrorContext::new_for_item(name.name.get_final_ident())),
+            ));
+        }
+    }
     // A typedef to a C function pointer. bindgen writes the target as
     // `Option<unsafe extern "C" fn(..)>`, which names no C++ type at all and
     // so gives the type converter nothing to do; put through it, the `Option`

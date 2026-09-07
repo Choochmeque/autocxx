@@ -114,6 +114,8 @@ pub enum ConvertErrorFromCpp {
     Blocked(QualifiedName),
     #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]
     UnusedTemplateParam,
+    #[error("This is a C++ alias template: C++ declared {declared} template parameter(s) for it, of which {type_params} are type parameters. bindgen represents no other kind, so it emitted the alias as a plain typedef - but naming the alias in C++ requires the template arguments that typedef has lost, so autocxx cannot generate C++ which uses it. Naming the type the alias points at in a 'generate!' directive is usually what was wanted.")]
+    AliasTemplate { declared: usize, type_params: usize },
     #[error("{}", STD_FUNCTION_ADVICE)]
     UnsupportedStdFunction,
     #[error("bindgen could not name this C++ type, and replaced it with an opaque blob of bytes ({0}) of the same size and alignment. autocxx will not put that blob into the bindings in place of the type, because the result would compile and be the wrong signature. Two things arrive this way: a type which C++ only reaches through a `using` declaration, where naming the underlying type in a `generate!` directive is usually enough; and std::function. {}", STD_FUNCTION_ADVICE)]

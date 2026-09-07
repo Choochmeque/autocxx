@@ -159,6 +159,17 @@ impl CppOriginalName {
     }
 }
 
+/// How many template parameters a C++ alias template declared, and how many of
+/// them are template *type* parameters. They differ when C++ declared a
+/// non-type or template template parameter: bindgen represents neither, and
+/// emits the alias as a plain typedef, which has lost the parameters that
+/// naming the alias in C++ still requires.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AliasTemplateParams {
+    pub(crate) declared: usize,
+    pub(crate) type_params: usize,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct NameAndParent {
     parent: DiscoveredItemId,
@@ -179,6 +190,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     visibility: HashMap<DiscoveredItemId, Visibility>,
     special_member_kinds: HashMap<DiscoveredItemId, SpecialMemberKind>,
     method_kinds: HashMap<DiscoveredItemId, MethodKind>,
+    alias_templates: HashMap<DiscoveredItemId, AliasTemplateParams>,
     explicitness: HashMap<DiscoveredItemId, Explicitness>,
     discards_template_param: HashSet<DiscoveredItemId>,
     names: HashMap<DiscoveredItemId, String>,
@@ -313,6 +325,16 @@ impl ParseCallbackResults {
             .and_then(|id| self.results.explicitness.get(&id).cloned())
     }
 
+    /// `None` if bindgen did not report this item as an alias template, which
+    /// includes every ordinary typedef.
+    pub(crate) fn alias_template_params(
+        &self,
+        name: &QualifiedName,
+    ) -> Option<AliasTemplateParams> {
+        self.id_by_name(name)
+            .and_then(|id| self.results.alias_templates.get(&id).cloned())
+    }
+
     pub(crate) fn discards_template_param(&self, name: &QualifiedName) -> bool {
         self.id_by_name(name)
             .map(|id| self.results.discards_template_param.contains(&id))
@@ -445,6 +467,21 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_method_kind(&self, id: DiscoveredItemId, kind: MethodKind) {
         self.results.borrow_mut().method_kinds.insert(id, kind);
+    }
+
+    fn denote_alias_template(
+        &self,
+        id: DiscoveredItemId,
+        declared_params: usize,
+        type_params: usize,
+    ) {
+        self.results.borrow_mut().alias_templates.insert(
+            id,
+            AliasTemplateParams {
+                declared: declared_params,
+                type_params,
+            },
+        );
     }
 
     fn denote_discards_template_param(&self, id: DiscoveredItemId) {
