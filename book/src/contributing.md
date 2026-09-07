@@ -138,7 +138,11 @@ To make a new release of autocxx,
 * Commit that and make a PR; ensure it passes tests on github CI.
 * If so, merge that PR, and update locally.
 * Run `tools/publish-all.sh`. This will do the actual `cargo publish`
-  for all the various crates.
+  for all the various crates. It first flattens bindgen's sources out of the
+  submodule into `engine/third_party/bindgen-src`, because `cargo package`
+  cannot carry a directory containing a `Cargo.toml` and the submodule has two;
+  see "Rolling bindgen" below. That directory is left untracked on purpose, so
+  the publish runs `--allow-dirty`.
 * On [github releases](https://github.com/google/autocxx/releases),
   choose Draft a new release. Add a tag for `v0.X.Y`. Go through
   the process to automatically create release notes.
@@ -167,8 +171,16 @@ Instead:
 * `engine/src/lib.rs` mounts the result as `mod vendored_bindgen`.
 
 A checkout therefore needs `git submodule update --init --recursive`, and CI jobs which
-compile the engine check out with `submodules: recursive`. `cargo package` flattens the
-submodule's files into the published crate, so crates.io users need none of this.
+compile the engine check out with `submodules: recursive`.
+
+Publishing needs one more step, which `tools/publish-all.sh` runs. `cargo package` prunes
+every directory below the package root which contains a `Cargo.toml`, reading it as a
+separate package; neither `include` nor `exclude` lifts that, so the submodule can never
+reach crates.io as it stands. `AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine`
+therefore copies the sources to `engine/third_party/bindgen-src` with those manifests
+renamed, and `build.rs` prefers that directory when it exists - which in a published crate
+is always. It is left untracked, so the publish is `--allow-dirty` and no bindgen source is
+committed here.
 
 To move to a new bindgen release:
 

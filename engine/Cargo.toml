@@ -17,6 +17,24 @@ edition = "2021"
 build = "build.rs"
 keywords = ["ffi"]
 categories = ["development-tools::ffi", "api-bindings"]
+# `third_party/bindgen-src` is bindgen's sources flattened out of the submodule
+# by `AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine`, which is a step
+# before `cargo publish`; `build.rs` prefers it when it exists. Publishing needs
+# it because `cargo package` prunes every directory below the package root which
+# holds a `Cargo.toml`, reading it as a separate package, and the submodule has
+# two - so the submodule itself can never reach crates.io. The flattening
+# renames those manifests.
+#
+# The published crate therefore carries BSD-3-Clause code (bindgen) alongside
+# autocxx's own MIT/Apache-2.0, which is why bindgen's LICENSE is on the list.
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "third_party/patches/*.patch",
+    "third_party/bindgen-src/**",
+]
 
 [features]
 default = ["reproduction_case", "runtime"]

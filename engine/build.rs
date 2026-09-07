@@ -27,7 +27,27 @@ use std::path::{Path, PathBuf};
 /// The submodule, and the directory inside it holding the library crate:
 /// rust-bindgen is a workspace, and `bindgen/` is the one member autocxx wants.
 const SUBMODULE_LIB: &str = "third_party/rust-bindgen/bindgen";
+
+/// The same sources, flattened, for the published crate.
+///
+/// `cargo package` prunes every directory below the package root which contains
+/// a `Cargo.toml`, treating it as a separate package, and neither `include` nor
+/// `exclude` lifts that. bindgen's sources sit under two such manifests, so the
+/// submodule cannot reach crates.io as it stands. `AUTOCXX_VENDOR_BINDGEN=1`
+/// copies them here with the manifests renamed, and this directory wins when it
+/// exists - which in a published crate is always, and in a git checkout is only
+/// if someone asked for it.
+const VENDORED_LIB: &str = "third_party/bindgen-src";
+
+/// What a `Cargo.toml` is called in `VENDORED_LIB`, so that cargo does not read
+/// the directory as a package of its own.
+const RENAMED_MANIFEST: &str = "Cargo.toml.upstream";
+
 const PATCH_DIR: &str = "third_party/patches";
+
+/// Set to copy `SUBMODULE_LIB` to `VENDORED_LIB` before building. Run before
+/// `cargo publish`; see `book/src/contributing.md`.
+const VENDOR_ENV: &str = "AUTOCXX_VENDOR_BINDGEN";
 
 /// The bindgen cargo features autocxx resolves for the vendored copy. A module
 /// cannot carry its own features - a `feature = "x"` inside it would ask about
@@ -134,18 +154,14 @@ fn main() {
 }
 
 fn vendor_bindgen(manifest: &Path, out: &Path, target: &str) {
-    let source = manifest.join(SUBMODULE_LIB);
+    println!("cargo:rerun-if-env-changed={VENDOR_ENV}");
+    if std::env::var_os(VENDOR_ENV).is_some() {
+        flatten_for_publishing(manifest);
+    }
+
+    let source = bindgen_sources(manifest);
     let patches = manifest.join(PATCH_DIR);
     let dest = out.join("vendored_bindgen");
-
-    if !source.join("lib.rs").is_file() {
-        panic!(
-            "{} is empty. It is a git submodule holding the bindgen sources \
-             autocxx builds against; run `git submodule update --init \
-             --recursive` and build again.",
-            source.display()
-        );
-    }
 
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", patches.display());
@@ -184,6 +200,64 @@ fn vendor_bindgen(manifest: &Path, out: &Path, target: &str) {
             .expect("cannot create the vendored bindgen directory");
         fs::write(&path, rewrite(&relative, &text, target))
             .expect("cannot write a vendored source");
+    }
+}
+
+/// Where bindgen's sources are: the flattened copy if the crate was published
+/// with one, otherwise the submodule.
+fn bindgen_sources(manifest: &Path) -> PathBuf {
+    let vendored = manifest.join(VENDORED_LIB);
+    if vendored.join("lib.rs").is_file() {
+        return vendored;
+    }
+    let submodule = manifest.join(SUBMODULE_LIB);
+    assert!(
+        submodule.join("lib.rs").is_file(),
+        "{} is empty. It is a git submodule holding the bindgen sources \
+         autocxx builds against; run `git submodule update --init --recursive` \
+         and build again.",
+        submodule.display()
+    );
+    submodule
+}
+
+/// Copy the submodule's sources to `VENDORED_LIB` so that `cargo package` can
+/// carry them, renaming each `Cargo.toml` so cargo does not prune the directory
+/// as a package of its own.
+fn flatten_for_publishing(manifest: &Path) {
+    let from = manifest.join(SUBMODULE_LIB);
+    let to = manifest.join(VENDORED_LIB);
+    assert!(
+        from.join("lib.rs").is_file(),
+        "{VENDOR_ENV} is set but {} is empty; run `git submodule update --init \
+         --recursive` first",
+        from.display()
+    );
+    if to.exists() {
+        fs::remove_dir_all(&to).expect("cannot clear the flattened bindgen directory");
+    }
+    copy_renaming_manifests(&from, &to);
+    println!(
+        "cargo:warning=vendored bindgen sources into {}",
+        to.display()
+    );
+}
+
+fn copy_renaming_manifests(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("cannot create the flattened bindgen directory");
+    for entry in fs::read_dir(from).expect("cannot read the bindgen sources") {
+        let path = entry.expect("cannot read a bindgen source entry").path();
+        let name = path.file_name().expect("a directory entry has a name");
+        if path.is_dir() {
+            copy_renaming_manifests(&path, &to.join(name));
+        } else {
+            let name = if name == "Cargo.toml" {
+                RENAMED_MANIFEST.as_ref()
+            } else {
+                name
+            };
+            fs::copy(&path, to.join(name)).expect("cannot copy a bindgen source");
+        }
     }
 }
 
