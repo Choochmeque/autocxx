@@ -9528,16 +9528,21 @@ fn test_shared_ptr_const_class_payload_is_still_unseen() {
         }
     "};
     // Matched on the C++ compiler's own words rather than on "it failed
-    // somehow", so that an unrelated breakage cannot keep this passing. Each
-    // compiler words the complaint differently; the type and the two
-    // specializations it cannot reconcile are what they share.
-    run_test_expect_fail_with_errors(
+    // somehow", so that an unrelated breakage cannot keep this passing.
+    //
+    // One substring, because the three compilers agree on very little here.
+    // clang says the return types differ, MSVC says it cannot convert one
+    // function pointer to the other, and gcc calls that an invalid conversion;
+    // MSVC names neither the function nor the `::`-qualified spelling the
+    // others use. The specialization C++ was asked for and could not have is
+    // what they all print, and is the fact this test is about.
+    run_test_expect_fail_with_error(
         "",
         hdr,
         quote! {},
         &["fx_Held", "fx_hold_class"],
         &[],
-        &["shared_ptr<const fx_Held>", "fx_hold_class"],
+        "shared_ptr<const fx_Held>",
     );
 }
 
