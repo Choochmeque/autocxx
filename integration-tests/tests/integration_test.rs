@@ -7223,27 +7223,34 @@ fn test_string_transparent_function() {
 ///
 /// ```text
 /// DidNotGenerateAnythingUsable("take_string",
-///   Argument { arg: "a", err: InvalidIdent(BindgenOpaqueType) })
+///   Argument { arg: "a", err: BindgenOpaqueBlob("root :: __BindgenOpaqueArray8 < [u8 ; 24usize] >") })
 /// ```
 ///
-/// Nothing autocxx can do about it, because nothing reaches autocxx to work
-/// with. bindgen lists `CXCursor_UsingDeclaration` among the cursor kinds it
-/// deliberately does not handle (`ir/item.rs`, `Item::from_ty` returning
-/// `ParseError::Continue`), so the alias appears nowhere in its output and the
-/// parameter arrives as an opaque blob of bytes:
+/// Teaching bindgen the cursor kind is not the fix, which is worth writing
+/// down because it looks like it should be. bindgen does list
+/// `CXCursor_UsingDeclaration` among the kinds it deliberately does not handle
+/// (`ir/item.rs`), but the parameter is lost independently of that, one layer
+/// below bindgen. libclang hands the parameter's type over as
+/// `CXType_Elaborated` whose `clang_getTypeDeclaration` is null: the sugar
+/// node clang uses for a name introduced by a using-declaration is a
+/// `UsingType`, which libclang has no `CXType` for and reports as
+/// `CXType_Unexposed` with no declaration either. So bindgen cannot resolve it
+/// to the `std::string` typedef it resolves the written-out spelling to; it
+/// re-parses the canonical type instead and lands on
+/// `std::__1::basic_string<char, ...>`, which is opaque, hence the blob. The
+/// nearest thing to a channel is the type's *spelling*, which does still read
+/// `std::string`.
 ///
-/// ```text
-/// pub fn take_string_bindgen_original(
-///     a: __bindgen_marker_Opaque<root::__BindgenOpaqueArray<u64, 3usize>>,
-/// ) -> u32;
-/// ```
+/// Nothing here reaches the `denote_using_declaration` report either: that one
+/// carries a name and the base class it comes from, which is what a
+/// class-scope `using Base::foo;` needs, and says nothing about how a type
+/// written through a namespace-scope one should be resolved.
 ///
-/// against `a: root::std::string` for the qualified spelling. autocxx's own
-/// handling of `use` items (`parse_bindgen.rs`) and of typedefs is not
-/// implicated: `typedef std::string mystring;`, `using mystring = std::string;`
-/// and `using namespace std;` all work. It is specifically a using-declaration
-/// naming a typedef of a class template instantiation. Fixing it means teaching
-/// autocxx-bindgen that cursor kind.
+/// autocxx's own handling of `use` items (`parse_bindgen.rs`) and of typedefs
+/// is not implicated: `typedef std::string mystring;`,
+/// `using mystring = std::string;` and `using namespace std;` all work. It is
+/// specifically a using-declaration naming a typedef of a class template
+/// instantiation.
 #[test]
 #[ignore]
 fn test_string_through_a_using_declaration() {
@@ -25957,5 +25964,553 @@ fn test_class_whose_bases_hold_its_members_is_refused_as_pod() {
             &["fx_NoPodDer"],
             "leaves its base classes less room",
         );
+    }
+}
+
+/// `using Base::foo;` in a class re-exports a base class member through the
+/// derived class. Where the base is private that is the *only* way to reach
+/// the member: there is no upcast to reach it by.
+///
+/// bindgen generates nothing for such a declaration - there is nothing to
+/// generate, the member already exists on the base - so before it reported
+/// them the method was reachable in C++ and absent from the Rust bindings,
+/// with `no method named `inherited`` the only sign of it.
+#[test]
+fn test_using_declaration_reexports_a_private_base_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Base {
+        public:
+            uint32_t inherited(uint32_t x) const { return x + 1; }
+        };
+        class fx_Derived : private fx_Base {
+        public:
+            using fx_Base::inherited;
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::fx_Derived::new().within_unique_ptr();
+        assert_eq!(d.inherited(1), 2);
+    };
+    run_test("", hdr, rs, &["fx_Derived"], &[]);
+}
+
+/// A using-declaration is also how C++ widens the access of a `protected`
+/// member, which is a second way for the member to be reachable through the
+/// derived class and through no upcast.
+#[test]
+fn test_using_declaration_widens_access_to_a_protected_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+        class fx_Base {
+        protected:
+            uint32_t prot() const { return 7; }
+        };
+        }
+        class fx_Derived : public fx_ns::fx_Base {
+        public:
+            using fx_ns::fx_Base::prot;
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::fx_Derived::new().within_unique_ptr();
+        assert_eq!(d.prot(), 7);
+    };
+    run_test("", hdr, rs, &["fx_Derived"], &[]);
+}
+
+/// The base a using-declaration names need not be the first one, and then its
+/// subobject does not sit at offset zero. The generated call has to be made in
+/// C++, where the compiler adjusts `this`; a Rust-side call through the
+/// derived class's own pointer would read the wrong object and say nothing
+/// about it.
+#[test]
+fn test_using_declaration_from_a_base_at_a_nonzero_offset() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_First {
+        public:
+            uint64_t padding = 12;
+        };
+        class fx_Second {
+        public:
+            uint32_t held = 42;
+            uint32_t held_value() const { return held; }
+        };
+        class fx_Derived : private fx_First, private fx_Second {
+        public:
+            using fx_Second::held_value;
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::fx_Derived::new().within_unique_ptr();
+        assert_eq!(d.held_value(), 42);
+    };
+    run_test("", hdr, rs, &["fx_Derived"], &[]);
+}
+
+/// A name the base overloads is not imported. Which member `d.foo(args)`
+/// selects is C++'s overload resolution to decide, and neither the parameter
+/// types nor their number settle it: a longer overload may have default
+/// arguments which make it callable with fewer, as here, and two of the same
+/// length may differ only in ways which make the call ambiguous. bindgen
+/// reports neither the default arguments nor enough of the types to tell.
+#[test]
+fn test_using_declaration_declines_a_name_the_base_overloads() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_B {
+        public:
+            uint32_t foo(uint32_t) const { return 1; }
+            uint32_t foo(uint32_t, uint32_t = 0) const { return 2; }
+        };
+        class fx_D : private fx_B {
+        public:
+            using fx_B::foo;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::fx_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "fx_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// A virtual member imports like any other, and still dispatches virtually:
+/// the generated call is written in C++ against the derived class, so which
+/// override runs is the C++ compiler's decision and not a symbol autocxx
+/// picked. `fx_make_most` hands back an `fx_Derived` whose dynamic type
+/// overrides the member, so a call which dispatched statically would return
+/// the base's answer instead.
+#[test]
+fn test_using_declaration_reexports_a_virtual_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        class fx_Base {
+        public:
+            virtual uint32_t which() const { return 1; }
+            virtual ~fx_Base() {}
+        };
+        class fx_Derived : private fx_Base {
+        public:
+            using fx_Base::which;
+        };
+        class fx_Most : public fx_Derived {
+        public:
+            uint32_t which() const override { return 2; }
+        };
+        inline std::unique_ptr<fx_Derived> fx_make_most() {
+            return std::unique_ptr<fx_Derived>(new fx_Most());
+        }
+    "};
+    let rs = quote! {
+        let plain = ffi::fx_Derived::new().within_unique_ptr();
+        assert_eq!(plain.which(), 1);
+        let most = ffi::fx_make_most();
+        assert_eq!(most.which(), 2);
+    };
+    run_test("", hdr, rs, &["fx_Derived", "fx_make_most"], &[]);
+}
+
+/// `using Base::Base;` inherits constructors rather than importing a member,
+/// and clang names such a declaration after the *derived* class. Inheriting
+/// constructors is a feature of its own and autocxx does not offer it; what
+/// this pins is that the declaration is recognised and passed over rather than
+/// mistaken for a member called `fx_Derived`.
+#[test]
+fn test_inheriting_constructor_declaration_is_passed_over() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Base {
+        public:
+            fx_Base() : held(1) {}
+            explicit fx_Base(uint32_t v) : held(v) {}
+            uint32_t get() const { return held; }
+        private:
+            uint32_t held;
+        };
+        class fx_Derived : public fx_Base {
+        public:
+            using fx_Base::fx_Base;
+            using fx_Base::get;
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::fx_Derived::new().within_unique_ptr();
+        assert_eq!(d.get(), 1);
+    };
+    run_test("", hdr, rs, &["fx_Derived"], &[]);
+}
+
+/// A member the *importing* class also declares, with the same parameter list,
+/// hides the one the using-declaration would have brought in - C++ says so,
+/// and offers no way to call the base's through the derived class once it
+/// does. Binding the base's anyway produced a shim which did not compile:
+/// `d.foo()` here is `void` and the copied signature says `uint32_t`.
+#[test]
+fn test_using_declaration_defers_to_a_member_which_hides_it() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_B {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class fx_D : private fx_B {
+        public:
+            using fx_B::foo;
+            void foo() const {}
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::fx_D::new().within_unique_ptr();
+        d.foo();
+    };
+    run_test("", hdr, rs, &["fx_D"], &[]);
+}
+
+/// A class may write more than one using-declaration, for different names,
+/// and each is imported on its own.
+#[test]
+fn test_using_declaration_imports_each_name_it_writes() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_B {
+        public:
+            uint32_t first() const { return 1; }
+            uint32_t second(uint32_t a) const { return a + 1; }
+            uint32_t hidden() const { return 3; }
+        };
+        class fx_D : private fx_B {
+        public:
+            using fx_B::first;
+            using fx_B::second;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_D::new().within_unique_ptr();
+            assert_eq!(d.first(), 1);
+            assert_eq!(d.second(5), 6);
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "fx_D",
+            method: "hidden",
+        })),
+        None,
+    );
+}
+
+/// A `using Base::foo;` in a class which also declares a `foo` of its own is
+/// the C++ idiom for merging the base's overloads into the derived class's
+/// own set, and autocxx does not attempt it: nothing is imported, and the
+/// class's own members are bound exactly as they were.
+///
+/// Which of the base's members is still callable through the derived class
+/// then depends on hiding, on ref-qualifiers and on default arguments, of
+/// which bindgen reports only the second - and answering from the name and
+/// the parameter types produced C++ which did not compile in all three cases:
+/// a return type which did not match the hidden member's, a call the derived
+/// class's own private member refused, and a call made ambiguous by a default
+/// argument.
+#[test]
+fn test_using_declaration_defers_to_a_member_of_the_same_name() {
+    struct NothingImported;
+    impl CodeCheckerFns for NothingImported {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            if quote::quote!(#rs).to_string().contains("foo1") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "a second `foo` was bound on fx_D, so the base's was imported after all"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_B {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class fx_D : public fx_B {
+        public:
+            using fx_B::foo;
+            uint32_t foo(uint32_t a) const { return a + 1; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::fx_D::new().within_unique_ptr();
+            assert_eq!(d.foo(5), 6);
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NothingImported)),
+        None,
+    );
+}
+
+/// A using-declaration may name any base, not only a direct one, so the class
+/// it names is looked for through the whole ancestry. `fx_C` inherits `fx_A`
+/// through `fx_B`, which declares nothing of its own.
+#[test]
+fn test_using_declaration_from_an_indirect_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_A {
+        public:
+            uint32_t reached() const { return 7; }
+        };
+        class fx_B : public fx_A {};
+        class fx_C : private fx_B {
+        public:
+            using fx_A::reached;
+        };
+    "};
+    let rs = quote! {
+        let c = ffi::fx_C::new().within_unique_ptr();
+        assert_eq!(c.reached(), 7);
+    };
+    run_test("", hdr, rs, &["fx_C"], &[]);
+}
+
+/// An imported name may not take a Rust name the importing class's own members
+/// already took. Here `fx_D`'s two `foo` overloads are numbered `foo` and
+/// `foo1` before anything is imported, and the base's literal `foo1` wants
+/// `foo1` as its first and only occurrence.
+#[test]
+fn test_using_declaration_import_does_not_take_a_name_already_given() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_B {
+        public:
+            uint32_t foo1() const { return 99; }
+        };
+        class fx_D : private fx_B {
+        public:
+            using fx_B::foo1;
+            uint32_t foo(uint32_t a) const { return a; }
+            uint32_t foo(uint32_t a, uint32_t b) const { return a + b; }
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::fx_D::new().within_unique_ptr();
+        assert_eq!(d.foo(1), 1);
+        assert_eq!(d.foo1(3, 4), 7);
+        assert_eq!(d.foo11(), 99);
+    };
+    run_test("", hdr, rs, &["fx_D"], &[]);
+}
+
+/// A name imported from two bases at once is left alone for the same reason a
+/// name the class declares itself is: which of the two the shim's
+/// `d.foo(args)` selects is C++'s overload resolution to decide, and here it
+/// decides the call is ambiguous.
+#[test]
+fn test_using_declaration_defers_to_the_same_name_from_two_bases() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_A {
+        public:
+            uint32_t foo(uint32_t) const { return 1; }
+        };
+        class fx_B {
+        public:
+            uint32_t foo(uint32_t, uint32_t = 0) const { return 2; }
+        };
+        class fx_D : private fx_A, private fx_B {
+        public:
+            using fx_A::foo;
+            using fx_B::foo;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::fx_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "fx_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// A base reached by two paths is two base subobjects, and C++ rejects the
+/// conversion to it at the call rather than at the declaration: the header is
+/// accepted and `d.reached()` is not. So the member is not bound, rather than
+/// bound to a shim which would not compile.
+#[test]
+fn test_using_declaration_declines_an_ambiguous_base_subobject() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_A {
+        public:
+            uint32_t reached() const { return 1; }
+        };
+        class fx_B : public fx_A {};
+        class fx_C : public fx_A {};
+        class fx_D : private fx_B, private fx_C {
+        public:
+            using fx_A::reached;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::fx_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "fx_D",
+            method: "reached",
+        })),
+        None,
+    );
+}
+
+/// A declaration autocxx cannot use still puts its base's members in the
+/// derived class's lookup, so it has to be able to veto the others: here
+/// `using fx_A::foo;` names a base reached twice and is dropped, and if that
+/// left `using fx_B::foo;` looking uncontested, the shim generated for it
+/// would make a call C++ finds ambiguous.
+#[test]
+fn test_using_declaration_dropped_for_one_base_still_vetoes_another() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_A {
+        public:
+            uint32_t foo(uint32_t, uint32_t = 0) const { return 1; }
+        };
+        class fx_L : public fx_A {};
+        class fx_R : public fx_A {};
+        class fx_B {
+        public:
+            uint32_t foo(uint32_t) const { return 2; }
+        };
+        class fx_D : private fx_L, private fx_R, private fx_B {
+        public:
+            using fx_A::foo;
+            using fx_B::foo;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::fx_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "fx_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// A base which merged an overload set of its own passes the merge on: `fx_B`
+/// writes `using fx_A::foo;` beside a `foo` of its own, so `using fx_B::foo;`
+/// in `fx_D` names both, and a shim calling one of them by name would again be
+/// ambiguous. Not synthesizing an import for `fx_B` does not take `fx_A`'s
+/// overload out of C++'s lookup.
+#[test]
+fn test_using_declaration_declines_a_base_whose_own_set_is_merged() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_A {
+        public:
+            uint32_t foo(uint32_t, uint32_t = 0) const { return 1; }
+        };
+        class fx_B : public fx_A {
+        public:
+            using fx_A::foo;
+            uint32_t foo(uint32_t) const { return 2; }
+        };
+        class fx_D : private fx_B {
+        public:
+            using fx_B::foo;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::fx_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["fx_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "fx_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// Asserts that no inherent `impl` block for a given type binds a method of a
+/// given name, for the using-declarations autocxx declines to import: without
+/// it such a test passes whether or not the import happened, since what it
+/// builds is the rest of the class.
+///
+/// Scoped to the type's own inherent impls because bindgen writes impl blocks
+/// of its own inside the mod autocxx re-emits verbatim, and those do carry the
+/// base class's members under their real names.
+struct NoMethodNamed {
+    ty: &'static str,
+    method: &'static str,
+}
+
+impl CodeCheckerFns for NoMethodNamed {
+    fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        fn walk(items: &[syn::Item], ty: &str, method: &str) -> bool {
+            items.iter().any(|item| match item {
+                syn::Item::Mod(m) => m
+                    .content
+                    .as_ref()
+                    .is_some_and(|(_, items)| walk(items, ty, method)),
+                syn::Item::Impl(imp) => {
+                    let self_ty = &imp.self_ty;
+                    imp.trait_.is_none()
+                        && quote::quote!(#self_ty).to_string() == ty
+                        && imp.items.iter().any(|item| match item {
+                            syn::ImplItem::Method(f) => f.sig.ident == method,
+                            _ => false,
+                        })
+                }
+                _ => false,
+            })
+        }
+        if walk(&rs.items, self.ty, self.method) {
+            return Err(TestError::RsCodeExaminationFail(format!(
+                "`{}::{}` was bound, so the using-declaration was imported after all",
+                self.ty, self.method
+            )));
+        }
+        Ok(())
     }
 }
