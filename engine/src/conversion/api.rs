@@ -25,6 +25,7 @@ use crate::{
 };
 use autocxx_parser::{ExternCppType, IncludeCppConfig, RustFun, RustPath};
 use indexmap::map::IndexMap as HashMap;
+use indexmap::set::IndexSet as HashSet;
 use itertools::Itertools;
 use quote::ToTokens;
 
@@ -66,10 +67,33 @@ pub(crate) enum TypeKind {
 pub(crate) enum HolderSurface {
     /// A `std::shared_ptr<const T>`, carrying the `T` as the `cxx::bridge`
     /// spells it. See google/autocxx#799.
-    SharedPtr { payload: Box<Type> },
+    SharedPtr {
+        payload: Box<Type>,
+        deps: HashSet<QualifiedName>,
+    },
     /// A `std::vector<T*>`, carrying the element - a raw pointer - as the
     /// `cxx::bridge` spells it. See google/autocxx#330.
-    VectorOfPointers { element: Box<Type> },
+    VectorOfPointers {
+        element: Box<Type>,
+        deps: HashSet<QualifiedName>,
+    },
+}
+
+impl HolderSurface {
+    /// Every type name the accessors put into the generated bindings: what the
+    /// payload was converted from, and anything that conversion passed
+    /// through.
+    ///
+    /// This is the holder's whole dependency, and `deps.rs` is where it is
+    /// read. Nothing else names the payload - a function handling one of these
+    /// names the holder and only the holder - so without this the garbage
+    /// collector may keep a holder whose payload it collected, and an ignored
+    /// payload leaves accessors naming a type nothing declares.
+    pub(crate) fn deps(&self) -> impl Iterator<Item = &QualifiedName> {
+        match self {
+            Self::SharedPtr { deps, .. } | Self::VectorOfPointers { deps, .. } => deps.iter(),
+        }
+    }
 }
 
 /// The C++ function's name for one of a holder's shims, and the name the

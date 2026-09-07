@@ -10175,6 +10175,86 @@ fn test_vector_of_pointers_lowers_to_an_opaque_holder() {
     );
 }
 
+/// A `std::shared_ptr<const T>` holder whose payload class autocxx could not
+/// generate, under `generate_all!`.
+///
+/// A holder's accessors are the only thing which names its payload - whatever
+/// handed the holder over names the holder and nothing else - so the holder is
+/// where that dependency has to be recorded. Without it, `generate_all!` is
+/// the arrangement which shows the hole: it makes every API a garbage
+/// collection root, the holder included, so the holder survives whether or not
+/// anything names it, and a payload which became an `Api::IgnoredItem` leaves
+/// the accessors naming a type nothing declares. autocxx does not get as far
+/// as saying so: cxx rejects the bridge with "unsupported type", which names
+/// the payload but nothing the user wrote. With the dependency recorded the
+/// holder is discarded alongside its payload and the rest of the header is
+/// generated as usual.
+///
+/// The payload here is a private nested class, which autocxx turns down
+/// because Rust could not name it either.
+///
+/// The build is skipped: `generate_all!` over `<memory>` binds the whole of
+/// the standard library the header drags in, which does not compile on every
+/// platform - the reason every other `generate_all!` test here sticks to
+/// `<cstdint>`. That is a limitation of blanket generation and nothing to do
+/// with holders, and the failure this test is about happens during generation,
+/// before any compiler runs.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_holder_follows_an_ignored_payload() {
+    let hdr = indoc! {"
+        #include <memory>
+        class fx_Keeper {
+            struct fx_Hidden { int a; };
+        public:
+            static std::shared_ptr<const fx_Hidden> hold() {
+                return std::make_shared<const fx_Hidden>(fx_Hidden { 3 });
+            }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(make_checks_without_building(vec![
+            // No accessor for the holder, which is the whole of what it would
+            // have contributed to the bridge.
+            make_string_absence_finder(vec!["_autocxx_get".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// The same, for a `std::vector<T*>` holder: the element class is the one
+/// autocxx could not generate.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_holder_follows_an_ignored_element() {
+    let hdr = indoc! {"
+        #include <vector>
+        class fx_Warden {
+            struct fx_Ward { int a; };
+        public:
+            static std::vector<fx_Ward*> list() { return {}; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! { generate_all!() },
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_absence_finder(vec!["_autocxx_len".to_string()]),
+        ])),
+        None,
+    );
+}
+
 #[test]
 fn test_rust_reference() {
     let hdr = indoc! {"

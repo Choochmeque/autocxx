@@ -640,32 +640,22 @@ impl<'a> TypeConverter<'a> {
             // Only `std::shared_ptr` gets an accessor surface, and only when
             // its payload is a type the bridge can name in one.
             //
-            // The payload's dependency is recorded here, on whatever is being
-            // converted, rather than on the holder: `Api::ConcreteType` has no
-            // arm in `deps.rs` to carry one. Wherever the holder is reached
-            // through something else - a function, an alias, another container
-            // - that is enough, because the conversion which yielded the
-            // holder recorded the payload on that same something, so the
-            // holder outlives the payload only if nothing names the holder at
-            // all. `test_shared_ptr_const_class_payload_survives_through_an_alias`
-            // walks the longest of those chains.
-            //
-            // It is not enough under `generate_all!`, which makes every API a
-            // garbage-collection root, holders included. A holder rooted that
-            // way survives on its own, and if its payload class is an
-            // `IgnoredItem` the accessor generated below names a type nothing
-            // declares, and the generated code does not compile. Giving
-            // `Api::ConcreteType` a dependency of its own is the fix, and is
-            // the queued follow-up to the lowering rather than part of it; a
-            // builtin payload, which is all the marker used to reach us for,
-            // cannot be ignored, which is why nothing has hit this yet.
+            // The names that conversion met are recorded on the holder rather
+            // than on whatever is being converted, because it is the holder's
+            // accessors which name them: a function handling one of these
+            // names the holder and nothing else. `deps.rs` reads them back off
+            // `HolderSurface`, so the garbage collector reaches the payload
+            // through the holder and an ignored payload takes the holder with
+            // it. Both matter under `generate_all!`, where a holder is a
+            // garbage-collection root and survives whether or not anything
+            // names it.
             let surface = if tn == QualifiedName::new_from_cpp_name("std::shared_ptr") {
                 match self.convert_const_payload(&typ, ns) {
                     Some(Ok(mut payload)) => {
-                        deps.extend(payload.types_encountered.drain(..));
                         extra_apis.append(&mut payload.extra_apis);
                         Some(HolderSurface::SharedPtr {
                             payload: Box::new(payload.ty.into()),
+                            deps: payload.types_encountered,
                         })
                     }
                     Some(Err(err)) => return Err(err),
@@ -694,29 +684,15 @@ impl<'a> TypeConverter<'a> {
                 // into the bridge's, and what turns down a pointee the bridge
                 // could not name - a pointer to a pointer, above all.
                 //
-                // The names it met are recorded on whatever is being
-                // converted rather than on the holder, because
-                // `Api::ConcreteType` has no arm in `deps.rs` - the same
-                // arrangement the smart-pointer branch above describes, and
-                // sound here for the same reason: `lower_to_holder` adds the
-                // holder's own name to this same `deps` set, and every route
-                // to the holder is a conversion of the vector which passes
-                // through here, so nothing can come to depend on the holder
-                // without depending on the element in the same breath.
-                //
-                // The `generate_all!` hole that branch records is this
-                // branch's too, and reaches it sooner: a holder rooted by
-                // `generate_all!` survives whether or not anything names it,
-                // and an element class which ended up an `IgnoredItem` would
-                // leave the accessors naming a type nothing declares. A
-                // dependency arm on `Api::ConcreteType` closes both, and is
-                // the queued follow-up rather than part of either.
+                // The names it met go onto the holder, for the reason the
+                // smart-pointer branch above gives: the accessors are what
+                // name them, and `deps.rs` reads them back from there.
                 let mut element =
                     self.convert_type(element, ns, &TypeConversionContext::WithinContainer)?;
-                deps.extend(element.types_encountered.drain(..));
                 let extra_apis = std::mem::take(&mut element.extra_apis);
                 let surface = Some(HolderSurface::VectorOfPointers {
                     element: Box::new(element.ty.into()),
+                    deps: element.types_encountered,
                 });
                 return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
             }

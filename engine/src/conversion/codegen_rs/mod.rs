@@ -637,10 +637,10 @@ impl<'a> RsCodeGenerator<'a> {
                     0,
                 );
                 match holder_surface {
-                    Some(HolderSurface::SharedPtr { payload }) => {
+                    Some(HolderSurface::SharedPtr { payload, .. }) => {
                         self.generate_shared_ptr_surface(&name, &bridge_id, &payload, &mut result)
                     }
-                    Some(HolderSurface::VectorOfPointers { element }) => {
+                    Some(HolderSurface::VectorOfPointers { element, .. }) => {
                         self.generate_vector_surface(&name, &bridge_id, &element, &mut result)
                     }
                     None => {}

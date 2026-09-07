@@ -44,6 +44,10 @@ impl HasDependencies for Api<FnPrePhase1> {
             Api::RustSubclassFn { details, .. } => Box::new(details.dependencies.iter()),
             Api::RustFn { deps, .. } => Box::new(deps.iter()),
             Api::Static { cpp_ty, .. } => Box::new(cpp_ty.iter()),
+            Api::ConcreteType {
+                holder_surface: Some(surface),
+                ..
+            } => Box::new(surface.deps()),
             _ => Box::new(std::iter::empty()),
         }
     }
@@ -95,6 +99,10 @@ impl HasDependencies for Api<FnPhase> {
             Api::RustSubclassFn { details, .. } => Box::new(details.dependencies.iter()),
             Api::RustFn { deps, .. } => Box::new(deps.iter()),
             Api::Static { cpp_ty, .. } => Box::new(cpp_ty.iter()),
+            Api::ConcreteType {
+                holder_surface: Some(surface),
+                ..
+            } => Box::new(surface.deps()),
             _ => Box::new(std::iter::empty()),
         }
     }
