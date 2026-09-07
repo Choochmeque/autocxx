@@ -210,12 +210,12 @@ fn vendor_bindgen(manifest: &Path, out: &Path, target: &str) {
     for (relative, text) in files {
         // A module's children are looked up beside its own file, so the root
         // has to be `mod.rs` for `codegen/`, `ir/` and `options/` to resolve.
-        let written = if relative == Path::new("lib.rs") {
-            PathBuf::from("mod.rs")
+        let written = if relative == "lib.rs" {
+            "mod.rs"
         } else {
-            relative.clone()
+            relative.as_str()
         };
-        let path = dest.join(&written);
+        let path = dest.join(written);
         fs::create_dir_all(path.parent().expect("a file has a parent"))
             .expect("cannot create the vendored bindgen directory");
         fs::write(&path, rewrite(&relative, &text, target))
@@ -287,8 +287,33 @@ fn copy_renaming_manifests(from: &Path, to: &Path) {
     }
 }
 
-/// Every `.rs` file under `dir`, keyed by its path relative to the source root.
-fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, String>) {
+/// Read a file with its line endings normalised to LF.
+///
+/// A patch is applied by matching its context lines against the source exactly,
+/// so the two have to agree about how a line ends. On Windows they do not:
+/// `core.autocrlf` defaults to true in Git for Windows, so a checkout rewrites
+/// both the sources and the patches to CRLF - and only some of them, because
+/// the bindgen submodule pins `eol=lf` on part of its tree and autocxx cannot
+/// set attributes inside a submodule at all. Normalising here settles it for
+/// every checkout, whatever the user's git configuration, rather than only for
+/// the ones this project can put a `.gitattributes` in front of.
+///
+/// Only `\r\n` is rewritten, which is exactly what `core.autocrlf` produces; a
+/// lone `\r` is left as the byte the author wrote.
+fn read_lf(path: &Path) -> String {
+    let text =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    if text.contains('\r') {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    }
+}
+
+/// Every `.rs` file under `dir`, keyed by its path relative to the source root,
+/// written with `/` on every platform so that the keys and the `+++ b/...`
+/// names in the patches are the same strings on Windows as everywhere else.
+fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) {
     for entry in fs::read_dir(dir).expect("cannot read the bindgen sources") {
         let path = entry.expect("cannot read a bindgen source entry").path();
         if path.is_dir() {
@@ -297,9 +322,19 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, String>) {
             let relative = path
                 .strip_prefix(root)
                 .expect("walked from the root")
-                .to_path_buf();
-            let text = fs::read_to_string(&path).expect("cannot read a bindgen source");
-            files.insert(relative, text);
+                .components()
+                .map(|c| {
+                    // `to_string_lossy` would map two different unrepresentable
+                    // names onto one key and quietly drop a source; a bindgen
+                    // release which cannot be named in UTF-8 should stop here
+                    // instead.
+                    c.as_os_str()
+                        .to_str()
+                        .unwrap_or_else(|| panic!("{} is not valid UTF-8", path.display()))
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            files.insert(relative, read_lf(&path));
         }
     }
 }
@@ -330,22 +365,21 @@ fn patch_series(dir: &Path) -> Vec<PathBuf> {
 /// applies, correctly, to different code. Nothing pins the tag, so diffing
 /// generated output across a submodule bump is the check that catches those -
 /// see `book/src/contributing.md`.
-fn apply_patch(patch: &Path, files: &mut BTreeMap<PathBuf, String>) {
-    let text = fs::read_to_string(patch)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", patch.display()));
+fn apply_patch(patch: &Path, files: &mut BTreeMap<String, String>) {
+    let text = read_lf(patch);
     for (target, body) in split_per_file(&text, patch) {
         let parsed = diffy::Patch::from_str(&body).unwrap_or_else(|e| {
             panic!(
                 "{} does not parse its hunks for {}: {e}",
                 patch.display(),
-                target.display()
+                target
             )
         });
         let before = files.get(&target).unwrap_or_else(|| {
             panic!(
                 "{} patches {}, which is not in the bindgen submodule",
                 patch.display(),
-                target.display()
+                target
             )
         });
         let after = diffy::apply(before, &parsed).unwrap_or_else(|e| {
@@ -353,7 +387,7 @@ fn apply_patch(patch: &Path, files: &mut BTreeMap<PathBuf, String>) {
                 "{} does not apply to {}: {e}. The patch series is rebased onto \
                  one bindgen tag; check the submodule is at that tag.",
                 patch.display(),
-                target.display()
+                target
             )
         });
         files.insert(target, after);
@@ -366,10 +400,10 @@ fn apply_patch(patch: &Path, files: &mut BTreeMap<PathBuf, String>) {
 /// inside a hunk body a removed line is prefixed with a single `-`, so the only
 /// way to fake that pair would be source text which itself begins `-- ` and is
 /// followed by source beginning `++ `.
-fn split_per_file(text: &str, patch: &Path) -> Vec<(PathBuf, String)> {
+fn split_per_file(text: &str, patch: &Path) -> Vec<(String, String)> {
     let lines: Vec<&str> = text.lines().collect();
-    let mut sections: Vec<(PathBuf, String)> = Vec::new();
-    let mut current: Option<(PathBuf, Vec<&str>)> = None;
+    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
 
     let mut i = 0;
     while i < lines.len() {
@@ -384,7 +418,7 @@ fn split_per_file(text: &str, patch: &Path) -> Vec<(PathBuf, String)> {
             }
             let target = lines[i + 1]["+++ ".len()..].trim();
             let target = target.strip_prefix("b/").unwrap_or(target);
-            current = Some((PathBuf::from(target), vec![line, lines[i + 1]]));
+            current = Some((target.to_owned(), vec![line, lines[i + 1]]));
             i += 2;
             continue;
         }
@@ -406,8 +440,8 @@ fn split_per_file(text: &str, patch: &Path) -> Vec<(PathBuf, String)> {
 
 /// Turn one bindgen source into something which compiles as a module of
 /// autocxx-engine rather than as part of its own crate.
-fn rewrite(relative: &Path, text: &str, target: &str) -> String {
-    if VERBATIM.contains(&relative.to_string_lossy().replace('\\', "/").as_str()) {
+fn rewrite(relative: &str, text: &str, target: &str) -> String {
+    if VERBATIM.contains(&relative) {
         return text.to_string();
     }
 
@@ -446,7 +480,7 @@ fn rewrite(relative: &Path, text: &str, target: &str) -> String {
 
     text = ignore_doctests(&text);
 
-    if relative == Path::new("lib.rs") {
+    if relative == "lib.rs" {
         text = format!("{MODULE_PREAMBLE}{text}");
     }
 
