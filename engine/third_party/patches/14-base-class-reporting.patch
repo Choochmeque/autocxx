@@ -1,0 +1,190 @@
+Subject: Report base classes through `ParseCallbacks`
+
+A base class reaches bindgen's output only as the field generated to store it,
+and `Base::requires_storage` declines to generate that field twice over: for a
+virtual base, because the object reaches it indirectly rather than at a fixed
+offset, and for a base bindgen finds zero-sized, because a field would give it
+a size. Both are right for the struct bindgen emits, and both leave the
+inheritance unrecorded. `struct Derived : Empty { int x; };` comes out
+`struct Derived { x: c_int }`, indistinguishable from a class with no bases at
+all.
+
+Only bindgen has that fact. `mod ir` is private, `DiscoveredItem::Struct`
+carries names alone, no `ParseCallbacks` method mentions bases, and even
+`CompInfo`'s `Trace` edges do not say which kind of base an edge leads to. A
+consumer which emits C++ of its own - deciding whether a class is abstract,
+which special members the language implicitly declares or deletes for it,
+whether an upcast exists, whether the layout is the layout of the fields - has
+nothing to work from but those fields, so it gets each of those wrong in
+silence rather than loudly.
+
+`denote_base_class` reports every base of every struct codegen writes members
+for: the class inherited from, whether the inheritance is virtual, the access
+specifier, and the name of the field storing the base where there is one. It
+fires before the `requires_storage` skip, so the two invisible cases are
+exactly what it adds. No generated output changes, and a consumer which does
+not implement it is unaffected.
+
+Reporting the access specifier rather than a boolean means `Base` carries a
+`Visibility` in place of its `is_pub` flag, so that protected and private
+inheritance stay distinguishable to a consumer; `Base::is_public` is unchanged
+for bindgen's own use.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -261,6 +261,35 @@
+     /// the C++ type; a downstream generator emitting C++ of its own needs to
+     /// know that.
+     fn denote_discards_template_param(&self, _id: DiscoveredItemId) {}
++
++    /// Report one direct base class of a struct or class.
++    ///
++    /// Called for every base of every compound type codegen writes out,
++    /// including the bases which contribute no field to the generated struct:
++    /// a virtual base, which the object reaches indirectly rather than at a
++    /// fixed offset, and a base bindgen finds zero-sized, which it leaves out
++    /// so as not to give it a size. Neither appears anywhere else in the
++    /// output, so a consumer which reads bases off the generated fields
++    /// concludes such a class has no bases at all - and gets its special
++    /// members, its abstractness and its layout wrong in silence.
++    ///
++    /// Not called for a type whose members codegen does not write out: one
++    /// generated as opaque, whose contents bindgen deliberately describes
++    /// nothing of; one which is blocklisted or outside the allowlist; or one
++    /// with non-type template parameters, which it emits nothing at all for.
++    ///
++    /// [`BaseClassInfo::base`] identifies the item the base type resolves to
++    /// through any type references. For `struct Derived : Alias` where `Alias`
++    /// is a typedef that is the typedef rather than the class behind it, which
++    /// is also the type bindgen writes for the field. A base which is a
++    /// template instantiation is identified by the instantiation, which
++    /// [`ParseCallbacks::new_item_found`] does not announce at all.
++    fn denote_base_class(
++        &self,
++        _derived: DiscoveredItemId,
++        _base: BaseClassInfo<'_>,
++    ) {
++    }
+ 
+     /// Report which kind of C++ method a function is: a constructor, a
+     /// destructor, a static method or an ordinary one.
+@@ -493,6 +522,35 @@
+     PureVirtual,
+ }
+ 
++/// How a class inherits one of its base classes.
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++pub enum BaseKind {
++    /// Ordinary inheritance, i.e. `struct Derived : Base {};`
++    Normal,
++    /// Virtual inheritance, i.e. `struct Derived : virtual Base {};`
++    Virtual,
++}
++
++/// Relevant information about a base class, reported through
++/// [`ParseCallbacks::denote_base_class`].
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct BaseClassInfo<'a> {
++    /// The class being inherited from.
++    pub base: DiscoveredItemId,
++
++    /// Whether the inheritance is virtual.
++    pub kind: BaseKind,
++
++    /// The access specifier the base is inherited with.
++    pub visibility: Visibility,
++
++    /// The field generated to store the base subobject, where one was
++    /// generated. `None` says the base exists in C++ but occupies no field:
++    /// it is virtual, or bindgen found it zero-sized.
++    pub field_name: Option<&'a str>,
++}
++
+ /// Whether a C++ method has been explicitly defaulted or deleted.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Explicitness {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -21,8 +21,9 @@
+ use super::BindgenOptions;
+ 
+ use crate::callbacks::{
+-    AttributeInfo, DeriveInfo, DiscoveredItem, DiscoveredItemId, Explicitness,
+-    FieldAttributeInfo, FieldInfo, ItemInfo, TypeKind as DeriveTypeKind,
++    AttributeInfo, BaseClassInfo, BaseKind, DeriveInfo, DiscoveredItem,
++    DiscoveredItemId, Explicitness, FieldAttributeInfo, FieldInfo, ItemInfo,
++    TypeKind as DeriveTypeKind,
+ };
+ use crate::codegen::error::Error;
+ use crate::ir::analysis::{HasVtable, Sizedness};
+@@ -2459,7 +2460,37 @@
+             }
+ 
+             for base in self.base_members() {
+-                if !base.requires_storage(ctx) {
++                let requires_storage = base.requires_storage(ctx);
++                // Reported before the skip below, which is the only mention a
++                // base with no storage would otherwise get anywhere.
++                // `through_type_refs` so that the id names what the field
++                // below would name, rather than a reference to it.
++                let base_id = DiscoveredItemId::new(
++                    base.ty
++                        .into_resolver()
++                        .through_type_refs()
++                        .resolve(ctx)
++                        .id()
++                        .as_usize(),
++                );
++                ctx.options().for_each_callback(|cb| {
++                    cb.denote_base_class(
++                        id,
++                        BaseClassInfo {
++                            base: base_id,
++                            kind: if base.is_virtual() {
++                                BaseKind::Virtual
++                            } else {
++                                BaseKind::Normal
++                            },
++                            visibility: base.visibility,
++                            field_name: requires_storage
++                                .then_some(base.field_name.as_str()),
++                        },
++                    );
++                });
++
++                if !requires_storage {
+                     continue;
+                 }
+ 
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -1005,8 +1005,8 @@
+     pub(crate) kind: BaseKind,
+     /// Name of the field in which this base should be stored.
+     pub(crate) field_name: String,
+-    /// Whether this base is inherited from publicly.
+-    pub(crate) is_pub: bool,
++    /// The access specifier this base is inherited with.
++    pub(crate) visibility: Visibility,
+ }
+ 
+ impl Base {
+@@ -1037,7 +1037,7 @@
+ 
+     /// Whether this base is inherited from publicly.
+     pub(crate) fn is_public(&self) -> bool {
+-        self.is_pub
++        matches!(self.visibility, Visibility::Public)
+     }
+ }
+ 
+@@ -1545,7 +1545,7 @@
+                         ty: type_id,
+                         kind,
+                         field_name,
+-                        is_pub: cur.access_specifier() == CX_CXXPublic,
++                        visibility: cur.access_specifier().into(),
+                     });
+                 }
+                 CXCursor_Constructor | CXCursor_Destructor |
