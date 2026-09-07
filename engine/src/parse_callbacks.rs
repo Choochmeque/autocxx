@@ -11,7 +11,7 @@ use std::{cell::RefCell, fmt::Display, panic::UnwindSafe, rc::Rc};
 use crate::types::{strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
-    DiscoveredItem, DiscoveredItemId, Explicitness, SpecialMemberKind, Visibility,
+    DiscoveredItem, DiscoveredItemId, Explicitness, MethodKind, SpecialMemberKind, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -87,9 +87,11 @@ impl CppOriginalName {
 
     /// The name by which a synthesized constructor is recognised as one.
     ///
-    /// `analyze_foreign_fn` spots a constructor by its name beginning with the
-    /// name of the type it constructs, so `synthesize_special_member` has to
-    /// hand it one that does - which means the very string that check compares
+    /// `analyze_foreign_fn` asks bindgen which methods are constructors and
+    /// falls back to the name for the functions bindgen never classified, which
+    /// is what a synthesized one is. That fallback wants a name beginning with
+    /// the name of the type constructed, so `synthesize_special_member` has to
+    /// hand it one - which means the very string that check compares
     /// against: the C++ final segment for a nested type, and otherwise the
     /// identifier bindgen emitted for the type, which for a type C++ calls
     /// `type` is `type_`. This is therefore a Rust-side name as often as not,
@@ -176,6 +178,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     root_mod: Option<DiscoveredItemId>,
     visibility: HashMap<DiscoveredItemId, Visibility>,
     special_member_kinds: HashMap<DiscoveredItemId, SpecialMemberKind>,
+    method_kinds: HashMap<DiscoveredItemId, MethodKind>,
     explicitness: HashMap<DiscoveredItemId, Explicitness>,
     discards_template_param: HashSet<DiscoveredItemId>,
     names: HashMap<DiscoveredItemId, String>,
@@ -295,6 +298,14 @@ impl ParseCallbackResults {
     pub(crate) fn special_member_kind(&self, name: &QualifiedName) -> Option<SpecialMemberKind> {
         self.id_by_name(name)
             .and_then(|id| self.results.special_member_kinds.get(&id).cloned())
+    }
+
+    /// What C++ says a method is. `None` means bindgen reported no kind for
+    /// this function: it is either a free function, which has no method kind,
+    /// or one autocxx synthesized and bindgen never saw.
+    pub(crate) fn get_method_kind(&self, name: &QualifiedName) -> Option<MethodKind> {
+        self.id_by_name(name)
+            .and_then(|id| self.results.method_kinds.get(&id).cloned())
     }
 
     pub(crate) fn get_deleted_or_defaulted(&self, name: &QualifiedName) -> Option<Explicitness> {
@@ -430,6 +441,10 @@ impl ParseCallbacks for AutocxxParseCallbacks {
             .borrow_mut()
             .explicitness
             .insert(id, explicitness);
+    }
+
+    fn denote_method_kind(&self, id: DiscoveredItemId, kind: MethodKind) {
+        self.results.borrow_mut().method_kinds.insert(id, kind);
     }
 
     fn denote_discards_template_param(&self, id: DiscoveredItemId) {

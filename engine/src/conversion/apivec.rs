@@ -362,6 +362,7 @@ mod tests {
                 virtualness: None,
                 cpp_vis: CppVisibility::Public,
                 special_member: None,
+                method_kind: None,
                 original_name: None,
                 self_ty: None,
                 synthesized_this_type: None,

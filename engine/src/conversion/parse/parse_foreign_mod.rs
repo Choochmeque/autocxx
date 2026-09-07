@@ -95,6 +95,7 @@ impl<'a> ParseForeignMod<'a> {
                     virtualness: self.parse_callback_results.get_virtualness(&qn),
                     cpp_vis: self.parse_callback_results.get_cpp_visibility(&qn),
                     special_member: self.parse_callback_results.special_member_kind(&qn),
+                    method_kind: self.parse_callback_results.get_method_kind(&qn),
                     original_name: self.parse_callback_results.get_fn_original_name(&qn),
                     synthesized_this_type: None,
                     add_to_trait: None,
