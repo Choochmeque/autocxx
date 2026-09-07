@@ -1161,9 +1161,13 @@ impl<'a> TypeConverter<'a> {
     /// holder autocxx already manufactures for such things, with `surface`
     /// saying which accessors the holder gets.
     ///
-    /// `typ` is the instantiation as bindgen wrote it, before any substitution
-    /// of cxx's own container names: it is the C++ spelling of the template -
-    /// not cxx's - that the generated typedef has to name.
+    /// `typ` is the instantiation before this conversion substitutes cxx's own
+    /// container names, because it is the C++ spelling of the template - not
+    /// cxx's - that the generated typedef has to name. Usually that means
+    /// bindgen's spelling; where the instantiation was reached through an
+    /// alias it is what the alias stored, which may be a substitution some
+    /// earlier conversion made. `type_to_cpp` maps both back to C++, and
+    /// [`sibling_shared_ptr`] is where the difference matters.
     fn lower_to_holder(
         &mut self,
         typ: TypePath,
