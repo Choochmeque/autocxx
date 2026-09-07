@@ -201,9 +201,10 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
 ///
 /// # Build time
 ///
-/// Everything here runs inside `autocxx_engine`, including the `libclang` parse
-/// - bindgen is vendored as [`vendored_bindgen`] rather than depended upon -
-/// except the final C++ codegen, which belongs to `cxx_gen`.
+/// Everything here runs inside `autocxx_engine`, including the `libclang`
+/// parse, because bindgen is vendored as `vendored_bindgen` rather than
+/// depended upon. The exception is the final C++ codegen, which belongs to
+/// `cxx_gen`.
 ///
 /// ```text
 ///   .rs input (your source, containing include_cpp!)
