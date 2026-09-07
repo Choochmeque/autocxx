@@ -8,10 +8,11 @@
 
 use std::{cell::RefCell, fmt::Display, panic::UnwindSafe, rc::Rc};
 
-use crate::types::{strip_bindgen_original_suffix, Namespace};
+use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
-    DiscoveredItem, DiscoveredItemId, Explicitness, MethodKind, SpecialMemberKind, Visibility,
+    BaseClassInfo, BaseKind, DiscoveredItem, DiscoveredItemId, Explicitness, MethodKind,
+    SpecialMemberKind, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -176,6 +177,40 @@ struct NameAndParent {
     name: String,
 }
 
+/// The base classes bindgen reported for one type.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct BaseClasses {
+    /// The bases whose identifier resolved to a name autocxx knows.
+    pub(crate) named: Vec<BaseClass>,
+    /// Whether any base did not. bindgen reports a base by the identifier of
+    /// the item its type resolves to, and it announces no such item for a
+    /// template instantiation, so `struct D : Base<int>` names nothing here.
+    /// It is a base all the same, and a class with one is a class whose
+    /// ancestry autocxx does not have.
+    pub(crate) any_unnamed: bool,
+    /// Whether any base, named or not, is inherited virtually.
+    pub(crate) any_virtual: bool,
+}
+
+/// A base class of some type, as bindgen reported it.
+#[derive(Debug, Clone)]
+pub(crate) struct BaseClass {
+    pub(crate) name: QualifiedName,
+    /// Whether C++ inherits it virtually. Such a base sits at no fixed offset
+    /// within the derived class, so the derived class's layout is not the
+    /// layout of the fields bindgen emits for it.
+    pub(crate) is_virtual: bool,
+    pub(crate) is_public: bool,
+}
+
+/// A base class before its identifier has been turned back into a name.
+#[derive(Debug, Clone)]
+struct ReportedBase {
+    base: DiscoveredItemId,
+    is_virtual: bool,
+    is_public: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 /// Information communicated to us from bindgen using its `ParseCallbacks`
 /// mechanism.
@@ -195,6 +230,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     discards_template_param: HashSet<DiscoveredItemId>,
     names: HashMap<DiscoveredItemId, String>,
     mods_for_items: HashMap<DiscoveredItemId, DiscoveredItemId>,
+    bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -228,10 +264,59 @@ impl UnindexedParseCallbackResults {
             })
             .collect();
 
+        let bases = self
+            .bases
+            .iter()
+            .filter_map(|(derived, reported)| {
+                let mut bases = BaseClasses::default();
+                for base in reported {
+                    bases.any_virtual |= base.is_virtual;
+                    match self.qualified_name(base.base) {
+                        Some(name) => bases.named.push(BaseClass {
+                            name,
+                            is_virtual: base.is_virtual,
+                            is_public: base.is_public,
+                        }),
+                        None => bases.any_unnamed = true,
+                    }
+                }
+                Some((self.qualified_name(*derived)?, bases))
+            })
+            .collect();
+
         ParseCallbackResults {
             results: self,
             index,
+            bases,
         }
+    }
+
+    /// The name autocxx knows an item by, from the name and the namespace
+    /// bindgen reported for it - the inverse of
+    /// [`ParseCallbackResults::id_by_name`], for the facts bindgen reports by
+    /// identifier rather than by name.
+    ///
+    /// `None` for an item bindgen never named - a template instantiation, which
+    /// it announces through no callback - and for one it named but never placed
+    /// in a module, which is one it abandoned before emitting anything: a class
+    /// with non-type template parameters, say.
+    ///
+    /// The walk terminates because each step moves to the enclosing module and
+    /// the root module is reported with no parent at all.
+    fn qualified_name(&self, id: DiscoveredItemId) -> Option<QualifiedName> {
+        let name = self.names.get(&id)?;
+        let root = self.root_mod?;
+        let mut segments = Vec::new();
+        let mut parent = *self.mods_for_items.get(&id)?;
+        while parent != root {
+            segments.push(self.names.get(&parent)?.clone());
+            parent = *self.mods_for_items.get(&parent)?;
+        }
+        let ns = segments
+            .into_iter()
+            .rev()
+            .fold(Namespace::new(), |ns, segment| ns.push(segment));
+        Some(QualifiedName::new(&ns, make_ident(name)))
     }
 }
 
@@ -240,6 +325,7 @@ impl UnindexedParseCallbackResults {
 pub(crate) struct ParseCallbackResults {
     results: UnindexedParseCallbackResults,
     index: HashMap<NameAndParent, DiscoveredItemId>,
+    bases: HashMap<QualifiedName, BaseClasses>,
 }
 
 impl ParseCallbackResults {
@@ -340,6 +426,26 @@ impl ParseCallbackResults {
             .map(|id| self.results.discards_template_param.contains(&id))
             .unwrap_or_default()
     }
+
+    /// Every base class bindgen reported for a type, including the ones it
+    /// generates no field for: a base it finds zero-sized, and a virtual
+    /// base, which the object reaches indirectly.
+    ///
+    /// `None` where bindgen reported nothing, which means either that the type
+    /// has no bases or that it is one bindgen wrote no members for - an opaque
+    /// type, which may have bases it describes nothing of.
+    pub(crate) fn get_bases(&self, name: &QualifiedName) -> Option<&BaseClasses> {
+        self.bases.get(name)
+    }
+
+    /// The types which inherit at least one base virtually, so are laid out
+    /// differently from the fields bindgen shows for them.
+    pub(crate) fn types_inheriting_virtually(&self) -> impl Iterator<Item = &QualifiedName> {
+        self.bases
+            .iter()
+            .filter(|(_, bases)| bases.any_virtual)
+            .map(|(name, _)| name)
+    }
 }
 
 #[derive(Debug)]
@@ -393,6 +499,14 @@ impl ParseCallbacks for AutocxxParseCallbacks {
     ) {
         let mut results = self.results.borrow_mut();
         if let Some(original_name) = original_name {
+            // bindgen reports a function under the name
+            // `generated_name_override` gave it, so the rename has to come off
+            // again here. It comes off type names too, which is wrong for a
+            // C++ class genuinely called `X_bindgen_original` - but the index
+            // this feeds keys a renamed function and a same-named type
+            // identically, so a type's entry has to survive being reached
+            // through a function's name. See
+            // `test_function_hidden_by_type_is_documented`.
             let original_name = strip_bindgen_original_suffix(original_name);
             results
                 .original_names
@@ -417,15 +531,24 @@ impl ParseCallbacks for AutocxxParseCallbacks {
         _source_location: Option<&SourceLocation>,
     ) {
         match item {
+            // Only a function is renamed - `generated_name_override` above
+            // does it, and autocxx knows one by the name with the suffix taken
+            // off again - so only a function's name is stripped here. Doing it
+            // to a type would file a C++ class genuinely called
+            // `Widget_bindgen_original` under `Widget`, where it would answer
+            // lookups meant for a different class and, once bases are reported
+            // by name, invent inheritance between the two.
+            DiscoveredItem::Function { final_name } => {
+                let final_name = strip_bindgen_original_suffix(&final_name);
+                self.results.borrow_mut().names.insert(id, final_name);
+            }
             DiscoveredItem::Struct { final_name, .. }
             | DiscoveredItem::Enum { final_name, .. }
             | DiscoveredItem::Union { final_name, .. }
             | DiscoveredItem::Alias {
                 alias_name: final_name,
                 ..
-            }
-            | DiscoveredItem::Function { final_name } => {
-                let final_name = strip_bindgen_original_suffix(&final_name);
+            } => {
                 self.results.borrow_mut().names.insert(id, final_name);
             }
             DiscoveredItem::Mod {
@@ -486,5 +609,18 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_discards_template_param(&self, id: DiscoveredItemId) {
         self.results.borrow_mut().discards_template_param.insert(id);
+    }
+
+    fn denote_base_class(&self, derived: DiscoveredItemId, base: BaseClassInfo<'_>) {
+        self.results
+            .borrow_mut()
+            .bases
+            .entry(derived)
+            .or_default()
+            .push(ReportedBase {
+                base: base.base,
+                is_virtual: matches!(base.kind, BaseKind::Virtual),
+                is_public: matches!(base.visibility, Visibility::Public),
+            });
     }
 }

@@ -18,6 +18,7 @@ use crate::{
         },
     },
     types::{Namespace, QualifiedName},
+    ParseCallbackResults,
 };
 use autocxx_parser::IncludeCppConfig;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +59,14 @@ impl StructDetails {
 pub struct ByValueChecker {
     // Mapping from type name to whether it is safe to be POD
     results: HashMap<QualifiedName, StructDetails>,
+    /// Types which inherit at least one base virtually. Such a type's layout
+    /// is not the layout of the fields bindgen shows: the virtual base sits at
+    /// an offset the object carries at runtime, and bindgen writes no field for
+    /// the base. It writes one for the pointer which finds it only where the
+    /// class needs a vtable pointer of its own - which `has_vtable` below
+    /// already refuses on - and where the pointer comes from a base instead,
+    /// all that is left is anonymous padding.
+    virtually_inherited: HashSet<QualifiedName>,
 }
 
 impl ByValueChecker {
@@ -71,7 +80,10 @@ impl ByValueChecker {
             };
             results.insert(tn.clone(), StructDetails::new(safety));
         }
-        ByValueChecker { results }
+        ByValueChecker {
+            results,
+            virtually_inherited: HashSet::new(),
+        }
     }
 
     /// Scan APIs to work out which are by-value safe. Constructs a [ByValueChecker]
@@ -79,8 +91,13 @@ impl ByValueChecker {
     pub(crate) fn new_from_apis(
         apis: &ApiVec<TypedefPhase>,
         config: &IncludeCppConfig,
+        parse_callback_results: &ParseCallbackResults,
     ) -> Result<ByValueChecker, ConvertErrorFromCpp> {
         let mut byvalue_checker = ByValueChecker::new();
+        byvalue_checker.virtually_inherited = parse_callback_results
+            .types_inheriting_virtually()
+            .cloned()
+            .collect();
         for blocklisted in config.get_blocklist() {
             let tn = QualifiedName::new_from_cpp_name(blocklisted);
             let safety = PodState::UnsafeToBePod(format!("type {tn} is on the blocklist"));
@@ -301,6 +318,17 @@ impl ByValueChecker {
         if Self::has_vtable(def) {
             let reason =
                 format!("Type {tyname} could not be POD because it has virtual functions.");
+            field_safety_problem = PodState::UnsafeToBePod(reason);
+        }
+        if self.virtually_inherited.contains(&tyname) {
+            // Not a conservative guess: a virtual base is at an offset the
+            // object carries at runtime, so the fields above are not this
+            // type's layout, and holding it by value in Rust would copy
+            // something else. Nothing else here can see it - a virtual base
+            // gets no field for `get_field_types` to find.
+            let reason = format!(
+                "Type {tyname} could not be POD because it inherits a base class virtually."
+            );
             field_safety_problem = PodState::UnsafeToBePod(reason);
         }
         let mut my_details = StructDetails::new(field_safety_problem);

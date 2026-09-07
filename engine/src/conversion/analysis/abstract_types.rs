@@ -19,7 +19,11 @@ use super::{
 };
 use crate::{
     conversion::{
-        analysis::{depth_first::fields_and_bases_first, fun::ReceiverMutability},
+        analysis::{
+            depth_first::fields_and_bases_first,
+            fun::ReceiverMutability,
+            tdef::{resolve_typedefs, typedef_targets},
+        },
         api::{ApiName, TypeKind},
         error_reporter::{convert_apis, convert_item_apis},
         ConvertErrorFromCpp, CppEffectiveName,
@@ -63,13 +67,56 @@ impl Signature {
     }
 }
 
+/// A pure virtual function which some class has yet to override, kept with the
+/// class which declared it pure.
+///
+/// The signature alone would not do. Two unrelated hierarchies can declare
+/// functions of the same name and parameters, and a class inheriting both
+/// carries both obligations; an override of one is not an override of the
+/// other.
+///
+/// The declaring class is not the whole identity either. A class can hold two
+/// subobjects of the *same* declaring class, reached through different virtual
+/// bases - `struct B : A {}; struct C : A {}; struct L : virtual B {};
+/// struct R : virtual C {};` and then `struct D : L, R {}` - and an override in
+/// one branch settles only that branch's copy. Telling those apart needs the
+/// path to the subobject, not just its type, which is more than this analysis
+/// carries. Such a class is called concrete when C++ calls it abstract, which
+/// is what it was called before bases were reported at all; the generated
+/// constructor then fails to compile, naming the abstract class.
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+struct PureVirtual {
+    declared_by: QualifiedName,
+    signature: Signature,
+}
+
 /// Spot types with pure virtual functions and mark them abstract.
 pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhase3> {
     #[derive(Default, Debug, Clone)]
     struct ClassAbstractState {
-        undefined: HashSet<Signature>,
+        /// Pure virtuals with no overrider, declared here or reached through a
+        /// base each derived class gets its own copy of. Only an override in
+        /// the class itself settles one of these: two non-virtual bases of the
+        /// same class are two separate subobjects, and overriding in one says
+        /// nothing about the other.
+        undefined: HashSet<PureVirtual>,
+        /// The same, for pure virtuals reached through a virtual base. There
+        /// is one such base subobject however many paths lead to it, so a
+        /// class which overrides one of them does so for every class sharing
+        /// that base - which is why these are kept apart.
+        undefined_through_virtual_base: HashSet<PureVirtual>,
+        /// Virtual functions this class defines itself.
         defined: HashSet<Signature>,
+        /// The obligations settled by a definition of something reached
+        /// through a virtual base: the ones this class writes and the ones its
+        /// bases contribute. Named by the obligation rather than by the
+        /// signature, so that an override settles the base subobject it
+        /// actually belongs to and no other. An override of something reached
+        /// through a *non*-virtual base is not among them at all, because it
+        /// settles only that class's own copy of the base.
+        overrides_through_virtual_base: HashSet<PureVirtual>,
     }
+    let typedef_targets = typedef_targets(&apis);
     let mut class_states: HashMap<QualifiedName, ClassAbstractState> = HashMap::new();
     let mut abstract_classes = HashSet::new();
     let mut pure_virtual_destructors: HashSet<QualifiedName> = HashSet::new();
@@ -96,7 +143,10 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
                         .entry(self_ty_name.clone())
                         .or_default()
                         .undefined
-                        .insert(Signature::new(name, params, *constness));
+                        .insert(PureVirtual {
+                            declared_by: self_ty_name.clone(),
+                            signature: Signature::new(name, params, *constness),
+                        });
                 }
                 MethodKind::Virtual(constness) => {
                     class_states
@@ -141,6 +191,7 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
                     pod:
                         PodAnalysis {
                             bases,
+                            virtual_bases,
                             kind: TypeKind::Pod | TypeKind::NonPod,
                             ..
                         },
@@ -155,15 +206,53 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
 
             // then add pure virtuals of bases
             for base in bases.iter() {
-                if let Some(base_cs) = class_states.get(base) {
-                    self_cs.undefined.extend(base_cs.undefined.iter().cloned());
+                // Whether the inheritance is virtual is recorded against the
+                // name the base was reported under; which class's pure virtuals
+                // those are is a question for the class that name resolves to.
+                let inherited_virtually = virtual_bases.contains(base);
+                let base = resolve_typedefs(&typedef_targets, base);
+                if let Some(base_cs) = class_states.get(&base) {
+                    // A base's own unsettled pure virtuals reach us through a
+                    // shared subobject exactly when we inherit that base
+                    // virtually. Ones it already held as shared stay shared,
+                    // however we inherit the base itself.
+                    let inherited = if inherited_virtually {
+                        &mut self_cs.undefined_through_virtual_base
+                    } else {
+                        &mut self_cs.undefined
+                    };
+                    inherited.extend(base_cs.undefined.iter().cloned());
+                    self_cs
+                        .undefined_through_virtual_base
+                        .extend(base_cs.undefined_through_virtual_base.iter().cloned());
+                    self_cs
+                        .overrides_through_virtual_base
+                        .extend(base_cs.overrides_through_virtual_base.iter().cloned());
                 }
             }
+
+            // A definition this class writes for something it reached through
+            // a virtual base is the final overrider for every class sharing
+            // that base. One it writes for something reached any other way is
+            // not, and stays in `defined` where only this class's own
+            // subobject is settled by it.
+            let overrides_shared: Vec<_> = self_cs
+                .undefined_through_virtual_base
+                .iter()
+                .filter(|pure| self_cs.defined.contains(&pure.signature))
+                .cloned()
+                .collect();
+            self_cs
+                .overrides_through_virtual_base
+                .extend(overrides_shared);
 
             // then remove virtuals defined in this class
             self_cs
                 .undefined
-                .retain(|und| !self_cs.defined.contains(und));
+                .retain(|und| !self_cs.defined.contains(&und.signature));
+            self_cs
+                .undefined_through_virtual_base
+                .retain(|und| !self_cs.overrides_through_virtual_base.contains(und));
 
             // if there are undefined functions, mark as virtual
             //
@@ -175,7 +264,10 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
             // does override it, explicitly or implicitly, and so is concrete.
             // Only the class which declares `= 0` on its own destructor is
             // abstract because of it.
-            if !self_cs.undefined.is_empty() || pure_virtual_destructors.contains(&name.name) {
+            if !self_cs.undefined.is_empty()
+                || !self_cs.undefined_through_virtual_base.is_empty()
+                || pure_virtual_destructors.contains(&name.name)
+            {
                 abstract_classes.insert(name.name.clone());
             }
 

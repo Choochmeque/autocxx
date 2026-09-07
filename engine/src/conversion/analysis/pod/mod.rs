@@ -26,6 +26,7 @@ use crate::{
         type_helpers::array_element_type,
         ConvertErrorFromCpp,
     },
+    parse_callbacks::BaseClass,
     types::{Namespace, QualifiedName},
     ParseCallbackResults,
 };
@@ -51,7 +52,21 @@ pub(crate) struct FieldInfo {
 #[derive(std::fmt::Debug)]
 pub(crate) struct PodAnalysis {
     pub(crate) kind: TypeKind,
+    /// Every base class, whether or not bindgen generated a field for it.
     pub(crate) bases: HashSet<QualifiedName>,
+    /// Whether this class has a base bindgen reported but could not name -
+    /// a template instantiation, which it announces through no callback. Such
+    /// a base is missing from `bases` above, so the sets there are known to be
+    /// incomplete and the constructor analysis declines to run C++'s rules.
+    /// Abstractness does not account for it: a pure virtual inherited from an
+    /// unnameable base still goes unnoticed, exactly as every base did before
+    /// bindgen reported any.
+    pub(crate) has_unnamed_base: bool,
+    /// The subset of `bases` this type inherits virtually. Such a base is one
+    /// subobject shared with everything else which inherits it virtually, so
+    /// it sits at no fixed offset here, and a function overriding one of its
+    /// pure virtuals overrides it for every class sharing it.
+    pub(crate) virtual_bases: HashSet<QualifiedName>,
     /// Base classes for which we should create casts.
     /// That's just those which are on the allowlist,
     /// because otherwise we don't know whether they're
@@ -92,7 +107,7 @@ pub(crate) fn analyze_pod_apis(
     // directives from the user can't be met because, for instance,
     // a type contains a std::string or some other type which can't be
     // held safely by value in Rust.
-    let byvalue_checker = ByValueChecker::new_from_apis(&apis, config)?;
+    let byvalue_checker = ByValueChecker::new_from_apis(&apis, config, parse_callback_results)?;
     // A base class may be a nested type which the user allowlisted by the name
     // C++ gives it; see google/autocxx#1422.
     let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
@@ -165,7 +180,7 @@ fn analyze_struct(
 ) -> Result<Box<dyn Iterator<Item = Api<PodPhase>>>, ConvertErrorWithContext> {
     let id = name.name.get_final_ident();
     check_for_fatal_attrs(parse_callback_results, &name.name)?;
-    let bases = get_bases(&details.item);
+    let (bases, has_unnamed_base) = get_bases(&name.name, &details.item, parse_callback_results);
     let mut field_deps = HashSet::new();
     let mut field_definition_deps = HashSet::new();
     let mut field_info = Vec::new();
@@ -201,10 +216,15 @@ fn analyze_struct(
     };
     let castable_bases = bases
         .iter()
-        .filter(|(_, is_public)| **is_public)
+        .filter(|(_, base)| base.is_public)
         .map(|(base, _)| base)
         .filter(|base| nested_cpp_names.is_on_allowlist(base))
         .cloned()
+        .collect();
+    let virtual_bases = bases
+        .iter()
+        .filter(|(_, base)| base.is_virtual)
+        .map(|(base, _)| base.clone())
         .collect();
     let num_generics = details.item.generics.params.len();
     let in_anonymous_namespace = name
@@ -217,6 +237,8 @@ fn analyze_struct(
         analysis: PodAnalysis {
             kind: type_kind,
             bases: bases.into_keys().collect(),
+            has_unnamed_base,
+            virtual_bases,
             castable_bases,
             field_deps,
             field_definition_deps,
@@ -288,29 +310,28 @@ fn get_struct_field_types(
     convert_errors
 }
 
-/// Map to whether the bases are public.
+/// The base classes of a type.
 ///
-/// A base class is only ever seen here as a field bindgen named `_base`,
-/// `_base_1` and so on; there is no other channel for one.
+/// bindgen reports every base through `denote_base_class`, including the ones
+/// it generates no field for - a base it finds zero-sized, and a virtual base,
+/// which the object reaches indirectly. Those two are invisible in the generated struct, so
+/// reading bases off the fields alone concluded that
+/// `struct D : Empty { int x; };` had no bases at all, and D then got its
+/// implicit special members, its abstractness and its upcasts from the wrong
+/// set of ancestors.
 ///
-/// TODO: which means a base that takes up no space is invisible. bindgen emits
-/// a field for a base only when `Base::requires_storage` says so, and that is
-/// false for an empty base - which C++ lays out at zero size inside its
-/// derived class - and for a virtual base. So for `struct D : Empty { int x;
-/// };` we are handed `struct D { pub x: c_int }` and conclude that `D` has no
-/// bases at all: `Empty`'s deleted or inaccessible default constructor,
-/// destructor, copy and move constructors never reach
-/// `find_constructors_present`, which then synthesizes members C++ refuses to
-/// compile; no upcast to `Empty` is generated; and `D` is not marked abstract
-/// for pure virtuals inherited from it. Nothing on this side can recover the
-/// relationship - the empty base's own type is generated, but nothing says
-/// anything derives from it, and `DiscoveredItem::Struct` carries only names.
-/// Fixing it needs bindgen either to emit a zero-sized `_base` field for such
-/// a base, or to report base classes through a parse callback.
-/// `test_empty_base_deletes_default_constructor` is written and `#[ignore]`d
-/// against that.
-fn get_bases(item: &ItemStruct) -> HashMap<QualifiedName, bool> {
-    item.fields
+/// The `_base` fields are read as well, because bindgen's report is not the
+/// only route in: `conversion_tests` hands the conversion phases bindgen
+/// output it wrote by hand, with no callbacks behind it. A base which arrives
+/// both ways is described by the report, which knows the C++ access specifier
+/// rather than guessing it from the field's Rust visibility.
+fn get_bases(
+    name: &QualifiedName,
+    item: &ItemStruct,
+    parse_callback_results: &ParseCallbackResults,
+) -> (HashMap<QualifiedName, BaseClass>, bool) {
+    let mut bases: HashMap<QualifiedName, BaseClass> = item
+        .fields
         .iter()
         .filter_map(|f| {
             let is_public = matches!(f.vis, Visibility::Public(_));
@@ -319,9 +340,33 @@ fn get_bases(item: &ItemStruct) -> HashMap<QualifiedName, bool> {
                     .ident
                     .as_ref()
                     .filter(|id| id.to_string().starts_with("_base"))
-                    .map(|_| (QualifiedName::from_type_path(typ), is_public)),
+                    .map(|_| {
+                        let name = QualifiedName::from_type_path(typ);
+                        (
+                            name.clone(),
+                            BaseClass {
+                                name,
+                                is_virtual: false,
+                                is_public,
+                            },
+                        )
+                    }),
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+    let reported = parse_callback_results.get_bases(name);
+    for base in reported.iter().flat_map(|bases| bases.named.iter()) {
+        // A base which is somehow this class itself would make the class its
+        // own ancestor, and `fields_and_bases_first` treats that as a
+        // dependency cycle and panics. C++ has no such class, so the only way
+        // to arrive at one is two classes sharing a name here: bindgen
+        // flattens `Outer::Inner` to `Outer_Inner`, which a class actually
+        // called `Outer_Inner` in the same namespace already answers to.
+        if base.name == *name {
+            continue;
+        }
+        bases.insert(base.name.clone(), base.clone());
+    }
+    (bases, reported.is_some_and(|bases| bases.any_unnamed))
 }

@@ -22,6 +22,7 @@ use crate::{
         analysis::{
             depth_first::fields_and_bases_first,
             pod::{FieldInfo, PodAnalysis},
+            tdef::{resolve_typedefs, typedef_targets},
         },
         api::{Api, ApiName, FuncToConvert},
         apivec::ApiVec,
@@ -275,13 +276,14 @@ fn describe_field(field: &FieldInfo, ty: Option<&QualifiedName>) -> String {
 fn unknown_dependencies(
     bases: &HashSet<QualifiedName>,
     field_info: &[FieldInfo],
+    get_base_items_found: impl Fn(&QualifiedName) -> Option<ItemsFound>,
     get_items_found: impl Fn(&QualifiedName) -> Option<ItemsFound>,
     field_type_name: impl Fn(&FieldInfo) -> Option<QualifiedName>,
 ) -> Vec<String> {
     let name_of = |qn: &QualifiedName| format!("`{}`", qn.to_cpp_name());
     bases
         .iter()
-        .filter(|base| get_items_found(base).is_none())
+        .filter(|base| get_base_items_found(base).is_none())
         .map(name_of)
         .chain(field_info.iter().filter_map(|field| match field.type_kind {
             TypeKind::Regular | TypeKind::SubclassHolder(_) => match field_type_name(field) {
@@ -483,6 +485,7 @@ pub(super) fn find_constructors_present(
             _ => None,
         })
         .collect();
+    let typedef_targets = typedef_targets(apis);
 
     // These contain all the classes we've seen so far with the relevant properties on their
     // constructors of each kind. We iterate via [`depth_first`], so analyzing later classes
@@ -516,6 +519,7 @@ pub(super) fn find_constructors_present(
                         | crate::conversion::api::TypeKind::NonPod
                         | crate::conversion::api::TypeKind::Opaque),
                     bases,
+                    has_unnamed_base,
                     field_info,
                     num_generics: 0usize,
                     in_anonymous_namespace: false,
@@ -551,6 +555,16 @@ pub(super) fn find_constructors_present(
                     all_items_found.get(qn).cloned()
                 }
             };
+            // A base is asked about by the class its name finally resolves
+            // to, because C++'s rules run over that class and `Alias` in
+            // `struct D : Alias {}` is not a class. Fields deliberately do not
+            // get the same treatment: an alias can add `const` to what it
+            // names, which changes the answers here and which bindgen does not
+            // report, so following one for a field would run the rules over a
+            // type the field is not. See `test_const_class_member_deletes_copy`.
+            let get_base_items_found = |qn: &QualifiedName| -> Option<ItemsFound> {
+                get_items_found(&resolve_typedefs(&typedef_targets, qn))
+            };
             // The name of the type a field is declared with, where it has one
             // we could look up. Kept alongside each field's analysis so that
             // we can name the culprit if it turns out to block a constructor.
@@ -580,7 +594,7 @@ pub(super) fn find_constructors_present(
             };
             let bases_items_found: Vec<(String, ItemsFound)> = bases
                 .iter()
-                .map_while(|base| Some((describe_base(base), get_items_found(base)?)))
+                .map_while(|base| Some((describe_base(base), get_base_items_found(base)?)))
                 .collect();
             let fields_items_found: Vec<(String, ItemsFound)> = field_info
                 .iter()
@@ -692,6 +706,10 @@ pub(super) fn find_constructors_present(
             // left as it is rather than given a second opacity flag.
             let is_opaque = matches!(kind, crate::conversion::api::TypeKind::Opaque);
             let items_found = if is_opaque
+                // A base bindgen reported but could not name is missing from
+                // `bases` entirely, so the count below would agree while the
+                // set was short of an ancestor.
+                || *has_unnamed_base
                 || bases_items_found.len() != bases.len()
                 || fields_items_found.len() != field_info.len()
                 || unknown_types.contains(&name.name)
@@ -779,6 +797,7 @@ pub(super) fn find_constructors_present(
                             WhyNoSpecialMember::DependenciesNotUnderstood(unknown_dependencies(
                                 bases,
                                 field_info,
+                                get_base_items_found,
                                 get_items_found,
                                 field_type_name,
                             ))
@@ -1114,29 +1133,23 @@ pub(super) fn find_constructors_present(
                 // class declares none of its own - so ours is `Implicit`, which
                 // excludes `= default` as well as a user-defined one - and each
                 // base and each field of class type has a trivial destructor
-                // too. `bases_items_found` and `fields_items_found` are
+                // too. A virtual base is not disqualifying: it makes the
+                // default constructor and the copy non-trivial, not the
+                // destructor. `bases_items_found` and `fields_items_found` are
                 // complete here: the arm above catches the case where a base or
-                // field was not understood.
+                // field was not understood, and bindgen reports every base
+                // including the empty ones it generates no field for.
                 //
-                // Complete, that is, as far as bindgen tells us. An *empty*
-                // base contributes no field for `get_bases` to find, so a class
-                // deriving from an empty base with a destructor is called
-                // trivially destructible here when C++ would not - the same
-                // bindgen gap `test_empty_base_deletes_default_constructor`
-                // waits on.
-                //
-                // Which is why nothing rests on this answer alone. Wherever it
-                // costs a type its destructor, the generated C++ asserts
-                // `std::is_trivially_destructible` for that type, so a class
-                // in this blind spot fails to build instead of quietly losing
-                // its cleanup - see
+                // Nothing rests on this answer alone either. Wherever it costs
+                // a type its destructor, the generated C++ asserts
+                // `std::is_trivially_destructible` for that type, so a class we
+                // got wrong fails to build instead of quietly losing its
+                // cleanup - see
                 // `codegen_cpp::generate_trivial_destructor_assertion`. Note
                 // that `generate_pod!`'s existing `IsRelocatable` assertion
                 // would *not* have served: cxx lets a user promise that trait
                 // by hand, so it says nothing the language guarantees about
-                // the destructor. Reporting the blind spot as an autocxx
-                // diagnostic rather than a C++ one is what is left to fix,
-                // once bindgen can report empty bases.
+                // the destructor.
                 let destructor_is_trivial = destructor.exists_implicit()
                     && bases_items_found
                         .iter()
