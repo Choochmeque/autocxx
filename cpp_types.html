@@ -498,6 +498,30 @@ adding <code>const</code> or <code>volatile</code> qualifiers or extra arguments
 one to call from Rust gets tricky.</p>
 <h2 id="abstract-types"><a class="header" href="#abstract-types">Abstract types</a></h2>
 <p><code>autocxx</code> does not allow instantiation of abstract types<sup class="footnote-reference" id="fr-abstract-1"><a href="#footnote-abstract">5</a></sup> (aka types with pure virtual methods).</p>
+<p>An abstract type also needs a virtual destructor before <code>autocxx</code> offers Rust a
+way to own one. No object of an abstract class exists, so every pointer to one
+points at an object of some derived class; if the destructor is not virtual,
+<code>delete</code>ing through that pointer runs the wrong one, which is undefined
+behaviour and which clang reports as <code>-Wdelete-abstract-non-virtual-dtor</code> and
+MSVC as C5205.</p>
+<p>The C++ <code>cxx</code> generates for <code>UniquePtr&lt;T&gt;</code>, and for <code>SharedPtr&lt;T&gt;</code>'s
+raw-pointer constructor, deletes through a <code>T*</code> exactly that way.
+<code>CxxVector&lt;T&gt;</code> is a different case with the same outcome: no element of an
+abstract type could ever be constructed, so nothing is there to delete, but the
+destructor which would still gets instantiated and the compiler still reports
+it. So for an abstract type with no virtual destructor <code>autocxx</code> adds none of
+those, nor <code>WeakPtr&lt;T&gt;</code>, which destroys nothing itself but is of no use without
+<code>SharedPtr&lt;T&gt;</code>. The generated type's documentation says so. As with an inaccessible destructor, the type and its
+methods are still generated and can be used through a reference or pointer C++
+hands you. Adding <code>virtual ~T();</code> to the C++ class is what makes it ownable.</p>
+<p>What <code>autocxx</code> actually knows is that it <em>found</em> no virtual destructor. If the
+class inherits one from a base you did not ask <code>autocxx</code> to generate, adding
+that base to your <code>generate!</code> list is what lets <code>autocxx</code> see it.</p>
+<p>Only the support <code>autocxx</code> adds of its own accord comes back. A C++ function
+which itself names a <code>std::unique_ptr&lt;T&gt;</code> for such a <code>T</code> is still bound, and
+<code>cxx</code> still generates the deleting glue for it, so such a header can still fail
+to compile. Refusing those signatures with a diagnostic instead is a job for a
+future release.</p>
 <hr>
 <ol class="footnote-definition"><li id="footnote-templated">
 <p>Future improvements tracked <a href="https://github.com/google/autocxx/issues/349">here</a> <a href="#fr-templated-1">↩</a></p>
