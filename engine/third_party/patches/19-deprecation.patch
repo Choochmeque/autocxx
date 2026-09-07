@@ -1,0 +1,239 @@
+Subject: Report a C++ deprecation through `ParseCallbacks`
+
+bindgen has no deprecation handling at all: nothing reads
+`clang_getCursorAvailability`, and `[[deprecated]]` reaches the parser only as
+`CXCursor_UnexposedAttr`, which flips one opaque boolean and is thrown away.
+So neither the marker nor the message it carries appears anywhere in bindgen's
+output or in anything it tells a consumer.
+
+That matters to a consumer which emits code of its own, in two directions.
+Rust wants `#[deprecated]` on the binding, which is where a caller should hear
+about it. C++ generated alongside - a shim which calls the function - names
+the deprecated declaration and so draws `-Wdeprecated-declarations`, whether
+or not anything calls the binding; a project which builds with `-Werror` then
+cannot bind the function at all. `[[deprecated]]` is encoded in no mangled
+name, so there is no back channel to recover it from either.
+
+`denote_deprecation` reports it, for functions and methods. Purely additive:
+no generated code changes.
+
+The message is the fiddly part. `clang_getCursorAvailability` says whether the
+declaration is deprecated - by `[[deprecated]]`, by
+`__attribute__((deprecated))` or by `__declspec(deprecated)` - and says nothing
+about what it was written with. `clang_getCursorPlatformAvailability` is the
+call which hands back the message, and it is asked here for no platform
+entries: a plain deprecation names no platform, and entries would only have to
+be freed again. Both functions are in libclang's stable C API and are already
+linked in.
+
+Each answers for the declaration it is asked about and no other. A member of a
+class or a namespace which is itself `[[deprecated]]` reports as available,
+even though naming the member is what draws the warning, so an enclosing
+deprecation is not reported here and would have to be looked for on the
+enclosing declaration.
+
+`Deprecation` is a struct holding one optional message rather than the message
+alone, so that the other things a deprecation carries - a replacement, a
+version, the platforms an availability attribute names - have somewhere to go
+without changing the callback's signature again.
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -3,7 +3,7 @@
+ pub use crate::ir::analysis::DeriveTrait;
+ pub use crate::ir::comp::{MethodKind, SpecialMemberKind};
+ pub use crate::ir::derive::CanDerive as ImplementsTrait;
+-pub use crate::ir::function::Visibility;
++pub use crate::ir::function::{Deprecation, Visibility};
+ pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
+ pub use crate::ir::int::IntKind;
+ pub use cexpr::token::Kind as TokenKind;
+@@ -338,6 +338,28 @@
+         &self,
+         _parent: DiscoveredItemId,
+         _member: DataMemberInfo<'_>,
++    ) {
++    }
++
++    /// Report that C++ marked a function or method deprecated, along with the
++    /// message the attribute was written with.
++    ///
++    /// `[[deprecated]]`, `__attribute__((deprecated))` and
++    /// `__declspec(deprecated)` all arrive here. The marker is encoded in no
++    /// mangled name and in no part of the generated Rust, so a consumer which
++    /// emits code of its own - Rust wanting `#[deprecated]`, or C++ which has
++    /// to name the function and would draw `-Wdeprecated-declarations` for it
++    /// - has no other way to learn of it.
++    ///
++    /// Reported for functions and methods, and for the marker each carries
++    /// itself. A deprecated type or variable is not reported at all, and a
++    /// function is not reported for a deprecation it inherits from an
++    /// enclosing declaration - a deprecated namespace or class - because
++    /// libclang answers for the declaration alone.
++    fn denote_deprecation(
++        &self,
++        _id: DiscoveredItemId,
++        _deprecation: &Deprecation,
+     ) {
+     }
+ 
+--- a/clang.rs
++++ b/clang.rs
+@@ -5,6 +5,7 @@
+ #![deny(clippy::missing_docs_in_private_items)]
+ 
+ use crate::ir::context::BindgenContext;
++use crate::ir::function::Deprecation;
+ use clang_sys::*;
+ use std::cmp;
+ 
+@@ -1033,6 +1034,58 @@
+         unsafe { clang_CXXConstructor_isMoveConstructor(self.x) != 0 }
+     }
+ 
++    /// The deprecation C++ marked this cursor's referent with, if it marked it
++    /// at all.
++    ///
++    /// `clang_getCursorAvailability` answers whether anything deprecated the
++    /// declaration - `[[deprecated]]`, `__attribute__((deprecated))` and
++    /// `__declspec(deprecated)` all come back as `CXAvailability_Deprecated` -
++    /// but it drops the message. `clang_getCursorPlatformAvailability` is what
++    /// carries that, and is asked here for no platform entries at all: a plain
++    /// deprecation names no platform, and entries would only have to be freed
++    /// again.
++    ///
++    /// It answers for this declaration and no other. A member of a class or a
++    /// namespace which is itself `[[deprecated]]` reports as available here,
++    /// even though naming it is what draws the warning, so an enclosing
++    /// deprecation has to be looked for on the enclosing declaration.
++    pub(crate) fn deprecation(&self) -> Option<Deprecation> {
++        if unsafe { clang_getCursorAvailability(self.x) } !=
++            CXAvailability_Deprecated
++        {
++            return None;
++        }
++        // clang writes all four out-parameters before it looks at anything, so
++        // an empty `CXString` here is only ever replaced, and disposing of one
++        // clang did not write is a no-op.
++        let mut always_deprecated = 0;
++        let mut always_unavailable = 0;
++        let mut deprecated_message = CXString {
++            data: ptr::null(),
++            private_flags: 0,
++        };
++        let mut unavailable_message = CXString {
++            data: ptr::null(),
++            private_flags: 0,
++        };
++        unsafe {
++            clang_getCursorPlatformAvailability(
++                self.x,
++                &mut always_deprecated,
++                &mut deprecated_message,
++                &mut always_unavailable,
++                &mut unavailable_message,
++                ptr::null_mut(),
++                0,
++            );
++            clang_disposeString(unavailable_message);
++        }
++        let message = cxstring_into_string(deprecated_message);
++        Some(Deprecation::new(
++            (!message.is_empty()).then_some(message),
++        ))
++    }
++
+     /// Try to evaluate this cursor.
+     pub(crate) fn evaluate(&self) -> Option<EvalResult> {
+         EvalResult::new(*self)
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -5222,6 +5222,11 @@
+                 cb.denote_explicit(discovered_id, Explicitness::Defaulted);
+             });
+         }
++        if let Some(deprecation) = self.deprecation() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_deprecation(discovered_id, deprecation);
++            });
++        }
+ 
+         let link_name_attr = self.link_name().or_else(|| {
+             let mangled_name = mangled_name.unwrap_or(name);
+--- a/ir/function.rs
++++ b/ir/function.rs
+@@ -118,6 +118,29 @@
+     /// Whether this function is `= default`.
+     pub fn defaulted_fn(&self) -> bool {
+         self.is_defaulted
++    }
++}
++
++/// A deprecation marker on a C++ declaration, and what it was written with.
++///
++/// A struct rather than the message alone so that the other things a
++/// deprecation can carry - a replacement, a version, the platforms an
++/// availability attribute names - have somewhere to go later.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Deprecation {
++    message: Option<String>,
++}
++
++impl Deprecation {
++    pub(crate) fn new(message: Option<String>) -> Self {
++        Self { message }
++    }
++
++    /// The message the attribute was written with, if it was written with one:
++    /// `[[deprecated("use bar instead")]]` has one and `[[deprecated]]` does
++    /// not.
++    pub fn message(&self) -> Option<&str> {
++        self.message.as_deref()
+     }
+ }
+ 
+@@ -167,6 +190,9 @@
+ 
+     /// The linkage of the function.
+     linkage: Linkage,
++
++    /// The deprecation C++ marked the function with, if it marked it at all.
++    deprecation: Option<Deprecation>,
+ 
+     /// Extra C++ facts autocxx needs.
+     autocxx: AutocxxFuncInfo,
+@@ -181,6 +207,7 @@
+         signature: TypeId,
+         kind: FunctionKind,
+         linkage: Linkage,
++        deprecation: Option<Deprecation>,
+         autocxx: AutocxxFuncInfo,
+     ) -> Self {
+         Function {
+@@ -190,6 +217,7 @@
+             signature,
+             kind,
+             linkage,
++            deprecation,
+             autocxx,
+         }
+     }
+@@ -222,6 +250,11 @@
+     /// Get this function's linkage.
+     pub(crate) fn linkage(&self) -> Linkage {
+         self.linkage
++    }
++
++    /// The deprecation C++ marked this function with, if any.
++    pub(crate) fn deprecation(&self) -> Option<&Deprecation> {
++        self.deprecation.as_ref()
+     }
+ 
+     /// Get this function's C++ special member kind.
+@@ -962,6 +995,7 @@
+             sig,
+             kind,
+             linkage,
++            cursor.deprecation(),
+             autocxx_info,
+         );
+ 
