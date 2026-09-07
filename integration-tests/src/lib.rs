@@ -107,8 +107,9 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
                                    //
                                    // Asking cc to turn warnings ON, rather than off and then passing the
                                    // flags ourselves, which looks equivalent and is not: cc 1.2.50 made
-                                   // `warnings(false)` emit `-w` (rust-lang/cc-rs#1633, closing its issue
-                                   // #283 - before that release the call silently did nothing), and `-w`
+                                   // `warnings(false)` emit `-w` (rust-lang/cc-rs#1633, closing
+                                   // rust-lang/cc-rs#283 - before that release the call silently did
+                                   // nothing), and `-w`
                                    // beats `-Wall -Werror` in either order on clang - an unused variable
                                    // compiles clean - so a lockfile bump would have silently deleted the
                                    // coverage this is here to pin down. This direction can only fail the
@@ -143,11 +144,13 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
     // C4458 and a C4100 were simply fixed. The survivors describe shapes
     // that ARE the test - a matrix of deleted destructors (C4624), deleting
     // an abstract class in a creduce-reduced repro (C5205), a nameless
-    // memberless struct (C4201/C4408) - and are scoped off at their own
-    // fixtures through make_clang_optional_arg_adder's flag_if_supported
-    // route, the same per-test mechanism their clang equivalents already
-    // use. The D9002 command-line warnings that also stood in the way died
-    // when flags started being spelled per compiler family.
+    // struct (C4201) - and are scoped off at their own fixtures through
+    // make_clang_optional_arg_adder's flag_if_supported route, the same
+    // per-test mechanism their clang equivalents already use. C4408 was on
+    // that list until the same reduction's anonymous struct was given a data
+    // member, which cost the bindings nothing; each scope is worth re-asking
+    // that question of. The D9002 command-line warnings that also stood in
+    // the way died when flags started being spelled per compiler family.
     b.flag(if target.contains("msvc") {
         "/WX"
     } else {

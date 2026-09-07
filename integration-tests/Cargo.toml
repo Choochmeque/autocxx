@@ -36,7 +36,8 @@ proc-macro2 = "1.0.11"
 # (`perform_asan_doom_test`) assert that deliberate corruption is CAUGHT, so
 # unsanitized fixtures fail them loudly. A noisy red leg blaming the canaries
 # is still a bad way to rediscover this, hence the pin. Hold at 1.0.81 until
-# #283 is fixed upstream, or until a workaround from that thread is in place
+# dtolnay/trybuild#283 is fixed, or until a workaround from that thread is in
+# place
 # here and the canaries have been shown to still trip.
 trybuild = "=1.0.81"
 # The suite installs its own logger - see `init_logging` - rather than letting
