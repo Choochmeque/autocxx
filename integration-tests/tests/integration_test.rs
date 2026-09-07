@@ -17941,13 +17941,36 @@ fn test_wchar_t_values() {
 }
 
 #[test]
-#[ignore] // case 1 above: CXType_Char32 => IntKind::U32 in build_builtin_ty
 fn test_char32_t() {
     let hdr = indoc! {"
         #include <cstdint>
         inline char32_t next_char32(char32_t c) { return c + 1; }
     "};
     run_test("", hdr, quote! {}, &["next_char32"], &[]);
+}
+
+/// `char32_t` values crossing the bridge in both directions, as
+/// `test_char16_t_values` does for `char16_t`.
+#[test]
+fn test_char32_t_values() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char32_t next_char32(char32_t c) { return c + 1; }
+        inline void bump32(char32_t& c) { c = c + 1; }
+        inline uint32_t widen32(char32_t c) { return c; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_char32(autocxx::c_char32_t(65)), autocxx::c_char32_t(66));
+        // The newtype is transparent over u32 in both directions.
+        assert_eq!(u32::from(ffi::next_char32(65u32.into())), 66);
+        let mut c = autocxx::c_char32_t(70);
+        ffi::bump32(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        // A code point outside the Basic Multilingual Plane survives, which
+        // is the whole reason `char32_t` is not `char16_t`.
+        assert_eq!(ffi::widen32(autocxx::c_char32_t(0x1F600)), 0x1F600);
+    };
+    run_test("", hdr, rs, &["next_char32", "bump32", "widen32"], &[]);
 }
 
 #[test]
