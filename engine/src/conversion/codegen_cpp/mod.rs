@@ -335,10 +335,12 @@ impl<'a> CppCodeGenerator<'a> {
                     analysis:
                         SubclassAnalysis {
                             superclass_destructor_visibility,
+                            superclass_destructor_virtual,
                         },
                 } => self.generate_subclass(
                     superclass,
                     superclass_destructor_visibility,
+                    *superclass_destructor_virtual,
                     name,
                     constructors_by_subclass.remove(name).unwrap_or_default(),
                     methods_by_subclass.remove(name).unwrap_or_default(),
@@ -945,6 +947,7 @@ impl<'a> CppCodeGenerator<'a> {
         &mut self,
         superclass: &QualifiedName,
         superclass_destructor_visibility: &Option<CppVisibility>,
+        superclass_destructor_virtual: bool,
         subclass: &SubclassName,
         constructors: Vec<&CppFunction>,
         methods: Vec<SubclassFunction>,
@@ -1007,8 +1010,16 @@ impl<'a> CppCodeGenerator<'a> {
         // `std::unique_ptr<Superclass>` requires the superclass to be
         // destructible from wherever the deleter is instantiated, so only offer
         // this conversion when the superclass destructor is public. A protected
-        // destructor is enough for the subclass itself, but not for this.
-        if let Some(CppVisibility::Public) = superclass_destructor_visibility {
+        // destructor is enough for the subclass itself, but not for this. It
+        // also has to be virtual: the pointer handed over owns a subclass peer,
+        // and `delete`ing that through a superclass pointer runs the wrong
+        // destructor otherwise.
+        if superclass_destructor_virtual
+            && matches!(
+                superclass_destructor_visibility,
+                Some(CppVisibility::Public)
+            )
+        {
             self.additional_functions.push(ExtraCpp {
                 declaration: Some(format!(
                     "inline std::unique_ptr<{}> {}_As_{}_UniquePtr(std::unique_ptr<{}> u) {{ return std::unique_ptr<{}>(u.release()); }}",
@@ -1031,10 +1042,29 @@ impl<'a> CppCodeGenerator<'a> {
             constructor_decls.push(decl);
             self.additional_functions.push(fn_impl);
         }
+        // A peer is deleted through a `std::unique_ptr<Peer>`. Where no
+        // virtual destructor was found for the superclass, the peer's is not
+        // virtual either, and deleting a non-final polymorphic class that way
+        // is clang's -Wdelete-non-abstract-non-virtual-dtor - about a class
+        // someone might derive from and then delete through this pointer.
+        // `final` forecloses that, which makes the deletion valid rather than
+        // suppressing a warning about it, in generated code a `-Werror` user
+        // cannot scope off.
+        //
+        // It is a restriction, so it is imposed only where it buys that: with
+        // a virtual superclass destructor there is nothing to warn about, and
+        // a C++ class deriving from the peer - which nothing documents, but
+        // nothing forbids either - keeps working.
+        let final_kw = if superclass_destructor_virtual {
+            ""
+        } else {
+            " final"
+        };
         self.additional_functions.push(ExtraCpp {
             type_definition: Some(format!(
-                "class {} : public {}\n{{\npublic:\n{}\n{}\nvoid {}() const;\nprivate:rust::Box<{}> obs;\nvoid really_remove_ownership();\n\n}};",
+                "class {}{} : public {}\n{{\npublic:\n{}\n{}\nvoid {}() const;\nprivate:rust::Box<{}> obs;\nvoid really_remove_ownership();\n\n}};",
                 subclass.cpp(),
+                final_kw,
                 superclass.to_cpp_name(),
                 constructor_decls.join("\n"),
                 method_decls.join("\n"),

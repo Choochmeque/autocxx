@@ -1,0 +1,46 @@
+Subject: Report a virtual destructor as virtual
+
+`denote_virtualness` asks `self.kind()` whether the function is virtual, and
+matches `FunctionKind::Method(MethodKind::Virtual { .. })`. A destructor never
+takes that variant: `FunctionKind::from_cursor` gives a `virtual ~T()` its own
+`MethodKind::VirtualDestructor`, so nothing was reported for one.
+
+The half of the pair immediately above does count it - `MethodKind::is_pure_virtual`
+matches `Virtual` and `VirtualDestructor` alike - which left the two answers
+disagreeing about the same C++: `~T() = 0` was reported as `PureVirtual` and
+`virtual ~T()` as nothing at all, the same as `~T()`. So a consumer reading the
+callback could pick out a pure virtual destructor, and could not tell an
+ordinary virtual destructor from a non-virtual one.
+
+That distinction decides whether `delete` through a pointer to the class runs
+the right destructor, which is the only thing making an abstract class
+deletable at all; autocxx reads it to decide whether to generate the
+`std::unique_ptr` and `std::vector` support which would do the deleting.
+
+`denote_virtualness` and the `is_virtual` this corrects are both 09's, so this
+is a fix to that patch rather than to anything vanilla bindgen has: it goes
+upstream with the callback or not at all. It is kept separate because 09 is
+already upstream-shaped and rebased as a unit, and because the two say
+different things - 09 adds a callback, this one fixes what it answers.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -5104,9 +5104,17 @@
+             return None;
+         }
+ 
++        // A virtual destructor is virtual: `MethodKind` gives it a variant of
++        // its own rather than a `Virtual` with a flag, and matching only
++        // `Virtual` reported `virtual ~T()` as not virtual at all.
++        // `is_pure_virtual` above already counts both, so `~T() = 0` was
++        // reported and `virtual ~T()` was not.
+         let is_virtual = matches!(
+             self.kind(),
+-            FunctionKind::Method(MethodKind::Virtual { .. })
++            FunctionKind::Method(
++                MethodKind::Virtual { .. } |
++                    MethodKind::VirtualDestructor { .. }
++            )
+         );
+ 
+         let is_dynamic_function = match self.kind() {

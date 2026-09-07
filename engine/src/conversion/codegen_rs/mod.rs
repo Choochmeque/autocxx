@@ -568,6 +568,53 @@ impl<'a> RsCodeGenerator<'a> {
                 ..
             } => {
                 let mut doc_attrs = get_doc_attrs(&details.item.attrs);
+                if constructors.abstract_without_virtual_destructor {
+                    // Each container asks cxx for C++ which destroys the
+                    // payload through a `T*`, and each in its own way.
+                    // `std::unique_ptr<T>`'s deleter does `delete`.
+                    // `std::shared_ptr<T>` is safe when it is handed ownership
+                    // of a derived object, but cxx's `$raw` shim builds one
+                    // from a `T*`, which installs a deleter doing the same
+                    // `delete`. `std::vector<T>` destroys its elements, which
+                    // for an abstract `T` can never exist - instantiating the
+                    // destructor is enough to emit the call. `WeakPtr`
+                    // destroys nothing itself and goes only because it is of
+                    // no use without `SharedPtr`.
+                    //
+                    // Where the destructor really is non-virtual, the two
+                    // smart-pointer paths perform the invalid deletion named
+                    // at
+                    // [`PublicConstructors::abstract_without_virtual_destructor`],
+                    // and the vector, which can hold nothing to delete, still
+                    // instantiates the code which would; the compiler
+                    // diagnoses all three. Where the destructor is virtual
+                    // through a base we could not see, none of it was wrong
+                    // and nothing would have been said - this withdrawal is
+                    // then a false alarm, which is the price of the safe
+                    // direction.
+                    //
+                    // What comes back is only what autocxx adds of its own
+                    // accord. cxx instantiates the same glue for any
+                    // `std::unique_ptr<T>` a bound C++ signature names itself,
+                    // and refusing those signatures - which would need a
+                    // diagnostic of our own - is not done here.
+                    doc_attrs.extend(make_doc_attrs(
+                        "autocxx has not added its usual `UniquePtr`, `SharedPtr`, `WeakPtr` \
+                         and `CxxVector` support for this type, because it is abstract and no \
+                         virtual destructor was found for it. Every pointer to an abstract \
+                         class points at an object of some derived class, so if the destructor \
+                         is not virtual, destroying one through such a pointer runs the wrong \
+                         one. Give the class a virtual destructor if C++ is meant to own one \
+                         this way - or, if it has one through a base class autocxx was not \
+                         asked to generate, add that base to your `generate!` list so that \
+                         autocxx can see it. You can still call this type's methods via a \
+                         reference or pointer obtained from C++. Note that a C++ function \
+                         which itself returns or takes a `std::unique_ptr` of this type is \
+                         still bound, and cxx still generates the deleting C++ for it, which \
+                         your compiler may then refuse."
+                            .to_string(),
+                    ));
+                }
                 if constructors.destructor_inaccessible {
                     // Say so on the type itself, because for a type with no
                     // public constructor there'd otherwise be nothing at all
@@ -601,12 +648,15 @@ impl<'a> RsCodeGenerator<'a> {
                         }
                     }
                 }
+                // `destroyable` is the smart-pointer trio and `movable` the
+                // vector; the note above says why both go.
+                let deletable = !constructors.abstract_without_virtual_destructor;
                 self.generate_type(
                     &name,
                     bridge_id,
                     kind,
-                    constructors.move_constructor,
-                    constructors.destructor,
+                    constructors.move_constructor && deletable,
+                    constructors.destructor && deletable,
                     || Some((Item::Struct(details.item.into()), doc_attrs)),
                     associated_methods,
                     num_generics,
@@ -710,6 +760,7 @@ impl<'a> RsCodeGenerator<'a> {
                 analysis:
                     SubclassAnalysis {
                         superclass_destructor_visibility,
+                        superclass_destructor_virtual,
                     },
             } => {
                 let methods = associated_methods.get(&superclass).map(|c| &c.methods);
@@ -744,6 +795,7 @@ impl<'a> RsCodeGenerator<'a> {
                     name,
                     &superclass,
                     superclass_destructor_visibility,
+                    superclass_destructor_virtual,
                     methods,
                     generate_peer_constructor,
                 )
@@ -766,6 +818,7 @@ impl<'a> RsCodeGenerator<'a> {
         sub: SubclassName,
         superclass: &QualifiedName,
         superclass_destructor_visibility: Option<CppVisibility>,
+        superclass_destructor_virtual: bool,
         methods: Option<&Vec<SuperclassMethod>>,
         generate_peer_constructor: bool,
     ) -> RsCodegenResult {
@@ -903,9 +956,18 @@ impl<'a> RsCodeGenerator<'a> {
             }
         });
         // Only a superclass with a public destructor can live in a
-        // `std::unique_ptr`, so this conversion exists only for those. The C++
-        // side agrees; see `CppCodeGenerator::generate_subclass`.
-        if let Some(CppVisibility::Public) = superclass_destructor_visibility {
+        // `std::unique_ptr`, so this conversion exists only for those, and the
+        // destructor has to be virtual besides: what the `std::unique_ptr`
+        // this hands out owns is a peer, never a plain superclass, so
+        // `delete`ing it through a superclass pointer whose destructor is not
+        // virtual runs the wrong one. The C++ side agrees; see
+        // `CppCodeGenerator::generate_subclass`.
+        if superclass_destructor_virtual
+            && matches!(
+                superclass_destructor_visibility,
+                Some(CppVisibility::Public)
+            )
+        {
             let as_unique_ptr_id = make_ident(format!("{cpp_id}_As_{super_name}_UniquePtr"));
             extern_c_mod_items.push(parse_quote! {
                 fn #as_unique_ptr_id(u: UniquePtr<#cpp_id>) -> UniquePtr<#super_cxxxbridge_id>;

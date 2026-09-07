@@ -248,6 +248,14 @@ pub(crate) struct SubclassAnalysis {
     /// destructor, but only a `public` one lets anyone else - in particular
     /// `std::unique_ptr<Superclass>` - do so.
     pub(crate) superclass_destructor_visibility: Option<CppVisibility>,
+    /// Whether that destructor is virtual, whether the superclass declares it
+    /// or inherits it. A `std::unique_ptr<Superclass>` made from a peer owns a
+    /// peer, never a plain superclass, so `delete`ing one runs the wrong
+    /// destructor unless this is true. Filled in by
+    /// [`crate::conversion::analysis::abstract_types::mark_types_abstract`],
+    /// which is where inherited virtualness is worked out; this pass leaves it
+    /// `false`.
+    pub(crate) superclass_destructor_virtual: bool,
 }
 
 /// An analysis phase where we've analyzed each function, but
@@ -324,6 +332,24 @@ pub(crate) struct PublicConstructors {
     /// The generated C++ has to say so out loud: see
     /// [`crate::conversion::codegen_cpp::CppCodeGenerator::generate_trivial_destructor_assertion`].
     pub(crate) destructor_omitted_as_trivial: bool,
+    /// Whether the class is abstract and no virtual destructor was found for
+    /// it, declared or inherited. No object of an abstract class exists, so
+    /// every pointer to one points at some derived object; if the destructor
+    /// is not virtual, `delete` through that pointer runs the wrong one, which
+    /// is undefined behaviour and which clang and cl both diagnose.
+    ///
+    /// "Not found" rather than "not virtual": a base which was never analyzed,
+    /// because it is off the allowlist or because bindgen could not name it,
+    /// could be carrying the `virtual` we are looking for. Withdrawing is the
+    /// safe direction either way - the compiler refuses the generated code in
+    /// the first case and would have accepted it in the second - and what is
+    /// generated from this says which of the two it knows.
+    ///
+    /// Filled in by
+    /// [`crate::conversion::analysis::abstract_types::mark_types_abstract`],
+    /// which is where abstractness and destructor virtualness are both worked
+    /// out; `from_items_found` leaves it `false`.
+    pub(crate) abstract_without_virtual_destructor: bool,
 }
 
 impl PublicConstructors {
@@ -334,6 +360,7 @@ impl PublicConstructors {
             destructor_inaccessible: !items_found.destructor.callable_any(),
             why_no_constructors: items_found.why_no_constructors.clone(),
             destructor_omitted_as_trivial,
+            abstract_without_virtual_destructor: false,
         }
     }
 }
@@ -694,6 +721,7 @@ impl<'a> FnAnalyzer<'a> {
                         superclass_destructor_visibility: destructor_visibility_by_class
                             .get(&superclass)
                             .copied(),
+                        superclass_destructor_virtual: false,
                     },
                     superclass,
                 })))

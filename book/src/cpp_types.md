@@ -394,5 +394,33 @@ implementation tracked. See
 
 `autocxx` does not allow instantiation of abstract types[^abstract] (aka types with pure virtual methods).
 
+An abstract type also needs a virtual destructor before `autocxx` offers Rust a
+way to own one. No object of an abstract class exists, so every pointer to one
+points at an object of some derived class; if the destructor is not virtual,
+`delete`ing through that pointer runs the wrong one, which is undefined
+behaviour and which clang reports as `-Wdelete-abstract-non-virtual-dtor` and
+MSVC as C5205.
+
+The C++ `cxx` generates for `UniquePtr<T>`, and for `SharedPtr<T>`'s
+raw-pointer constructor, deletes through a `T*` exactly that way.
+`CxxVector<T>` is a different case with the same outcome: no element of an
+abstract type could ever be constructed, so nothing is there to delete, but the
+destructor which would still gets instantiated and the compiler still reports
+it. So for an abstract type with no virtual destructor `autocxx` adds none of
+those, nor `WeakPtr<T>`, which destroys nothing itself but is of no use without
+`SharedPtr<T>`. The generated type's documentation says so. As with an inaccessible destructor, the type and its
+methods are still generated and can be used through a reference or pointer C++
+hands you. Adding `virtual ~T();` to the C++ class is what makes it ownable.
+
+What `autocxx` actually knows is that it *found* no virtual destructor. If the
+class inherits one from a base you did not ask `autocxx` to generate, adding
+that base to your `generate!` list is what lets `autocxx` see it.
+
+Only the support `autocxx` adds of its own accord comes back. A C++ function
+which itself names a `std::unique_ptr<T>` for such a `T` is still bound, and
+`cxx` still generates the deleting glue for it, so such a header can still fail
+to compile. Refusing those signatures with a diagnostic instead is a job for a
+future release.
+
 [^abstract]: `autocxx`'s determination of abstract types is a bit approximate and
 [could be improved](https://github.com/google/autocxx/issues/774).

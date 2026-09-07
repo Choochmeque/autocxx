@@ -120,6 +120,7 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
     let mut class_states: HashMap<QualifiedName, ClassAbstractState> = HashMap::new();
     let mut abstract_classes = HashSet::new();
     let mut pure_virtual_destructors: HashSet<QualifiedName> = HashSet::new();
+    let mut virtual_destructors: HashSet<QualifiedName> = HashSet::new();
 
     for api in apis.iter() {
         match api {
@@ -163,7 +164,9 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
             // off the original C++ function, which carries it for everything
             // bindgen hands us. Destructors we synthesize ourselves have no
             // virtualness, which is right: we only synthesize one when C++
-            // didn't declare one, and an undeclared destructor is never pure.
+            // didn't declare one, and an undeclared destructor is never
+            // virtual of its own accord - only by inheriting virtualness from
+            // a base, which the walk below adds.
             Api::Function {
                 fun,
                 analysis:
@@ -177,13 +180,66 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
                         ..
                     },
                 ..
-            } if matches!(fun.virtualness, Some(Virtualness::PureVirtual)) => {
-                pure_virtual_destructors.insert(self_ty_name.clone());
+            } if fun.virtualness.is_some() => {
+                if matches!(fun.virtualness, Some(Virtualness::PureVirtual)) {
+                    pure_virtual_destructors.insert(self_ty_name.clone());
+                }
+                virtual_destructors.insert(self_ty_name.clone());
             }
             _ => {}
         }
     }
 
+    // A destructor is virtual if a base's is, whether or not the class
+    // declares one of its own, and however many classes down the chain the
+    // `virtual` was written.
+    //
+    // Run to a fixed point rather than in one pass over
+    // `fields_and_bases_first`. That order is taken from the base names as
+    // bindgen reported them, and a base named through a typedef is resolved
+    // here rather than there, so a chain which passes through an alias can be
+    // visited derived-class-first. Hierarchies are shallow, and the loop stops
+    // the first time a pass adds nothing.
+    //
+    // What this can't see is a base outside the APIs - not allowlisted, or one
+    // bindgen could not name (`has_unnamed_base`) - which leaves a class whose
+    // destructor is virtual looking as though it isn't. The answer is
+    // therefore "no virtual destructor was found", not "the destructor is not
+    // virtual", and everything generated from it says so.
+    loop {
+        let mut found_more = false;
+        for api in apis.iter() {
+            if let Api::Struct {
+                name,
+                analysis:
+                    PodAndConstructorAnalysis {
+                        pod: PodAnalysis { bases, .. },
+                        ..
+                    },
+                ..
+            } = api
+            {
+                if !virtual_destructors.contains(&name.name)
+                    && bases.iter().any(|base| {
+                        virtual_destructors.contains(&resolve_typedefs(&typedef_targets, base))
+                    })
+                {
+                    virtual_destructors.insert(name.name.clone());
+                    found_more = true;
+                }
+            }
+        }
+        if !found_more {
+            break;
+        }
+    }
+
+    // A `TypeKind::Opaque` class is left out, and so never becomes abstract
+    // however many pure virtuals bindgen reported for it. That is what
+    // abstractness has always done here, and everything keyed off it inherits
+    // the limitation - including the container withdrawal below, which an
+    // `opaque!`d class with pure virtuals and a non-virtual destructor
+    // therefore escapes.
     for api in fields_and_bases_first(apis.iter()) {
         if let Api::Struct {
             analysis:
@@ -280,10 +336,28 @@ pub(crate) fn mark_types_abstract(apis: ApiVec<FnPrePhase3>) -> ApiVec<FnPrePhas
     let mut apis: ApiVec<_> = apis
         .into_iter()
         .map(|mut api| {
-            if let Api::Struct { name, analysis, .. } = &mut api {
-                if abstract_classes.contains(&name.name) {
+            match &mut api {
+                Api::Struct { name, analysis, .. } if abstract_classes.contains(&name.name) => {
                     analysis.pod.kind = TypeKind::Abstract;
+                    // Nothing may `delete` one of these through a pointer to
+                    // the class itself, so the container support which does
+                    // has to be withheld. See
+                    // [`PublicConstructors::abstract_without_virtual_destructor`].
+                    analysis.constructors.abstract_without_virtual_destructor =
+                        !virtual_destructors.contains(&name.name);
                 }
+                // The same set answers the subclass question, which is about
+                // the superclass rather than about this type; see
+                // [`SubclassAnalysis::superclass_destructor_virtual`].
+                Api::Subclass {
+                    superclass,
+                    analysis,
+                    ..
+                } => {
+                    analysis.superclass_destructor_virtual = virtual_destructors
+                        .contains(&resolve_typedefs(&typedef_targets, superclass));
+                }
+                _ => {}
             }
             api
         })

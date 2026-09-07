@@ -6738,18 +6738,16 @@ fn test_derived_abstract_class_no_make_unique() {
 /// abstract class type 'B'`. `denote_base_class` reports the link, so `f()`
 /// propagates.
 ///
-/// `virtual ~A()` is the one departure from the header the issue was reported
-/// with, which declared no destructor. Without it, the `UniquePtr<B>` autocxx
-/// generates deletes a `B` through a `B*` whose destructor is not virtual,
-/// which is undefined behaviour and which both clang and cl say so of. That is
-/// a defect in the repro rather than anything this test asserts - `B` is
-/// abstract because of `f()`, whatever its destructor does.
+/// The header is the one the issue was reported with, declaring no destructor.
+/// It used to need a `virtual ~A()` added to it, because the `UniquePtr<B>`
+/// autocxx generated then deleted a `B` through a `B*` whose destructor is not
+/// virtual - undefined behaviour, which both clang and cl say so of. Nothing
+/// generates that `UniquePtr` any more, so the repro can be the repro.
 #[test]
 fn test_issue_1326() {
     let hdr = indoc! {"
         struct A {
             virtual int f() = 0;
-            virtual ~A() {}
         };
         struct B : virtual public A {
             static void i_want_this_function();
@@ -6799,6 +6797,244 @@ fn test_derived_abstract_class_with_no_allowlisting_no_make_unique() {
     "};
     let rs = quote! {};
     run_test("", hdr, rs, &["B"], &[]);
+}
+
+/// No object of an abstract class exists, so every pointer to one points at
+/// some derived object, and `delete` through it runs the wrong destructor
+/// unless the destructor is virtual. The C++ cxx generates for `UniquePtr`,
+/// and for `SharedPtr`'s raw-pointer constructor, deletes through such a
+/// pointer; `CxxVector`'s destructor destroys elements which for an abstract
+/// type could never have been constructed, but is instantiated and diagnosed
+/// all the same. autocxx adds none of those for such a class - nor `WeakPtr`,
+/// which destroys nothing itself and is of no use without `SharedPtr`.
+///
+/// The warning this avoids - clang's `-Wdelete-abstract-non-virtual-dtor`, cl's
+/// C5205 - is raised inside `<memory>` on code autocxx wrote, which a `-Werror`
+/// user has no way to scope off. This test therefore asserts nothing about the
+/// diagnostic: the suite builds every fixture with warnings as errors, so a
+/// regression fails the build.
+///
+/// This is about the support autocxx adds by itself. A header which names
+/// `std::unique_ptr<Shape>` in a signature of its own still gets cxx's glue
+/// for it, and still fails to build; refusing such a signature with a
+/// diagnostic would be a separate piece of work.
+#[test]
+fn test_abstract_class_without_virtual_destructor_gets_no_containers() {
+    let hdr = indoc! {"
+        class Shape {
+        public:
+            virtual int sides() const = 0;
+        };
+        // `final` so that owning a `Square` raises nothing of its own:
+        // deleting a non-final polymorphic class through a pointer to itself
+        // is clang's `-Wdelete-non-abstract-non-virtual-dtor`, a separate
+        // warning about a case which is only wrong if someone derives
+        // further, and not what this test is about.
+        class Square final : public Shape {
+        public:
+            int sides() const { return 4; }
+        };
+    "};
+    let rs = quote! {
+        // `Square` is concrete, so owning one is unaffected - what goes is
+        // ownership of the abstract base, not the class itself. The
+        // `generate!("Shape")` below is a hard error if the type stopped being
+        // generated altogether.
+        let square = ffi::Square::new().within_unique_ptr();
+        assert_eq!(square.sides(), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Shape", "Square"], &[], None),
+        None,
+        Some(make_checks(vec![
+            make_string_absence_finder(vec![
+                "impl UniquePtr < Shape >".to_string(),
+                "impl SharedPtr < Shape >".to_string(),
+                "impl WeakPtr < Shape >".to_string(),
+                "impl CxxVector < Shape >".to_string(),
+            ]),
+            make_string_finder(vec![
+                // `Square` is concrete, and keeps everything.
+                "impl UniquePtr < Square >".to_string(),
+                // The absence is documented where the type is.
+                "abstract and no virtual destructor was found for it".to_string(),
+            ]),
+        ])),
+        None,
+    );
+}
+
+/// The other side of the rule: a virtual destructor makes `delete` through a
+/// pointer to the abstract class run the right one, so the containers stay.
+#[test]
+fn test_abstract_class_with_virtual_destructor_keeps_containers() {
+    let hdr = indoc! {"
+        #include <memory>
+        class Shape {
+        public:
+            virtual ~Shape() {}
+            virtual int sides() const = 0;
+        };
+        class Square : public Shape {
+        public:
+            int sides() const { return 4; }
+        };
+        inline std::unique_ptr<Shape> get_square() {
+            return std::unique_ptr<Shape>(new Square());
+        }
+    "};
+    let rs = quote! {
+        // Dropping this deletes a `Square` through a `Shape*`, which is what
+        // the virtual destructor is for.
+        let square = ffi::get_square();
+        assert_eq!(square.sides(), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Shape", "Square", "get_square"], &[], None),
+        None,
+        // No `impl CxxVector<Shape>` to look for: a user-declared destructor
+        // means C++ never implicitly declares a move constructor, and it is
+        // that constructor which asks for one. `std::vector` of an abstract
+        // type is of no use anyway - no element could ever be constructed.
+        Some(make_checks(vec![
+            make_string_finder(vec![
+                "impl UniquePtr < Shape >".to_string(),
+                "impl SharedPtr < Shape >".to_string(),
+                "impl WeakPtr < Shape >".to_string(),
+            ]),
+            make_string_absence_finder(vec!["impl CxxVector < Shape >".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// A destructor is virtual if a base's is, whether or not the class declares
+/// one of its own and however far down the chain the `virtual` was written.
+/// bindgen reports the declaration, so the inherited virtualness has to be
+/// worked out from the base classes.
+#[test]
+fn test_abstract_class_inheriting_virtual_destructor_keeps_containers() {
+    let hdr = indoc! {"
+        #include <memory>
+        class Base {
+        public:
+            virtual ~Base() {}
+        };
+        class Middle : public Base {};
+        class Shape : public Middle {
+        public:
+            virtual int sides() const = 0;
+        };
+        class Square : public Shape {
+        public:
+            int sides() const { return 4; }
+        };
+        inline std::unique_ptr<Shape> get_square() {
+            return std::unique_ptr<Shape>(new Square());
+        }
+    "};
+    let rs = quote! {
+        let square = ffi::get_square();
+        assert_eq!(square.sides(), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Shape", "Square", "get_square"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "impl UniquePtr < Shape >".to_string()
+        ])),
+        None,
+    );
+}
+
+/// The same, with one link of the chain named through a typedef. bindgen
+/// reports the base under the name the class was written with, so the walk
+/// which propagates virtualness has to resolve that name to reach `Base` at
+/// all. (It also cannot rely on bases being visited before the classes
+/// deriving from them, because the order it would rely on is taken from those
+/// unresolved names - which is why the walk runs to a fixed point. No fixture
+/// here pins that: which order the APIs arrive in is not something a header
+/// dictates.)
+#[test]
+fn test_abstract_class_inheriting_virtual_destructor_through_typedef_keeps_containers() {
+    let hdr = indoc! {"
+        #include <memory>
+        class Base {
+        public:
+            virtual ~Base() {}
+        };
+        typedef Base BaseAlias;
+        class Middle : public BaseAlias {};
+        class Shape : public Middle {
+        public:
+            virtual int sides() const = 0;
+        };
+        class Square : public Shape {
+        public:
+            int sides() const { return 4; }
+        };
+        inline std::unique_ptr<Shape> get_square() {
+            return std::unique_ptr<Shape>(new Square());
+        }
+    "};
+    let rs = quote! {
+        let square = ffi::get_square();
+        assert_eq!(square.sides(), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Shape", "Square", "get_square"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "impl UniquePtr < Shape >".to_string()
+        ])),
+        None,
+    );
+}
+
+/// A pure virtual destructor is still virtual, so a class made abstract by one
+/// keeps its containers too.
+#[test]
+fn test_pure_virtual_destructor_keeps_containers() {
+    let hdr = indoc! {"
+        #include <memory>
+        class Shape {
+        public:
+            virtual ~Shape() = 0;
+            int sides() const { return 4; }
+        };
+        inline Shape::~Shape() {}
+        class Square : public Shape {};
+        inline std::unique_ptr<Shape> get_square() {
+            return std::unique_ptr<Shape>(new Square());
+        }
+    "};
+    let rs = quote! {
+        let square = ffi::get_square();
+        assert_eq!(square.sides(), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Shape", "Square", "get_square"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "impl UniquePtr < Shape >".to_string()
+        ])),
+        None,
+    );
 }
 
 /// A `std::vector<T*>` parameter in the shape it was first reported in: a
@@ -7705,31 +7941,7 @@ fn test_issue_506() {
         hdr,
         rs,
         directives_from_lists(&["spanner::Database", "spanner::Row"], &[], None),
-        // `be::bh` inherits `bf`'s pure virtual and overrides nothing, so it is
-        // abstract, and nothing gives it a virtual destructor. Deleting one is
-        // -Wdelete-abstract-non-virtual-dtor on clang and C5205 on cl. Nothing
-        // in this header deletes anything: the warning is raised inside
-        // `<memory>`, instantiated by the smart-pointer and vector support
-        // autocxx generates for `be::bh`. Which of those routes reaches it
-        // first differs by standard library.
-        //
-        // The obvious repair - a virtual destructor on `bf`, which is what
-        // test_virtual_methods_additional got - is not available here, because
-        // it does not leave the bindings alone. It drops `std::vector<be::bh>`
-        // and its `unique_ptr` from the generated C++ (ten symbols) and
-        // renames the synthesized move constructor from
-        // `spanner_Row_new_synthetic_move_ctor_*` to a bare
-        // `new_synthetic_move_ctor_*`, `BridgeNameTracker` no longer having a
-        // collision to qualify. google/autocxx#506 was filed as "to be
-        // characterized" and this test asserts only that the shape builds, so
-        // there is no way to show a reshaped fixture still covers it. Scoped
-        // off rather than reduced further.
-        //
-        // What the examination did establish is that this diagnostic, alone
-        // among the suite's scopes, is not about the fixture: a `-Werror` user
-        // whose own abstract class gets the same generated support meets the
-        // same warning, with nothing to scope it off. Unfixed.
-        make_clang_optional_arg_adder(&[], &["-Wno-delete-abstract-non-virtual-dtor", "/wd5205"]),
+        None,
         None,
         None,
     );
@@ -19753,6 +19965,134 @@ fn test_pure_virtual_destructor_derived_stays_concrete() {
         assert_eq!(obj.a(), autocxx::c_int(2));
     };
     run_test("", hdr, rs, &["PureDtorBase", "ConcreteDerived"], &[]);
+}
+
+/// The `std::unique_ptr<Superclass>` a subclass peer can be converted into
+/// owns a peer, never a plain superclass, so `delete`ing one runs the
+/// superclass destructor. That conversion therefore exists only where the
+/// superclass destructor is virtual as well as public.
+#[test]
+fn test_subclass_of_class_without_virtual_destructor_gets_no_unique_ptr_conversion() {
+    let hdr = indoc! {"
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const = 0;
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            obs.borrow().foo();
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(make_string_absence_finder(vec![
+            "as_Observer_unique_ptr".to_string()
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) {}
+            }
+        }),
+    );
+}
+
+/// And exists where it is virtual, which is the shape every other subclass
+/// test here uses. The peer is not `final` in that case either: `final` is a
+/// restriction autocxx imposes only where it has to, and a C++ class deriving
+/// from the peer keeps working.
+#[test]
+fn test_subclass_of_class_with_virtual_destructor_gets_unique_ptr_conversion() {
+    let hdr = indoc! {"
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        virtual void foo() const = 0;
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_cpp_owned(MyObserver { cpp_peer: Default::default() });
+            let obs = MyObserver::as_Observer_unique_ptr(obs);
+            obs.foo();
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["class MyObserverCpp : public Observer"],
+            &["class MyObserverCpp final"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) {}
+            }
+        }),
+    );
+}
+
+/// The gate is on the superclass destructor, not on the superclass being
+/// abstract: whatever else `Observer` is, the `std::unique_ptr<Observer>` this
+/// conversion would hand out owns a peer.
+#[test]
+fn test_subclass_of_concrete_class_without_virtual_destructor_gets_no_unique_ptr_conversion() {
+    let hdr = indoc! {"
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo() const {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            obs.borrow().foo();
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        // Checked without building. `Observer` is concrete, so it keeps its
+        // own `UniquePtr` support, and deleting a non-final polymorphic class
+        // through a pointer to itself is clang's
+        // -Wdelete-non-abstract-non-virtual-dtor - which is about deriving
+        // further rather than about anything here, and which the suite's
+        // -Werror turns into a build failure. Nothing about that is this
+        // test's subject.
+        Some(make_checks_without_building(vec![
+            make_string_absence_finder(vec!["as_Observer_unique_ptr".to_string()]),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+    );
 }
 
 #[test]

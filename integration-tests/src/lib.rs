@@ -142,15 +142,18 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
     // - all their own doing, none from the generated C++, from cxx, or from
     // the standard library except where a fixture reaches into it. Twelve
     // C4458 and a C4100 were simply fixed. The survivors describe shapes
-    // that ARE the test - a matrix of deleted destructors (C4624), deleting
-    // an abstract class in a creduce-reduced repro (C5205), a nameless
+    // that ARE the test - a matrix of deleted destructors (C4624), a nameless
     // struct (C4201) - and are scoped off at their own fixtures through
     // make_clang_optional_arg_adder's flag_if_supported route, the same
-    // per-test mechanism their clang equivalents already use. C4408 was on
-    // that list until the same reduction's anonymous struct was given a data
-    // member, which cost the bindings nothing; each scope is worth re-asking
-    // that question of. The D9002 command-line warnings that also stood in
-    // the way died when flags started being spelled per compiler family.
+    // per-test mechanism their clang equivalents already use. Two have since
+    // left that list: C4408 when the anonymous struct in a reduction was
+    // given a data member, which cost the bindings nothing, and C5205
+    // (deleting an abstract class, clang's
+    // -Wdelete-abstract-non-virtual-dtor) when autocxx stopped generating the
+    // deleting path for such a class at all - that one was never about the
+    // fixture. Each remaining scope is worth re-asking that question of. The
+    // D9002 command-line warnings that also stood in the way died when flags
+    // started being spelled per compiler family.
     b.flag(if target.contains("msvc") {
         "/WX"
     } else {
