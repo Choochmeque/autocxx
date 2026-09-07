@@ -95,10 +95,11 @@ pub(crate) enum HolderSurface {
 }
 
 impl HolderSurface {
-    /// Every type name the accessors put into the generated bindings: what the
-    /// payload was converted from, and anything that conversion passed
-    /// through. For a `std::weak_ptr` it is the sibling holder, which carries
-    /// the payload in turn.
+    /// Every name the payload's conversion met: what the payload was
+    /// converted from, and anything that conversion passed through on the way,
+    /// which may be more than the accessors go on to spell. For a
+    /// `std::weak_ptr` it is the sibling holder, which carries the payload in
+    /// turn.
     ///
     /// This is the holder's whole dependency, and `deps.rs` is where it is
     /// read. Nothing else names the payload - a function handling one of these
