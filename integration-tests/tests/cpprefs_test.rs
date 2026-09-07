@@ -8,6 +8,7 @@
 
 //! Tests specific to reference wrappers.
 
+use crate::code_checkers::{make_checks, make_rust_code_finder};
 use autocxx_integration_tests::{directives_from_lists, do_run_test};
 use indoc::indoc;
 use proc_macro2::TokenStream;
@@ -36,6 +37,37 @@ fn run_cpprefs_test(
         directives_from_lists(generate, generate_pods, None),
         None,
         None,
+        None,
+        "unsafe_references_wrapped",
+        Some(quote! {
+            #![feature(arbitrary_self_types_pointers)]
+        }),
+    )
+    .unwrap()
+}
+
+/// As [`run_cpprefs_test`], but also examines the code that was generated -
+/// for a test whose subject is what the policy did to a signature, which
+/// running the result cannot always tell apart from what it would have done
+/// anyway.
+fn run_cpprefs_test_with_checks(
+    header_code: &str,
+    rust_code: TokenStream,
+    generate: &[&str],
+    generate_pods: &[&str],
+    checks: autocxx_integration_tests::CodeChecker,
+) {
+    if !arbitrary_self_types_supported() {
+        // "unsafe_references_wrapped" requires arbitrary_self_types, which requires nightly.
+        return;
+    }
+    do_run_test(
+        "",
+        header_code,
+        rust_code,
+        directives_from_lists(generate, generate_pods, None),
+        None,
+        Some(checks),
         None,
         "unsafe_references_wrapped",
         Some(quote! {
@@ -1032,8 +1064,9 @@ fn test_shared_ptr_const_cpprefs() {
 /// kept at the other end: `argument_conversion_details` gives a parameter of
 /// `TypeKind::Pointer` `UnsafetyNeeded::Always` whatever the policy, so a
 /// generated function which *takes* one of these elements is an `unsafe fn`
-/// here as everywhere. `fx_horns` below is one, and the test has to write the
-/// `unsafe` to call it.
+/// here as everywhere. `fx_horns` below is one, and the test insists on the
+/// `unsafe fn` in the generated signature rather than settling for writing
+/// `unsafe` at the call, which would compile either way.
 ///
 /// Addresses the bug reported upstream as google/autocxx#330.
 #[test]
@@ -1059,7 +1092,25 @@ fn test_vector_of_pointers_cpprefs() {
         // non-null and outlives this call.
         assert_eq!(unsafe { ffi::fx_horns(first) }, 3);
     };
-    run_cpprefs_test("", hdr, rs, &["fx_herd", "fx_horns"], &["fx_Goat"]);
+    run_cpprefs_test_with_checks(
+        hdr,
+        rs,
+        &["fx_herd", "fx_horns"],
+        &["fx_Goat"],
+        make_checks(vec![make_rust_code_finder(vec![
+            // The element as a raw pointer coming out...
+            quote! {
+                pub fn get (& self , pos : usize) -> Option < * mut output :: fx_Goat >
+            },
+            // ...and `unsafe` demanded of anything taking one back in. The
+            // parameter is part of the pattern so that this cannot be
+            // satisfied by one of bindgen's own declarations of the same
+            // function under a suffixed name.
+            quote! {
+                pub unsafe fn fx_horns (g : * mut fx_Goat) -> u32
+            },
+        ])]),
+    );
 }
 
 /// A copy constructor in this mode. Its source is a `const T&`, which the mode

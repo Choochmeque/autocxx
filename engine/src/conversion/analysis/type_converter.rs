@@ -692,11 +692,19 @@ impl<'a> TypeConverter<'a> {
             if let Some(element) = sole_pointer_generic_arg(&typ) {
                 // Conversion is what turns bindgen's spelling of the pointee
                 // into the bridge's, and what turns down a pointee the bridge
-                // could not name - a pointer to a pointer, above all. The
-                // names it met are recorded on whatever is being converted,
-                // for the reason the smart-pointer branch gives: this is what
-                // keeps the element type from being garbage-collected out from
-                // under the holder's accessors.
+                // could not name - a pointer to a pointer, above all.
+                //
+                // The names it met are recorded on whatever is being
+                // converted rather than on the holder, because
+                // `Api::ConcreteType` has no arm in `deps.rs`. The
+                // smart-pointer branch above argues that is enough because its
+                // payload is a builtin the garbage collector cannot take away;
+                // that argument does not carry here, where the element is
+                // typically a class. The one that does is this: `lower_to_holder`
+                // adds the holder's own name to this same `deps` set, and every
+                // route to the holder is a conversion of the vector which
+                // passes through here, so nothing can come to depend on the
+                // holder without depending on the element in the same breath.
                 let mut element =
                     self.convert_type(element, ns, &TypeConversionContext::WithinContainer)?;
                 deps.extend(element.types_encountered.drain(..));

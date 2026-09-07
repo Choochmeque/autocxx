@@ -861,8 +861,8 @@ impl<'a> CppCodeGenerator<'a> {
     /// specialization was made with, qualifiers and all, so nothing here has
     /// to re-derive a C++ name for it. `operator[]` on a `const` vector yields
     /// a `const` reference to the stored pointer, and returning `value_type`
-    /// copies it out - which is what lets the result outlive any later
-    /// mutation of the vector. See google/autocxx#330.
+    /// copies it out - so the caller holds an address rather than a borrow of
+    /// the slot a later mutation would move. See google/autocxx#330.
     fn generate_vector_shims(&mut self, tn: &QualifiedName) {
         let holder = tn.get_final_item();
         let declaration = VectorShim::ALL

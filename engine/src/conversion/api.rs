@@ -145,8 +145,8 @@ pub(crate) enum VectorShim {
     Len,
     /// `std::vector::operator[]`, which is undefined out of range, so the
     /// method Rust wraps it in says so. It hands back the element by value -
-    /// a copy of the stored pointer, not a pointer into the vector - which is
-    /// what makes every result of it outlive any later mutation.
+    /// the stored pointer copied out, not a borrow of the slot holding it -
+    /// so a later mutation of the vector cannot change what the caller got.
     GetUnchecked,
 }
 

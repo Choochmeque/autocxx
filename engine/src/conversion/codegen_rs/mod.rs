@@ -1151,9 +1151,10 @@ impl<'a> RsCodeGenerator<'a> {
     /// owns its pointers and not their pointees, so it makes no promise about
     /// what one points at and this makes none either: the element is a raw
     /// pointer under every unsafe policy, may be null, and needs `unsafe` to
-    /// dereference. It follows too that nothing C++ later does to the vector
-    /// can invalidate a pointer already handed out, since none of them points
-    /// into the vector's own storage.
+    /// dereference. It follows that a later mutation of the vector cannot
+    /// change which address a caller is holding - nothing handed out is a
+    /// borrow of an element's slot - though it says nothing about what that
+    /// address points at, which the vector never spoke for.
     ///
     /// The mode is read-only. A mutating surface would need a `Pin<&mut>`
     /// receiver and a way to build a holder from Rust, and neither is needed
@@ -1976,11 +1977,15 @@ fn vector_holder_doc() -> String {
      this vector keeps it alive. Every accessor hands the element back as a raw \
      pointer for that reason, under every unsafe policy, so that reading through \
      one stays `unsafe` and the promise stays yours to make.\n\n\
-     The flip side is that a pointer you have already been given cannot be \
-     invalidated by anything C++ does to the vector afterwards: what you hold is \
-     a copy of the stored pointer and not a pointer into the vector's own \
-     storage, so `push_back`, `erase` and reallocation leave it alone. Only the \
-     pointee's own lifetime, which was never this vector's business, can.\n\n\
+     What an accessor gives you is the stored pointer's *value*, copied out, \
+     and not a reference to the slot it sits in. So `push_back`, `erase` and \
+     the reallocation they cause cannot change which address you are holding, \
+     the way they would leave a borrow of the element itself dangling. They can \
+     still end the life of what it points at, if that happens to live in \
+     storage those operations own - an element made to point into the vector's \
+     own buffer is invalidated by a reallocation like anything else in there. \
+     The pointee's lifetime was never this vector's promise, and it is not this \
+     type's either.\n\n\
      The surface is read-only. There is no way to change the vector from Rust \
      here; C++ still can, and `len` and `get` ask it afresh every time."
         .to_string()
