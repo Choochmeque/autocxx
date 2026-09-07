@@ -9630,11 +9630,15 @@ fn test_unique_ptr_const_accessors() {
 
 /// The accessors a `std::weak_ptr<const T>` holder gets, and the
 /// `std::shared_ptr<const T>` holder which `lock` hands back - manufactured
-/// alongside the weak one, since this header never names that specialization
-/// itself.
+/// alongside the weak one.
 ///
-/// The counts are the point: locking joins the ownership group and raises the
-/// count, dropping the lock lowers it again, and once C++ has let go the
+/// The header goes out of its way never to name that specialization: the
+/// owning `shared_ptr` is a function-local static, so nothing autocxx converts
+/// mentions it and the holder `lock` returns exists only because the weak
+/// holder asked for it.
+///
+/// The counts are the rest of it: locking joins the ownership group and raises
+/// the count, dropping the lock lowers it again, and once C++ has let go the
 /// `weak_ptr` says so. `lock` still answers with a holder then, of an empty
 /// `shared_ptr`, which is what C++ does.
 ///
@@ -9647,13 +9651,16 @@ fn test_weak_ptr_const_accessors() {
             int a;
             int describe() const { return a + 1; }
         };
-        inline std::shared_ptr<const fx_Watched>& fx_kept() {
+        // The only `std::shared_ptr` in this header is a local variable, which
+        // bindgen never sees: every signature deals in `std::weak_ptr`.
+        inline std::weak_ptr<const fx_Watched> fx_watched(bool let_go) {
             static std::shared_ptr<const fx_Watched> kept =
                 std::make_shared<const fx_Watched>(fx_Watched { 5 });
-            return kept;
+            if (let_go) { kept.reset(); }
+            return std::weak_ptr<const fx_Watched>(kept);
         }
-        inline std::weak_ptr<const fx_Watched> fx_watch() { return fx_kept(); }
-        inline void fx_let_go() { fx_kept().reset(); }
+        inline std::weak_ptr<const fx_Watched> fx_watch() { return fx_watched(false); }
+        inline void fx_let_go() { fx_watched(true); }
     "};
     let rs = quote! {
         let weak = ffi::fx_watch();
@@ -9681,6 +9688,52 @@ fn test_weak_ptr_const_accessors() {
         assert_eq!(nothing.use_count(), 0);
     };
     run_test("", hdr, rs, &["fx_Watched", "fx_watch", "fx_let_go"], &[]);
+}
+
+/// A smart pointer reached through an alias to the *container*, whose payload
+/// is `const` through an alias of its own:
+/// `typedef const int CI; using W = std::weak_ptr<CI>`.
+///
+/// This is the shape where the path which reaches the lowering is not
+/// bindgen's. A typedef's target is analysed before any typedef target can be
+/// resolved, so the `const` on `CI` was invisible then and nothing was
+/// lowered; what the alias stored is cxx's own substituted spelling,
+/// `cxx::WeakPtr<CI>`, and that is what a later use of the alias resolves to.
+/// The sibling `std::shared_ptr` holder therefore has to be named afresh
+/// rather than derived from the path in hand, which used to yield
+/// `typedef cxx::shared_ptr<CI> ...` and an undeclared identifier `cxx` in the
+/// generated C++.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_weak_ptr_const_through_a_container_alias() {
+    let hdr = indoc! {"
+        #include <memory>
+        typedef const int fx_CI;
+        using fx_W = std::weak_ptr<fx_CI>;
+        inline fx_W fx_watch_alias() {
+            static std::shared_ptr<fx_CI> kept = std::make_shared<fx_CI>(3);
+            return fx_W(kept);
+        }
+    "};
+    let rs = quote! {
+        let weak = ffi::fx_watch_alias();
+        assert!(!weak.expired());
+        let locked = weak.lock();
+        assert_eq!(unsafe { *locked.get() }, autocxx::c_int(3));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_watch_alias"], &[], None),
+        None,
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &["typedef std::shared_ptr<fx_CI>"],
+            &["cxx::shared_ptr"],
+        ))])),
+        None,
+    );
 }
 
 /// A holder nested inside a container cxx *does* understand, which is the

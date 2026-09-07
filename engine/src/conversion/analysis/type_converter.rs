@@ -1407,22 +1407,6 @@ impl<'a> TypeConverter<'a> {
 /// erasure being bindgen's and older than the lowering. So the match here is
 /// what keeps a single pointer argument the only shape that arrives, and not
 /// what decides which allocators are in reach.
-/// The `std::shared_ptr<const T>` beside a `std::weak_ptr<const T>`: what
-/// `std::weak_ptr::lock` answers with, and so what the weak holder's shim has
-/// to return a holder of.
-///
-/// Built by renaming the last segment, so it stays bindgen's spelling of the
-/// instantiation in every other respect - namespace, template argument and the
-/// `const` marker on it - which is what `type_to_cpp` needs to write the
-/// typedef out as `std::shared_ptr<const T>`.
-fn sibling_shared_ptr(typ: &TypePath) -> TypePath {
-    let mut sibling = typ.clone();
-    if let Some(last) = sibling.path.segments.last_mut() {
-        last.ident = make_ident("shared_ptr").0;
-    }
-    sibling
-}
-
 fn sole_pointer_generic_arg(typ: &TypePath) -> Option<Type> {
     let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
         return None;
@@ -1431,6 +1415,30 @@ fn sole_pointer_generic_arg(typ: &TypePath) -> Option<Type> {
         [GenericArgument::Type(elem @ Type::Ptr(_))] => Some((*elem).clone()),
         _ => None,
     }
+}
+
+/// The `std::shared_ptr<const T>` beside a `std::weak_ptr<const T>`: what
+/// `std::weak_ptr::lock` answers with, and so what the weak holder's shim has
+/// to return a holder of.
+///
+/// Only the template arguments are taken from `typ`; the container is named
+/// afresh from what autocxx knows `std::shared_ptr` by, rather than by
+/// renaming a segment. The path reaching the lowering is not always bindgen's:
+/// where the header wrote `using W = std::weak_ptr<CI>`, the typedef was
+/// analysed before any typedef target could be resolved, so the `const` on
+/// `CI` was invisible then, nothing was lowered, and what the alias stored was
+/// cxx's own substituted spelling - `cxx::WeakPtr<CI>`. Renaming the last
+/// segment of that produces `cxx::shared_ptr`, which autocxx knows nothing
+/// about and which reached the generated C++ verbatim, as
+/// `typedef cxx::shared_ptr<CI> ...`.
+fn sibling_shared_ptr(typ: &TypePath) -> TypePath {
+    let mut sibling = QualifiedName::new_from_cpp_name("std::shared_ptr").to_type_path();
+    if let (Some(last), Some(original)) =
+        (sibling.path.segments.last_mut(), typ.path.segments.last())
+    {
+        last.arguments = original.arguments.clone();
+    }
+    sibling
 }
 
 /// Processing functions sometimes results in new types being materialized.
