@@ -12,7 +12,7 @@ use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
-    Explicitness, MethodKind, SpecialMemberKind, Visibility,
+    Explicitness, MethodKind, SpecialMemberKind, UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -225,6 +225,26 @@ pub(crate) struct BaseClass {
     pub(crate) is_public: bool,
 }
 
+/// A `using Base::foo;` written in a class, as bindgen reported it.
+///
+/// C++ requires the name to be a member of a base class, so the base is the
+/// place to look the signature up - which is what has to happen, because
+/// libclang reports a proper subset of the declarations such a using-
+/// declaration introduces and bindgen therefore reports none of them.
+#[derive(Debug, Clone)]
+pub(crate) struct UsingDeclaration {
+    /// The name the declaration introduces into the class. For an inherited
+    /// constructor - `using Base::Base;` - clang names the declaration after
+    /// the derived class, so this is the derived class's own name.
+    pub(crate) name: String,
+    /// The base class the name is taken from, where bindgen could say.
+    pub(crate) source_scope: Option<QualifiedName>,
+    /// The access the declaration gives the name in the class which wrote it.
+    /// It is the declaration's own, not the member's: `using Base::foo;` in a
+    /// `public:` section is how C++ widens a `protected` member.
+    pub(crate) visibility: Visibility,
+}
+
 /// A base class before its identifier has been turned back into a name.
 #[derive(Debug, Clone)]
 struct ReportedBase {
@@ -255,6 +275,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
     data_members: HashMap<DiscoveredItemId, Vec<DataMember>>,
     deprecations: HashMap<DiscoveredItemId, Deprecation>,
+    using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -308,10 +329,19 @@ impl UnindexedParseCallbackResults {
             })
             .collect();
 
+        let using_declarations = self
+            .using_declarations
+            .iter()
+            .filter_map(|(id, declarations)| {
+                Some((self.qualified_name(*id)?, declarations.clone()))
+            })
+            .collect();
+
         ParseCallbackResults {
             results: self,
             index,
             bases,
+            using_declarations,
         }
     }
 
@@ -350,6 +380,7 @@ pub(crate) struct ParseCallbackResults {
     results: UnindexedParseCallbackResults,
     index: HashMap<NameAndParent, DiscoveredItemId>,
     bases: HashMap<QualifiedName, BaseClasses>,
+    using_declarations: HashMap<QualifiedName, Vec<UsingDeclaration>>,
 }
 
 impl ParseCallbackResults {
@@ -495,6 +526,16 @@ impl ParseCallbackResults {
             .iter()
             .filter(|(_, bases)| bases.any_virtual)
             .map(|(name, _)| name)
+    }
+
+    /// The `using Base::foo;` declarations written in a class, in declaration
+    /// order. Empty for a class with none, and for one bindgen wrote no
+    /// members of.
+    pub(crate) fn using_declarations(&self, name: &QualifiedName) -> &[UsingDeclaration] {
+        self.using_declarations
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// The types bindgen reported any base class for at all.
@@ -648,6 +689,19 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_method_kind(&self, id: DiscoveredItemId, kind: MethodKind) {
         self.results.borrow_mut().method_kinds.insert(id, kind);
+    }
+
+    fn denote_using_declaration(&self, parent: DiscoveredItemId, using: UsingDeclarationInfo<'_>) {
+        self.results
+            .borrow_mut()
+            .using_declarations
+            .entry(parent)
+            .or_default()
+            .push(UsingDeclaration {
+                name: using.name.to_string(),
+                source_scope: using.source_scope.map(QualifiedName::new_from_cpp_name),
+                visibility: using.visibility,
+            });
     }
 
     fn denote_deprecation(&self, id: DiscoveredItemId, deprecation: &Deprecation) {

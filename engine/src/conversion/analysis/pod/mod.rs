@@ -26,7 +26,7 @@ use crate::{
         type_helpers::array_element_type,
         ConvertErrorFromCpp,
     },
-    parse_callbacks::{BaseClass, DataMember},
+    parse_callbacks::{BaseClass, DataMember, UsingDeclaration},
     types::{Namespace, QualifiedName},
     ParseCallbackResults,
 };
@@ -72,6 +72,11 @@ pub(crate) struct PodAnalysis {
     /// it sits at no fixed offset here, and a function overriding one of its
     /// pure virtuals overrides it for every class sharing it.
     pub(crate) virtual_bases: HashSet<QualifiedName>,
+    /// The `using Base::foo;` declarations C++ wrote in this class, which
+    /// make base class members nameable through it. bindgen generates nothing
+    /// for one, so the member is reachable in C++ and not in the generated
+    /// Rust unless something puts it back.
+    pub(crate) using_declarations: Vec<UsingDeclaration>,
     /// Base classes for which we should create casts.
     /// That's just those which are on the allowlist,
     /// because otherwise we don't know whether they're
@@ -194,6 +199,9 @@ fn analyze_struct(
     let data_members = parse_callback_results
         .data_members(&name.name)
         .unwrap_or_default();
+    let using_declarations = parse_callback_results
+        .using_declarations(&name.name)
+        .to_vec();
     let mut field_deps = HashSet::new();
     let mut field_definition_deps = HashSet::new();
     let mut field_info = Vec::new();
@@ -256,6 +264,7 @@ fn analyze_struct(
         analysis: PodAnalysis {
             kind: type_kind,
             bases: bases.into_keys().collect(),
+            using_declarations,
             has_unnamed_base,
             virtual_bases,
             castable_bases,
