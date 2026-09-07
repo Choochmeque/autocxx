@@ -630,8 +630,18 @@ impl<'a> TypeConverter<'a> {
         //
         // All three of the smart pointers are lowered, and each gets the
         // accessors its C++ type has (see `HolderSurface`).
-        let payload_is_const = self.generic_args_are_const_qualified(&typ)?;
-        if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppPtr && payload_is_const {
+        //
+        // Asked only of the containers whose answer it is - the two places
+        // below which read it are both within a cxx container. The question is
+        // fallible, because reading a qualifier off an alias means resolving
+        // the alias, and a template argument of a container cxx knows nothing
+        // about is one nobody resolves: it goes into an opaque holder whole,
+        // and asking would turn an alias autocxx cannot follow into a refusal
+        // of a type which never needed it followed.
+        let generic_behavior = known_types().cxx_generic_behavior(&tn);
+        let payload_is_const = generic_behavior != CxxGenericType::Not
+            && self.generic_args_are_const_qualified(&typ)?;
+        if generic_behavior == CxxGenericType::CppPtr && payload_is_const {
             let mut extra_apis = ApiVec::new();
             let surface = self.const_smart_pointer_surface(&tn, &typ, ns, &mut extra_apis)?;
             return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
@@ -648,7 +658,7 @@ impl<'a> TypeConverter<'a> {
         // uses - definition `std::vector<T*>`, so the element type stays where
         // C++ can see it - and give it a read-only accessor surface. See
         // google/autocxx#330.
-        if known_types().cxx_generic_behavior(&tn) == CxxGenericType::CppVector {
+        if generic_behavior == CxxGenericType::CppVector {
             if let Some(element) = sole_pointer_generic_arg(&typ) {
                 // Conversion is what turns bindgen's spelling of the pointee
                 // into the bridge's, and what turns down a pointee the bridge
@@ -702,7 +712,6 @@ impl<'a> TypeConverter<'a> {
 
         // Finally let's see if it's generic.
         if let Some(last_seg) = Self::get_generic_args(&mut typ) {
-            let generic_behavior = known_types().cxx_generic_behavior(&tn);
             let forward_declarations_ok = generic_behavior == CxxGenericType::Rust;
             if generic_behavior != CxxGenericType::Not {
                 // this is a type of generic understood by cxx (e.g. CxxVector)
