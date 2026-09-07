@@ -22710,23 +22710,25 @@ fn test_concrete_template_reference_parameter() {
     );
 }
 
-/// A C++ `[[deprecated]]` function, bound and never called from Rust.
+/// C++ `[[deprecated]]` declarations, bound and never named from Rust.
 ///
-/// Both halves of the generated C++ name the function - autocxx's own wrapper
-/// in `autocxxgen_ffi.h` and cxx's shim in `gen0.cxx` - so both draw
+/// Both halves of the generated C++ used to name each function - autocxx's own
+/// wrapper in `autocxxgen_ffi.h` and cxx's shim in `gen0.cxx` - so both drew
 /// `-Wdeprecated-declarations`, which this harness compiles with `-Werror`.
-/// The warning fires whether or not any Rust code calls the function, because
-/// the wrapper is emitted for everything `generate!` names.
+/// The warning fired whether or not any Rust code called the function, because
+/// the wrapper is emitted for everything `generate!` names, so a project
+/// building with `-Werror` could not bind a deprecated function at all.
 ///
-/// The signal belongs on the Rust side, as `#[deprecated]` carrying the C++
-/// message. It cannot be put there yet: `autocxx-bindgen` 0.73 has no
-/// deprecation handling at all, so nothing about the attribute reaches this
-/// layer. The two other things this crate recovers behind bindgen's back -
-/// ref-qualifiers and linkage - are both encoded in the mangled name, and
-/// `[[deprecated]]` is not encoded anywhere. Fixing this needs a bindgen
-/// `ParseCallbacks` hook backed by `clang_getCursorPlatformAvailability`.
+/// bindgen now reports the marker, which buys two things. The function is
+/// routed through an autocxx wrapper, so cxx's shim names only that wrapper;
+/// and the wrapper is bracketed by a pragma silencing the warning for its own
+/// body alone. `#![deny(deprecated)]` pins the other side of the same claim:
+/// the marker moves to Rust as `#[deprecated]`, and nothing autocxx generates
+/// names the marked binding, so a caller who never asks for the function hears
+/// nothing from either language.
+///
+/// Addresses the bug reported upstream as google/autocxx#1403.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/1403
 fn test_deprecated_cpp_function() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -22736,15 +22738,88 @@ fn test_deprecated_cpp_function() {
             virtual ~fx_Dep() {}
         };
         [[deprecated(\"gone soon\")]] inline uint32_t fx_old_fn() { return 2; }
+        [[deprecated]] inline uint32_t fx_old_bare_fn() { return 3; }
     "};
-    run_test_ex(
+    do_run_test(
         "",
         hdr,
         quote! {},
-        directives_from_lists(&["fx_Dep", "fx_old_fn"], &[], None),
+        directives_from_lists(&["fx_Dep", "fx_old_fn", "fx_old_bare_fn"], &[], None),
         None,
         None,
         None,
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(deprecated)]
+        }),
+    )
+    .unwrap()
+}
+
+/// The message a C++ `[[deprecated]]` was written with has to reach the Rust
+/// caller, because that caller is the only person who can act on it: the
+/// generated C++ is nobody's to edit. `[[deprecated]]` with no message has to
+/// arrive as a bare `#[deprecated]` rather than as an empty note.
+///
+/// Addresses the bug reported upstream as google/autocxx#1403.
+#[test]
+fn test_deprecated_cpp_function_warns_its_rust_caller() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        [[deprecated(\"gone soon\")]] inline uint32_t fx_old_fn() { return 2; }
+        [[deprecated]] inline uint32_t fx_old_bare_fn() { return 3; }
+    "};
+    let rs = quote! {
+        #[deny(deprecated)]
+        fn calls_them() {
+            assert_eq!(ffi::fx_old_fn(), 2);
+            assert_eq!(ffi::fx_old_bare_fn(), 3);
+        }
+        calls_them();
+    };
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["fx_old_fn", "fx_old_bare_fn"],
+        &[],
+        &[
+            "use of deprecated function `ffi::fx_old_fn`: gone soon",
+            "use of deprecated function `ffi::fx_old_bare_fn`",
+        ],
+    );
+}
+
+/// The same for a method, which reaches Rust as an inherent impl item rather
+/// than as a free function and so takes its `#[deprecated]` from a different
+/// generator.
+///
+/// Addresses the bug reported upstream as google/autocxx#1403.
+#[test]
+fn test_deprecated_cpp_method_warns_its_rust_caller() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Dep {
+        public:
+            fx_Dep() {}
+            [[deprecated(\"use bar instead\")]] uint32_t foo() const { return 1; }
+        };
+    "};
+    let rs = quote! {
+        #[deny(deprecated)]
+        fn calls_it() {
+            let d = ffi::fx_Dep::new().within_unique_ptr();
+            assert_eq!(d.foo(), 1);
+        }
+        calls_it();
+    };
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        rs,
+        &["fx_Dep"],
+        &[],
+        "use of deprecated method `ffi::fx_Dep::foo`: use bar instead",
     );
 }
 
