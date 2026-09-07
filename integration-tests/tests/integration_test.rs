@@ -17974,7 +17974,6 @@ fn test_char32_t_values() {
 }
 
 #[test]
-#[ignore] // case 2 above: libclang has no CXType_Char8, so this arrives opaque
 fn test_char8_t() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -17985,6 +17984,37 @@ fn test_char8_t() {
         hdr,
         quote! {},
         directives_from_lists(&["next_char8"], &[], None),
+        make_cpp20_adder(),
+        None,
+        None,
+    );
+}
+
+/// `char8_t` values crossing the bridge in both directions, as
+/// `test_char16_t_values` does for `char16_t`.
+#[test]
+fn test_char8_t_values() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char8_t next_char8(char8_t c) { return c + 1; }
+        inline void bump8(char8_t& c) { c = c + 1; }
+        inline uint32_t widen8(char8_t c) { return c; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_char8(autocxx::c_char8_t(65)), autocxx::c_char8_t(66));
+        // The newtype is transparent over u8 in both directions.
+        assert_eq!(u8::from(ffi::next_char8(65u8.into())), 66);
+        let mut c = autocxx::c_char8_t(70);
+        ffi::bump8(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        // `char8_t` is unsigned, so a continuation byte is not negative.
+        assert_eq!(ffi::widen8(autocxx::c_char8_t(0x80)), 0x80);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["next_char8", "bump8", "widen8"], &[], None),
         make_cpp20_adder(),
         None,
         None,
