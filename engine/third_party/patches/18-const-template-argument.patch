@@ -1,0 +1,53 @@
+Subject: Keep a template argument's `const` when it resolves to a record
+
+`--use-const-newtype-wrapper` marks a type C++ qualified `const` in its own
+right, and it already reaches template arguments: `shared_ptr<const int>` comes
+out `shared_ptr<__bindgen_marker_Const<c_int>>`, and so does an argument which
+is a pointer. An argument which is a *record* silently loses it, so
+`shared_ptr<const Foo>` and `shared_ptr<Foo>` are one type in the output.
+
+The qualifier belongs to the node it is written on. For `Container<const Foo>`
+clang gives an argument type which is `const` and refers to `Foo`, so bindgen
+builds a `const` `Type` whose kind is `ResolvedTypeRef(Foo)`; `Foo` itself is
+not `const`. `TemplateInstantiation::try_to_rust_ty` resolves the argument
+`through_type_refs()` before rendering it, which lands on `Foo` and leaves the
+qualified node - the only node which knows about the `const` - behind. A
+builtin or a pointer has no such node to skip, which is why those two kept it.
+
+Read the qualifier off the argument before resolving and re-apply it after,
+which is what the pointer arm of `TryToRustTy for Type` already does with a
+pointee's constness a few hundred lines above. Doing it at the one place
+template arguments are rendered covers every template, `std::` container and
+user-written class alike, rather than special-casing any of them.
+
+Nothing changes unless `--use-const-newtype-wrapper` is on, since
+`const_wrapper` is what decides whether to wrap at all.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -4990,11 +4990,24 @@
+             // the def uses.
+             .filter(|&(_, param)| ctx.uses_template_parameter(def.id(), *param))
+             .map(|(arg, _)| {
++                // `const` belongs to the node it is written on, and resolving
++                // through a type reference lands on a different node: for
++                // `Container<const T>` where `T` is a record, the argument is a
++                // `const` `ResolvedTypeRef` pointing at the record, and the
++                // record itself is not `const`. So read the qualifier before
++                // resolving, exactly as the pointer arm of `TryToRustTy for
++                // Type` reads a pointee's, and put it back afterwards.
++                let is_const = ctx.resolve_type(*arg).is_const();
+                 let arg = arg.into_resolver().through_type_refs().resolve(ctx);
+                 let ty = arg
+                     .try_to_rust_ty(ctx, &())?
+                     .with_implicit_template_params(ctx, arg);
+-                Ok(ty)
++                // If resolution stayed where it was, or landed on a node which
++                // is itself `const`, `TryToRustTy for Type` has already
++                // qualified `ty` and doing it again would nest the marker.
++                let is_const = is_const &&
++                    !arg.as_type().is_some_and(|ty| ty.is_const());
++                Ok(helpers::const_wrapper(ty, is_const, ctx))
+             })
+             .collect::<error::Result<Vec<_>>>()?;
+ 

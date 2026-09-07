@@ -191,6 +191,8 @@ pub enum ConvertErrorFromCpp {
     InvalidTypeForCppPtr(QualifiedName),
     #[error("A C++ std::vector was found containing some type that cxx can't accommodate as a vector element ({})", .0.to_cpp_name())]
     InvalidTypeForCppVector(QualifiedName),
+    #[error("A C++ {} was found whose payload C++ qualified `const`. cxx names a container's payload as a plain type, with nowhere to put the qualifier, so the only thing autocxx could declare is a container of a mutable payload - a different C++ type. std::shared_ptr, std::unique_ptr and std::weak_ptr are lowered to an opaque C++ holder instead; this container is not.", .0.to_cpp_name())]
+    ConstCxxContainerPayload(QualifiedName),
     #[error("Variadic functions are not supported by cxx or autocxx.")]
     Variadic,
     #[error("A type had a template inside a std::vector, which is not supported.")]

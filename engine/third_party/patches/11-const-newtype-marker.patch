@@ -29,13 +29,12 @@ option's documentation says so. The one place which has to *name* the type
 rather than declare something of it, a newtype alias's constructor expression,
 unwraps the marker itself.
 
-Two known gaps, both where an existing resolution step erases the qualifier
-before the wrap site sees it, and neither addressed here: a template argument's
-constness is resolved away by `through_type_refs()` before
-`TemplateInstantiation::try_to_rust_ty` renders it, so `shared_ptr<const int>`
-is still rendered as `shared_ptr<int>`; and an alias's target is resolved the
-same way before `pub type`/`pub use` is emitted for it, so `typedef const E CE`
-over an enum loses it too.
+One known gap, where an existing resolution step erases the qualifier before
+the wrap site sees it, and not addressed here: an alias's target is resolved
+`through_type_refs()` before `pub type`/`pub use` is emitted for it, so
+`typedef const E CE` over an enum loses it. A template argument had the same
+problem when the argument was a record; `18-const-template-argument.patch`
+fixes that one, the same way the pointer arm here already does.
 
 --- a/options/mod.rs
 +++ b/options/mod.rs

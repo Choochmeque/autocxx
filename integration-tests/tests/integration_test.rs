@@ -9522,52 +9522,93 @@ fn test_shared_ptr_const_pointer_payload() {
     );
 }
 
-/// The reach of the lowering above, stated as a test: a `std::shared_ptr<const
-/// T>` whose `T` is a class still does not build.
+/// The same lowering, with a class payload. This is what
+/// `18-const-template-argument.patch` unlocked: bindgen used to resolve a
+/// class argument's `TypeKind::ResolvedTypeRef` past the node its `const` sat
+/// on, so `std::shared_ptr<const fx_Held>` arrived indistinguishable from
+/// `std::shared_ptr<fx_Held>`, was spelled `SharedPtr<fx_Held>`, and the C++
+/// cxx generated failed to bind against the real signature.
 ///
-/// Nothing in the engine can help here, because the fact never arrives.
-/// bindgen erases a template argument's `const` before rendering the
-/// instantiation, and the marker `--use-const-newtype-wrapper` adds does not
-/// reach one - `engine/third_party/patches/11-const-newtype-marker.patch` says
-/// so in its own commit message. What that message does not say, and what is
-/// true, is that the erasure is not uniform: a builtin argument keeps the
-/// marker, which is why the tests above work, and a record one does not,
-/// because it is reached through a type reference which `through_type_refs()`
-/// resolves and drops the qualifier from. So autocxx sees plain
-/// `std::shared_ptr<fx_Class>`, spells it `SharedPtr<fx_Class>`, and the C++
-/// cxx generates fails to bind against the real signature exactly as it did
-/// before.
+/// The holder's accessor now hands back a `*const fx_Held`, so the payload is
+/// read through the class's own methods rather than as a scalar - and the
+/// class is one the bridge has to declare, which a builtin payload never was.
 ///
-/// This test exists to fail loudly if that ever changes, since the fix then is
-/// to delete it and extend the tests above.
-///
-/// Addresses part of the bug reported upstream as google/autocxx#799.
+/// Addresses the bug reported upstream as google/autocxx#799.
 #[test]
-fn test_shared_ptr_const_class_payload_is_still_unseen() {
+fn test_shared_ptr_const_class_payload() {
     let hdr = indoc! {"
         #include <memory>
-        struct fx_Held { int a; };
+        struct fx_Held {
+            int a;
+            int describe() const { return a * 2; }
+        };
         inline std::shared_ptr<const fx_Held> fx_hold_class() {
             return std::make_shared<const fx_Held>(fx_Held { 3 });
         }
     "};
-    // Matched on the C++ compiler's own words rather than on "it failed
-    // somehow", so that an unrelated breakage cannot keep this passing.
-    //
-    // One substring, because the three compilers agree on very little here.
-    // clang says the return types differ, MSVC says it cannot convert one
-    // function pointer to the other, and gcc calls that an invalid conversion;
-    // MSVC names neither the function nor the `::`-qualified spelling the
-    // others use. The specialization C++ was asked for and could not have is
-    // what they all print, and is the fact this test is about.
-    run_test_expect_fail_with_error(
+    let rs = quote! {
+        let held = ffi::fx_hold_class();
+        assert_eq!(held.use_count(), 1);
+        // SAFETY: `fx_hold_class` always returns a `shared_ptr` owning a real
+        // `fx_Held`, and `held` keeps that ownership group alive across the
+        // read.
+        let payload = unsafe { &*held.get() };
+        assert_eq!(payload.describe(), autocxx::c_int(6));
+        let second = held.clone();
+        assert_eq!(held.use_count(), 2);
+        drop(second);
+        assert_eq!(held.use_count(), 1);
+    };
+    run_test_ex(
         "",
         hdr,
-        quote! {},
-        &["fx_Held", "fx_hold_class"],
-        &[],
-        "shared_ptr<const fx_Held>",
+        rs,
+        directives_from_lists(&["fx_Held", "fx_hold_class"], &[], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(
+                &["typedef std::shared_ptr<const fx_Held>"],
+                &["typedef std::shared_ptr<fx_Held>"],
+            )),
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self) -> * const output :: fx_Held
+            }]),
+        ])),
+        None,
     );
+}
+
+/// The payload is a class the bridge has to declare, and nothing declares the
+/// holder itself: it is manufactured during conversion and `Api::ConcreteType`
+/// has no arm in `deps.rs`, so what keeps the class alive through the garbage
+/// collector is that every conversion which yields the holder records the
+/// class as a dependency of whatever it was converting. Here that is an alias,
+/// and the function which returns it depends on the alias in turn - so the
+/// chain has a link in it that the builtin-payload tests never exercised.
+///
+/// Addresses the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_class_payload_survives_through_an_alias() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_AliasHeld { int a; };
+        using fx_HeldPtr = std::shared_ptr<const fx_AliasHeld>;
+        inline fx_HeldPtr fx_hold_via_alias() {
+            return std::make_shared<const fx_AliasHeld>(fx_AliasHeld { 7 });
+        }
+    "};
+    // Deliberately generating only the function: the class and the alias have
+    // to be pulled in by the dependency chain, not by a directive.
+    let rs = quote! {
+        let held = ffi::fx_hold_via_alias();
+        assert_eq!(held.use_count(), 1);
+        // Naming the class is the assertion: it is declared only because the
+        // dependency chain reached it. Its fields are not readable from Rust -
+        // it is opaque, having never been asked for by value.
+        let payload: *const ffi::fx_AliasHeld = held.get();
+        assert!(!payload.is_null());
+    };
+    run_test("", hdr, rs, &["fx_hold_via_alias"], &[]);
 }
 
 #[test]
@@ -20539,6 +20580,241 @@ fn test_const_multidimensional_array_field() {
         quote! {},
         &["fx_HasConstGrid", "fx_read_grid", "fx_Cell"],
         &[],
+    );
+}
+
+/// `Holder<const Thing>` and `Holder<Thing>` are two C++ types, and autocxx
+/// used to make one type of them: the argument's `const` was resolved away
+/// before bindgen rendered it, so both instantiations reached the same
+/// synthesized concrete name and the C++ autocxx wrote for one was used for
+/// the other. The smart-pointer lowering never saw this shape - a plain
+/// template class goes straight to the concrete-type machinery.
+#[test]
+fn test_template_class_with_const_record_argument_is_its_own_type() {
+    let hdr = indoc! {"
+        struct fx_Thing { int v; };
+        template <typename T> class fx_Holder { public: T t; };
+        using fx_MutableHolder = fx_Holder<fx_Thing>;
+        using fx_ConstHolder = fx_Holder<const fx_Thing>;
+        inline int fx_read_mutable(const fx_MutableHolder& h) { return h.t.v; }
+        inline int fx_read_const(const fx_ConstHolder& h) { return h.t.v; }
+        inline int fx_read_both() {
+            fx_MutableHolder m{{3}};
+            fx_ConstHolder c{{4}};
+            return fx_read_mutable(m) * 10 + fx_read_const(c);
+        }
+    "};
+    // Rust has no instance of either holder to pass - autocxx invents no
+    // constructors for a concrete template instantiation - so the two
+    // signatures are what the test is about: cxx checks each against the real
+    // C++ function, and before this they were both checked against
+    // `fx_Holder<fx_Thing>`.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_read_both(), autocxx::c_int(34));
+        },
+        directives_from_lists(
+            &[
+                "fx_Thing",
+                "fx_MutableHolder",
+                "fx_ConstHolder",
+                "fx_read_mutable",
+                "fx_read_const",
+                "fx_read_both",
+            ],
+            &[],
+            None,
+        ),
+        None,
+        // The two concrete types autocxx invents, which is where the collision
+        // showed: one name for both meant one C++ typedef for both.
+        Some(make_string_finder(vec![
+            "fx_Holder_fx_Thing_AutocxxConcrete".into(),
+            "fx_Holder_const_fx_Thing_AutocxxConcrete".into(),
+        ])),
+        None,
+    );
+}
+
+/// The same for a builtin argument, where bindgen already kept the `const` and
+/// autocxx then wrote bindgen's marker into the C++ verbatim - a typedef
+/// naming `__bindgen_marker_Const<int>`, which is not a C++ type at all. The
+/// smart-pointer lowering taught `type_to_cpp` to write the qualifier instead;
+/// this is the other route to the same function.
+#[test]
+fn test_template_class_with_const_builtin_argument() {
+    let hdr = indoc! {"
+        template <typename T> class fx_Box { public: T t; };
+        using fx_ConstIntBox = fx_Box<const int>;
+        inline int fx_read_const_int(const fx_ConstIntBox& b) { return b.t; }
+        inline int fx_read_boxed_five() { fx_ConstIntBox b{5}; return fx_read_const_int(b); }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_read_boxed_five(), autocxx::c_int(5));
+        },
+        &["fx_ConstIntBox", "fx_read_const_int", "fx_read_boxed_five"],
+        &[],
+    );
+}
+
+/// `const` *pointer* arguments, which are why the qualifier is written to the
+/// right of what it qualifies. `Ptr* const` is a constant pointer and the
+/// left-hand spelling `const Ptr*` is a pointer to a constant, so which side
+/// it goes on decides which of the two the generated C++ names - and for
+/// `Ptr* const*`, where the qualifier is one declarator deep, there is no
+/// left-hand spelling at all.
+#[test]
+fn test_template_class_with_const_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Pointee { int v; };
+        template <typename T> class fx_Slot { public: T t; };
+        using fx_ConstPtrSlot = fx_Slot<fx_Pointee* const>;
+        using fx_PtrToConstSlot = fx_Slot<const fx_Pointee*>;
+        using fx_PtrToConstPtrSlot = fx_Slot<fx_Pointee* const*>;
+        using fx_PtrToConstPtrToConstSlot = fx_Slot<const fx_Pointee* const*>;
+        inline int fx_read_const_ptr(const fx_ConstPtrSlot& s) { return s.t->v; }
+        inline int fx_read_ptr_to_const(const fx_PtrToConstSlot& s) { return s.t->v; }
+        inline int fx_read_ptr_to_const_ptr(const fx_PtrToConstPtrSlot& s) { return (*s.t)->v; }
+        inline int fx_read_both_consts(const fx_PtrToConstPtrToConstSlot& s) { return (*s.t)->v; }
+        inline int fx_read_through_all() {
+            static fx_Pointee p{7};
+            static fx_Pointee* const pp = &p;
+            static const fx_Pointee* const cpp = &p;
+            fx_ConstPtrSlot a{&p};
+            fx_PtrToConstSlot b{&p};
+            fx_PtrToConstPtrSlot c{&pp};
+            fx_PtrToConstPtrToConstSlot d{&cpp};
+            return fx_read_const_ptr(a) + fx_read_ptr_to_const(b) +
+                fx_read_ptr_to_const_ptr(c) + fx_read_both_consts(d);
+        }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_read_through_all(), autocxx::c_int(28));
+        },
+        &[
+            "fx_Pointee",
+            "fx_ConstPtrSlot",
+            "fx_PtrToConstSlot",
+            "fx_PtrToConstPtrSlot",
+            "fx_PtrToConstPtrToConstSlot",
+            "fx_read_const_ptr",
+            "fx_read_ptr_to_const",
+            "fx_read_ptr_to_const_ptr",
+            "fx_read_both_consts",
+            "fx_read_through_all",
+        ],
+        &[],
+    );
+}
+
+/// `std::unique_ptr<const T>` is lowered to the same opaque holder the shared
+/// pointer gets, without the accessors - so a class payload, which used to be
+/// invisible, now round-trips through Rust and back into C++.
+#[test]
+fn test_unique_ptr_of_const_record_round_trips() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Owned { int v; };
+        inline std::unique_ptr<const fx_Owned> fx_make_owned() {
+            return std::unique_ptr<const fx_Owned>(new fx_Owned { 9 });
+        }
+        inline int fx_read_owned(const std::unique_ptr<const fx_Owned>& p) {
+            return p->v;
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let owned = ffi::fx_make_owned();
+            assert_eq!(ffi::fx_read_owned(&owned), autocxx::c_int(9));
+        },
+        directives_from_lists(&["fx_Owned", "fx_make_owned", "fx_read_owned"], &[], None),
+        None,
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &["typedef std::unique_ptr<const fx_Owned>"],
+            &["typedef std::unique_ptr<fx_Owned>"],
+        ))])),
+        None,
+    );
+}
+
+/// `std::vector` gets no lowering: cxx needs an opaque holder to be a complete
+/// type, and completing a `std::vector<const T>` is ill-formed. So the payload
+/// is turned down here instead, which is the difference between a diagnostic
+/// naming the container and a C++ compiler complaining about a specialization
+/// nobody wrote.
+#[test]
+fn test_vector_of_const_record_is_refused() {
+    let hdr = indoc! {"
+        #include <vector>
+        struct fx_Element { int v; };
+        using fx_ConstElements = std::vector<const fx_Element>;
+        inline int fx_count_const_elements(const fx_ConstElements& v) { return 0; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_Element", "fx_ConstElements", "fx_count_const_elements"],
+        &[],
+        "A C++ std::vector was found whose payload C++ qualified `const`",
+    );
+}
+
+/// `rust::Box` takes the same refusal by the same route, which is a different
+/// `CxxGenericType` arm from the vector's and so worth its own test: nothing
+/// else would notice if the check moved somewhere only the C++ containers
+/// reach.
+#[test]
+fn test_rust_box_of_const_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+
+        struct fx_BoxedRust;
+        inline uint32_t fx_take_const_box(rust::Box<const fx_BoxedRust>) {
+            return 4;
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_take_const_box"], &[], None),
+        "whose payload C++ qualified `const`",
+    );
+}
+
+/// A `std::unique_ptr<const T>` *member* is lowered like any other use, and the
+/// class keeps the facts its member gives it: a unique pointer is not
+/// copyable, so neither is anything holding one.
+#[test]
+fn test_const_container_member_still_deletes_copy() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct fx_Held2 { int v; };
+        struct fx_HoldsConst { std::unique_ptr<const fx_Held2> p; };
+        inline int fx_read_held2(const fx_HoldsConst& h) { return h.p->v; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_Held2", "fx_HoldsConst", "fx_read_held2"], &[], None),
+        None,
+        Some(make_string_absence_finder(vec![
+            "CopyNew for output :: fx_HoldsConst".into(),
+        ])),
+        None,
     );
 }
 
