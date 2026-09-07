@@ -9879,6 +9879,44 @@ fn test_vector_of_pointers_does_not_own_its_pointees() {
     );
 }
 
+/// The seam between this lowering and the `const`-payload refusal beside it:
+/// `std::vector<T* const>`, whose element is a pointer *and* carries bindgen's
+/// `const` marker, so both predicates are in play on the one type.
+///
+/// The refusal wins, and must. The marker means a `const` pointer to a mutable
+/// `fx_Goat`, and `std::vector` cannot be instantiated with a `const`
+/// `value_type` at all - its allocator requires a non-const one - so a holder
+/// would be a typedef of a specialization C++ rejects, which is worse than the
+/// diagnostic. Nothing has to be ordered to get this: the two predicates are
+/// disjoint by construction, because the marker arrives as a `Type::Path`
+/// wrapping the element and [`sole_pointer_generic_arg`] takes only a bare
+/// `Type::Ptr`, and no type is both.
+///
+/// [`test_vector_of_const_pointers`] is the other side of the seam - a pointer
+/// to a `const` object rather than a `const` pointer - and it *is* lowered,
+/// because pointee constness is part of a Rust type already and no marker is
+/// involved.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_const_pointer_elements_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <vector>
+        struct fx_Goat { uint32_t horns; };
+        using fx_ConstPtrs = std::vector<fx_Goat* const>;
+        inline uint32_t fx_count_const_ptrs(const fx_ConstPtrs& v);
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_Goat", "fx_ConstPtrs", "fx_count_const_ptrs"],
+        &[],
+        "A C++ std::vector was found whose payload C++ qualified `const`",
+    );
+}
+
 /// A `std::vector<const T*>`, whose element constness reaches the accessors.
 ///
 /// Nothing of bindgen's `const` marker is involved: `const fx_Goat*` is a

@@ -696,15 +696,21 @@ impl<'a> TypeConverter<'a> {
                 //
                 // The names it met are recorded on whatever is being
                 // converted rather than on the holder, because
-                // `Api::ConcreteType` has no arm in `deps.rs`. The
-                // smart-pointer branch above argues that is enough because its
-                // payload is a builtin the garbage collector cannot take away;
-                // that argument does not carry here, where the element is
-                // typically a class. The one that does is this: `lower_to_holder`
-                // adds the holder's own name to this same `deps` set, and every
-                // route to the holder is a conversion of the vector which
-                // passes through here, so nothing can come to depend on the
-                // holder without depending on the element in the same breath.
+                // `Api::ConcreteType` has no arm in `deps.rs` - the same
+                // arrangement the smart-pointer branch above describes, and
+                // sound here for the same reason: `lower_to_holder` adds the
+                // holder's own name to this same `deps` set, and every route
+                // to the holder is a conversion of the vector which passes
+                // through here, so nothing can come to depend on the holder
+                // without depending on the element in the same breath.
+                //
+                // The `generate_all!` hole that branch records is this
+                // branch's too, and reaches it sooner: a holder rooted by
+                // `generate_all!` survives whether or not anything names it,
+                // and an element class which ended up an `IgnoredItem` would
+                // leave the accessors naming a type nothing declares. A
+                // dependency arm on `Api::ConcreteType` closes both, and is
+                // the queued follow-up rather than part of either.
                 let mut element =
                     self.convert_type(element, ns, &TypeConversionContext::WithinContainer)?;
                 deps.extend(element.types_encountered.drain(..));
