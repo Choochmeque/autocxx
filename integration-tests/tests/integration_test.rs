@@ -17212,19 +17212,28 @@ fn test_issue_1089() {
     run_generate_all_test(hdr);
 }
 
-/// google/autocxx#1094's own repro: `g` is an alias template whose only
-/// template parameter is a non-type one, which bindgen drops, so `g` reaches
-/// autocxx as `pub type g = root::b::f;` - a plain typedef naming a template
-/// without arguments. autocxx handles that now, and `test_issue_1094b` is the
-/// same shape written so that it runs everywhere.
+/// google/autocxx#1094's own repro, with the one thing in it autocxx has no
+/// stake in taken out. The reduction on the issue is:
 ///
-/// This one does not run everywhere, and not for an autocxx reason: the repro
-/// is written around `__make_integer_seq`, which is a Clang builtin, so the
-/// C++ autocxx generates from it compiles only where the C++ compiler is
-/// Clang. The libclang matrix pins libclang and leaves the runner's g++ in
-/// place, where this is `'__make_integer_seq' does not name a type`.
+/// ```cpp
+/// namespace {
+/// typedef int a;
+/// }
+/// namespace b {
+/// template <typename> struct c;
+/// template <typename d, d e> using f = __make_integer_seq<c, d, e>;
+/// template <a e> using g = f<a, e>;
+/// } // namespace b
+/// ```
+///
+/// `__make_integer_seq` is a Clang builtin, so that header only compiles under
+/// Clang, and the libclang matrix legs build with g++. `make_seq` below is an
+/// ordinary class template with the same parameter list, and everything the
+/// bug turned on is kept: the anonymous namespace typedef, the incomplete `c`,
+/// the alias template `f` whose non-type parameter bindgen drops, and `g`
+/// aliasing that. The two headers generate the same Rust, item for item, `g`
+/// included - which is refused by the alias-template rule.
 #[test]
-#[ignore] // the repro is written around a Clang builtin - see above
 fn test_issue_1094() {
     let hdr = indoc! {"
         namespace {
@@ -17232,7 +17241,8 @@ fn test_issue_1094() {
         }
         namespace b {
         template <typename> struct c;
-        template <typename d, d e> using f = __make_integer_seq<c, d, e>;
+        template <template <typename> class, typename d, d> struct make_seq;
+        template <typename d, d e> using f = make_seq<c, d, e>;
         template <a e> using g = f<a, e>;
         } // namespace b
     "};
