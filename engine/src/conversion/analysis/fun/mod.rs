@@ -207,6 +207,12 @@ pub(crate) struct ReturnTypeAnalysis {
     /// one of bindgen's markers, but behind a typedef it arrives as an
     /// ordinary path and the alias has to be resolved first.
     was_rvalue_reference: bool,
+    /// Whether C++ qualified the return type itself `const`. That qualifier
+    /// is part of the function's type, and cxx takes the address of every
+    /// function it declares, so a `const int f()` declared to cxx as
+    /// `-> c_int` is rejected by C++ at `int (*f$)() = ::f;`. Calling it
+    /// through a wrapper of our own sidesteps that. See google/autocxx#1191.
+    was_const: bool,
     deps: HashSet<QualifiedName>,
     placement_param_needed: Option<(FnArg, ArgumentAnalysis)>,
 }
@@ -219,6 +225,7 @@ impl Default for ReturnTypeAnalysis {
             was_reference: false,
             was_mutable_reference: false,
             was_rvalue_reference: false,
+            was_const: false,
             deps: Default::default(),
             placement_param_needed: None,
         }
@@ -1550,6 +1557,7 @@ impl<'a> FnAnalyzer<'a> {
 
         let mut ret_type = return_analysis.rt;
         let ret_type_conversion = return_analysis.conversion;
+        let ret_type_was_const = return_analysis.was_const;
 
         // Do we need to convert either parameters or return type?
         let param_conversion_needed = param_details.iter().any(|b| b.conversion.cpp_work_needed());
@@ -1631,6 +1639,13 @@ impl<'a> FnAnalyzer<'a> {
             _ if matches!(fun.ref_qualifier, CppRefQualifier::LValue) => true,
             _ if param_conversion_needed => true,
             _ if ret_type_conversion_needed => true,
+            // cxx takes the address of every function it declares, and a
+            // top-level `const` on the return type is part of the function's
+            // type, so `int (*f$)() = ::f;` does not compile for a `const int
+            // f()`. Our own wrapper returns the unqualified type - which the
+            // caller is copying out of C++ anyway - and calls through.
+            // google/autocxx#1191.
+            _ if ret_type_was_const => true,
             _ if cpp_name_incompatible_with_cxx => true,
             _ if fun.synthetic_cpp.is_some() => true,
             _ if self.force_wrapper_generation => true,
@@ -2412,6 +2427,7 @@ impl<'a> FnAnalyzer<'a> {
             ReturnType::Default => ReturnTypeAnalysis::default(),
             ReturnType::Type(rarrow, boxed_type) => {
                 let annotated_type = self.convert_boxed_type(boxed_type.clone(), ns)?;
+                let was_const = annotated_type.is_const;
                 let boxed_type = annotated_type.ty;
                 let ty: &Type = boxed_type.as_ref();
                 match ty {
@@ -2450,6 +2466,7 @@ impl<'a> FnAnalyzer<'a> {
                                 conversion: Some(TypeConversionPolicy::new_for_placement_return(
                                     ty.clone(),
                                 )),
+                                was_const,
                                 deps: annotated_type.types_encountered,
                                 placement_param_needed: Some((fnarg, analysis)),
                                 ..Default::default()
@@ -2465,6 +2482,7 @@ impl<'a> FnAnalyzer<'a> {
                             ReturnTypeAnalysis {
                                 rt: ReturnType::Type(*rarrow, boxed_type),
                                 conversion,
+                                was_const,
                                 deps: annotated_type.types_encountered,
                                 ..Default::default()
                             }
@@ -2510,6 +2528,7 @@ impl<'a> FnAnalyzer<'a> {
                             was_reference,
                             was_mutable_reference,
                             was_rvalue_reference,
+                            was_const,
                             deps: annotated_type.types_encountered,
                             placement_param_needed: None,
                         }

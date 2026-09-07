@@ -14,6 +14,7 @@ use crate::conversion::{
     api::{FuncToConvert, UnanalyzedApi},
     convert_error::ConvertErrorWithContext,
     convert_error::ErrorContext,
+    type_helpers::strip_const_markers,
 };
 use crate::minisyn::{minisynize_punctuated, minisynize_vec};
 use crate::types::strip_bindgen_original_suffix_from_ident;
@@ -198,7 +199,11 @@ fn analyze_static(
             ident.to_string(),
         ));
     }
-    match ty {
+    // A `const` variable arrives wrapped in bindgen's const marker, which says
+    // nothing about whether we can re-export the declaration - `const Fred` is
+    // the same type to us as `Fred` - and would hide the `root::` prefix the
+    // check below looks for.
+    match strip_const_markers(ty) {
         Type::Path(typ) => {
             let is_cpp_type = typ
                 .path
