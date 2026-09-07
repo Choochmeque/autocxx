@@ -1,0 +1,301 @@
+Subject: Represent base classes by the bytes the target gave them
+
+bindgen stores each base class in a field of the base's own type, which is
+`sizeof(base)` bytes wide. The target is not obliged to give the base that
+many. Under the Itanium ABI a class which is not a POD for the purpose of
+layout lends its tail padding to whatever the derived class lays out next:
+given `struct B { B(); int i; char c; };`, `sizeof(B)` is eight but `B`'s data
+ends at five, and `struct D : B { char d; };` puts `d` at offset five. A field
+of type `B` puts it at eight, which leaves every member of `D` after the base
+at the wrong offset and `D` four bytes too wide. The same thing happens between
+one base and the next, and to a class holding a virtual base which its
+most-derived class puts somewhere else. bindgen notices, after the fact -
+`pad_struct` logs "Calculated wrong layout" - and writes the struct out anyway.
+This is https://github.com/rust-lang/rust-bindgen/issues/380, reported again as
+rust-lang/rust-bindgen#1116, rust-lang/rust-bindgen#1516 and
+rust-lang/rust-bindgen#3095, and it is why `virtual_inheritance.hpp` in the
+test suite carries a `--no-layout-tests` and a FIXME pointing at
+rust-lang/rust-bindgen#465: `class D : C, B` there puts `bazz` at 28 and
+bindgen put it at 32.
+
+Which bytes the bases really occupy is something the target has already been
+asked: it is the offset of the first member laid out after them, or, for a
+class with no members of its own, the class's size. Where fields of the bases'
+own types would run past that, they cannot be fields of those types at all -
+Rust has no way to say "a `B`, but only the five bytes of it this class uses".
+One opaque field spanning the bytes the bases do occupy leaves every member
+after them at the offset the target reported, and the class at the size and
+alignment the target gave it. The bases' types are what is lost, and only for
+the classes bindgen was already writing out wrong; a class whose bases fit is
+untouched. `gen_partialeq_impl` names those fields, so it is told when they are
+not there and compares the one field which is.
+
+`saw_base` had to stop aligning a packed struct's bases. `align_to_latest_field`
+already returns early for a packed struct and then the base was aligned anyway,
+which put the running offset past both where the target puts the base and where
+`#[repr(packed)]` puts the field written for it - enough, now that the offset is
+compared against something, to call a correct packed layout wrong.
+
+Reading the answer back from the target rather than modelling an ABI is what
+makes this portable. Nothing about the Itanium ABI is written down here, and the
+MSVC ABI, which does not lend a base's tail padding to the derived class at all,
+reports the offsets which say so and keeps its typed bases; where the two ABIs
+put a virtual base differently, each is read back the same way.
+
+Three things this does not reach.
+
+A base moved by less than the room in front of the class's first member is not
+seen. `struct B { B(); int i; char a, b, c; }; struct C { C(); char x, y; };
+struct D : B, C { int z; };` really puts `C` at 7 and this still puts it at 8;
+`z` is at 12 either way and the class ends at 16 either way, so nothing `D`
+declares itself is wrong and there is nothing left to compare against. Catching
+it takes the offset of each base, which libclang has reported only since 20.0,
+through `clang_getOffsetOfBase`; `clang_Cursor_getOffsetOfField` answers for
+fields alone, and bindgen asks clang-sys for `clang_11_0`. Reaching for the
+newer call means raising that floor or asking at run time whether the symbol is
+there, and then replacing this comparison with per-base offsets rather than
+tightening it. Without asking clang the only bound left is to refuse every class
+whose first base has room to spare, and that refuses far more than is ever
+wrong: whether a base lends that room is the ABI's choice, and the sizes on
+their own do not say.
+
+A member which overlaps the bases rather than following them - which only
+`[[no_unique_address]]` on an empty one does - leaves no run of bytes to write
+at all. That is rust-lang/rust-bindgen#3438, a layout with no Rust shape; the
+bases are left as they were and the log says so, rather than dropping them and
+putting the member on top of what they hold.
+
+The opaque field is bytes, so it carries the base's internal padding, which C++
+need not initialize and which a derived `PartialEq` or `Debug` then reads. That
+is what `_bindgen_opaque_blob` has always done for an opaque type, and what the
+TODO on `helpers::blob` asks about; nothing here makes it better or worse.
+
+--- a/codegen/impl_partialeq.rs
++++ b/codegen/impl_partialeq.rs
+@@ -10,6 +10,7 @@
+     comp_info: &CompInfo,
+     item: &Item,
+     ty_for_impl: &proc_macro2::TokenStream,
++    opaque_bases: bool,
+ ) -> Option<proc_macro2::TokenStream> {
+     let mut tokens = vec![];
+ 
+@@ -23,14 +24,22 @@
+             &self.bindgen_union_field[..] == &other.bindgen_union_field[..]
+         });
+     } else {
+-        for base in comp_info.base_members() {
+-            if !base.requires_storage(ctx) {
+-                continue;
+-            }
++        // The bases are one field of bytes rather than a field each, because
++        // the target left them less room than their own types take up.
++        if opaque_bases {
++            tokens.push(quote! {
++                self.__bindgen_bases == other.__bindgen_bases
++            });
++        } else {
++            for base in comp_info.base_members() {
++                if !base.requires_storage(ctx) {
++                    continue;
++                }
+ 
+-            let ty_item = ctx.resolve_item(base.ty);
+-            let field_name = &base.field_name;
+-            tokens.push(gen_field(ctx, ty_item, field_name));
++                let ty_item = ctx.resolve_item(base.ty);
++                let field_name = &base.field_name;
++                tokens.push(gen_field(ctx, ty_item, field_name));
++            }
+         }
+ 
+         for field in comp_info.fields() {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2442,6 +2442,10 @@
+             });
+         }
+ 
++        // How many bytes the base classes occupy, where they had to become one
++        // opaque field rather than a field each; see below.
++        let mut opaque_bases = None;
++
+         if !is_opaque {
+             if item.has_vtable_ptr(ctx) {
+                 let vtable = Vtable::new(item.id(), self);
+@@ -2459,8 +2463,102 @@
+                 struct_layout.saw_vtable();
+             }
+ 
++            // Where the bases end if each is a field of its own type, against
++            // where the target puts what it lays out after them. A base's tail
++            // padding can hold the members which follow it - `struct D : B {
++            // char d; }` puts `d` at offset 5 where `sizeof(B)` is 8 - and so
++            // can the room a virtual base's subobject leaves in a class which
++            // does not hold it there. A field of the base's type is
++            // `sizeof(base)` bytes wide whichever the target chose, so where
++            // the two disagree the bases cannot be fields of their own types
++            // at all. One opaque field spanning the bytes they do occupy
++            // leaves every member after them at the offset the target
++            // reported, which is the whole of what the layout has to get
++            // right. See https://github.com/rust-lang/rust-bindgen/issues/380.
++            let bases_start = struct_layout.latest_offset();
++            let bases_end = {
++                let mut probe = struct_layout.clone();
++                for base in self.base_members() {
++                    if base.requires_storage(ctx) {
++                        probe.saw_base(ctx.resolve_item(base.ty).expect_type());
++                    }
++                }
++                probe.latest_offset()
++            };
++            // Only the first member is asked about, and a class with no
++            // members of its own is measured against its own size instead, so
++            // an overrun which fits in the room before that member is not
++            // seen. `struct B { B(); int i; char a, b, c; }; struct C { C();
++            // char x, y; }; struct D : B, C { int z; };` really puts `C` at 7
++            // and this still puts it at 8: `z` is at 12 either way and the
++            // class ends at 16 either way. What is left wrong is the offset of
++            // a base field, not of anything the class declares itself. Catching
++            // it
++            // would take the offset of each base, and libclang has reported
++            // those only since 20.0, through `clang_getOffsetOfBase`;
++            // `clang_Cursor_getOffsetOfField` answers for fields alone, and
++            // this crate asks clang-sys for `clang_11_0`. Reaching for the
++            // newer call means raising that floor or asking at run time
++            // whether the symbol is there, which is a change of its own. The
++            // bound which would catch it without asking clang - refusing every
++            // class whose first base has room to spare - refuses far more than
++            // is ever wrong: whether a base lends that room is the ABI's
++            // choice, and the sizes on their own do not say.
++            let members_start = match self.fields().first() {
++                Some(Field::DataMember(data)) => {
++                    data.offset().map(|bits| bits / 8)
++                }
++                // A bitfield allocation unit starts at or before its first
++                // bitfield, at a multiple of its own alignment.
++                Some(Field::Bitfields(unit)) => {
++                    unit.bitfields().first().and_then(FieldMethods::offset).map(
++                        |bits| {
++                            let align = unit.layout().align.max(1);
++                            bits / 8 / align * align
++                        },
++                    )
++                }
++                None => None,
++            }
++            .or_else(|| layout.map(|l| l.size));
++            opaque_bases = match members_start {
++                Some(start) if bases_end > start => {
++                    // Never `Some(0)`: a member which starts where the bases
++                    // do, or before them, overlaps them rather than following
++                    // them, and there is no run of bytes to write. Only
++                    // `[[no_unique_address]]` on an empty member does that;
++                    // it is a layout with no Rust shape at all, and one
++                    // bindgen already gets wrong - see
++                    // https://github.com/rust-lang/rust-bindgen/issues/3438.
++                    // Leaving the bases as they were keeps that where it was,
++                    // rather than dropping them and putting the member on top
++                    // of what they hold.
++                    match start.checked_sub(bases_start).filter(|b| *b > 0) {
++                        Some(bytes) => {
++                            warn!(
++                                "The target left {canonical_name} less room \
++                                 for its base classes than fields of their own \
++                                 types would take up; representing them as \
++                                 {bytes} opaque bytes"
++                            );
++                            Some(bytes)
++                        }
++                        None => {
++                            warn!(
++                                "The target overlaps a member of \
++                                 {canonical_name} with its base classes; the \
++                                 struct written here is not that layout"
++                            );
++                            None
++                        }
++                    }
++                }
++                _ => None,
++            };
++
+             for base in self.base_members() {
+-                let requires_storage = base.requires_storage(ctx);
++                let requires_storage =
++                    base.requires_storage(ctx) && opaque_bases.is_none();
+                 // Reported before the skip below, which is the only mention a
+                 // base with no storage would otherwise get anywhere.
+                 // `through_type_refs` so that the id names what the field
+@@ -2516,6 +2614,20 @@
+                     #access_spec #field_name: #inner,
+                 });
+             }
++
++            if let Some(bytes) = opaque_bases {
++                let bases_layout = Layout::new(bytes, 1);
++                struct_layout.saw_field_with_layout(
++                    "__bindgen_bases",
++                    bases_layout,
++                    Some(bases_start * 8),
++                );
++                let ty = helpers::blob(ctx, bases_layout, false);
++                let access_spec = access_specifier(visibility);
++                fields.push(quote! {
++                    #access_spec __bindgen_bases: #ty,
++                });
++            }
+         }
+ 
+         let mut methods = vec![];
+@@ -3145,6 +3257,7 @@
+                 self,
+                 item,
+                 &ty_for_impl,
++                opaque_bases.is_some(),
+             ) {
+                 let partialeq_bounds = if generic_param_names.is_empty() {
+                     quote! {}
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -13,7 +13,7 @@
+ const MAX_GUARANTEED_ALIGN: usize = 8;
+ 
+ /// Trace the layout of struct.
+-#[derive(Debug)]
++#[derive(Clone, Debug)]
+ pub(crate) struct StructLayoutTracker<'a> {
+     name: &'a str,
+     ctx: &'a BindgenContext,
+@@ -96,6 +96,12 @@
+         self.last_field_was_flexible_array = true;
+     }
+ 
++    /// The offset the next member would be laid out at, given what the tracker
++    /// has been told about so far.
++    pub(crate) fn latest_offset(&self) -> usize {
++        self.latest_offset
++    }
++
+     pub(crate) fn saw_vtable(&mut self) {
+         debug!("saw vtable for {}", self.name);
+ 
+@@ -110,7 +116,17 @@
+         if let Some(layout) = base_ty.layout(self.ctx) {
+             self.align_to_latest_field(layout);
+ 
+-            self.latest_offset += self.padding_bytes(layout) + layout.size;
++            // A packed struct does not align its bases any more than it aligns
++            // its fields, which is what `align_to_latest_field` returns early
++            // for; the offset would otherwise run past where the target puts
++            // them and past where `#[repr(packed)]` puts the fields written
++            // here.
++            let padding = if self.is_packed {
++                0
++            } else {
++                self.padding_bytes(layout)
++            };
++            self.latest_offset += padding + layout.size;
+             self.latest_field_layout = Some(layout);
+             self.max_field_align = cmp::max(self.max_field_align, layout.align);
+         }
