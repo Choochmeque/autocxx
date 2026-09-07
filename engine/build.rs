@@ -132,6 +132,9 @@ const MODULE_PREAMBLE: &str = "\
 // as a private module the rest is dead.
 #![allow(unused_imports)]
 #![allow(dead_code)]
+// The doc links point at bindgen's public API, where some of what they name is
+// not reachable from here.
+#![allow(rustdoc::all)]
 ";
 
 fn main() {
@@ -441,11 +444,47 @@ fn rewrite(relative: &Path, text: &str, target: &str) -> String {
         text = text.replace(&format!("{attr}\n"), "");
     }
 
+    text = ignore_doctests(&text);
+
     if relative == Path::new("lib.rs") {
         text = format!("{MODULE_PREAMBLE}{text}");
     }
 
     text
+}
+
+/// Mark every code block in a doc comment `ignore`.
+///
+/// These are bindgen's examples, and they are written for people who depend on
+/// the bindgen crate: `use bindgen::builder;`. There is no such crate here, so
+/// as doctests of autocxx-engine they do not compile. Marking them rather than
+/// deleting them keeps the vendored text as close to upstream as everything
+/// else, and nothing is lost: they document an API autocxx does not re-export.
+fn ignore_doctests(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_block = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let doc_body = trimmed
+            .strip_prefix("///")
+            .or_else(|| trimmed.strip_prefix("//!"))
+            .map(str::trim_start);
+        if let Some(body) = doc_body {
+            if body.starts_with("```") {
+                if in_block {
+                    in_block = false;
+                } else {
+                    in_block = true;
+                    let fence = line.find("```").expect("the body starts with one");
+                    out.push_str(&line[..fence + 3]);
+                    out.push_str("ignore\n");
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 /// Rewrite `name!` to `path!`, leaving `name` alone anywhere it is not a macro
