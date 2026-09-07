@@ -9169,8 +9169,18 @@ fn test_shared_ptr() {
     );
 }
 
+/// google/autocxx#799. Re-run when bindgen learned to mark a `const` type
+/// (`test_return_const_int`): still fails. The marker does not reach a template
+/// argument, whose constness bindgen's instantiation codegen resolves away -
+/// but even with it there would be nowhere to put the answer. cxx spells this
+/// `SharedPtr<T>`, autocxx picks that by name, and Rust has no `const T` for
+/// the `T`. Preserving the fact in bindgen would still be worth doing, so that
+/// autocxx could refuse the signature deliberately rather than mis-declare it;
+/// it would not make this pass. The gate on passing is cxx's:
+/// `::std::shared_ptr< ::c_int> (*make_shared_int$)() = ::make_shared_int;`
+/// is rejected against a `std::shared_ptr<const int> ()`.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/799
+#[ignore] // https://github.com/google/autocxx/issues/799 - cxx has no SharedPtr<const T>
 fn test_shared_ptr_const() {
     let hdr = indoc! {"
         #include <memory>
@@ -15080,13 +15090,16 @@ fn test_implicit_constructor_rules() {
         test_movable![ffi::MemberPointerDeleted];
         test_call_a![ffi::MemberPointerDeleted];
 
-        //test_copyable![ffi::MemberConstPointerDeleted];
-        //test_movable![ffi::MemberConstPointerDeleted];
-        //test_call_a![ffi::MemberConstPointerDeleted];
+        // A `T* const` member is const in its own right, which deletes the
+        // default constructor - so no `test_constructible!`/`test_make_unique!`
+        // here, unlike `MemberPointerDeleted` above.
+        test_copyable![ffi::MemberConstPointerDeleted];
+        test_movable![ffi::MemberConstPointerDeleted];
+        test_call_a![ffi::MemberConstPointerDeleted];
 
-        //test_copyable![ffi::MemberConst];
-        //test_movable![ffi::MemberConst];
-        //test_call_a![ffi::MemberConst];
+        test_copyable![ffi::MemberConst];
+        test_movable![ffi::MemberConst];
+        test_call_a![ffi::MemberConst];
 
         test_copyable![ffi::MemberReferenceDeleted];
         test_movable![ffi::MemberReferenceDeleted];
@@ -15372,13 +15385,8 @@ fn test_implicit_constructor_rules() {
         "NonConstCopy",
         "TwoCopy",
         "MemberPointerDeleted",
-        // TODO: Handle top-level const on C++ members correctly.
-        // bindgen erases top-level const, so T* const (which
-        // deletes the default constructor) is indistinguishable
-        // from T* (which doesn't) — same gap as MemberConst below.
-        //"MemberConstPointerDeleted",
-        // TODO: Handle top-level const on C++ members correctly.
-        //"MemberConst",
+        "MemberConstPointerDeleted",
+        "MemberConst",
         "MemberReferenceDeleted",
         "MemberConstReferenceDeleted",
         "MemberReference",
@@ -16448,7 +16456,11 @@ fn test_issue_1170() {
     run_test("", hdr, quote! {}, &["Arch"], &[]);
 }
 
-#[ignore] // https://github.com/google/autocxx/issues/1191
+/// google/autocxx#1191: a `const`-qualified return type is part of the
+/// function's type, and cxx takes the address of every function it declares,
+/// so declaring this one as `-> c_int` used to be rejected by C++ at
+/// `::c_int (*get_value$)() = ::get_value;`. It goes through a wrapper of our
+/// own instead.
 #[test]
 fn test_return_const_int() {
     let hdr = indoc! {
@@ -19168,6 +19180,7 @@ fn test_absent_constructors_explain_themselves() {
         };
         struct HasUnconstructibleMember { NoDefault m; };
         struct HasReferenceMember { uint32_t& r; };
+        struct HasConstMember { const uint32_t c; };
         class PrivateCopy {
         public:
             PrivateCopy() {}
@@ -19190,6 +19203,7 @@ fn test_absent_constructors_explain_themselves() {
             &[
                 "HasUnconstructibleMember",
                 "HasReferenceMember",
+                "HasConstMember",
                 "DerivesPrivateCopy",
                 "DeclaresMove",
             ],
@@ -19205,6 +19219,10 @@ fn test_absent_constructors_explain_themselves() {
              with no default member initializer, leaving an implicitly declared constructor \
              nothing to bind it to. A constructor written out in the C++ source can bind it in \
              its member initializer list."
+                .to_string(),
+            "autocxx has not given this type a default constructor, because its field `c` is \
+             `const` and so an implicitly declared constructor would have no way to give it its \
+             one and only value."
                 .to_string(),
             "C++ gives this type no copy constructor, because its base class `PrivateCopy` has \
              no accessible copy constructor."
@@ -19586,7 +19604,6 @@ fn test_pod_holding_nested_struct() {
 /// C++ deletes the default constructor of a class with a const data member
 /// and no initializer for it, so nothing may synthesize a `new()` for one.
 #[test]
-#[ignore] // needs bindgen to say a field is const - see the note in implicit_constructors
 fn test_const_field_deletes_default_constructor() {
     let hdr = indoc! {"
         struct fx_HasConstField {
@@ -19595,6 +19612,217 @@ fn test_const_field_deletes_default_constructor() {
         inline int read_it(const fx_HasConstField& h) { return h.m; }
     "};
     run_test("", hdr, quote! {}, &["fx_HasConstField", "read_it"], &[]);
+}
+
+/// The two things `const` can qualify in a pointer field are different facts,
+/// and only one of them touches the constructors. `T* const` is a const
+/// field, so C++ deletes the default constructor; `const T*` is an ordinary
+/// pointer at something the pointee's owner won't let you write to, and the
+/// class is default-constructible as usual. bindgen renders both as
+/// `*const T`/`*mut T` without help, which is why the marker has to
+/// distinguish them.
+#[test]
+fn test_const_pointee_does_not_delete_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_Pointee { int a; };
+        struct fx_HasPointerToConst {
+            const fx_Pointee* p;
+        };
+        inline int fx_count_it(const fx_HasPointerToConst& h) { return h.p ? h.p->a : 0; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_HasPointerToConst::new().within_unique_ptr();
+        assert_eq!(ffi::fx_count_it(&h), autocxx::c_int(0));
+    };
+    run_test("", hdr, rs, &["fx_HasPointerToConst", "fx_count_it"], &[]);
+}
+
+/// C++ folds a `const` element type into the array: `const int a[3]` is an
+/// array of const ints, and the member is as unassignable as a plain `const
+/// int` is. So it deletes the default constructor the same way, and the
+/// marker has to survive the array.
+#[test]
+fn test_const_array_field_deletes_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_HasConstArray {
+            const int a[3];
+        };
+        inline int fx_read_first(const fx_HasConstArray& h) { return h.a[0]; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_HasConstArray", "fx_read_first"],
+        &[],
+    );
+}
+
+/// A `const` bitfield is `const` like any other member, so it deletes the
+/// default constructor too - and it is the shape which decides how bindgen's
+/// const marker has to be declared. bindgen renders a bitfield's accessors
+/// with the member's own type and casts between it and the allocation unit's
+/// integer (`self.a() as u32`), so a marker declared as a newtype makes the
+/// generated bindgen module fail to compile with `error[E0605]:
+/// non-primitive cast`. It is declared as a transparent alias instead - see
+/// `make_bindgen_builder`.
+#[test]
+fn test_const_bitfield_field() {
+    let hdr = indoc! {"
+        struct fx_ConstBitfield {
+            fx_ConstBitfield() : a(1), b(2) {}
+            const int a : 3;
+            int b : 3;
+        };
+        inline int fx_read_bf(const fx_ConstBitfield& h) { return h.b; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_ConstBitfield", "fx_read_bf"], &[]);
+}
+
+/// `typedef const int ci` is `const` at the alias, not at each use of it, so
+/// a field of that type is only known to be unassignable if the typedef's
+/// analysis carried the fact forward. It converts to a plain `c_int`, which
+/// cannot say it - the same reason the analysis already remembers whether the
+/// target was an rvalue reference.
+#[test]
+fn test_const_field_through_typedef_deletes_default_constructor() {
+    let hdr = indoc! {"
+        typedef const int fx_ci;
+        struct fx_HasTypedefConst { fx_ci m; };
+        inline int fx_read_tc(const fx_HasTypedefConst& h) { return h.m; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_HasTypedefConst", "fx_read_tc"],
+        &[],
+    );
+}
+
+/// A `const` alias for another alias. bindgen resolves an alias's target
+/// through the wrapper which held the constness before rendering it, so
+/// `typedef int I; typedef const I CI;` comes out as `pub type CI = root::I;`
+/// with no marker anywhere - the same erasure as `test_const_enum_typedef`,
+/// and the reason the engine only has to look at the last link of a chain.
+/// Closing it needs bindgen to keep the qualifier across that resolution,
+/// which for an enum alias also means not taking the `pub use` shortcut.
+#[test]
+#[ignore] // bindgen erases const when an alias's target is itself a type-ref
+fn test_const_field_through_typedef_chain_deletes_default_constructor() {
+    let hdr = indoc! {"
+        typedef int fx_I;
+        typedef const fx_I fx_CI;
+        struct fx_HasChain { fx_CI m; };
+        inline int fx_read_chain(const fx_HasChain& h) { return h.m; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_HasChain", "fx_read_chain"], &[]);
+}
+
+/// A second alias for one which was already `const` still deletes the default
+/// constructor: `A` carries the marker because its own target is a builtin,
+/// and `B` picks it up when its target is resolved.
+#[test]
+fn test_const_field_through_alias_of_const_alias() {
+    let hdr = indoc! {"
+        typedef const int fx_A;
+        typedef fx_A fx_B;
+        struct fx_HasB { fx_B m; };
+        inline int fx_read_b(const fx_HasB& h) { return h.m; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_HasB", "fx_read_b"], &[]);
+}
+
+/// A `const` alias for an enum. bindgen resolves an alias's target through the
+/// wrapper which held the constness before rendering it, so the marker never
+/// reaches the `pub use` it emits for an enum alias - which is just as well,
+/// because `pub use path::Marker<E> as CE;` would not be a legal `use`.
+///
+/// C++ does delete `fx_HasConstEnum`'s default constructor, and the const-field
+/// rule does not see it here. Nothing is generated which fails to build, but
+/// only because a coarser rule already declines: autocxx does not credit an
+/// enum with a default constructor, so the field is refused as
+/// `DependencyLacksIt` rather than as a `const` one. The `const` half of this
+/// case rides on that, and would be exposed by any field type autocxx does
+/// credit - see `test_const_field_through_typedef_chain_deletes_default_constructor`,
+/// which is the same erasure with an `int` behind it and is `#[ignore]`d.
+#[test]
+fn test_const_enum_typedef() {
+    let hdr = indoc! {"
+        enum fx_E { fx_A = 1, fx_B = 2 };
+        typedef const fx_E fx_CE;
+        struct fx_HasConstEnum { fx_CE m; };
+        inline int fx_take_ce(fx_CE e) { return (int)e; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_take_ce", "fx_E", "fx_HasConstEnum"],
+        &[],
+    );
+}
+
+/// A `const` bitfield deletes the default constructor like any other `const`
+/// member, and autocxx does not notice. bindgen emits no field of the
+/// member's own type for a bitfield - the struct gets one allocation unit for
+/// the whole run, and the member survives only as accessors - so the const
+/// marker has nowhere to land that `find_constructors_present` reads. Closing
+/// it needs bindgen to report a bitfield's own type, which is the same
+/// missing per-field report as google/autocxx#816's initializers.
+#[test]
+#[ignore] // needs bindgen to report a bitfield's own type, not just its accessors
+fn test_const_bitfield_deletes_default_constructor() {
+    let hdr = indoc! {"
+        struct fx_ConstBf { const int a : 3; };
+        inline int fx_read_bf_only(const fx_ConstBf& h) { return h.a; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_ConstBf", "fx_read_bf_only"], &[]);
+}
+
+/// A `const` member of class type also deletes the copy constructor, when the
+/// class has no copy constructor accepting a const source: the member cannot
+/// be moved from, and the copy it falls back to is not there. autocxx now
+/// knows the field is `const` but does not run that rule - the checks in
+/// `find_constructors_present` ask what the field's type can do, not what can
+/// be done to a `const` one of it - so it offers a copy constructor C++
+/// deletes.
+#[test]
+#[ignore] // engine: the copy/move checks ignore field constness
+fn test_const_class_member_deletes_copy() {
+    let hdr = indoc! {"
+        struct fx_M {
+            fx_M();
+            fx_M(fx_M&&);
+            fx_M(const fx_M&) = delete;
+            int x;
+        };
+        struct fx_S { const fx_M m; };
+        inline int fx_read_s(const fx_S& s) { return s.m.x; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_S", "fx_read_s", "fx_M"], &[]);
+}
+
+/// The marker and the array layers alternate all the way down for a
+/// multidimensional array, because bindgen folds a const element type into the
+/// array's own constness as well as leaving it on the element. A walk which
+/// stops at the first of either finds a marker where it wanted a type name.
+#[test]
+fn test_const_multidimensional_array_field() {
+    let hdr = indoc! {"
+        struct fx_Cell { int v; };
+        struct fx_HasConstGrid {
+            const fx_Cell grid[2][3];
+        };
+        inline int fx_read_grid(const fx_HasConstGrid& h) { return h.grid[1][2].v; }
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {},
+        &["fx_HasConstGrid", "fx_read_grid", "fx_Cell"],
+        &[],
+    );
 }
 
 /// An empty base class is laid out at zero size inside the class deriving
