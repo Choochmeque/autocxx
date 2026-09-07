@@ -6801,22 +6801,62 @@ fn test_derived_abstract_class_with_no_allowlisting_no_make_unique() {
     run_test("", hdr, rs, &["B"], &[]);
 }
 
+/// A `std::vector<T*>` parameter in the shape it was first reported in: a
+/// method of a class in a namespace, taking a vector of pointers to a class
+/// forward-declared at that point.
+///
+/// This used to assert the opposite - that the method was ignored - because
+/// nothing could be done with such a signature. It now binds, which is what
+/// google/autocxx#330 asked for.
+///
+/// The reduced repro this came from returned `struct b`, a type declared
+/// nowhere but in that very declaration, and that half has been dropped
+/// because it is a second bug and not this one. bindgen puts such a type in
+/// the root module where C++ puts it in the enclosing namespace, and reports
+/// it as a complete empty struct where C++ never defines it, so autocxx
+/// generates C++ naming `::b` and no refusal fires. That reproduces with no
+/// vector anywhere in the header - `namespace ns { class S { public: struct b
+/// c(int); }; }` fails the same way on an unmodified tree - so the method was
+/// only ever ignored here because the vector was refused first, and keeping
+/// the return type would pin somebody else's bug to this test.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
 #[test]
 fn test_vector_of_pointers() {
-    // Just ensures the troublesome API is ignored
     let hdr = indoc! {"
+        #include <cstdint>
         #include <vector>
         namespace operations_research {
         class a;
         class Solver {
         public:
-          struct b c(std::vector<a *>);
+          uint32_t c(std::vector<a *>);
         };
         class a {};
+        inline std::vector<a*> make_pack() { static a x; return { &x, &x }; }
         } // namespace operations_research
     "};
-    let rs = quote! {};
-    run_test("", hdr, rs, &["operations_research::Solver"], &[]);
+    let cxx = indoc! {"
+        uint32_t operations_research::Solver::c(std::vector<a*> v) {
+            return static_cast<uint32_t>(v.size());
+        }
+    "};
+    let rs = quote! {
+        let pack = ffi::operations_research::make_pack();
+        assert_eq!(pack.len(), 2);
+        let mut solver = ffi::operations_research::Solver::new().within_unique_ptr();
+        assert_eq!(solver.pin_mut().c(pack), 2);
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "operations_research::Solver",
+            "operations_research::make_pack",
+        ],
+        &[],
+    );
 }
 
 #[test]
@@ -9609,6 +9649,342 @@ fn test_shared_ptr_const_class_payload_survives_through_an_alias() {
         assert!(!payload.is_null());
     };
     run_test("", hdr, rs, &["fx_hold_via_alias"], &[]);
+}
+
+/// The header every `std::vector<T*>` test below shares. `fx_herd` is the one
+/// vector C++ owns; the bound functions read it, copy it and mutate it, so
+/// that what Rust sees can be compared against what C++ still has.
+///
+/// `fx_Goat` is a `pod!` so that a test can read a field through an element
+/// pointer without another shim standing between the two.
+const VECTOR_OF_POINTERS_HDR: &str = indoc! {"
+    #include <cstdint>
+    #include <vector>
+
+    struct fx_Goat { uint32_t horns; };
+
+    inline std::vector<fx_Goat*>& fx_herd() {
+        static std::vector<fx_Goat*> v;
+        return v;
+    }
+    inline void fx_add(uint32_t horns) { fx_herd().push_back(new fx_Goat{horns}); }
+    inline void fx_forget() {
+        for (fx_Goat* g : fx_herd()) delete g;
+        fx_herd().clear();
+    }
+    inline std::vector<fx_Goat*> fx_snapshot() { return fx_herd(); }
+    inline void fx_append(std::vector<fx_Goat*>& v, uint32_t horns) {
+        v.push_back(new fx_Goat{horns});
+    }
+    inline uint32_t fx_total(const std::vector<fx_Goat*>& v) {
+        uint32_t t = 0;
+        for (const fx_Goat* g : v) t += (g ? g->horns : 0);
+        return t;
+    }
+    inline uint32_t fx_total_by_value(std::vector<fx_Goat*> v) { return fx_total(v); }
+"};
+
+/// A `std::vector<T*>` crossing the bridge in every direction, and the
+/// accessors the holder gets.
+///
+/// The middle of it is the promise that makes this type safe to hand out at
+/// all: `fx_append` pushes onto the very vector Rust is holding, which may
+/// reallocate the pointer array, and the element pointer read before that is
+/// still good afterwards. Nothing autocxx hands back points into the vector -
+/// each is a copy of a stored `fx_Goat*` - so no mutation of the vector can
+/// reach it. `len` is asked afresh each time and sees the new element.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_round_trip() {
+    let rs = quote! {
+        ffi::fx_add(3);
+        ffi::fx_add(5);
+        let mut v = ffi::fx_snapshot();
+        assert_eq!(v.len(), 2);
+        assert!(!v.is_empty());
+        assert!(v.get(2).is_none());
+        assert_eq!(ffi::fx_total(&v), 8);
+        assert_eq!(ffi::fx_total_by_value(ffi::fx_snapshot()), 8);
+
+        let first = v.get(0).unwrap();
+        assert_eq!(unsafe { (*first).horns }, 3);
+        ffi::fx_append(v.pin_mut(), 7);
+        assert_eq!(v.len(), 3);
+        assert_eq!(ffi::fx_total(&v), 15);
+        // The pointer read before the push, after it.
+        assert_eq!(unsafe { (*first).horns }, 3);
+
+        let horns: Vec<u32> = v.iter().map(|g| unsafe { (*g).horns }).collect();
+        assert_eq!(horns, vec![3, 5, 7]);
+        // The one C++ still owns is untouched by any of this: `fx_snapshot`
+        // copied the pointers and `fx_append` grew the copy.
+        assert_eq!(ffi::fx_snapshot().len(), 2);
+
+        unsafe { ffi::fx_delete(v.get(2).unwrap()) };
+        ffi::fx_forget();
+    };
+    run_test(
+        "",
+        &format!("{VECTOR_OF_POINTERS_HDR}\ninline void fx_delete(fx_Goat* g) {{ delete g; }}\n"),
+        rs,
+        &[
+            "fx_add",
+            "fx_forget",
+            "fx_snapshot",
+            "fx_append",
+            "fx_total",
+            "fx_total_by_value",
+            "fx_delete",
+        ],
+        &["fx_Goat"],
+    );
+}
+
+/// The two element values the API must not paper over: there may be no element
+/// at all, and an element which is there may be null.
+///
+/// `get` tells them apart - `None` past the end, `Some(null)` for a null
+/// element - because a `std::vector<T*>` distinguishes them and so must
+/// anything standing for one. An empty vector is the other end of the same
+/// question: `len` is zero, `get(0)` is `None`, and `iter` yields nothing
+/// rather than running off the end.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_null_and_empty_elements() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <vector>
+        struct fx_Goat { uint32_t horns; };
+        inline std::vector<fx_Goat*> fx_empty() { return {}; }
+        inline std::vector<fx_Goat*> fx_holey() {
+            static fx_Goat g{9};
+            return { nullptr, &g, nullptr };
+        }
+    "};
+    let rs = quote! {
+        let empty = ffi::fx_empty();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert!(empty.get(0).is_none());
+        assert_eq!(empty.iter().count(), 0);
+
+        let holey = ffi::fx_holey();
+        assert_eq!(holey.len(), 3);
+        assert!(!holey.is_empty());
+        assert!(holey.get(0).unwrap().is_null());
+        assert!(!holey.get(1).unwrap().is_null());
+        assert!(holey.get(2).unwrap().is_null());
+        assert!(holey.get(3).is_none());
+        assert_eq!(unsafe { (*holey.get(1).unwrap()).horns }, 9);
+        assert_eq!(holey.iter().filter(|g| g.is_null()).count(), 2);
+    };
+    run_test("", hdr, rs, &["fx_empty", "fx_holey"], &["fx_Goat"]);
+}
+
+/// That the holder owns the pointers and not the pointees, proved against the
+/// C++ runtime rather than against the wrapper: an instrumented element type
+/// counts its own destructions, and dropping the holder does not raise the
+/// count. The pointees are still readable afterwards, and are destroyed only
+/// when C++ is asked to destroy them.
+///
+/// This is the fact the generated documentation states and the reason the
+/// accessors hand back raw pointers: holding the vector establishes nothing
+/// about what an element points at.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_does_not_own_its_pointees() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <vector>
+
+        inline uint32_t& fx_dtor_count() { static uint32_t c = 0; return c; }
+
+        struct fx_Counted {
+            uint32_t v;
+            ~fx_Counted() { fx_dtor_count()++; }
+        };
+
+        inline std::vector<fx_Counted*> fx_counted() {
+            fx_dtor_count() = 0;
+            return { new fx_Counted{1}, new fx_Counted{2} };
+        }
+        inline uint32_t fx_dtors() { return fx_dtor_count(); }
+        inline uint32_t fx_value(const fx_Counted* p) { return p->v; }
+        inline void fx_destroy(fx_Counted* p) { delete p; }
+    "};
+    let rs = quote! {
+        let v = ffi::fx_counted();
+        let first = v.get(0).unwrap();
+        let second = v.get(1).unwrap();
+        assert_eq!(ffi::fx_dtors(), 0);
+
+        drop(v);
+        // `~vector` freed the array of pointers and nothing else.
+        assert_eq!(ffi::fx_dtors(), 0);
+        assert_eq!(unsafe { ffi::fx_value(first) }, 1);
+        assert_eq!(unsafe { ffi::fx_value(second) }, 2);
+
+        unsafe { ffi::fx_destroy(first) };
+        assert_eq!(ffi::fx_dtors(), 1);
+        unsafe { ffi::fx_destroy(second) };
+        assert_eq!(ffi::fx_dtors(), 2);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_counted",
+            "fx_dtors",
+            "fx_value",
+            "fx_destroy",
+            "fx_Counted",
+        ],
+        &[],
+    );
+}
+
+/// A `std::vector<const T*>`, whose element constness reaches the accessors.
+///
+/// Nothing of bindgen's `const` marker is involved: `const fx_Goat*` is a
+/// pointer to a `const` object, which is part of a Rust type already and
+/// arrives as `*const fx_Goat`. That is why this needs no counterpart to
+/// `test_shared_ptr_const_class_payload_is_still_unseen` - the qualifier
+/// bindgen drops is the argument's own, as in `T* const`, and that is not what
+/// a vector of pointers to `const` is written with.
+///
+/// Pinned on both halves of the output. The generated typedef keeps the
+/// qualifier, which is what makes the C++ bind; the accessors hand back a
+/// `*const` and there is no `*mut` counterpart anywhere.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_const_pointers() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <vector>
+        struct fx_Goat { uint32_t horns; };
+        inline std::vector<const fx_Goat*> fx_const_herd() {
+            static fx_Goat a{3};
+            static fx_Goat b{5};
+            return { &a, &b };
+        }
+        inline uint32_t fx_const_total(const std::vector<const fx_Goat*>& v) {
+            uint32_t t = 0;
+            for (const fx_Goat* g : v) t += g->horns;
+            return t;
+        }
+    "};
+    let rs = quote! {
+        let v = ffi::fx_const_herd();
+        assert_eq!(v.len(), 2);
+        assert_eq!(unsafe { (*v.get(0).unwrap()).horns }, 3);
+        assert_eq!(ffi::fx_const_total(&v), 8);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_const_herd", "fx_const_total"], &["fx_Goat"], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(
+                &["typedef std::vector<const fx_Goat*>"],
+                &["typedef std::vector<fx_Goat*>"],
+            )),
+            make_rust_code_finder(vec![quote! {
+                pub fn get (& self , pos : usize) -> Option < * const output :: fx_Goat >
+            }]),
+            // No accessor hands back anything mutable. Matched on the two
+            // shapes only an accessor has, because a `pod!` type gets a
+            // `*mut` of its own from the storage-allocation machinery and the
+            // bare pointer type would find that instead.
+            make_string_absence_finder(vec![
+                "Option < * mut".to_string(),
+                "get_unchecked (& self , pos : usize) -> * mut".to_string(),
+            ]),
+        ])),
+        None,
+    );
+}
+
+/// A `std::vector<T*>` inside a container cxx does understand.
+///
+/// The shape reaches the branch which converts a cxx container's payload, and
+/// so depends on that branch carrying out the holder's own `Api` - which is
+/// shared with the smart-pointer lowering and covered from the other side by
+/// [`test_shared_ptr_const_nested_in_a_container`]. Without it the bridge
+/// names a type nothing declared and the function is silently refused.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_nested_in_a_container() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        #include <vector>
+        struct fx_Goat { uint32_t horns; };
+        inline std::unique_ptr<std::vector<fx_Goat*>> fx_boxed_herd() {
+            static fx_Goat g{3};
+            return std::make_unique<std::vector<fx_Goat*>>(
+                std::vector<fx_Goat*>{ &g });
+        }
+    "};
+    let rs = quote! {
+        let v = ffi::fx_boxed_herd();
+        assert_eq!(v.len(), 1);
+        assert_eq!(unsafe { (*v.get(0).unwrap()).horns }, 3);
+    };
+    run_test("", hdr, rs, &["fx_boxed_herd"], &["fx_Goat"]);
+}
+
+/// What the lowering does to the generated code, positively and negatively:
+/// the C++ typedef names the specialization C++ wrote, and cxx is never asked
+/// for a `CxxVector` of it.
+///
+/// The Rust half pins the two shims the whole surface is built from. `get`,
+/// `is_empty` and `iter` are written in terms of them and are exercised by the
+/// tests above rather than pinned here.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_lowers_to_an_opaque_holder() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <vector>
+        struct fx_Goat { uint32_t horns; };
+        inline std::vector<fx_Goat*> fx_herd() { return {}; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert!(ffi::fx_herd().is_empty());
+        },
+        directives_from_lists(&["fx_herd"], &["fx_Goat"], None),
+        None,
+        Some(make_checks(vec![
+            Box::new(CppMatcher::new(&["typedef std::vector<fx_Goat*>"], &[])),
+            make_rust_code_finder(vec![
+                quote! {
+                    pub fn len (& self) -> usize
+                },
+                quote! {
+                    pub unsafe fn get_unchecked (& self , pos : usize) -> * mut output :: fx_Goat
+                },
+            ]),
+            // cxx is never asked for a vector of pointers, which is the thing
+            // it has no `VectorElement` for and this lowering exists to avoid.
+            // `CxxVector<fx_Goat>` is generated regardless - `fx_Goat` is an
+            // ordinary type which may live in a vector - so the pointer is
+            // what makes this the absence it is about.
+            make_string_absence_finder(vec!["CxxVector < * mut".to_string()]),
+        ])),
+        None,
+    );
 }
 
 #[test]

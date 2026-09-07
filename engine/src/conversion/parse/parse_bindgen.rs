@@ -144,7 +144,7 @@ impl<'a> ParseBindgen<'a> {
                         name,
                         cpp_definition: cpp_definition.clone(),
                         rs_definition: None,
-                        shared_ptr_payload: None,
+                        holder_surface: None,
                     }
                 }),
         );

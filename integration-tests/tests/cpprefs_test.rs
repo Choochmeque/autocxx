@@ -1017,6 +1017,51 @@ fn test_shared_ptr_const_cpprefs() {
     run_cpprefs_test("", hdr, rs, &["fx_hold", "fx_peek"], &[]);
 }
 
+/// A `std::vector<T*>` holder under `unsafe_references_wrapped`.
+///
+/// The accessors are unchanged by the policy, which is the decision this test
+/// records. A `CppRef` is what a C++ *reference* becomes in this mode, and
+/// there is no reference here: a `std::vector<T*>` stores pointers, and a C++
+/// pointer reaches Rust as a raw pointer under every policy autocxx has.
+/// Wrapping one would manufacture exactly the promise a `CppRef` carries and
+/// the vector does not make - non-null, and live for as long as you hold it -
+/// which is the hole review found in the smart-pointer holder's `get` and
+/// closed by making that method `unsafe`. There is nothing to close here.
+///
+/// The mode gives up nothing by leaving these alone, because its guarantee is
+/// kept at the other end: `argument_conversion_details` gives a parameter of
+/// `TypeKind::Pointer` `UnsafetyNeeded::Always` whatever the policy, so a
+/// generated function which *takes* one of these elements is an `unsafe fn`
+/// here as everywhere. `fx_horns` below is one, and the test has to write the
+/// `unsafe` to call it.
+///
+/// Addresses the bug reported upstream as google/autocxx#330.
+#[test]
+fn test_vector_of_pointers_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <vector>
+        struct fx_Goat { uint32_t horns; };
+        inline std::vector<fx_Goat*> fx_herd() {
+            static fx_Goat only{3};
+            return { &only, nullptr };
+        }
+        inline uint32_t fx_horns(fx_Goat* g) { return g->horns; }
+    "};
+    let rs = quote! {
+        let v = ffi::fx_herd();
+        assert_eq!(v.len(), 2);
+        // The annotation is the assertion: a raw pointer, not a `CppMutRef`.
+        let first: *mut ffi::fx_Goat = v.get(0).unwrap();
+        assert!(v.get(1).unwrap().is_null());
+        assert!(v.get(2).is_none());
+        // Safe: `fx_herd`'s first element points at a `static`, so it is
+        // non-null and outlives this call.
+        assert_eq!(unsafe { ffi::fx_horns(first) }, 3);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_herd", "fx_horns"], &["fx_Goat"]);
+}
+
 /// A copy constructor in this mode. Its source is a `const T&`, which the mode
 /// otherwise turns into a `CppRef`, but `moveit`'s `CopyNew` copies from a
 /// `&Self` and that is not negotiable - so the source stays a Rust reference

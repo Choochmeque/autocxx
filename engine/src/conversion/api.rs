@@ -55,6 +55,38 @@ pub(crate) enum TypeKind {
               // in which case we'll err on the side of caution.
 }
 
+/// What autocxx knows an opaque holder to be, where it lowered a template
+/// instantiation cxx cannot spell to one.
+///
+/// cxx sees a holder as an ordinary opaque extern type, so nothing about what
+/// it holds reaches Rust by itself. This says which set of shims to write
+/// beside it and what those carry. `None` on an `Api::ConcreteType` is every
+/// other concrete type, which gets no accessors at all.
+#[derive(Debug)]
+pub(crate) enum HolderSurface {
+    /// A `std::shared_ptr<const T>`, carrying the `T` as the `cxx::bridge`
+    /// spells it. See google/autocxx#799.
+    SharedPtr { payload: Box<Type> },
+    /// A `std::vector<T*>`, carrying the element - a raw pointer - as the
+    /// `cxx::bridge` spells it. See google/autocxx#330.
+    VectorOfPointers { element: Box<Type> },
+}
+
+/// The C++ function's name for one of a holder's shims, and the name the
+/// `cxx::bridge` declares it by.
+///
+/// Built rather than allocated, so unlike every other bridge name it is not
+/// reserved against the user's own: `BridgeNameTracker` and
+/// `fixed_bridge_names` run during analysis, and the holder these belong to is
+/// manufactured after that. A header declaring a function called
+/// `<holder>_autocxx_get` would collide, where `<holder>` is the mangled
+/// spelling of the instantiation - so the name to collide with is one nobody
+/// writes by accident, and a collision is a Rust compile error in generated
+/// code rather than anything silent.
+fn shim_cpp_name(holder: &QualifiedName, rust_name: &str) -> String {
+    format!("{}_autocxx_{rust_name}", holder.get_final_item())
+}
+
 /// One of the C++ helper functions autocxx generates beside the opaque holder
 /// it lowers a `std::shared_ptr<const T>` to.
 ///
@@ -93,17 +125,46 @@ impl SharedPtrShim {
     }
 
     /// The C++ function's name, and the name the `cxx::bridge` declares it by.
-    ///
-    /// Built rather than allocated, so unlike every other bridge name it is not
-    /// reserved against the user's own: `BridgeNameTracker` and
-    /// `fixed_bridge_names` run during analysis, and the holder these belong to
-    /// is manufactured after that. A header declaring a function called
-    /// `<holder>_autocxx_get` would collide, where `<holder>` is the mangled
-    /// spelling of a `std::shared_ptr<const T>` instantiation - so the name to
-    /// collide with is one nobody writes by accident, and a collision is a Rust
-    /// compile error in generated code rather than anything silent.
     pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
-        format!("{}_autocxx_{}", holder.get_final_item(), self.rust_name())
+        shim_cpp_name(holder, self.rust_name())
+    }
+}
+
+/// One of the C++ helper functions autocxx generates beside the opaque holder
+/// it lowers a `std::vector<T*>` to.
+///
+/// Only these two are shims, and neither can be misused: they are the C++
+/// container's own `size` and `operator[]`, and the second is reached from
+/// Rust only through an `unsafe fn` which states the bound it needs. The rest
+/// of the surface - `get`, `is_empty`, `iter` - is written in Rust in terms of
+/// them, because a bounds check costs nothing there and an extra shim would.
+/// See google/autocxx#330.
+#[derive(Copy, Clone)]
+pub(crate) enum VectorShim {
+    /// `std::vector::size`, as a `size_t`.
+    Len,
+    /// `std::vector::operator[]`, which is undefined out of range, so the
+    /// method Rust wraps it in says so. It hands back the element by value -
+    /// a copy of the stored pointer, not a pointer into the vector - which is
+    /// what makes every result of it outlive any later mutation.
+    GetUnchecked,
+}
+
+impl VectorShim {
+    pub(crate) const ALL: [Self; 2] = [Self::Len, Self::GetUnchecked];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Len => "len",
+            Self::GetUnchecked => "get_unchecked",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
+        shim_cpp_name(holder, self.rust_name())
     }
 }
 
@@ -620,10 +681,10 @@ pub(crate) enum Api<T: AnalysisPhase> {
         name: ApiName,
         rs_definition: Option<Box<Type>>,
         cpp_definition: String,
-        /// Where this concrete type is the opaque holder we lower a
-        /// `std::shared_ptr<const T>` to, the `T` as the `cxx::bridge` spells
-        /// it. `None` for every other concrete type. See google/autocxx#799.
-        shared_ptr_payload: Option<Box<Type>>,
+        /// What this concrete type is, where it is an opaque holder we lower a
+        /// template instantiation cxx cannot spell to. `None` for every other
+        /// concrete type.
+        holder_surface: Option<HolderSurface>,
     },
     /// A simple note that we want to make a constructor for
     /// a `std::string` on the heap.

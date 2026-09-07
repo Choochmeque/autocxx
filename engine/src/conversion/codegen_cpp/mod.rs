@@ -34,7 +34,7 @@ use super::{
         },
         pod::PodAnalysis,
     },
-    api::{Api, Provenance, SharedPtrShim, SubclassName, TypeKind},
+    api::{Api, HolderSurface, Provenance, SharedPtrShim, SubclassName, TypeKind, VectorShim},
     apivec::ApiVec,
     parse::CppRefQualifier,
     ConvertErrorFromCpp, CppEffectiveName,
@@ -235,7 +235,7 @@ impl<'a> CppCodeGenerator<'a> {
                 Api::ConcreteType {
                     rs_definition,
                     cpp_definition,
-                    shared_ptr_payload,
+                    holder_surface,
                     ..
                 } => {
                     let effective_cpp_definition = match rs_definition {
@@ -246,8 +246,14 @@ impl<'a> CppCodeGenerator<'a> {
                     };
 
                     self.generate_typedef(api.name(), &effective_cpp_definition);
-                    if shared_ptr_payload.is_some() {
-                        self.generate_shared_ptr_shims(api.name());
+                    match holder_surface {
+                        Some(HolderSurface::SharedPtr { .. }) => {
+                            self.generate_shared_ptr_shims(api.name())
+                        }
+                        Some(HolderSurface::VectorOfPointers { .. }) => {
+                            self.generate_vector_shims(api.name())
+                        }
+                        None => {}
                     }
                 }
                 Api::CType { typename, .. } => self.generate_ctype_typedef(typename),
@@ -843,6 +849,44 @@ impl<'a> CppCodeGenerator<'a> {
         self.additional_functions.push(ExtraCpp {
             declaration: Some(declaration),
             headers: vec![Header::System("memory"), Header::System("cstdint")],
+            ..Default::default()
+        })
+    }
+
+    /// The two C++ helpers behind everything Rust can do with the opaque
+    /// holder we lower a `std::vector<T*>` to.
+    ///
+    /// Written against the holder's own typedef rather than against `T*`: the
+    /// element is spelt `H::value_type`, which is exactly the pointer type the
+    /// specialization was made with, qualifiers and all, so nothing here has
+    /// to re-derive a C++ name for it. `operator[]` on a `const` vector yields
+    /// a `const` reference to the stored pointer, and returning `value_type`
+    /// copies it out - which is what lets the result outlive any later
+    /// mutation of the vector. See google/autocxx#330.
+    fn generate_vector_shims(&mut self, tn: &QualifiedName) {
+        let holder = tn.get_final_item();
+        let declaration = VectorShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn);
+                match shim {
+                    VectorShim::Len => format!(
+                        "inline ::std::size_t {name}(const {holder}& self) {{ return self.size(); }}"
+                    ),
+                    // No bounds check here. The Rust method this is reached
+                    // through is `unsafe` and says the caller owes one, and
+                    // the safe `get` above it does the checking - which it can
+                    // do without a second call into C++ only because it is the
+                    // one deciding to make this one.
+                    VectorShim::GetUnchecked => format!(
+                        "inline {holder}::value_type {name}(const {holder}& self, ::std::size_t pos) {{ return self[pos]; }}"
+                    ),
+                }
+            })
+            .join("\n");
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
+            headers: vec![Header::System("vector"), Header::System("cstddef")],
             ..Default::default()
         })
     }

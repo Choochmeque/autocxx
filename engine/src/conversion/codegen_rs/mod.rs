@@ -50,7 +50,10 @@ use super::{
         fun::{FnKind, FnPhase, PodAndDepAnalysis, ReceiverMutability, SubclassAnalysis},
         pod::PodAnalysis,
     },
-    api::{AnalysisPhase, Api, SharedPtrShim, SubclassName, TypeKind, SUPER_FN_SUFFIX},
+    api::{
+        AnalysisPhase, Api, HolderSurface, SharedPtrShim, SubclassName, TypeKind, VectorShim,
+        SUPER_FN_SUFFIX,
+    },
     convert_error::ErrorContextType,
     derives::DeriveRequests,
     doc_attr::get_doc_attrs,
@@ -622,9 +625,7 @@ impl<'a> RsCodeGenerator<'a> {
                     0,
                 )
             }
-            Api::ConcreteType {
-                shared_ptr_payload, ..
-            } => {
+            Api::ConcreteType { holder_surface, .. } => {
                 let mut result = self.generate_type(
                     &name,
                     bridge_id.clone(),
@@ -635,8 +636,14 @@ impl<'a> RsCodeGenerator<'a> {
                     associated_methods,
                     0,
                 );
-                if let Some(payload) = shared_ptr_payload {
-                    self.generate_shared_ptr_surface(&name, &bridge_id, &payload, &mut result);
+                match holder_surface {
+                    Some(HolderSurface::SharedPtr { payload }) => {
+                        self.generate_shared_ptr_surface(&name, &bridge_id, &payload, &mut result)
+                    }
+                    Some(HolderSurface::VectorOfPointers { element }) => {
+                        self.generate_vector_surface(&name, &bridge_id, &element, &mut result)
+                    }
+                    None => {}
                 }
                 result
             }
@@ -1125,6 +1132,106 @@ impl<'a> RsCodeGenerator<'a> {
             #[doc = #doc]
             impl #holder {
                 #(#methods)*
+            }
+        });
+    }
+
+    /// Declare the two C++ helpers of a `std::vector<T*>` holder in the
+    /// bridge, and put the read-only surface built from them on the holder
+    /// itself.
+    ///
+    /// Written here rather than as synthesized `Api::Function`s for the reason
+    /// [`Self::generate_shared_ptr_surface`] gives, and shaped after
+    /// `cxx::CxxVector`, which is what a caller reaching for a `std::vector`
+    /// will already know: `len`, `is_empty`, a checked `get`, an unchecked
+    /// one, and `iter`.
+    ///
+    /// Every one of them hands back the element by value - a copy of the
+    /// stored `T*`. That is the whole safety story of this type. The vector
+    /// owns its pointers and not their pointees, so it makes no promise about
+    /// what one points at and this makes none either: the element is a raw
+    /// pointer under every unsafe policy, may be null, and needs `unsafe` to
+    /// dereference. It follows too that nothing C++ later does to the vector
+    /// can invalidate a pointer already handed out, since none of them points
+    /// into the vector's own storage.
+    ///
+    /// The mode is read-only. A mutating surface would need a `Pin<&mut>`
+    /// receiver and a way to build a holder from Rust, and neither is needed
+    /// to bind a header which passes these around. See google/autocxx#330.
+    fn generate_vector_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        element: &Type,
+        result: &mut RsCodegenResult,
+    ) {
+        // As in `generate_shared_ptr_surface`: the bridge mod has a flat
+        // namespace, and the output mod, where the methods go, uses the
+        // qualified spellings.
+        let holder = name.get_final_ident();
+        let bridge_element = unqualify_type(element.clone(), self.bridge_type_names);
+        for shim in VectorShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name));
+            result.extern_c_mod_items.push(match shim {
+                VectorShim::Len => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id) -> usize;
+                },
+                // cxx would insist this be an `unsafe fn` if a raw pointer
+                // were a *parameter*; returning one is safe, here as in every
+                // other binding autocxx writes for a C++ function returning
+                // `T*`. What is unsafe is the index, and the mod this is
+                // declared in is private to the generated `ffi` mod, so the
+                // only way to reach it is the `unsafe fn` below.
+                VectorShim::GetUnchecked => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id, pos: usize) -> #bridge_element;
+                },
+            });
+        }
+        let len_id = make_ident(VectorShim::Len.cpp_name(name));
+        let get_unchecked_id = make_ident(VectorShim::GetUnchecked.cpp_name(name));
+        let holder_doc = vector_holder_doc();
+        let len_doc = vector_len_doc();
+        let is_empty_doc = vector_is_empty_doc();
+        let get_doc = vector_get_doc();
+        let get_unchecked_doc = vector_get_unchecked_doc();
+        let iter_doc = vector_iter_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #holder_doc]
+            impl #holder {
+                #[doc = #len_doc]
+                pub fn len(&self) -> usize {
+                    cxxbridge::#len_id(self)
+                }
+
+                #[doc = #is_empty_doc]
+                pub fn is_empty(&self) -> bool {
+                    self.len() == 0
+                }
+
+                #[doc = #get_unchecked_doc]
+                pub unsafe fn get_unchecked(&self, pos: usize) -> #element {
+                    cxxbridge::#get_unchecked_id(self, pos)
+                }
+
+                #[doc = #get_doc]
+                pub fn get(&self, pos: usize) -> Option<#element> {
+                    if pos < self.len() {
+                        // Safe: the bound was just read from the vector, and
+                        // nothing between there and here can have changed it -
+                        // this thread makes no other call into C++, and any
+                        // other thread mutating a vector Rust holds a
+                        // reference to is already a data race the caller owes
+                        // us against.
+                        Some(unsafe { self.get_unchecked(pos) })
+                    } else {
+                        None
+                    }
+                }
+
+                #[doc = #iter_doc]
+                pub fn iter(&self) -> impl Iterator<Item = #element> + '_ {
+                    (0usize..).map_while(move |pos| self.get(pos))
+                }
             }
         });
     }
@@ -1846,6 +1953,85 @@ fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
                 .to_string()
         }
     }
+}
+
+/// What the generated docs say about a `std::vector<T*>` holder, on the impl
+/// block carrying its methods.
+///
+/// As with the smart-pointer holder, the type's name gives no clue, so this is
+/// where a caller who expected `cxx::CxxVector` learns what they have. It is
+/// also the only place the ownership contract can be stated once rather than
+/// per method. See google/autocxx#330.
+fn vector_holder_doc() -> String {
+    "This type is a C++ `std::vector<T*>`, held opaquely.\n\n\
+     `cxx::CxxVector<T>` cannot stand for it: cxx implements its `VectorElement` \
+     for its own types and for opaque `ExternType`s, and a raw pointer is \
+     neither. autocxx therefore declares this instantiation to cxx as an opaque \
+     extern type whose C++ definition is exactly `std::vector<T*>`, and gives it \
+     the methods below.\n\n\
+     **The vector owns the pointers, not what they point at.** Dropping the \
+     `UniquePtr` holding one of these runs `~vector`, which frees the array of \
+     pointers and touches no pointee. So an element is exactly as good as C++ \
+     made it: it may be null, it may already dangle, and nothing about holding \
+     this vector keeps it alive. Every accessor hands the element back as a raw \
+     pointer for that reason, under every unsafe policy, so that reading through \
+     one stays `unsafe` and the promise stays yours to make.\n\n\
+     The flip side is that a pointer you have already been given cannot be \
+     invalidated by anything C++ does to the vector afterwards: what you hold is \
+     a copy of the stored pointer and not a pointer into the vector's own \
+     storage, so `push_back`, `erase` and reallocation leave it alone. Only the \
+     pointee's own lifetime, which was never this vector's business, can.\n\n\
+     The surface is read-only. There is no way to change the vector from Rust \
+     here; C++ still can, and `len` and `get` ask it afresh every time."
+        .to_string()
+}
+
+fn vector_len_doc() -> String {
+    "The number of elements - `std::vector::size`.\n\n\
+     Read from C++ on every call, so it reflects any mutation C++ has made \
+     since the last one."
+        .to_string()
+}
+
+fn vector_is_empty_doc() -> String {
+    "Whether the vector has no elements. As `len() == 0`, and read afresh in \
+     the same way."
+        .to_string()
+}
+
+fn vector_get_doc() -> String {
+    "The element at `pos`, or `None` if there is no such element.\n\n\
+     The bound is read from C++ immediately before the element is, so this \
+     cannot read past the end.\n\n\
+     `Some` carries a raw pointer which may itself be null: an element of a \
+     `std::vector<T*>` is whatever C++ put there, and a present element and a \
+     non-null one are different questions. See the type's own documentation for \
+     what the pointer does and does not promise."
+        .to_string()
+}
+
+fn vector_get_unchecked_doc() -> String {
+    "The element at `pos`, without checking that there is one - \
+     `std::vector::operator[]`.\n\n\
+     [`Self::get`] is this with the bound checked, and costs one extra call \
+     into C++ to read the length.\n\n\
+     # Safety\n\n\
+     `pos` must be less than the length of the vector at the moment of the \
+     call. Indexing a `std::vector` out of range is undefined behaviour in C++, \
+     and nothing here or in the generated C++ checks. Note that C++ may have \
+     shortened the vector since any length you read earlier."
+        .to_string()
+}
+
+fn vector_iter_doc() -> String {
+    "The elements, in order.\n\n\
+     Each step asks the vector for its length and then for one element, so a \
+     C++ mutation part-way through changes what the iterator goes on to yield \
+     rather than taking it past the end. That is also why this is not an \
+     `ExactSizeIterator`: the length is not fixed when iteration starts.\n\n\
+     The items are raw pointers, with everything the type's own documentation \
+     says about them."
+        .to_string()
 }
 
 /// Snippets of code generated from a particular API.
