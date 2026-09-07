@@ -67,6 +67,10 @@ pub struct ByValueChecker {
     /// already refuses on - and where the pointer comes from a base instead,
     /// all that is left is anonymous padding.
     virtually_inherited: HashSet<QualifiedName>,
+    /// Types bindgen reported a base class for. Read together with the field
+    /// bindgen writes in place of the base fields, so that a C++ member which
+    /// happens to be spelled like that field cannot be mistaken for one.
+    has_bases: HashSet<QualifiedName>,
 }
 
 impl ByValueChecker {
@@ -83,6 +87,7 @@ impl ByValueChecker {
         ByValueChecker {
             results,
             virtually_inherited: HashSet::new(),
+            has_bases: HashSet::new(),
         }
     }
 
@@ -98,6 +103,7 @@ impl ByValueChecker {
             .types_inheriting_virtually()
             .cloned()
             .collect();
+        byvalue_checker.has_bases = parse_callback_results.types_with_bases().cloned().collect();
         for blocklisted in config.get_blocklist() {
             let tn = QualifiedName::new_from_cpp_name(blocklisted);
             let safety = PodState::UnsafeToBePod(format!("type {tn} is on the blocklist"));
@@ -320,6 +326,24 @@ impl ByValueChecker {
                 format!("Type {tyname} could not be POD because it has virtual functions.");
             field_safety_problem = PodState::UnsafeToBePod(reason);
         }
+        if self.has_bases.contains(&tyname) && Self::bases_are_opaque_bytes(def) {
+            // The loop above already refused this - `__bindgen_marker_Opaque`
+            // is not a type autocxx knows - but says so in terms of the marker
+            // rather than of what happened. bindgen writes this one field in
+            // place of the base fields when the target left the bases less
+            // room than fields of their own types would take up, which is a
+            // layout Rust cannot spell with a field per base; the bases are
+            // bytes from here on, so nothing in the class can be read by
+            // value. Asking whether the class has bases at all keeps a C++
+            // member which happens to be spelled `__bindgen_bases` from being
+            // read as one of those.
+            let reason = format!(
+                "Type {tyname} could not be POD because the C++ compiler leaves its base \
+                 classes less room than fields of their own types would take up, so the bases \
+                 have no Rust type."
+            );
+            field_safety_problem = PodState::UnsafeToBePod(reason);
+        }
         if self.virtually_inherited.contains(&tyname) {
             // Not a conservative guess: a virtual base is at an offset the
             // object carries at runtime, so the fields above are not this
@@ -530,6 +554,19 @@ impl ByValueChecker {
             }
         }
         false
+    }
+
+    /// Whether bindgen replaced this struct's base-class fields with the one
+    /// opaque field it writes when the target's layout does not leave the
+    /// bases room for their own types - see `third_party/patches/
+    /// 17-base-class-extent.patch`.
+    fn bases_are_opaque_bytes(def: &ItemStruct) -> bool {
+        def.fields.iter().any(|f| {
+            f.ident
+                .as_ref()
+                .map(|id| id == "__bindgen_bases")
+                .unwrap_or(false)
+        })
     }
 }
 
