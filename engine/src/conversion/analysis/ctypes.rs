@@ -19,8 +19,8 @@ use super::deps::HasDependencies;
 use super::fun::FnPhase;
 
 /// Spot any of the C types cxx cannot spell - the variable-length integers,
-/// `void` and `char16_t` - used in the [Api]s, and append those as extra APIs
-/// so that the generated C++ declares a typedef for each.
+/// `void` and the C++ character types - used in the [Api]s, and append those
+/// as extra APIs so that the generated C++ declares a typedef for each.
 pub(crate) fn append_ctype_information(apis: &mut ApiVec<FnPhase>) {
     let ctypes: HashMap<Ident, QualifiedName> = apis
         .iter()

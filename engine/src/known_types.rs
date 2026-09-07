@@ -12,6 +12,21 @@ use indoc::indoc;
 use once_cell::sync::OnceCell;
 use syn::{parse_quote, TypePath};
 
+/// The C++ character types which no Rust primitive is, listed as
+/// `(C++ spelling, the name bindgen invents for it, our newtype's path)`.
+///
+/// Each is its own type in C++ - `char16_t` is not `uint16_t`, and a C++
+/// compiler checking a function pointer's type says so - but Rust has no
+/// equivalent, so bindgen is asked (`use_distinct_char16_t` and friends) to
+/// emit a name of its own invention rather than the integer of the same width.
+/// This table is what binds that name: it feeds the entries below, the `use`
+/// injected into every bindgen module by `engine/src/lib.rs`, and the guard in
+/// `parse_bindgen.rs` which keeps that `use` from being read back as a typedef.
+pub(crate) const CXX_CHARACTER_TYPES: &[(&str, &str, &str)] = &[
+    ("char16_t", "bindgen_cchar16_t", "autocxx::c_char16_t"),
+    ("wchar_t", "bindgen_cwchar_t", "autocxx::c_wchar_t"),
+];
+
 /// The behavior of the type.
 #[derive(Debug)]
 enum Behavior {
@@ -25,7 +40,10 @@ enum Behavior {
     CByValueVecSafe,
     CVariableLengthByValue,
     CVoid,
-    CChar16,
+    /// One of [`CXX_CHARACTER_TYPES`]: a C++ character type which no Rust
+    /// primitive is, so we wrap it in a newtype of our own and emit a C++
+    /// typedef naming it.
+    CCharacter,
     RustContainerByValueSafe,
 }
 
@@ -41,7 +59,7 @@ impl Behavior {
             Behavior::CByValue
             | Behavior::CByValueVecSafe
             | Behavior::CVariableLengthByValue
-            | Behavior::CChar16
+            | Behavior::CCharacter
             | Behavior::CVoid
             | Behavior::RustByValue
             // `rust::Str` is a borrowed (pointer, length) pair.
@@ -238,7 +256,7 @@ impl TypeDatabase {
                         | Behavior::CByValueVecSafe
                         | Behavior::CByValue
                         | Behavior::CVariableLengthByValue
-                        | Behavior::CChar16
+                        | Behavior::CCharacter
                         | Behavior::RustContainerByValueSafe => true,
                         Behavior::CxxString | Behavior::CxxContainerVector | Behavior::CVoid => {
                             false
@@ -329,8 +347,8 @@ impl TypeDatabase {
     }
 
     /// The canonical name of this type if it is one of the ctypes - the
-    /// variable length integers, `void` and `char16_t` - which we need to
-    /// wrap, and `None` if it isn't one of them.
+    /// variable length integers, `void` and the C++ character types - which we
+    /// need to wrap, and `None` if it isn't one of them.
     ///
     /// The answer is the canonical name rather than the name asked about
     /// because these types reach us under aliases - `char16_t` arrives as
@@ -341,7 +359,7 @@ impl TypeDatabase {
             .filter(|td| {
                 matches!(
                     td.behavior,
-                    Behavior::CVariableLengthByValue | Behavior::CVoid | Behavior::CChar16
+                    Behavior::CVariableLengthByValue | Behavior::CVoid | Behavior::CCharacter
                 )
             })
             .map(|td| td.to_typename())
@@ -632,54 +650,48 @@ fn create_type_database() -> TypeDatabase {
         false,
         false,
     ));
-    db.insert(TypeDetails::new(
-        "autocxx::c_char16_t",
-        "char16_t",
-        Behavior::CChar16,
-        Some("c_char16_t".into()),
-        false,
-        false,
-    ));
-    // `char16_t` never reaches us under any of the names above. bindgen emits
-    // it as a bare `bindgen_cchar16_t`, which `engine/src/lib.rs` binds to
-    // `autocxx::c_char16_t` with a `use` injected into every module. Unless
-    // that name is known here too, every function which mentions a `char16_t`
-    // is discarded for depending on a type we've never heard of.
-    db.insert_alias("bindgen_cchar16_t", "autocxx::c_char16_t");
-    // TODO: `char16_t`'s three siblings - `char8_t`, `char32_t` and `wchar_t`
-    // - and `long double` have no entry here and cannot be given one from this
-    // side. They are distinct types in C++, but nothing distinguishing reaches
-    // us, so a `char32_t` and a `uint32_t` are the same token by the time we
-    // see them and we cannot even refuse the function cleanly. Each is blocked
-    // in autocxx-bindgen, but by a different thing:
+    for (cpp_name, bindgen_name, rs_name) in CXX_CHARACTER_TYPES {
+        db.insert(TypeDetails::new(
+            *rs_name,
+            *cpp_name,
+            Behavior::CCharacter,
+            Some(
+                rs_name
+                    .rsplit("::")
+                    .next()
+                    .expect("a path has a final segment")
+                    .to_string(),
+            ),
+            false,
+            false,
+        ));
+        // None of these reaches us under any of the names above: bindgen emits
+        // the fake name, which `engine/src/lib.rs` binds to the newtype with a
+        // `use` injected into every module. Unless that name is known here
+        // too, every function which mentions the type is discarded for
+        // depending on a type we've never heard of.
+        db.insert_alias(bindgen_name, rs_name);
+    }
+    // TODO: three more C++ built-ins belong in the table above and cannot be
+    // given an entry from this side, because nothing distinguishing reaches us:
+    // a `char32_t` and a `uint32_t` are the same token by the time we see them,
+    // and we cannot even refuse the function cleanly. Each is blocked in
+    // bindgen, but by a different thing:
     //
     // - `char32_t` is collapsed on purpose: `CXType_Char32 =>
-    //   TypeKind::Int(IntKind::U32)` in `build_builtin_ty`. `wchar_t` keeps an
-    //   `IntKind::WChar` but codegen renders it through
-    //   `Layout::known_type_for_size`, so it arrives as a bare `u16`/`u32`.
-    //   Both need exactly the edit `char16_t` already had: an option like
-    //   `use_distinct_char16_t` and a marker rendering that survives codegen.
+    //   TypeKind::Int(IntKind::U32)` in `build_builtin_ty`. It needs exactly
+    //   the edit `wchar_t` just had.
     //
     // - `char8_t` is not collapsed but unrecognised: libclang has no
     //   `CXType_Char8` (the kinds go `CXType_UChar`, `CXType_Char16`,
     //   `CXType_Char32`), so `build_builtin_ty` returns `None` and bindgen
-    //   falls back to an opaque type of the right layout - we receive
-    //   `__bindgen_marker_Opaque<u8>` and unwrap it to `u8`. bindgen cannot
-    //   add a `Char8` arm until libclang exposes the kind; it would have to
-    //   recognise the type another way first.
+    //   falls back to an opaque type of the right layout.
     //
     // - `long double` renders by layout size, so where it is 8 bytes (MSVC,
-    //   64-bit Arm) it behaves like the collapses above, and where it is 16
+    //   Apple Arm) it is indistinguishable from `double`, and where it is 16
     //   (x86-64 System V) `FloatKind::LongDouble` becomes
     //   `integer_type(layout)`, i.e. `u128` - which is not registered here at
     //   all, so on those targets the function is rejected during our own
     //   analysis rather than by the C++ compiler.
-    //
-    // Once a `bindgen_c*_t` name arrives for one of them, it needs what
-    // `char16_t` has: a `TypeDetails` entry above, an `insert_alias` here, the
-    // injected `use` in `engine/src/lib.rs`, the guard in `parse_bindgen.rs`,
-    // and a `#[repr(transparent)]` newtype in the `autocxx` crate - whose
-    // payload, for `wchar_t` and `long double`, has to be chosen per target.
-    // The integration tests for all four are written and `#[ignore]`d.
     db
 }

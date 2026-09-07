@@ -344,7 +344,13 @@ impl<'a> ParseBindgen<'a> {
                         UseTree::Rename(urn) => {
                             let old_id = &urn.ident;
                             let new_id = &urn.rename;
-                            if new_id == "bindgen_cchar16_t" {
+                            // The `use` autocxx itself injects to bind a C++
+                            // character type's bindgen-invented name; it is
+                            // not a typedef the header declared.
+                            if crate::known_types::CXX_CHARACTER_TYPES
+                                .iter()
+                                .any(|(_, bindgen_name, _)| new_id == bindgen_name)
+                            {
                                 return Ok(());
                             }
                             let new_tyname = QualifiedName::new(ns, new_id.clone().into());

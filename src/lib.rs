@@ -705,6 +705,111 @@ impl From<c_char16_t> for u16 {
     }
 }
 
+/// The Rust integer which a C++ `wchar_t` is, on this target.
+///
+/// Unlike `char16_t`, `wchar_t` has no fixed representation: its width and its
+/// signedness are both the target's to choose, so this is a `cfg` and not a
+/// constant. Getting the width wrong would make [`c_wchar_t`] a different size
+/// from the C++ type it stands in for and every value would be read from the
+/// wrong bytes, with nothing in the generated code to notice - so the four arms
+/// below were checked against `clang -dM -E`'s `__WCHAR_TYPE__` for every
+/// target `rustc --print target-list` names, and agree with it on all of them.
+/// They are mutually exclusive and exhaustive by construction.
+///
+/// - 16-bit unsigned: everything using the Microsoft ABI, plus Cygwin and
+///   UEFI, which are `unsigned short` for the same reason.
+/// - 16-bit signed: AVR and MSP430, where `int` is itself 16 bits.
+/// - 32-bit unsigned: AAPCS (`arm`, `aarch64`) - except Darwin, NetBSD and
+///   OpenBSD, each of which overrides it - and AIX.
+/// - 32-bit signed: everywhere else, which is most places.
+///
+/// The `libc` crate keeps the same table and differs on three tier-3 targets
+/// (`csky`, `hexagon`, and `riscv64` on Android, where it says unsigned and
+/// clang says `int`); clang is the authority here, because clang is what
+/// compiles the C++ this has to match.
+///
+/// The integration test `test_wchar_t_values` asks the C++ compiler for
+/// `sizeof(wchar_t)` and its signedness and asserts the choice here matches, so
+/// every platform the test suite runs on checks its own row: CI's Linux
+/// x86-64, macOS Arm and both Windows targets.
+#[cfg(any(windows, target_os = "cygwin", target_os = "uefi"))]
+#[allow(non_camel_case_types)]
+pub type wchar_t = u16;
+
+/// The Rust integer which a C++ `wchar_t` is, on this target. See the first
+/// definition of this alias for the rationale.
+#[cfg(all(
+    not(any(windows, target_os = "cygwin", target_os = "uefi")),
+    any(target_arch = "avr", target_arch = "msp430")
+))]
+#[allow(non_camel_case_types)]
+pub type wchar_t = i16;
+
+/// The Rust integer which a C++ `wchar_t` is, on this target. See the first
+/// definition of this alias for the rationale.
+#[cfg(all(
+    not(any(windows, target_os = "cygwin", target_os = "uefi")),
+    not(any(target_arch = "avr", target_arch = "msp430")),
+    any(
+        target_os = "aix",
+        all(
+            any(target_arch = "arm", target_arch = "aarch64"),
+            not(target_vendor = "apple"),
+            not(any(target_os = "netbsd", target_os = "openbsd"))
+        )
+    )
+))]
+#[allow(non_camel_case_types)]
+pub type wchar_t = u32;
+
+/// The Rust integer which a C++ `wchar_t` is, on this target. See the first
+/// definition of this alias for the rationale. This arm is the complement of
+/// the three above.
+#[cfg(all(
+    not(any(windows, target_os = "cygwin", target_os = "uefi")),
+    not(any(target_arch = "avr", target_arch = "msp430")),
+    not(any(
+        target_os = "aix",
+        all(
+            any(target_arch = "arm", target_arch = "aarch64"),
+            not(target_vendor = "apple"),
+            not(any(target_os = "netbsd", target_os = "openbsd"))
+        )
+    ))
+))]
+#[allow(non_camel_case_types)]
+pub type wchar_t = i32;
+
+/// A C++ `wchar_t`. Like the other C type wrappers here, this is a
+/// transparent newtype over the Rust integer of the same width, so a value
+/// crosses between the two with `.0` or [`From`]. That integer is
+/// [`wchar_t`], which is chosen per target.
+#[derive(Debug, Eq, Copy, Clone, PartialEq, Hash)]
+#[allow(non_camel_case_types)]
+#[repr(transparent)]
+pub struct c_wchar_t(pub wchar_t);
+
+/// # Safety
+///
+/// We assert that the namespace and type ID refer to a C++
+/// type which is equivalent to this Rust type.
+unsafe impl cxx::ExternType for c_wchar_t {
+    type Id = cxx::type_id!(c_wchar_t);
+    type Kind = cxx::kind::Trivial;
+}
+
+impl From<wchar_t> for c_wchar_t {
+    fn from(val: wchar_t) -> Self {
+        Self(val)
+    }
+}
+
+impl From<c_wchar_t> for wchar_t {
+    fn from(val: c_wchar_t) -> Self {
+        val.0
+    }
+}
+
 /// autocxx couldn't generate these bindings.
 /// If you come across a method, type or function which refers to this type,
 /// it indicates that autocxx couldn't generate that binding. A documentation

@@ -866,7 +866,8 @@ pub(crate) enum Api<T: AnalysisPhase> {
     },
     /// A C type the generated C++ has to typedef for itself, because cxx has
     /// no spelling of its own for it: the variable-length integers (`int`,
-    /// `unsigned long`), `void`, and `char16_t`. See `KnownTypes::as_ctype`
+    /// `unsigned long`), `void`, and the C++ character types (`char16_t`,
+    /// `char32_t`, `char8_t`, `wchar_t`). See `KnownTypes::as_ctype`
     /// for which types those are; `typename` is the canonical name to declare
     /// it under, which need not be the alias it reached us as.
     CType {
