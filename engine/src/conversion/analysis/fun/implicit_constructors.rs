@@ -125,6 +125,27 @@ pub(crate) enum WhyNoSpecialMember {
     /// initializer list, and the copy and move constructors bind it to
     /// whatever the object they're copying from bound it to.
     ReferenceField { field: Option<String> },
+    /// The class has a `const` field, which deletes the default constructor
+    /// C++ would otherwise have declared implicitly - unless the field has a
+    /// default member initializer, which bindgen does not report, or the
+    /// field is itself const-default-constructible, which only a class type
+    /// with a user-provided default constructor is. Neither is checked, so
+    /// this is raised without knowing; see the `blocker` below for why that
+    /// is the safe direction.
+    ///
+    /// A constructor the C++ source writes out can still initialize the field
+    /// in its member initializer list.
+    ///
+    /// Only the default constructor is withdrawn here. A `const` field of
+    /// *class* type can also delete the copy and move constructors, when the
+    /// class has no copy constructor taking a const source - the const member
+    /// cannot be moved from, and falls back to a copy which is not there.
+    /// That rule is not implemented: the checks in `find_constructors_present`
+    /// ask what the field's own type can do, not what can be done to a `const`
+    /// one of it, so a class with such a member still gets copy and move
+    /// constructors C++ deletes. `test_const_class_member_deletes_copy` is
+    /// written and `#[ignore]`d against it.
+    ConstField { field: Option<String> },
     /// The class has a field of rvalue reference (`&&`) type.
     RvalueReferenceField,
     /// C++ withdraws a class's implicitly declared copy constructor once the
@@ -182,6 +203,22 @@ impl WhyNoSpecialMember {
                  default member initializer, leaving an implicitly declared constructor nothing \
                  to bind it to. A constructor written out in the C++ source can bind it in its \
                  member initializer list."
+            ),
+            Self::ConstField { field: Some(field) } => format!(
+                "autocxx has not given this type a {member}, because its field `{field}` is \
+                 `const` and so an implicitly declared constructor would have no way to give it \
+                 its one and only value. C++ still declares one if the field has a default \
+                 member initializer, or is of a class type with a default constructor of its \
+                 own; autocxx cannot see either, and assumes neither. A constructor written out \
+                 in the C++ source can initialize the field in its member initializer list."
+            ),
+            Self::ConstField { field: None } => format!(
+                "autocxx has not given this type a {member}, because it has a `const` field and \
+                 so an implicitly declared constructor would have no way to give it its one and \
+                 only value. C++ still declares one if the field has a default member \
+                 initializer, or is of a class type with a default constructor of its own; \
+                 autocxx cannot see either, and assumes neither. A constructor written out in \
+                 the C++ source can initialize the field in its member initializer list."
             ),
             Self::RvalueReferenceField => format!(
                 "C++ gives this type no {member}, because it has a field of rvalue reference \
@@ -611,6 +648,17 @@ pub(super) fn find_constructors_present(
                 .map(|field| WhyNoSpecialMember::ReferenceField {
                     field: field.name.clone(),
                 });
+            // A `const` member is the other field which deletes the implicit
+            // default constructor without its own analysis saying so: the
+            // type it qualifies is default-constructible, the field just
+            // cannot be assigned to afterwards. bindgen reports the qualifier
+            // through its `__bindgen_marker_Const` wrapper, which the type
+            // converter strips and records.
+            let const_field = field_info.iter().find(|field| field.is_const).map(|field| {
+                WhyNoSpecialMember::ConstField {
+                    field: field.name.clone(),
+                }
+            });
 
             // Check that all the bases and field types are known first. This combined with
             // iterating via [`depth_first`] means we can safely search in `items_found` for all of
@@ -791,34 +839,21 @@ pub(super) fn find_constructors_present(
                                     }
                             }));
                     if have_defaulted {
-                        // TODO: a `const` member with no initializer also
-                        // deletes the default constructor, and we don't
-                        // notice - `field_info` doesn't record constness, so
-                        // we synthesize a `new()` which C++ refuses to
-                        // compile. Same missing information as the member
-                        // initializers of google/autocxx#816.
-                        //
-                        // Recording it in `FieldInfo` is the easy half. The
-                        // information does not reach us: a field's type
-                        // arrives as the `syn::Type` bindgen printed, and Rust
-                        // struct fields have no `const`, so `const int m` and
-                        // `int m` are both `c_int` by the time we look. There
-                        // is no field-level parse callback either, and
-                        // `DiscoveredItem` has no variant for one. bindgen
-                        // itself does know - `ir::ty::Type::is_const` - so the
-                        // fix starts there, with a `__bindgen_marker_Const<T>`
-                        // wrapper alongside the `Reference` and
-                        // `RValueReference` ones autocxx already asks for in
-                        // `engine/src/lib.rs` and unwraps in
-                        // `type_helpers.rs`. Once a field can be seen to be
-                        // const, this becomes another `blocker` arm below and
-                        // a `WhyNoSpecialMember` variant naming the field.
-                        // `test_const_field_deletes_default_constructor` is
-                        // written and `#[ignore]`d against that day.
+                        // Both the reference and the `const` arm below withdraw
+                        // the constructor whenever the field is there, where
+                        // C++ withdraws it only when the field also has no
+                        // default member initializer. bindgen does not report
+                        // initializers - google/autocxx#816 asks for exactly
+                        // that, and it is the next bindgen patch in this series
+                        // - so until it does, both stay conservative: a `new()`
+                        // we decline to offer is a missing convenience, and one
+                        // we offer wrongly is a C++ compile error.
                         let blocker = if has_rvalue_reference_fields {
                             Some(WhyNoSpecialMember::RvalueReferenceField)
                         } else if let Some(reference_field) = reference_field.clone() {
                             Some(reference_field)
+                        } else if let Some(const_field) = const_field.clone() {
+                            Some(const_field)
                         } else {
                             first_dependency_lacking(&bases_items_found, |items_found| {
                                 [
@@ -832,8 +867,13 @@ pub(super) fn find_constructors_present(
                                     ),
                                 ]
                             })
-                            // TODO: Allow member initializers for
-                            // https://github.com/google/autocxx/issues/816.
+                            // A field whose own default constructor is missing
+                            // stops this one too - unless the field has a
+                            // default member initializer, which is what
+                            // google/autocxx#816 literally asks for. Same
+                            // missing report as the two conservative arms
+                            // above, and settled the same way: wait for the
+                            // bindgen patch which adds it rather than guess.
                             .or_else(|| {
                                 first_dependency_lacking(&fields_items_found, |items_found| {
                                     [

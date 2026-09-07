@@ -42,6 +42,10 @@ pub(crate) struct FieldInfo {
     pub(crate) ty: Type,
     pub(crate) type_kind: type_converter::TypeKind,
     pub(crate) bindgen_opaque_data: bool,
+    /// Whether C++ declared the field itself `const`, as opposed to it
+    /// pointing at something const. Deletes the implicitly declared default
+    /// constructor; see `find_constructors_present`.
+    pub(crate) is_const: bool,
 }
 
 #[derive(std::fmt::Debug)]
@@ -269,6 +273,7 @@ fn get_struct_field_types(
                         name: f.ident.as_ref().map(|id| id.to_string()),
                         ty: r.ty,
                         type_kind: r.kind,
+                        is_const: r.is_const,
                         bindgen_opaque_data: f
                             .ident
                             .as_ref()

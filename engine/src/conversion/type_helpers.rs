@@ -121,6 +121,45 @@ pub(crate) fn unwrap_has_opaque(ty: &TypePath) -> Option<&syn::Type> {
     unwrap_bindgen_marker(ty, "__bindgen_marker_Opaque")
 }
 
+/// If `ty` is a type C++ qualified `const` in its own right - `const int`,
+/// `T* const`, a `const`-qualified return - return the type it qualifies.
+///
+/// Rust has no spelling for that qualifier, so bindgen would drop it without
+/// the marker: `const int` and `int` are both `c_int`, and `T* const` and `T*`
+/// are both `*mut T`. Constness of a *pointee* is a different thing and needs
+/// no marker, because `*const T` says it.
+pub(crate) fn unwrap_const(ty: &TypePath) -> Option<&syn::Type> {
+    unwrap_bindgen_marker(ty, "__bindgen_marker_Const")
+}
+
+/// Peels bindgen's `const` markers off `ty`, for the walks which care what a
+/// type is laid out as rather than whether C++ let anyone write to it. A
+/// `const T` occupies exactly what a `T` does.
+pub(crate) fn strip_const_markers(mut ty: &Type) -> &Type {
+    while let Type::Path(typ) = ty {
+        match unwrap_const(typ) {
+            Some(inner) => ty = inner,
+            None => break,
+        }
+    }
+    ty
+}
+
+/// [`array_element_type`], for output which may have `const` markers in it.
+///
+/// The two have to be peeled together rather than one after the other: bindgen
+/// folds a `const` element type into the array's own constness as well as
+/// leaving it on the element (`ir/ty.rs`'s `from_clang_ty`), so
+/// `const int a[2][3]` arrives as markers and array layers alternating all the
+/// way down, and stopping at the first of either finds nothing useful.
+pub(crate) fn unqualified_array_element_type(ty: &Type) -> &Type {
+    let mut ty = strip_const_markers(ty);
+    while let Type::Array(arr) = ty {
+        ty = strip_const_markers(&arr.elem);
+    }
+    ty
+}
+
 /// If `ty` is `root::__BindgenBitfieldUnit<[u8; N]>` - the allocation unit
 /// bindgen puts a run of C++ bitfields into - return the `[u8; N]` storage it
 /// wraps.

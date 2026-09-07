@@ -13,8 +13,8 @@ use crate::{
         analysis::tdef::TypedefPhase,
         api::{Api, TypedefKind},
         type_helpers::{
-            array_element_type, is_pointer_like, unwrap_bitfield, unwrap_function_pointer,
-            unwrap_has_opaque,
+            is_pointer_like, strip_const_markers, unqualified_array_element_type, unwrap_bitfield,
+            unwrap_function_pointer, unwrap_has_opaque,
         },
     },
     types::{Namespace, QualifiedName},
@@ -430,8 +430,12 @@ impl ByValueChecker {
             // `T arr[N]` holds N of `T` by value, so `T` decides whether the
             // field can be POD exactly as it would for a plain field of it -
             // with one exception, below.
-            let field_is_array = matches!(f.ty, Type::Array(_));
-            match array_element_type(&f.ty) {
+            // A `const` field is laid out exactly as the type it qualifies,
+            // so bindgen's marker for it decides nothing here; what it wraps
+            // does.
+            let field_ty = strip_const_markers(&f.ty);
+            let field_is_array = matches!(field_ty, Type::Array(_));
+            match unqualified_array_element_type(field_ty) {
                 Type::Path(p) => {
                     if unwrap_bitfield(p).is_some() {
                         // A bitfield allocation unit is a byte array with

@@ -1,0 +1,186 @@
+Subject: Mark `const`-qualified types with a newtype wrapper
+
+Rust cannot spell a top-level `const`, so bindgen drops it: `const int` and
+`int` both come out `c_int`, and `int *const` and `int *` both come out
+`*mut c_int`. Constness of a *pointee* survives, because `*const T` says it,
+but the qualifier on the type itself does not survive anywhere.
+
+That loses facts consumers need. A `const` data member can delete the class's
+implicitly declared default constructor - it does whenever the member has no
+default member initializer and is not itself const-default-constructible, which
+is every scalar member - and a generator which cannot see the qualifier will
+offer a constructor C++ refuses to compile. A `const`-qualified return type is
+part of the function's type, so anything which takes the address of the
+function has to name it exactly.
+
+`--use-const-newtype-wrapper` wraps such a type in `__bindgen_marker_Const<T>`,
+the same shape `--use-opaque-newtype-wrapper` and
+`--use-reference-newtype-wrapper` already use: a fake type the caller declares
+itself, through `--raw-line` or by post-processing. Off by default, so no
+existing output changes.
+
+The wrap is at the tail of `TryToRustTy for Type`, so the positions a type
+reaches from there are covered without enumerating any of them. Two of those
+also carry a value - a `const` variable's type sits beside the initializer, and
+a `const` bitfield's accessors cast between the field type and the allocation
+unit's integer - so the definition the caller supplies has to be transparent
+(`pub type __bindgen_marker_Const<T> = T;`) rather than a newtype struct. The
+option's documentation says so. The one place which has to *name* the type
+rather than declare something of it, a newtype alias's constructor expression,
+unwraps the marker itself.
+
+Two known gaps, both where an existing resolution step erases the qualifier
+before the wrap site sees it, and neither addressed here: a template argument's
+constness is resolved away by `through_type_refs()` before
+`TemplateInstantiation::try_to_rust_ty` renders it, so `shared_ptr<const int>`
+is still rendered as `shared_ptr<int>`; and an alias's target is resolved the
+same way before `pub type`/`pub use` is emitted for it, so `typedef const E CE`
+over an enum loses it too.
+
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -203,6 +203,38 @@
+             }
+         },
+         as_args: "--use-reference-newtype-wrapper",
++    },
++
++    /// Use a newtype wrapper to denote types which are `const` in their own
++    /// right, as opposed to pointing at something `const`. Rust has no
++    /// spelling for that - `const int` and `int` are both `c_int`, and
++    /// `int *const` and `int *` are both `*mut c_int` - so the qualifier is
++    /// otherwise dropped. The wrapper is a fake type called
++    /// `__bindgen_marker_Const`, to be replaced by post-processing the output
++    /// or by a `use` injected with `--every-module-raw-line` or similar.
++    ///
++    /// A pointer or reference to a `const` type is unaffected: that constness
++    /// is already carried by `*const T`.
++    ///
++    /// Unlike the opaque and reference markers, this one lands on types in
++    /// positions which also carry a *value* - a `const` variable's type, sat
++    /// beside the initializer bindgen emits for it, and a `const` bitfield's
++    /// accessors, whose bodies cast between the field type and the allocation
++    /// unit's integer. So the definition supplied for it has to be
++    /// transparent, i.e. `pub type __bindgen_marker_Const<T> = T;` rather than
++    /// a newtype struct, unless the output is post-processed before it is
++    /// compiled.
++    use_const_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap `const`-qualified types in a fake newtype
++            /// wrapper which post-processors can replace with something
++            /// more sensible.
++            pub fn use_const_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_const_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-const-newtype-wrapper",
+     },
+ 
+     /// Whether we should distinguish between C++'s `char16_t` and `u16`.
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -695,6 +695,7 @@
+         represent_cxx_operators,
+         use_opaque_newtype_wrapper,
+         use_reference_newtype_wrapper,
++        use_const_newtype_wrapper,
+         vtable_generation,
+         sort_semantically,
+         merge_extern_blocks,
+@@ -1004,6 +1005,7 @@
+             represent_cxx_operators,
+             use_opaque_newtype_wrapper,
+             use_reference_newtype_wrapper,
++            use_const_newtype_wrapper,
+             vtable_generation,
+             sort_semantically,
+             merge_extern_blocks,
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -168,6 +168,47 @@
+     }
+ }
+ 
++/// The name of the marker newtype `const_wrapper` puts round a `const` type.
++const CONST_MARKER: &str = "__bindgen_marker_Const";
++
++/// A type which C++ qualified `const` in its own right, wrapped in a marker
++/// newtype if one was asked for.
++pub(crate) fn const_wrapper(
++    ty: syn::Type,
++    is_const: bool,
++    ctx: &BindgenContext,
++) -> syn::Type {
++    if is_const && ctx.options().use_const_newtype_wrapper {
++        let marker = Ident::new(CONST_MARKER, Span::call_site());
++        syn::parse_quote! { #marker < #ty > }
++    } else {
++        ty
++    }
++}
++
++/// Undoes [`const_wrapper`], for the one place which needs to *name* a type
++/// rather than declare something of it: a newtype alias's constructor. The
++/// marker is not part of that constructor's name, and `Marker<Inner>(v)` is
++/// not an expression whatever the marker is defined as.
++pub(crate) fn strip_const_wrapper(ty: &syn::Type) -> &syn::Type {
++    let syn::Type::Path(path) = ty else {
++        return ty;
++    };
++    let Some(segment) = path.path.segments.last() else {
++        return ty;
++    };
++    if segment.ident != CONST_MARKER {
++        return ty;
++    }
++    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
++        return ty;
++    };
++    match args.args.first() {
++        Some(syn::GenericArgument::Type(inner)) => inner,
++        _ => ty,
++    }
++}
++
+ pub(crate) mod ast_ty {
+     use crate::ir::context::BindgenContext;
+     use crate::ir::function::FunctionSig;
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -841,7 +841,11 @@
+                         AliasVariation::NewType | AliasVariation::NewTypeDeref
+                     )
+                 {
+-                    val = quote! { #ty(#val) };
++                    // The alias's own newtype is what the value is built as;
++                    // the const marker, if the type carries one, wraps that
++                    // and is not part of the constructor's name.
++                    let ctor = helpers::strip_const_wrapper(&ty);
++                    val = quote! { #ctor(#val) };
+                 }
+                 result.push(quote! {
+                     #(#attrs)*
+@@ -4544,6 +4548,22 @@
+     type Extra = Item;
+ 
+     fn try_to_rust_ty(
++        &self,
++        ctx: &BindgenContext,
++        item: &Item,
++    ) -> error::Result<syn::Type> {
++        let ty = self.try_to_unqualified_rust_ty(ctx, item)?;
++        // A `const` qualifier on the type itself has no Rust spelling, so
++        // unless a marker newtype was asked for it is dropped here. Constness
++        // of a *pointee* is not this: `to_ptr` renders that as `*const T`.
++        Ok(helpers::const_wrapper(ty, self.is_const(), ctx))
++    }
++}
++
++impl Type {
++    /// The Rust type for this C++ type, before any marker newtype
++    /// [`TryToRustTy::try_to_rust_ty`] wraps round it.
++    fn try_to_unqualified_rust_ty(
+         &self,
+         ctx: &BindgenContext,
+         item: &Item,

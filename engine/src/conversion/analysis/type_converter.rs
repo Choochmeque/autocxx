@@ -14,8 +14,8 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            extract_pinned_mutable_reference_type, unwrap_bitfield, unwrap_function_pointer,
-            unwrap_has_opaque, unwrap_reference,
+            extract_pinned_mutable_reference_type, unwrap_bitfield, unwrap_const,
+            unwrap_function_pointer, unwrap_has_opaque, unwrap_reference,
         },
         ConvertErrorFromCpp,
     },
@@ -60,6 +60,9 @@ pub(crate) enum TypeKind {
 pub(crate) struct TypedefTargetInfo {
     ty: Type,
     kind: TypeKind,
+    /// Whether C++ qualified the target `const` in its own right. Same reason
+    /// it is kept on the analysis: the converted type cannot say it.
+    is_const: bool,
 }
 
 /// Results of some type conversion, annotated with a list of every type encountered,
@@ -70,6 +73,12 @@ pub(crate) struct Annotated<T> {
     pub(crate) types_encountered: HashSet<QualifiedName>,
     pub(crate) extra_apis: ApiVec<NullPhase>,
     pub(crate) kind: TypeKind,
+    /// Whether C++ qualified this type `const` in its own right - `const int
+    /// m`, `T* const p`, `const int f()`. Kept beside the type because Rust
+    /// has no way to spell it: `ty` is what the qualifier was applied to.
+    /// Constness of a *pointee* is not this; that is in `ty` already, as
+    /// `*const T`.
+    pub(crate) is_const: bool,
 }
 
 impl<T> Annotated<T> {
@@ -84,6 +93,22 @@ impl<T> Annotated<T> {
             types_encountered,
             extra_apis,
             kind,
+            is_const: false,
+        }
+    }
+
+    /// Records that C++ qualified this `const`. See [`Self::is_const`].
+    fn marked_const(mut self) -> Self {
+        self.is_const = true;
+        self
+    }
+
+    /// [`Self::marked_const`], for a constness which is only sometimes there.
+    fn marked_const_if(self, is_const: bool) -> Self {
+        if is_const {
+            self.marked_const()
+        } else {
+            self
         }
     }
 
@@ -93,6 +118,7 @@ impl<T> Annotated<T> {
             types_encountered: self.types_encountered,
             extra_apis: self.extra_apis,
             kind: self.kind,
+            is_const: self.is_const,
         }
     }
 }
@@ -243,6 +269,16 @@ impl<'a> TypeConverter<'a> {
             }
             Type::Array(mut arr) => {
                 let innerty = self.convert_type(*arr.elem, ns, &ctx.behind_reference())?;
+                // An array of `const` elements is as unassignable as a `const`
+                // scalar, and C++ says so outright: an array type whose element
+                // type is cv-qualified is itself cv-qualified. bindgen agrees -
+                // it folds a const element into the array's own constness - but
+                // it also leaves the marker on the element, and for
+                // `const T a[2][3]` the outermost node we are handed is the
+                // array rather than a marker. So the fact has to come up from
+                // the element here, or a multidimensional const array looks
+                // assignable.
+                let is_const = innerty.is_const;
                 arr.elem = Box::new(innerty.ty);
                 Annotated::new(
                     Type::Array(arr),
@@ -250,6 +286,7 @@ impl<'a> TypeConverter<'a> {
                     innerty.extra_apis,
                     TypeKind::Regular,
                 )
+                .marked_const_if(is_const)
             }
             Type::Ptr(ptr) => self.convert_ptr(ptr, ns, ctx)?,
             _ => {
@@ -277,7 +314,16 @@ impl<'a> TypeConverter<'a> {
         // `denote_discards_template_param` callback (see
         // `ParseCallbackResults::discards_template_param`), not by wrapping
         // a type.
-        if let Some(ty) = unwrap_has_opaque(&typ) {
+        if let Some(ty) = unwrap_const(&typ) {
+            // C++ qualified this type `const` in its own right. Rust cannot
+            // spell that, so the type is whatever the qualifier was applied
+            // to and the fact travels alongside on the `Annotated`. Two things
+            // read it: `find_constructors_present`, for which a `const` member
+            // with no initializer deletes the class's implicitly declared
+            // default constructor, and the return-type analysis in `fun`,
+            // which routes a `const`-returning function through a wrapper.
+            Ok(self.convert_type(ty.clone(), ns, ctx)?.marked_const())
+        } else if let Some(ty) = unwrap_has_opaque(&typ) {
             // bindgen could not name the C++ type here, so it substituted a
             // blob of bytes of the right size and alignment. As field data
             // that is exactly what autocxx wants - the layout is all it needs -
@@ -477,6 +523,13 @@ impl<'a> TypeConverter<'a> {
 
         // Now convert this type itself.
         deps.insert(original_tn.clone());
+        // A `typedef const int ci` is `const` at the alias, not at each use of
+        // it, so the constness of what we are about to resolve has to come
+        // from the typedef's own analysis. Read before the match below, which
+        // has several exits and would have to carry it through all of them.
+        let target_is_const = self
+            .resolve_typedef(&original_tn)?
+            .is_some_and(|target| target.is_const);
         // First let's see if this is a typedef.
         let (mut typ, tn) = match self.resolve_typedef(&original_tn)? {
             None => (typ, original_tn),
@@ -492,7 +545,7 @@ impl<'a> TypeConverter<'a> {
                 if let Some(result) = Self::function_pointer(resolved_tp, ctx) {
                     return result.map(|mut annotated| {
                         annotated.types_encountered.extend(deps);
-                        annotated
+                        annotated.marked_const_if(target_is_const)
                     });
                 }
                 // `Pin<&mut T>` is not a name to go looking for: it is what
@@ -516,6 +569,7 @@ impl<'a> TypeConverter<'a> {
             Some(TypedefTargetInfo {
                 ty: Type::Ptr(resolved_tp),
                 kind,
+                ..
             }) => {
                 // The typedef resolves to a pointer. Its pointee may
                 // itself involve typedefs (e.g. typedef char C;
@@ -538,7 +592,7 @@ impl<'a> TypeConverter<'a> {
                 if is_rvalue_reference {
                     annotated.kind = TypeKind::RValueReference;
                 }
-                return Ok(annotated);
+                return Ok(annotated.marked_const_if(target_is_const));
             }
             Some(TypedefTargetInfo { ty: other, .. }) => {
                 // Anything else the typedef resolved to was converted when the
@@ -558,7 +612,8 @@ impl<'a> TypeConverter<'a> {
                     Type::Reference(_) => TypeKind::Reference,
                     _ => TypeKind::Regular,
                 };
-                return Ok(Annotated::new(other.clone(), deps, ApiVec::new(), kind));
+                return Ok(Annotated::new(other.clone(), deps, ApiVec::new(), kind)
+                    .marked_const_if(target_is_const));
             }
         };
 
@@ -662,7 +717,10 @@ impl<'a> TypeConverter<'a> {
                 deps.insert(new_tn);
             }
         }
-        Ok(Annotated::new(Type::Path(typ), deps, extra_apis, kind))
+        Ok(
+            Annotated::new(Type::Path(typ), deps, extra_apis, kind)
+                .marked_const_if(target_is_const),
+        )
     }
 
     fn get_generic_args(typ: &mut TypePath) -> Option<&mut PathSegment> {
@@ -705,6 +763,14 @@ impl<'a> TypeConverter<'a> {
 
     /// Follow a chain of typedefs to what it eventually points at, along with
     /// what the analysis of the last typedef in the chain made of that target.
+    ///
+    /// The last is enough for the constness it also reports, even though C++
+    /// applies `const` where it is written and no later typedef takes it off
+    /// again. bindgen erases the qualifier from an alias whose target is
+    /// itself an alias - `typedef int I; typedef const I CI;` comes out as
+    /// `pub type CI = root::I;` with no marker on it - so the only alias which
+    /// can arrive `const` is one naming a builtin, and that is where a chain
+    /// ends. See `test_const_field_through_typedef_chain_deletes_default_constructor`.
     fn resolve_typedef<'b>(
         &'b self,
         tn: &QualifiedName,
@@ -1074,6 +1140,7 @@ impl TypedefTarget for TypedefAnalysis {
                 TypedefKind::Use(ref ty) => (***ty).clone(),
             },
             kind: self.target_kind.clone(),
+            is_const: self.target_is_const,
         })
     }
 }

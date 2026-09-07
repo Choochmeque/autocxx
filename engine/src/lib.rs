@@ -370,8 +370,22 @@ impl IncludeCppEngine {
         inc_dirs: &[PathBuf],
         extra_clang_args: &[&str],
     ) -> bindgen::Builder {
-        let bindgen_marker_types = ["Opaque", "Reference", "RValueReference"];
-        let raw_line = bindgen_marker_types
+        // The markers we ask bindgen for. Each is a fake type wrapping what it
+        // marks, and every one of them is read off the syntax bindgen emits
+        // and then stripped, so what they are declared *as* only has to keep
+        // the bindgen mod compiling until then.
+        //
+        // `Const` is declared as a transparent alias rather than a newtype
+        // because it is the one marker which lands on types in positions that
+        // also carry a value: a `const` variable's type sits beside the
+        // initializer bindgen emits for it, and a `const` bitfield's accessors
+        // cast between the field type and the allocation unit's integer
+        // (`self.x() as u32`). A newtype makes both of those `error[E0605]:
+        // non-primitive cast`. An alias is invisible to all of it and just as
+        // visible to us, since we match on the type bindgen printed.
+        let bindgen_marker_newtypes = ["Opaque", "Reference", "RValueReference"];
+        let bindgen_marker_aliases = ["Const"];
+        let raw_line = bindgen_marker_newtypes
             .iter()
             .map(|t| {
                 // `Default` because we ask bindgen to derive it for the
@@ -388,7 +402,16 @@ impl IncludeCppEngine {
                      pub struct __bindgen_marker_{t}<T: ?Sized>(T);"
                 )
             })
+            .chain(
+                bindgen_marker_aliases
+                    .iter()
+                    .map(|t| format!("pub type __bindgen_marker_{t}<T> = T;")),
+            )
             .join(" ");
+        let bindgen_marker_types: Vec<_> = bindgen_marker_newtypes
+            .iter()
+            .chain(bindgen_marker_aliases.iter())
+            .collect();
         let use_list = bindgen_marker_types
             .iter()
             .map(|t| format!("__bindgen_marker_{t}"))
@@ -418,6 +441,7 @@ impl IncludeCppEngine {
             .use_specific_virtual_function_receiver(true)
             .use_opaque_newtype_wrapper(true)
             .use_reference_newtype_wrapper(true)
+            .use_const_newtype_wrapper(true)
             .represent_cxx_operators(true)
             .use_distinct_char16_t(true)
             .generate_deleted_functions(true)

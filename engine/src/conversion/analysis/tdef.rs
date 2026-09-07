@@ -37,6 +37,12 @@ pub(crate) struct TypedefAnalysis {
     /// later uses this alias has no other way to tell which it was. See
     /// google/autocxx#1363.
     pub(crate) target_kind: TypeKind,
+    /// Whether the target was `const` in its own right - `typedef const int
+    /// ci`. Kept for the same reason as `target_kind`: converting throws it
+    /// away, because Rust has no way to spell it, and a field or return which
+    /// later names this alias would otherwise never learn that C++ made it
+    /// unassignable.
+    pub(crate) target_is_const: bool,
     pub(crate) deps: HashSet<QualifiedName>,
 }
 
@@ -88,6 +94,7 @@ pub(crate) fn convert_typedef_targets(
                         // unconverted, so there is nothing here that a caller
                         // couldn't read off the type itself.
                         target_kind: TypeKind::Regular,
+                        target_is_const: false,
                         deps: HashSet::new(),
                     },
                 },
@@ -187,6 +194,10 @@ fn get_replacement_typedef(
                 // one is allowed: it behaves as a pointer in every way the
                 // later analyses ask about.
                 target_kind: TypeKind::Pointer,
+                // A pointer to a function, not a `const` one: the marker would
+                // have wrapped the `Option<..>` and `function_pointer` would
+                // not have recognised it.
+                target_is_const: false,
                 deps: HashSet::new(),
             },
         });
@@ -252,6 +263,7 @@ fn get_replacement_typedef(
                 analysis: TypedefAnalysis {
                     kind: TypedefKind::Type(Box::new(converted_type.into())),
                     target_kind: final_type.kind,
+                    target_is_const: final_type.is_const,
                     deps: final_type.types_encountered,
                 },
             })
