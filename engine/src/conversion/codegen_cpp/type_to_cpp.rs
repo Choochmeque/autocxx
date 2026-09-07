@@ -224,9 +224,12 @@ impl CppNameMap {
                 // means rendering qualifiers per declarator rather than by
                 // wrapping strings, which is a rewrite of this function and
                 // not of a piece with the smart-pointer lowering it was
-                // written for. Nothing reaches it today: the marker arrives
-                // only on a builtin, and the smart-pointer payload is rendered
-                // at the top level of a template argument.
+                // written for. Nothing reaches it today: a marked type is
+                // rendered either as a smart-pointer payload, which is the top
+                // level of a template argument, or in a position where the
+                // qualifier is the outermost thing about it.
+                // `test_shared_ptr_const_pointer_payload` covers the one
+                // pointer shape which does arrive.
                 // See google/autocxx#799.
                 if let Some(inner) = unwrap_const(typ) {
                     let inner_cpp = self.type_to_cpp(inner)?;

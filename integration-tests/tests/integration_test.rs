@@ -9457,6 +9457,47 @@ fn test_shared_ptr_const_nested_in_a_container() {
     run_test("", hdr, rs, &["fx_hold_nested"], &[]);
 }
 
+/// A payload which is a `const`-qualified *pointer* rather than a
+/// `const`-qualified value: `std::shared_ptr<int* const>`.
+///
+/// bindgen keeps the marker here for the same reason it keeps it on a builtin -
+/// a pointer is not reached through a type reference - so this shape does reach
+/// the lowering, which makes it the case that tells the two spellings of the
+/// qualifier apart. `int* const` is a const pointer to a mutable `int`;
+/// rendering the marker as a prefix would have manufactured
+/// `std::shared_ptr<const int*>`, a different specialization, and the typedef
+/// would not have bound to the real signature.
+///
+/// Addresses part of the bug reported upstream as google/autocxx#799.
+#[test]
+fn test_shared_ptr_const_pointer_payload() {
+    let hdr = indoc! {"
+        #include <memory>
+        inline std::shared_ptr<int* const> fx_hold_ptr() {
+            static int value = 3;
+            return std::make_shared<int* const>(&value);
+        }
+    "};
+    let rs = quote! {
+        let held = ffi::fx_hold_ptr();
+        // Two derefs: the holder's payload is the pointer, and the pointer's
+        // pointee is the int.
+        assert_eq!(unsafe { **held.get() }, autocxx::c_int(3));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_hold_ptr"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["typedef std::shared_ptr<int* const>"],
+            &["typedef std::shared_ptr<const int*>"],
+        ))),
+        None,
+    );
+}
+
 /// The reach of the lowering above, stated as a test: a `std::shared_ptr<const
 /// T>` whose `T` is a class still does not build.
 ///

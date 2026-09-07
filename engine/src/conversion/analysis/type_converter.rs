@@ -1214,11 +1214,13 @@ impl<'a> TypeConverter<'a> {
 ///
 /// What this can see is narrower than what C++ wrote, and the difference
 /// decides the whole reach of the lowering downstream. bindgen keeps the marker
-/// on a *builtin* template argument - `std::shared_ptr<const int>` arrives as
-/// `shared_ptr<__bindgen_marker_Const<c_int>>` - but not on a record one: a
-/// class argument is reached through a type reference, and `through_type_refs()`
-/// resolves that before `TemplateInstantiation::try_to_rust_ty` renders it,
-/// dropping the qualifier on the way. So `std::shared_ptr<const Foo>` arrives
+/// on a template argument it renders directly - a builtin or a pointer, so
+/// `std::shared_ptr<const int>` arrives as
+/// `shared_ptr<__bindgen_marker_Const<c_int>>` - but not on a record one.
+/// `TemplateInstantiation::try_to_rust_ty` resolves each argument
+/// `.through_type_refs()` before rendering it, which walks a class argument's
+/// `TypeKind::ResolvedTypeRef` to the record it names and leaves the qualifier
+/// behind on the reference. So `std::shared_ptr<const Foo>` arrives
 /// indistinguishable from `std::shared_ptr<Foo>` and nothing here can lower it.
 /// `engine/third_party/patches/11-const-newtype-marker.patch` records the
 /// erasure in its commit message; that it spares builtins is what makes this
