@@ -82,10 +82,18 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
                     let first = missing_deps.next();
                     std::mem::drop(missing_deps);
                     if let Some(missing_dep) = first.cloned() {
-                        create_ignore_item(
-                            api,
-                            ConvertErrorFromCpp::UnknownDependentType(missing_dep),
-                        )
+                        // Discarded for the same reason as the branch above,
+                        // so it propagates the same way: whatever depends on
+                        // this item has to go too, and needs another iteration
+                        // to find out. An item can only reach this branch
+                        // through some name of its own that nothing declares,
+                        // which its dependents cannot see - autocxx's opaque
+                        // holders are the case in point, since the payload
+                        // they name appears in nothing else's dependencies.
+                        iterate_again = true;
+                        let err = ConvertErrorFromCpp::UnknownDependentType(missing_dep);
+                        ignored_items.insert(api.name().clone(), err.clone());
+                        create_ignore_item(api, err)
                     } else {
                         api
                     }
