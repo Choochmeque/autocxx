@@ -220,9 +220,10 @@ a few other things.</li>
 <code>engine/src/conversion</code> to convert it to be a format suitable for input
 to <code>cxx</code>.</p>
 <p>However, most of the actual code is in <code>engine/src/conversion/mod.rs</code>.</p>
-<p>At the moment we're using a slightly branched version of <code>bindgen</code> called <code>autocxx-bindgen</code>.
-It's hoped this is temporary (see <a href="https://github.com/google/autocxx/issues/124">here</a>
-for status.)</p>
+<p><code>bindgen</code> is vendored rather than depended upon: <code>engine/third_party/rust-bindgen</code> is a
+submodule of upstream <code>rust-lang/rust-bindgen</code> pinned at a release tag, and
+<code>engine/third_party/patches</code> holds autocxx's delta as a patch series which <code>engine/build.rs</code>
+applies into <code>OUT_DIR</code>. See "Rolling bindgen" below.</p>
 <h2 id="how-to-develop"><a class="header" href="#how-to-develop">How to develop</a></h2>
 <p>If you're making a change, here's what you need to do to get useful diagnostics etc.
 First of all, <code>cargo run</code> in the <code>demo</code> directory. If it breaks, you don't get much
@@ -286,49 +287,60 @@ released version number, and <code>NEW</code> is the new version number.</li>
 <li>Commit that and make a PR; ensure it passes tests on github CI.</li>
 <li>If so, merge that PR, and update locally.</li>
 <li>Run <code>tools/publish-all.sh</code>. This will do the actual <code>cargo publish</code>
-for all the various crates.</li>
+for all the various crates. It first flattens bindgen's sources out of the
+submodule into <code>engine/third_party/bindgen-src</code>, because <code>cargo package</code>
+cannot carry a directory containing a <code>Cargo.toml</code> and the submodule has two;
+see "Rolling bindgen" below. That directory is left untracked on purpose, so
+the publish runs <code>--allow-dirty</code>.</li>
 <li>On <a href="https://github.com/google/autocxx/releases">github releases</a>,
 choose Draft a new release. Add a tag for <code>v0.X.Y</code>. Go through
 the process to automatically create release notes.</li>
 </ul>
 <h2 id="rolling-bindgen"><a class="header" href="#rolling-bindgen">Rolling bindgen</a></h2>
-<p>autocxx currently depends upon a fork of bindgen called <code>autocxx-bindgen</code>.
-<a href="https://github.com/google/autocxx/issues/124">This issue</a> is an attempt
-at entirely unforking bindgen. There are about 14 upstream PRs required;
-we should work hard to make required changes to get them accepted,
-because then this section becomes irrelevant and you'll never need to follow
-these steps.</p>
-<p>Otherwise, periodically, you'll need to merge bindgen into autocxx-bindgen.
-<a href="https://github.com/adetaylor/rust-bindgen"><code>autocxx-bindgen</code> is kept in this repository</a>
-in the <code>master</code> branch (which should be renamed eventually if we don't
-unfork bindgen).</p>
-<p>To update it,</p>
+<p>autocxx needs facts about C++ which bindgen does not report: access specifiers, special
+members, virtualness, the original C++ spelling behind a flattened nested name, and markers
+telling opaque types and references apart from what they are generated as. It used to get
+them from <code>autocxx-bindgen</code>, a fork republished under its own name, which had to be rebased
+by hand and fell far enough behind upstream to miss the clang-22 fix for
+<code>clang_getTypeDeclaration</code> (see <a href="https://github.com/google/autocxx/issues/1509">google/autocxx#1509</a>
+and <a href="https://github.com/rust-lang/rust-bindgen/issues/3278">rust-lang/rust-bindgen#3278</a>).</p>
+<p>Instead:</p>
 <ul>
-<li>Check out the master branch of that repo</li>
-<li>Make a new branch</li>
-<li><code>git pull &lt;upstream repo&gt; main</code> (note that we use merge rather than
-rebase)</li>
-<li>Resolve conflicts and commit.</li>
-<li>Push this branch to <a href="https://github.com/adetaylor/rust-bindgen">the autocxx-bindgen repo</a></li>
-<li>Make a new branch of autocxx</li>
-<li>Amend <a href="https://github.com/google/autocxx/blob/main/engine/Cargo.toml#L34"><code>engine/Cargo.toml</code></a>
-to point to the new git branch of autocxx-bindgen instead of using
-a published version (see the commented-out line)</li>
-<li>Maybe <code>cd integration-tests; cargo test</code> to ensure things build and seem to
-work... but you won't really know until you push to github CI</li>
-<li>So, push your autocxx and make a pull request</li>
-<li>If everything passes on CI, bump the <code>autocxx-bindgen</code> version number.
-This needs to be done in <code>bindgen/Cargo.toml</code> and <code>Cargo.toml</code>. Commit that.</li>
-<li>Push directly onto the master branch of
-<a href="https://github.com/adetaylor/rust-bindgen">the autocxx-bindgen repo</a>.
-You can't raise this roll as a pull request because Google's CLA tooling
-will reject it.</li>
-<li><code>cargo publish</code> the new autocxx-bindgen version.</li>
-<li>Amend your <code>autocxx</code> PR to switch to the published <code>autocxx-bindgen</code> version,
-and push that.</li>
-<li>Ensure CI still passes.</li>
-<li>If so, merge your <code>autocxx</code> PR.</li>
+<li><code>engine/third_party/rust-bindgen</code> is a git submodule of upstream <code>rust-lang/rust-bindgen</code>,
+checked out at a release tag. Nothing in it is edited, and no upstream code is committed to
+this repository.</li>
+<li><code>engine/third_party/patches/*.patch</code> is autocxx's delta, one file per feature, applied in
+numeric order. Each patch applies to the submodule's <code>bindgen/</code> directory.</li>
+<li><code>engine/build.rs</code> copies the submodule sources into <code>OUT_DIR</code>, applies the patches, and
+rewrites the result so it compiles as a module rather than a crate: bindgen's cargo
+features become fixed <code>cfg</code>s, macros reached through <code>#[macro_use] extern crate</code> become
+absolute paths, and <code>crate::</code> becomes <code>crate::vendored_bindgen::</code>.</li>
+<li><code>engine/src/lib.rs</code> mounts the result as <code>mod vendored_bindgen</code>.</li>
 </ul>
+<p>A checkout therefore needs <code>git submodule update --init --recursive</code>, and CI jobs which
+compile the engine check out with <code>submodules: recursive</code>.</p>
+<p>Publishing needs one more step, which <code>tools/publish-all.sh</code> runs. <code>cargo package</code> prunes
+every directory below the package root which contains a <code>Cargo.toml</code>, reading it as a
+separate package; neither <code>include</code> nor <code>exclude</code> lifts that, so the submodule can never
+reach crates.io as it stands. <code>AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine</code>
+therefore copies the sources to <code>engine/third_party/bindgen-src</code> with those manifests
+renamed, and <code>build.rs</code> prefers that directory when it exists - which in a published crate
+is always. It is left untracked, so the publish is <code>--allow-dirty</code> and no bindgen source is
+committed here.</p>
+<p>To move to a new bindgen release:</p>
+<ul>
+<li><code>cd engine/third_party/rust-bindgen &amp;&amp; git fetch &amp;&amp; git checkout &lt;new tag&gt;</code></li>
+<li><code>cargo check -p autocxx-engine</code>. Every patch that no longer applies fails the build naming
+the patch and the file, so there is no silent mis-patching.</li>
+<li>Rebase the failing patches. The delta is small and each patch is one feature, so this is a
+matter of re-reading the hunk against the new upstream code rather than a merge.</li>
+<li>Run the integration suite, and diff generated output against the previous commit for
+anything the release changed on its own.</li>
+<li>Commit the submodule bump and the rebased patches together.</li>
+</ul>
+<p>Anything in the patch series which upstream would take is worth sending upstream: the series
+is the list of reasons autocxx cannot use bindgen as published, and every patch removed from
+it is one less thing to rebase.</p>
 <h2 id="major-areas-of-tech-debt"><a class="header" href="#major-areas-of-tech-debt">Major areas of tech debt</a></h2>
 <p>The core of autocxx is the <code>Api</code> enum. That's solid. It's created by parsing
 bindgen output, and exists all the way through to Rust and C++ codegen.
@@ -357,10 +369,11 @@ become uniform here by abstracting the name deconfliction stuff from the
 function analysis.</p>
 </li>
 <li>
-<p><strong>Fork of bindgen</strong>. As noted under <a href="#rolling-bindgen">rolling bindgen, above</a>,
-we currently use a fork of bindgen called <code>autocxx-bindgen</code>. This carries
-a maintenance burden as we roll upstream. Also as noted above, we're
-making good progress on undoing this. Tracked
+<p><strong>Patched bindgen</strong>. As noted under <a href="#rolling-bindgen">rolling bindgen, above</a>,
+autocxx patches bindgen rather than using it as published. The patch series is
+small and each patch is one feature, but every one of them is a hunk to rebase
+at each bindgen release, and a feature upstream would take is a feature nobody
+has to rebase again. Tracked
 <a href="https://github.com/google/autocxx/issues/124">here</a>.</p>
 </li>
 <li>
