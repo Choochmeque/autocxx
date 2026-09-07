@@ -9269,9 +9269,9 @@ fn test_shared_ptr_const() {
 /// the ones which would catch a leak or a double free: after the final Rust
 /// owner is dropped the deleter must have run exactly once, and not before.
 ///
-/// The payload is an `int` rather than a class because that is the whole of
-/// what this reaches today - see
-/// [`test_shared_ptr_const_class_payload_is_still_unseen`].
+/// The payload is an `int` because that is what this test was written for. A
+/// class payload reaches the lowering too now - see
+/// [`test_shared_ptr_const_class_payload`].
 ///
 /// Addresses the bug reported upstream as google/autocxx#799.
 #[test]
@@ -9888,9 +9888,11 @@ fn test_vector_of_pointers_does_not_own_its_pointees() {
 /// `value_type` at all - its allocator requires a non-const one - so a holder
 /// would be a typedef of a specialization C++ rejects, which is worse than the
 /// diagnostic. Nothing has to be ordered to get this: the two predicates are
-/// disjoint by construction, because the marker arrives as a `Type::Path`
-/// wrapping the element and [`sole_pointer_generic_arg`] takes only a bare
-/// `Type::Ptr`, and no type is both.
+/// disjoint by construction. `generic_args_are_const_qualified` asks whether
+/// *any* argument is a `Type::Path` carrying the marker;
+/// `sole_pointer_generic_arg` demands that there be exactly one argument and
+/// that it be a bare `Type::Ptr`. So whenever the second succeeds the first
+/// has no argument left to be true of, whichever runs first.
 ///
 /// [`test_vector_of_const_pointers`] is the other side of the seam - a pointer
 /// to a `const` object rather than a `const` pointer - and it *is* lowered,
@@ -9921,10 +9923,9 @@ fn test_vector_of_const_pointer_elements_is_refused() {
 ///
 /// Nothing of bindgen's `const` marker is involved: `const fx_Goat*` is a
 /// pointer to a `const` object, which is part of a Rust type already and
-/// arrives as `*const fx_Goat`. That is why this needs no counterpart to
-/// `test_shared_ptr_const_class_payload_is_still_unseen` - the qualifier
-/// bindgen drops is the argument's own, as in `T* const`, and that is not what
-/// a vector of pointers to `const` is written with.
+/// arrives as `*const fx_Goat`. The marker is for a qualifier on the argument
+/// itself, as in `fx_Goat* const`, which is a different type and takes the
+/// refusal above rather than this lowering.
 ///
 /// Pinned on both halves of the output. The generated typedef keeps the
 /// qualifier, which is what makes the C++ bind; the accessors hand back a
@@ -21310,9 +21311,10 @@ fn test_unique_ptr_of_const_record_round_trips() {
     );
 }
 
-/// `std::vector` gets no lowering: cxx needs an opaque holder to be a complete
-/// type, and completing a `std::vector<const T>` is ill-formed. So the payload
-/// is turned down here instead, which is the difference between a diagnostic
+/// A `std::vector` of `const` elements gets no lowering, where a
+/// `std::vector<T*>` does: cxx needs an opaque holder to be a complete type,
+/// and completing a `std::vector<const T>` is ill-formed. So the payload is
+/// turned down here instead, which is the difference between a diagnostic
 /// naming the container and a C++ compiler complaining about a specialization
 /// nobody wrote.
 #[test]
