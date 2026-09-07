@@ -659,7 +659,11 @@ impl<'a> TypeConverter<'a> {
         let generic_behavior = known_types().cxx_generic_behavior(&tn);
         let payload_is_const = generic_behavior != CxxGenericType::Not
             && self.generic_args_are_const_qualified(&typ)?;
-        if generic_behavior == CxxGenericType::CppPtr && payload_is_const {
+        if matches!(
+            generic_behavior,
+            CxxGenericType::CppUniquePtr | CxxGenericType::CppSharedPtr
+        ) && payload_is_const
+        {
             let mut extra_apis = ApiVec::new();
             let surface = self.const_smart_pointer_surface(&tn, &typ, ns, &mut extra_apis)?;
             return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
@@ -1322,8 +1326,13 @@ impl<'a> TypeConverter<'a> {
                                 return Ok(TypeKind::Regular);
                             }
                         }
-                        CxxGenericType::CppPtr => {
+                        CxxGenericType::CppUniquePtr => {
                             if !known_types().permissible_within_unique_ptr(&inner_qn) {
+                                return Err(ConvertErrorFromCpp::InvalidTypeForCppPtr(inner_qn));
+                            }
+                        }
+                        CxxGenericType::CppSharedPtr => {
+                            if !known_types().permissible_within_shared_or_weak_ptr(&inner_qn) {
                                 return Err(ConvertErrorFromCpp::InvalidTypeForCppPtr(inner_qn));
                             }
                         }

@@ -30,15 +30,23 @@ pub(crate) const CXX_CHARACTER_TYPES: &[(&str, &str, &str)] = &[
 ];
 
 /// The behavior of the type.
+///
+/// The three C++ smart pointers are told apart because cxx asks a different
+/// question of each one's payload - see [`TypeDatabase::permissible_within_unique_ptr`]
+/// and [`TypeDatabase::permissible_within_shared_or_weak_ptr`] - and so is
+/// `char` from `bool`, which cxx takes in a `shared_ptr` and not in a
+/// `vector`, where `char` is welcome in neither.
 #[derive(Debug)]
 enum Behavior {
-    CxxContainerPtr,
+    CxxContainerUniquePtr,
+    CxxContainerSharedPtr,
     CxxContainerVector,
     CxxString,
     RustStr,
     RustString,
     RustByValue,
     CByValue,
+    CChar,
     CByValueVecSafe,
     CVariableLengthByValue,
     CVoid,
@@ -59,6 +67,7 @@ impl Behavior {
         match self {
             // Primitives, and `Pin<&T>`, which is a reference.
             Behavior::CByValue
+            | Behavior::CChar
             | Behavior::CByValueVecSafe
             | Behavior::CVariableLengthByValue
             | Behavior::CCharacter
@@ -69,7 +78,8 @@ impl Behavior {
             // Each of these owns something it has to give back: a heap
             // allocation, a refcount, or a Rust `Box`.
             Behavior::CxxString
-            | Behavior::CxxContainerPtr
+            | Behavior::CxxContainerUniquePtr
+            | Behavior::CxxContainerSharedPtr
             | Behavior::CxxContainerVector
             | Behavior::RustString
             | Behavior::RustContainerByValueSafe => false,
@@ -117,13 +127,15 @@ impl TypeDetails {
             Behavior::RustString
             | Behavior::RustStr
             | Behavior::CxxString
-            | Behavior::CxxContainerPtr
+            | Behavior::CxxContainerUniquePtr
+            | Behavior::CxxContainerSharedPtr
             | Behavior::CxxContainerVector
             | Behavior::RustContainerByValueSafe => {
                 let tn = QualifiedName::new_from_cpp_name(&self.rs_name);
                 let cxx_name = tn.get_final_item();
                 let (templating, payload) = match self.behavior {
-                    Behavior::CxxContainerPtr
+                    Behavior::CxxContainerUniquePtr
+                    | Behavior::CxxContainerSharedPtr
                     | Behavior::CxxContainerVector
                     | Behavior::RustContainerByValueSafe => ("template<typename T> ", "T* ptr"),
                     _ => ("", "char* ptr"),
@@ -166,7 +178,8 @@ impl TypeDetails {
 
     fn get_generic_behavior(&self) -> CxxGenericType {
         match self.behavior {
-            Behavior::CxxContainerPtr => CxxGenericType::CppPtr,
+            Behavior::CxxContainerUniquePtr => CxxGenericType::CppUniquePtr,
+            Behavior::CxxContainerSharedPtr => CxxGenericType::CppSharedPtr,
             Behavior::CxxContainerVector => CxxGenericType::CppVector,
             Behavior::RustContainerByValueSafe => CxxGenericType::Rust,
             _ => CxxGenericType::Not,
@@ -192,9 +205,12 @@ pub(crate) fn known_types() -> &'static TypeDatabase {
 pub enum CxxGenericType {
     /// Not a generic at all
     Not,
-    /// Some generic like cxx::UniquePtr where the contents must be a
-    /// complete type.
-    CppPtr,
+    /// `cxx::UniquePtr`, whose contents must be a complete type and none of
+    /// cxx's own atoms but `CxxString`.
+    CppUniquePtr,
+    /// `cxx::SharedPtr` or `cxx::WeakPtr`, which take the same contents as a
+    /// `UniquePtr` plus the numeric atoms, and no `CxxVector`.
+    CppSharedPtr,
     /// Some generic like cxx::Vector where the contents must be a
     /// complete type, and some types of int are allowed too.
     CppVector,
@@ -251,12 +267,14 @@ impl TypeDatabase {
                 (
                     tn.clone(),
                     match self.get(tn).unwrap().behavior {
-                        Behavior::CxxContainerPtr
+                        Behavior::CxxContainerUniquePtr
+                        | Behavior::CxxContainerSharedPtr
                         | Behavior::RustStr
                         | Behavior::RustString
                         | Behavior::RustByValue
                         | Behavior::CByValueVecSafe
                         | Behavior::CByValue
+                        | Behavior::CChar
                         | Behavior::CVariableLengthByValue
                         | Behavior::CCharacter
                         | Behavior::RustContainerByValueSafe => true,
@@ -296,7 +314,8 @@ impl TypeDatabase {
             .map(|td| {
                 matches!(
                     td.behavior,
-                    Behavior::CxxContainerPtr
+                    Behavior::CxxContainerUniquePtr
+                        | Behavior::CxxContainerSharedPtr
                         | Behavior::CxxContainerVector
                         | Behavior::RustContainerByValueSafe
                 )
@@ -389,6 +408,9 @@ impl TypeDatabase {
     /// `autocxx::c_int` family - are not, but we ask cxx to make them so by
     /// emitting `impl CxxVector<c_int> {}` into the generated bridge alongside
     /// the `type c_int = autocxx::c_int;` alias. See google/autocxx#422.
+    ///
+    /// Mirrors `check_type_cxx_vector`, cxx-gen 0.7.200
+    /// `src/syntax/check.rs:211`, which takes neither `bool` nor `c_char`.
     pub(crate) fn permissible_within_vector(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
@@ -412,6 +434,9 @@ impl TypeDatabase {
     /// family - are not atoms as far as cxx is concerned, so the explicit shim
     /// trait impls this crate writes in `autocxx::c_type_vectors` make them
     /// work like any other named type. See google/autocxx#422.
+    ///
+    /// Mirrors `check_type_unique_ptr`, cxx-gen 0.7.200
+    /// `src/syntax/check.rs:147`.
     pub(crate) fn permissible_within_unique_ptr(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
@@ -419,6 +444,34 @@ impl TypeDatabase {
                     x.behavior,
                     Behavior::CxxString
                         | Behavior::CxxContainerVector
+                        | Behavior::CVariableLengthByValue
+                )
+            })
+            .unwrap_or(true)
+    }
+
+    /// Whether cxx can accommodate `ty` inside a `std::shared_ptr` or a
+    /// `std::weak_ptr`.
+    ///
+    /// These two are more generous than `unique_ptr`: cxx implements
+    /// `SharedPtrTarget` and `WeakPtrTarget` for every numeric atom and for
+    /// `bool`, so `SharedPtr<u32>` needs no help from us. What it will not
+    /// take is a `CxxVector` payload, or `c_char`, or a `String`. Asking the
+    /// `unique_ptr` question of all three refused the numeric payloads for no
+    /// reason and let `shared_ptr<vector<T>>` through to be refused by cxx.
+    ///
+    /// Mirrors `check_type_shared_ptr` and `check_type_weak_ptr`, cxx-gen
+    /// 0.7.200 `src/syntax/check.rs:165` and `:188`, which agree with each
+    /// other and with the trait impls in cxx's own `src/shared_ptr.rs:460`
+    /// and `src/weak_ptr.rs:166`.
+    pub(crate) fn permissible_within_shared_or_weak_ptr(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|x| {
+                matches!(
+                    x.behavior,
+                    Behavior::CxxString
+                        | Behavior::CByValue
+                        | Behavior::CByValueVecSafe
                         | Behavior::CVariableLengthByValue
                 )
             })
@@ -477,7 +530,7 @@ fn create_type_database() -> TypeDatabase {
     db.insert(TypeDetails::new(
         "cxx::UniquePtr",
         "std::unique_ptr",
-        Behavior::CxxContainerPtr,
+        Behavior::CxxContainerUniquePtr,
         None,
         false,
         true,
@@ -493,7 +546,7 @@ fn create_type_database() -> TypeDatabase {
     db.insert(TypeDetails::new(
         "cxx::SharedPtr",
         "std::shared_ptr",
-        Behavior::CxxContainerPtr,
+        Behavior::CxxContainerSharedPtr,
         None,
         true,
         true,
@@ -501,7 +554,7 @@ fn create_type_database() -> TypeDatabase {
     db.insert(TypeDetails::new(
         "cxx::WeakPtr",
         "std::weak_ptr",
-        Behavior::CxxContainerPtr,
+        Behavior::CxxContainerSharedPtr,
         None,
         true,
         true,
@@ -631,7 +684,7 @@ fn create_type_database() -> TypeDatabase {
     db.insert(TypeDetails::new(
         "::std::os::raw::c_char",
         "char",
-        Behavior::CByValue,
+        Behavior::CChar,
         None,
         true,
         true,

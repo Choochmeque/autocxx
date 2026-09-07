@@ -282,6 +282,66 @@ fn test_share_ctype() {
     );
 }
 
+/// cxx takes every numeric atom inside a `shared_ptr` or a `weak_ptr` -
+/// `check_type_shared_ptr` and `check_type_weak_ptr` in cxx-gen 0.7.200
+/// `src/syntax/check.rs`, lines 165 and 188 - and implements
+/// `SharedPtrTarget`/`WeakPtrTarget` for each. Only `check_type_unique_ptr`
+/// (line 147) turns them down, so asking the `unique_ptr` question of all
+/// three refused these for no reason.
+#[test]
+fn test_share_int() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        inline std::shared_ptr<uint32_t> share_up() {
+            return std::make_shared<uint32_t>(12);
+        }
+        inline uint32_t take_shared(std::shared_ptr<uint32_t> a) { return *a; }
+        inline std::weak_ptr<uint32_t> shared_to_weak(std::shared_ptr<uint32_t> a) {
+            return std::weak_ptr<uint32_t>(a);
+        }
+    "};
+    let rs = quote! {
+        let a = ffi::share_up();
+        assert_eq!(ffi::take_shared(a.clone()), 12);
+        assert_eq!(*ffi::shared_to_weak(a.clone()).upgrade().as_ref().unwrap(), 12);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["share_up", "take_shared", "shared_to_weak"],
+        &[],
+    );
+}
+
+/// The other half of the same split. cxx turns down a `shared_ptr` of a
+/// `vector` - "std::shared_ptr<std::vector> is not supported yet",
+/// `check_type_shared_ptr` again - where it takes a `unique_ptr` of one. Ask
+/// the `unique_ptr` question and the bridge is emitted and then rejected
+/// whole, which costs every other binding in the same `include_cpp!`;
+/// refusing it here costs only the function.
+#[test]
+fn test_shared_ptr_of_vector_refused_without_the_rest_of_the_bridge() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        #include <vector>
+        class Thing {
+        public:
+            Thing() {}
+            std::shared_ptr<std::vector<uint32_t>> share_vec() const {
+                return std::make_shared<std::vector<uint32_t>>();
+            }
+            uint32_t unrelated() const { return 7; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().unrelated(), 7);
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
+}
+
 #[test]
 fn test_give_string_up() {
     let cxx = indoc! {"
