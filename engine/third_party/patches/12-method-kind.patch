@@ -1,0 +1,73 @@
+Subject: Report which kind of C++ method a function is
+
+bindgen renders a C++ method as a free function whose name is built from the
+class's name and the method's, so the generated Rust says nothing about which
+methods are constructors. `ParseCallbacks::denote_special_member` covers only
+the special members, which leaves a constructor taking arguments of its own
+indistinguishable from any other method - a consumer that emits C++ has to
+guess from the name, and `Widget::Widget3()` guesses wrong.
+
+bindgen already has the answer in `ir::comp::MethodKind`, computed from the
+cursor at parse time. Make that enum public and add an additive
+`ParseCallbacks::denote_method_kind`, reported from function codegen beside the
+existing item facts.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -1,7 +1,7 @@
+ //! A public API for more fine-grained customization of bindgen behavior.
+ 
+ pub use crate::ir::analysis::DeriveTrait;
+-pub use crate::ir::comp::SpecialMemberKind;
++pub use crate::ir::comp::{MethodKind, SpecialMemberKind};
+ pub use crate::ir::derive::CanDerive as ImplementsTrait;
+ pub use crate::ir::function::Visibility;
+ pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
+@@ -262,6 +262,19 @@
+     /// know that.
+     fn denote_discards_template_param(&self, _id: DiscoveredItemId) {}
+ 
++    /// Report which kind of C++ method a function is: a constructor, a
++    /// destructor, a static method or an ordinary one.
++    ///
++    /// bindgen renders a method as a free function whose name is built from
++    /// the class's name and the method's, so nothing in the generated Rust
++    /// distinguishes a constructor from a method which happens to be named
++    /// after its class. Only [`ParseCallbacks::denote_special_member`] comes
++    /// close, and it speaks only for the special members: a constructor taking
++    /// arguments of its own is not one. A consumer which has to emit C++ of
++    /// its own needs the distinction, because a constructor is called by a
++    /// syntax of its own.
++    fn denote_method_kind(&self, _id: DiscoveredItemId, _kind: MethodKind) {}
++
+     // TODO add callback for ResolvedTypeRef
+ }
+ 
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -4942,6 +4942,12 @@
+             attributes.push(attributes::doc(&comment));
+         }
+ 
++        if let FunctionKind::Method(method_kind) = self.kind() {
++            let id = DiscoveredItemId::new(item.id().as_usize());
++            ctx.options()
++                .for_each_callback(|cb| cb.denote_method_kind(id, method_kind));
++        }
++
+         let discovered_id = DiscoveredItemId::new(item.id().as_usize());
+         if is_pure_virtual {
+             ctx.options().for_each_callback(|cb| {
+
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -32,7 +32,7 @@
+ 
+ /// The kind of C++ method.
+ #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+-pub(crate) enum MethodKind {
++pub enum MethodKind {
+     /// A constructor. We represent it as method for convenience, to avoid code
+     /// duplication.
+     Constructor,
