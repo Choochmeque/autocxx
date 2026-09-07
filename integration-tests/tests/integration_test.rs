@@ -17435,8 +17435,8 @@ fn test_take_bitfield() {
 
 #[test]
 /// The other direction: C++ fills in the bitfields and Rust reads them back.
-/// Only the unsigned fields are checked here; see
-/// `test_give_bitfield_signed_fields` for why.
+/// The signed fields of the same struct are
+/// [`test_give_bitfield_signed_fields`]'s.
 fn test_give_bitfield() {
     let cxx = indoc! {"
         Bitfieldy give_bitfield() {
@@ -17463,15 +17463,12 @@ fn test_give_bitfield() {
 }
 
 #[test]
-#[ignore = "bindgen's generated getter for a signed bitfield does not sign-extend: \
-            `__BindgenBitfieldUnit::get` returns the raw bits in a u64 and the getter \
-            casts them straight to the field's signed type, so `signed3` holding -3 \
-            reads back as 5. See https://github.com/rust-lang/rust-bindgen/issues/1160. \
-            Nothing in autocxx can fix it; bindgen 0.73.1 does not carry a fix - it \
-            reimplemented the accessors for speed, not for sign extension."]
-/// The signed half of [`test_give_bitfield`]. Kept as a live (if ignored) test
-/// rather than commented out, so that whoever picks up the bindgen fix can
-/// just delete the `#[ignore]` and see whether it passes.
+/// The signed half of [`test_give_bitfield`]. `__BindgenBitfieldUnit::get`
+/// hands back the raw bits in a `u64`, and bindgen's getter used to cast them
+/// straight to the field's signed type, so `signed3` holding -3 read back as 5
+/// ([rust-bindgen#1160](https://github.com/rust-lang/rust-bindgen/issues/1160),
+/// open since 2018). The vendored bindgen's signed-bitfield patch extends
+/// before the cast; this is what pins it.
 fn test_give_bitfield_signed_fields() {
     let cxx = indoc! {"
         Bitfieldy give_bitfield() {
@@ -17488,6 +17485,183 @@ fn test_give_bitfield_signed_fields() {
         assert_eq!(bitfield.signed4(), -1);
     };
     run_test(cxx, &hdr, rs, &["give_bitfield"], &["Bitfieldy"]);
+}
+
+#[test]
+/// The shapes the sign extension has to cope with: the narrowest signed field
+/// there is, a field as wide as its own declared type (which has no bits above
+/// its sign bit and must come back untouched), a field of a 1-, 2-, 4- and
+/// 8-byte declared type apiece, a signed field reached through a `typedef`, a
+/// plain `int` rather than a fixed-width type, positive values in signed fields
+/// as well as negative ones, and unsigned neighbours which must still arrive
+/// zero-extended. The 16-byte case bindgen can reach is `__int128`, which MSVC
+/// does not have, so it is not here.
+///
+/// Each struct holds bitfields of one declared type size, and no more of them
+/// than fit in one allocation unit of that size. A run which crosses either
+/// boundary is laid out differently on the two Windows targets - that is
+/// `test_bitfield_mixing_declared_type_sizes`'s subject, and reproducing it
+/// here would only make this test fail for the other reason.
+fn test_bitfield_signed_getters_sign_extend() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        typedef int32_t Count;
+        struct OneByte {
+            int8_t narrowest : 1;
+            int8_t negative : 3;
+            uint8_t unsigned_three : 3;
+        };
+        struct TwoBytes {
+            int16_t negative : 9;
+            int16_t positive : 5;
+            uint16_t unsigned_two : 2;
+        };
+        struct FourBytes {
+            Count via_typedef : 6;
+            int positive : 5;
+            uint32_t unsigned_five : 5;
+        };
+        struct FullWidth {
+            int32_t whole : 32;
+        };
+        struct EightBytes {
+            int64_t negative : 40;
+        };
+        OneByte make_one_byte();
+        TwoBytes make_two_bytes();
+        FourBytes make_four_bytes();
+        FullWidth make_full_width();
+        EightBytes make_eight_bytes();
+        uint32_t check_one_byte(OneByte);
+        uint32_t check_two_bytes(TwoBytes);
+        uint32_t check_four_bytes(FourBytes);
+        uint32_t check_full_width(FullWidth);
+        uint32_t check_eight_bytes(EightBytes);
+    "};
+    // Each checker returns a bit per field it disagrees with, so that a failure
+    // names the field rather than the struct.
+    let cxx = indoc! {"
+        OneByte make_one_byte() {
+            OneByte result{};
+            result.narrowest = -1;
+            result.negative = -3;
+            result.unsigned_three = 5;
+            return result;
+        }
+        uint32_t check_one_byte(OneByte x) {
+            uint32_t wrong = 0;
+            if (x.narrowest != 0) wrong |= 1u << 0;
+            if (x.negative != 3) wrong |= 1u << 1;
+            if (x.unsigned_three != 2) wrong |= 1u << 2;
+            return wrong;
+        }
+        TwoBytes make_two_bytes() {
+            TwoBytes result{};
+            result.negative = -256;
+            result.positive = 5;
+            result.unsigned_two = 3;
+            return result;
+        }
+        uint32_t check_two_bytes(TwoBytes x) {
+            uint32_t wrong = 0;
+            if (x.negative != 255) wrong |= 1u << 0;
+            if (x.positive != -6) wrong |= 1u << 1;
+            if (x.unsigned_two != 1) wrong |= 1u << 2;
+            return wrong;
+        }
+        FourBytes make_four_bytes() {
+            FourBytes result{};
+            result.via_typedef = -32;
+            result.positive = 11;
+            result.unsigned_five = 31;
+            return result;
+        }
+        uint32_t check_four_bytes(FourBytes x) {
+            uint32_t wrong = 0;
+            if (x.via_typedef != 31) wrong |= 1u << 0;
+            if (x.positive != -16) wrong |= 1u << 1;
+            if (x.unsigned_five != 1) wrong |= 1u << 2;
+            return wrong;
+        }
+        FullWidth make_full_width() {
+            FullWidth result{};
+            result.whole = -2000000000;
+            return result;
+        }
+        uint32_t check_full_width(FullWidth x) {
+            return x.whole == 2000000001 ? 0 : 1;
+        }
+        EightBytes make_eight_bytes() {
+            EightBytes result{};
+            result.negative = -549755813888;
+            return result;
+        }
+        uint32_t check_eight_bytes(EightBytes x) {
+            return x.negative == 549755813887 ? 0 : 1;
+        }
+    "};
+    let rs = quote! {
+        let mut one_byte = ffi::make_one_byte();
+        assert_eq!(one_byte.narrowest(), -1);
+        assert_eq!(one_byte.negative(), -3);
+        assert_eq!(one_byte.unsigned_three(), 5);
+        one_byte.set_narrowest(0);
+        one_byte.set_negative(3);
+        one_byte.set_unsigned_three(2);
+        assert_eq!(ffi::check_one_byte(one_byte), 0);
+
+        let mut two_bytes = ffi::make_two_bytes();
+        assert_eq!(two_bytes.negative(), -256);
+        assert_eq!(two_bytes.positive(), 5);
+        assert_eq!(two_bytes.unsigned_two(), 3);
+        two_bytes.set_negative(255);
+        two_bytes.set_positive(-6);
+        two_bytes.set_unsigned_two(1);
+        assert_eq!(ffi::check_two_bytes(two_bytes), 0);
+
+        let mut four_bytes = ffi::make_four_bytes();
+        assert_eq!(four_bytes.via_typedef(), -32);
+        assert_eq!(four_bytes.positive(), 11);
+        assert_eq!(four_bytes.unsigned_five(), 31);
+        four_bytes.set_via_typedef(31);
+        four_bytes.set_positive(-16);
+        four_bytes.set_unsigned_five(1);
+        assert_eq!(ffi::check_four_bytes(four_bytes), 0);
+
+        let mut full_width = ffi::make_full_width();
+        assert_eq!(full_width.whole(), -2000000000);
+        full_width.set_whole(2000000001);
+        assert_eq!(ffi::check_full_width(full_width), 0);
+
+        let mut eight_bytes = ffi::make_eight_bytes();
+        assert_eq!(eight_bytes.negative(), -549755813888);
+        eight_bytes.set_negative(549755813887);
+        assert_eq!(ffi::check_eight_bytes(eight_bytes), 0);
+    };
+    run_test(
+        cxx,
+        hdr,
+        rs,
+        &[
+            "make_one_byte",
+            "make_two_bytes",
+            "make_four_bytes",
+            "make_full_width",
+            "make_eight_bytes",
+            "check_one_byte",
+            "check_two_bytes",
+            "check_four_bytes",
+            "check_full_width",
+            "check_eight_bytes",
+        ],
+        &[
+            "OneByte",
+            "TwoBytes",
+            "FourBytes",
+            "FullWidth",
+            "EightBytes",
+        ],
+    );
 }
 
 #[test]
@@ -17602,19 +17776,19 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
         Words make_words() {
             Words result{};
             result.plain_unsigned = 5;
-            result.plain_int = 6;
+            result.plain_int = -7;
             result.fixed_unsigned = 6;
-            result.fixed_signed = 2;
+            result.fixed_signed = -2;
             result.shade = MID;
-            result.handle = 5;
+            result.handle = -5;
             return result;
         }
         uint32_t check_words(Words x) {
             uint32_t wrong = 0;
             if (x.plain_unsigned != 9) wrong |= 1u << 0;
-            if (x.plain_int != -7) wrong |= 1u << 1;
+            if (x.plain_int != 6) wrong |= 1u << 1;
             if (x.fixed_unsigned != 3) wrong |= 1u << 2;
-            if (x.fixed_signed != -2) wrong |= 1u << 3;
+            if (x.fixed_signed != 2) wrong |= 1u << 3;
             if (x.shade != LIGHT) wrong |= 1u << 4;
             if (x.handle != 3) wrong |= 1u << 5;
             return wrong;
@@ -17623,14 +17797,14 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
             Bytes result{};
             result.flag = true;
             result.byte_unsigned = 6;
-            result.byte_signed = 2;
+            result.byte_signed = -2;
             return result;
         }
         uint32_t check_bytes(Bytes x) {
             uint32_t wrong = 0;
             if (x.flag) wrong |= 1u << 0;
             if (x.byte_unsigned != 3) wrong |= 1u << 1;
-            if (x.byte_signed != -2) wrong |= 1u << 2;
+            if (x.byte_signed != 2) wrong |= 1u << 2;
             return wrong;
         }
         Wide make_wide() {
@@ -17642,23 +17816,20 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
     "};
     let rs = quote! {
         let mut words = ffi::make_words();
-        // Every getter reads back what C++ wrote. The signed fields hold
-        // positive values on the way out on purpose: bindgen's getter does
-        // not sign-extend, which `test_give_bitfield_signed_fields` pins,
-        // and a negative value here would be testing that bug rather than
-        // this conversion.
+        // Every getter reads back what C++ wrote, negative values included:
+        // the conversion has to keep the sign bits the sign extension put
+        // there, which `test_bitfield_signed_getters_sign_extend` pins.
         assert_eq!(words.plain_unsigned(), 5, "{}", object_bytes(&words));
-        assert_eq!(words.plain_int(), 6, "{}", object_bytes(&words));
+        assert_eq!(words.plain_int(), -7, "{}", object_bytes(&words));
         assert_eq!(words.fixed_unsigned(), 6, "{}", object_bytes(&words));
-        assert_eq!(words.fixed_signed(), 2, "{}", object_bytes(&words));
+        assert_eq!(words.fixed_signed(), -2, "{}", object_bytes(&words));
         assert!(matches!(words.shade(), ffi::Shade::MID), "{}", object_bytes(&words));
-        assert_eq!(words.handle(), 5, "{}", object_bytes(&words));
-        // ...and every setter puts back something C++ agrees with, negative
-        // values included: nothing about the way in is short of sign bits.
+        assert_eq!(words.handle(), -5, "{}", object_bytes(&words));
+        // ...and every setter puts back something C++ agrees with.
         words.set_plain_unsigned(9);
-        words.set_plain_int(-7);
+        words.set_plain_int(6);
         words.set_fixed_unsigned(3);
-        words.set_fixed_signed(-2);
+        words.set_fixed_signed(2);
         words.set_shade(ffi::Shade::LIGHT);
         words.set_handle(3);
         let written = object_bytes(&words);
@@ -17668,10 +17839,10 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
         let mut bytes = ffi::make_bytes();
         assert_eq!(bytes.flag(), true, "{}", object_bytes(&bytes));
         assert_eq!(bytes.byte_unsigned(), 6, "{}", object_bytes(&bytes));
-        assert_eq!(bytes.byte_signed(), 2, "{}", object_bytes(&bytes));
+        assert_eq!(bytes.byte_signed(), -2, "{}", object_bytes(&bytes));
         bytes.set_flag(false);
         bytes.set_byte_unsigned(3);
-        bytes.set_byte_signed(-2);
+        bytes.set_byte_signed(2);
         let written = object_bytes(&bytes);
         let wrong = ffi::check_bytes(bytes);
         assert_eq!(wrong, 0, "C++ disagrees about fields {wrong:#05b}; {written}");

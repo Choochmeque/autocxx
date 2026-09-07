@@ -1,0 +1,91 @@
+Subject: Sign-extend signed bitfields in the generated accessors
+
+A bitfield's bits arrive from its allocation unit zero-extended:
+`__BindgenBitfieldUnit::get` and `get_const` both mask to the field's width and
+hand the result back in a `u64`, and the getter casts that straight to the
+field's declared type. The cast truncates but never extends, so a signed
+bitfield narrower than its declared type reads back as its two's-complement bit
+pattern: `int x : 3` holding -3 comes back as 5. `bool` and enum fields got arms
+of their own when the accessors stopped transmuting (#3335); signed integers did
+not. A signed field as wide as its type already reads correctly, because the
+cast from the same-sized unsigned integer keeps every bit.
+
+Extend before the cast: shift the value's top bit up to the sign bit of the
+declared type, then arithmetic-shift it back. A field as wide as its declared
+type shifts by zero, which is the same answer it gives today. A field declared
+wider than its type is padding in the extra bits ([class.bit]/1), with nothing
+above the type's own sign bit to extend from, so the shift saturates to zero
+there too. The arithmetic shift happens in whatever `int_kind_rust_type` gives
+that integer kind - the same route the rest of codegen takes to an integer
+kind's Rust spelling - so it respects `--ctypes-prefix` and `--use-core` like
+everything else. `char` is the one kind reachable here whose Rust spelling can
+disagree with the IR about signedness, since `c_char` follows the Rust target
+and `IntKind::Char` follows clang's; there the shift is logical, which is the
+answer a getter returning an unsigned type wants anyway.
+
+Widths above 64 are out of scope: `__BindgenBitfieldUnit` reads and writes
+through a `u64` and asserts as much, so a bitfield wider than that is already
+unsupported, sign or no sign.
+
+Enum bitfields are left alone. They reach their type through `mem::transmute`
+rather than a cast, and whether an enum's underlying type is signed is a
+separate question from the field's.
+
+Fixes #1160.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2168,6 +2168,35 @@
+         );
+         let access_spec = access_specifier(*bitfield_visibility);
+ 
++        // Bits come out of an allocation unit zero-extended, but C and C++ read
++        // a signed bitfield sign-extended from the field's own width, so a
++        // getter narrower than its declared type has to extend them itself:
++        // shift the value's top bit up to the declared type's sign bit and
++        // arithmetic-shift it back. A width at least as wide as the declared
++        // type has nothing above that sign bit to extend from - the extra bits
++        // of a wider one are padding - and shifts by zero.
++        let sign_extension = match bitfield_ty_kind {
++            TypeKind::Int(int_kind) if int_kind.is_signed() => {
++                let signed_ty = helpers::ast_ty::int_kind_rust_type(
++                    ctx,
++                    *int_kind,
++                    Some(bitfield_ty_layout),
++                );
++                let shift = (bitfield_ty_layout.size * 8)
++                    .saturating_sub(width as usize);
++                Some((signed_ty, shift))
++            }
++            _ => None,
++        };
++        let extended = |get: &proc_macro2::TokenStream| match &sign_extension {
++            Some((signed_ty, shift)) => {
++                // Parenthesised throughout: a cast followed by `<<` or `>>`
++                // parses as the start of generic arguments.
++                quote! { ((((#get) << #shift) as #signed_ty) >> #shift) as _ }
++            }
++            None => quote! { #get as _ },
++        };
++
+         if parent.is_union() && !struct_layout.is_rust_union() {
+             // `__BindgenUnionField::as_ref` and `as_mut` are `unsafe fn`, so
+             // every one of these bodies needs a block, and a `bool` field needs
+@@ -2192,7 +2221,7 @@
+                     quote! { ::#prefix::mem::transmute(#get) },
+                     quote! { ::#prefix::mem::transmute(#raw_get) },
+                 ),
+-                _ => (quote! { #get as _ }, quote! { #raw_get as _ }),
++                _ => (extended(&get), extended(&raw_get)),
+             };
+ 
+             methods.extend(Some(quote! {
+@@ -2252,7 +2281,7 @@
+                     quote! { ::#prefix::mem::transmute(#get) },
+                     quote! { ::#prefix::mem::transmute(#raw_get) },
+                 ),
+-                _ => (quote! { #get as _ }, quote! { #raw_get as _ }),
++                _ => (extended(&get), extended(&raw_get)),
+             };
+ 
+             let getter_body = if is_rust_union ||
