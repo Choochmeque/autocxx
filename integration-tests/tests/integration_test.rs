@@ -6291,8 +6291,16 @@ fn test_private_constructor_make_unique() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
+/// C++ decays an array parameter to a pointer before autocxx ever sees it:
+/// clang reports `const uint32_t a[4]` as `const uint32_t *`, bindgen writes
+/// `*const u32`, and the length is gone at the ABI. So what this pins is the
+/// decayed-parameter case of the arrays request reported upstream as
+/// google/autocxx#266 - the pointer arrives intact and is callable. The rest
+/// of that request is elsewhere: an array passed or returned by value, and
+/// `std::array`.
+///
+/// `test_take_array_in_function` spells the same call for `char a[4]`.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/266
 fn test_take_array() {
     let hdr = indoc! {"
     #include <cstdint>
@@ -6302,8 +6310,9 @@ fn test_take_array() {
     "};
     let rs = quote! {
         let c: [u32; 4usize] = [ 10, 20, 30, 40 ];
-        let c = c as *const [_];
-        assert_eq!(ffi::take_array(&c), 40);
+        unsafe {
+            assert_eq!(ffi::take_array(c.as_ptr()), 40);
+        }
     };
     run_test("", hdr, rs, &["take_array"], &[]);
 }
