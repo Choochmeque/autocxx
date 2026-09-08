@@ -9646,41 +9646,18 @@ fn test_string_transparent_function() {
 }
 
 /// The same function, with the parameter named through a namespace-scope
-/// `using std::string;` rather than written out. autocxx should substitute
-/// `CxxString` for it exactly as above, and doesn't:
+/// `using std::string;` rather than written out, which has to substitute
+/// `CxxString` exactly as above.
 ///
-/// ```text
-/// DidNotGenerateAnythingUsable("take_string",
-///   Argument { arg: "a", err: BindgenOpaqueBlob("root :: __BindgenOpaqueArray8 < [u8 ; 24usize] >") })
-/// ```
-///
-/// Teaching bindgen the cursor kind is not the fix, which is worth writing
-/// down because it looks like it should be. bindgen does list
-/// `CXCursor_UsingDeclaration` among the kinds it deliberately does not handle
-/// (`ir/item.rs`), but the parameter is lost independently of that, one layer
-/// below bindgen. libclang hands the parameter's type over as
-/// `CXType_Elaborated` whose `clang_getTypeDeclaration` is null: the sugar
-/// node clang uses for a name introduced by a using-declaration is a
-/// `UsingType`, which libclang has no `CXType` for and reports as
-/// `CXType_Unexposed` with no declaration either. So bindgen cannot resolve it
-/// to the `std::string` typedef it resolves the written-out spelling to; it
-/// re-parses the canonical type instead and lands on
-/// `std::__1::basic_string<char, ...>`, which is opaque, hence the blob. The
-/// nearest thing to a channel is the type's *spelling*, which does still read
-/// `std::string`.
-///
-/// Nothing here reaches the `denote_using_declaration` report either: that one
-/// carries a name and the base class it comes from, which is what a
-/// class-scope `using Base::foo;` needs, and says nothing about how a type
-/// written through a namespace-scope one should be resolved.
-///
-/// autocxx's own handling of `use` items (`parse_bindgen.rs`) and of typedefs
-/// is not implicated: `typedef std::string mystring;`,
-/// `using mystring = std::string;` and `using namespace std;` all work. It is
-/// specifically a using-declaration naming a typedef of a class template
-/// instantiation.
+/// It used to refuse the function instead - `BindgenOpaqueBlob("root ::
+/// __BindgenOpaqueArray8 < [u8 ; 24usize] >")`, twenty-four bytes of libc++
+/// `std::string` - because a name introduced by a using-declaration reaches
+/// bindgen as a type with no declaration, and the canonical type it fell
+/// through to is `std::basic_string<...>`, which autocxx makes opaque. The
+/// substitution `CxxString` arrives by is keyed on the alias, so the canonical
+/// type is not a route to it: only naming the declaration the using-declaration
+/// names will do, which is what bindgen now does.
 #[test]
-#[ignore]
 fn test_string_through_a_using_declaration() {
     let hdr = indoc! {"
         #include <string>
@@ -21818,18 +21795,26 @@ fn test_public_destructor_keeps_owning_apis() {
     );
 }
 
+/// `std::string` reached through a using-declaration, as a return value and
+/// behind a reference. bindgen used to hand autocxx an opaque blob rather than
+/// something it could recognize as `std::string`, so `foo` could not be
+/// generated; it had been asked for by name, so the refusal was reported
+/// rather than passed over in silence - google/autocxx#1269. The name resolves
+/// now, and both bind.
 #[test]
 fn test_using_string_function() {
     let hdr = indoc! {"
         #include <string>
+        #include <cstdint>
         using std::string;
-        void foo(const string &a);
+        inline string give_str() { return string(\"hi!\"); }
+        inline uint32_t foo(const string &a) { return static_cast<uint32_t>(a.size()); }
     "};
-    let rs = quote! {};
-    // The `using` alias means bindgen hands us an opaque blob rather than
-    // something we recognize as std::string, so `foo` can't be generated.
-    // It was requested by name, so we report it - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["foo"], &[]);
+    let rs = quote! {
+        let s = ffi::give_str();
+        assert_eq!(ffi::foo(s.as_ref().unwrap()), 3);
+    };
+    run_test("", hdr, rs, &["give_str", "foo"], &[]);
 }
 
 #[test]
@@ -25840,21 +25825,16 @@ fn test_empty_base_named_through_a_typedef() {
     );
 }
 
-/// bindgen skips `CXCursor_UsingDeclaration`, so a C++ type which is only
-/// reachable through `using outer::Alias;` never enters bindgen's allowlist
-/// and is replaced by an opaque blob of the right size and alignment. For a
-/// four-byte type that blob is plain `u32`, which autocxx used to unwrap and
-/// hand to cxx: `void fx_take_bu(fx_BU)`, taking a struct by value, became
-/// `fn fx_take_bu(b: u32)`. Nothing in either language then complains.
-///
-/// The refusal also has to describe the way out, and there is no `generate!`
-/// directive which is one: the name in the signature is the one the using
-/// declaration introduced, and nothing which reaches autocxx connects it to the
-/// type it aliases. `generate!("fx_outer::fx_BU")` generates that type and
-/// changes nothing here; only the header naming the type through `fx_outer`
-/// does.
+/// A type only reachable through `using outer::Alias;` used to reach autocxx
+/// as an opaque blob of the right size and alignment, because bindgen could
+/// not name the declaration such a type is written through. For a four-byte
+/// type that blob was plain `u32`, which autocxx once unwrapped and handed to
+/// cxx - `void fx_take_bu(fx_BU)`, taking a struct by value, became
+/// `fn fx_take_bu(b: u32)`, which nothing in either language complains about -
+/// and later refused outright. bindgen now resolves the name, so the struct
+/// crosses as itself.
 #[test]
-fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
+fn test_type_named_through_a_using_declaration_by_value() {
     let hdr = indoc! {"
         #include <cstdint>
         namespace fx_outer {
@@ -25862,23 +25842,20 @@ fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
             typedef fx_Box<uint32_t> fx_BU;
         }
         using fx_outer::fx_BU;
-        inline void fx_take_bu(fx_BU b) { (void)b; }
+        inline fx_BU fx_give_bu() { fx_BU b; b.contents = 3; return b; }
+        inline uint32_t fx_take_bu(fx_BU b) { return b.contents; }
     "};
-    run_test_expect_fail_with_errors(
-        "",
-        hdr,
-        quote! {},
-        &["fx_take_bu"],
-        &[],
-        &[
-            "replaced it with an opaque blob of bytes",
-            "no `generate!` directive names what the declaration introduced",
-        ],
-    );
+    let rs = quote! {
+        // Named, so that a binding which flattened the struct back to its
+        // four bytes would not type-check.
+        let b: cxx::UniquePtr<ffi::fx_outer::fx_BU> = ffi::fx_give_bu();
+        assert_eq!(ffi::fx_take_bu(b), 3);
+    };
+    run_test("", hdr, rs, &["fx_give_bu", "fx_take_bu"], &[]);
 }
 
-/// And the advice that refusal gives, followed: the same header with the type
-/// spelt through the namespace which declares it binds.
+/// The same type spelt through the namespace which declares it, which bound
+/// even while the using-declared spelling did not.
 #[test]
 fn test_type_named_through_its_own_namespace_is_not_hidden() {
     let hdr = indoc! {"
@@ -25892,10 +25869,10 @@ fn test_type_named_through_its_own_namespace_is_not_hidden() {
     run_test("", hdr, quote! {}, &["fx_take_bu_ns"], &[]);
 }
 
-/// As above, but the blob is what the function returns. The old bindings said
-/// `fn fx_give_bu() -> u32`.
+/// As above, where the type is what the function returns. The old bindings
+/// said `fn fx_give_bu() -> u32`.
 #[test]
-fn test_type_hidden_by_using_declaration_is_refused_as_return_value() {
+fn test_type_named_through_a_using_declaration_as_return_value() {
     let hdr = indoc! {"
         #include <cstdint>
         namespace fx_outer {
@@ -25903,23 +25880,22 @@ fn test_type_hidden_by_using_declaration_is_refused_as_return_value() {
             typedef fx_Box<uint32_t> fx_BU;
         }
         using fx_outer::fx_BU;
-        inline fx_BU fx_give_bu() { return fx_BU(); }
+        inline fx_BU fx_give_bu() { fx_BU b; b.contents = 7; return b; }
+        inline uint32_t fx_read_bu(const fx_BU& b) { return b.contents; }
     "};
-    run_test_expect_fail_with_error(
-        "",
-        hdr,
-        quote! {},
-        &["fx_give_bu"],
-        &[],
-        "replaced it with an opaque blob of bytes",
-    );
+    let rs = quote! {
+        let b = ffi::fx_give_bu();
+        assert_eq!(ffi::fx_read_bu(b.as_ref().unwrap()), 7);
+    };
+    run_test("", hdr, rs, &["fx_give_bu", "fx_read_bu"], &[]);
 }
 
-/// The blob reaches a reference and a pointer parameter too, where the old
-/// bindings said `&u32` and `*const u32` for a reference and a pointer to a
-/// struct. A reference is not a safe hiding place for it.
+/// The name is resolved behind a reference too, where the old bindings said
+/// `&u32` for a reference to a struct. The `const` written in front of the
+/// name is part of the elaborated type's spelling, so the name has to be read
+/// off the type that one names rather than off the type itself.
 #[test]
-fn test_type_hidden_by_using_declaration_is_refused_behind_a_reference() {
+fn test_type_named_through_a_using_declaration_behind_a_reference() {
     let hdr = indoc! {"
         #include <cstdint>
         namespace fx_outer {
@@ -25927,25 +25903,24 @@ fn test_type_hidden_by_using_declaration_is_refused_behind_a_reference() {
             typedef fx_Box<uint32_t> fx_BU;
         }
         using fx_outer::fx_BU;
-        inline void fx_take_bu_ref(const fx_BU& b) { (void)b; }
+        inline fx_BU fx_give_bu() { fx_BU b; b.contents = 9; return b; }
+        inline uint32_t fx_take_bu_ref(const fx_BU& b) { return b.contents; }
     "};
-    run_test_expect_fail_with_error(
-        "",
-        hdr,
-        quote! {},
-        &["fx_take_bu_ref"],
-        &[],
-        "replaced it with an opaque blob of bytes",
-    );
+    let rs = quote! {
+        let b = ffi::fx_give_bu();
+        assert_eq!(ffi::fx_take_bu_ref(b.as_ref().unwrap()), 9);
+    };
+    run_test("", hdr, rs, &["fx_give_bu", "fx_take_bu_ref"], &[]);
 }
 
-/// The blob reaches the payload of a cxx container too. `UniquePtr<T>` and
-/// `CxxVector<T>` name their payload type in the bridge, so a blob is no more
-/// use there than in a bare parameter - and unlike a struct field, a container
-/// is not a place layout alone will do.
+/// And inside a cxx container, which names its payload type in the bridge, so
+/// a blob was no more use there than in a bare parameter. The payload reaches
+/// bindgen as a template argument, whose location cursor is the declaration
+/// the type does not have - which is why the resolution is by name rather than
+/// by a walk out through the scopes the name is visible in.
 #[test]
-fn test_type_hidden_by_using_declaration_is_refused_inside_a_container() {
-    let prefix = indoc! {"
+fn test_type_named_through_a_using_declaration_inside_a_container() {
+    let hdr = indoc! {"
         #include <cstdint>
         #include <memory>
         #include <vector>
@@ -25954,33 +25929,65 @@ fn test_type_hidden_by_using_declaration_is_refused_inside_a_container() {
             typedef fx_Box<uint32_t> fx_BU;
         }
         using fx_outer::fx_BU;
+        inline std::unique_ptr<fx_BU> fx_give_uptr() {
+            auto b = std::make_unique<fx_BU>();
+            b->contents = 4;
+            return b;
+        }
+        inline uint32_t fx_take_uptr(std::unique_ptr<fx_BU> b) { return b->contents; }
+        inline std::unique_ptr<std::vector<fx_BU>> fx_give_vec() {
+            auto v = std::make_unique<std::vector<fx_BU>>();
+            v->push_back(fx_BU{5});
+            return v;
+        }
+        inline uint32_t fx_take_vec(const std::vector<fx_BU>& b) { return b[0].contents; }
     "};
-    for (decl, func) in [
-        (
-            "inline void fx_take_uptr(std::unique_ptr<fx_BU> b) { (void)b; }",
-            "fx_take_uptr",
-        ),
-        (
-            "inline void fx_take_vec(const std::vector<fx_BU>& b) { (void)b; }",
-            "fx_take_vec",
-        ),
-    ] {
-        run_test_expect_fail_with_error(
-            "",
-            &format!("{prefix}{decl}\n"),
-            quote! {},
-            &[func],
-            &[],
-            "replaced it with an opaque blob of bytes",
-        );
-    }
+    let rs = quote! {
+        assert_eq!(ffi::fx_take_uptr(ffi::fx_give_uptr()), 4);
+        assert_eq!(ffi::fx_take_vec(ffi::fx_give_vec().as_ref().unwrap()), 5);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_give_uptr", "fx_take_uptr", "fx_give_vec", "fx_take_vec"],
+        &[],
+    );
 }
 
-/// An array of the blob, on the other hand, is fine where any blob is fine:
-/// inside a struct, where its layout is the whole of what autocxx wants from
-/// it. The refusal must not follow the array element into a field.
+/// A using-declared type as an array element in a struct field. This used to
+/// hold an array of the blob, and pinned that the refusal did not follow the
+/// element into the field; now the element is named, and what it pins is that
+/// naming it leaves the field alone.
 #[test]
-fn test_array_of_hidden_type_is_still_allowed_in_a_struct_field() {
+fn test_array_of_using_declared_type_is_allowed_in_a_struct_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            struct fx_Plain { uint32_t contents; };
+        }
+        using fx_outer::fx_Plain;
+        struct fx_HoldsArray { fx_Plain arr[4]; uint32_t tail; };
+    "};
+    let rs = quote! {
+        let h = ffi::fx_HoldsArray::default();
+        assert_eq!(h.tail, 0);
+        assert_eq!(h.arr[2].contents, 0);
+    };
+    run_test("", hdr, rs, &[], &["fx_HoldsArray", "fx_outer::fx_Plain"]);
+}
+
+/// The same field where the element is a typedef to a template instantiation.
+/// This used to be allowed without the question being asked: the element was a
+/// blob, and an array of a blob has always been let through
+/// (`ByValueChecker::ingest_struct`). Now that the element is named, POD
+/// analysis has to decide whether the instantiation is safe to hold by value,
+/// and it cannot - the concrete type autocxx synthesizes for an instantiation
+/// carries no members for the analysis to look at. The refusal says so. This is
+/// the cost of naming the element, and the test is here to show it changing if
+/// that analysis ever learns to see through a synthesized concrete type.
+#[test]
+fn test_pod_array_of_concrete_instantiation_is_refused() {
     let hdr = indoc! {"
         #include <cstdint>
         namespace fx_outer {
@@ -25990,11 +25997,14 @@ fn test_array_of_hidden_type_is_still_allowed_in_a_struct_field() {
         using fx_outer::fx_BU;
         struct fx_HoldsArray { fx_BU arr[4]; uint32_t tail; };
     "};
-    let rs = quote! {
-        let h = ffi::fx_HoldsArray::default();
-        assert_eq!(h.tail, 0);
-    };
-    run_test("", hdr, rs, &[], &["fx_HoldsArray"]);
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_HoldsArray"],
+        "which we know nothing about",
+    );
 }
 
 /// Where bindgen gives us a *typedef* to a blob, the alias has a name of its
@@ -30609,4 +30619,30 @@ impl CodeCheckerFns for NoMethodNamed {
         }
         Ok(())
     }
+}
+
+/// Resolution by name has to be confined to names which were written through a
+/// using-declaration, and a deduced return type is the shape which shows why.
+/// `fx_deduced` returns `fx_use::fx_A`, which is `fx_n::fx_A`, which is
+/// `double`; clang prints the deduced type as the bare `fx_A` it was deduced
+/// from, with no declaration and with no node naming what it stands for. The
+/// global `fx_A` - an `int`, imported somewhere so that it is on record -
+/// answers to that same spelling. Resolving one to the other would bind this
+/// function as returning an integer.
+#[test]
+fn test_deduced_return_is_not_resolved_to_a_using_declared_name() {
+    let hdr = indoc! {"
+        using fx_A = int;
+        namespace fx_shadow { using ::fx_A; }
+        namespace fx_n { using fx_A = double; }
+        namespace fx_use {
+            using fx_n::fx_A;
+            inline auto fx_deduced() { return fx_A{1.5}; }
+        }
+    "};
+    let rs = quote! {
+        let d: f64 = ffi::fx_use::fx_deduced();
+        assert_eq!(d, 1.5);
+    };
+    run_test("", hdr, rs, &["fx_use::fx_deduced"], &[]);
 }

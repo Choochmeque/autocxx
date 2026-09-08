@@ -537,11 +537,14 @@ impl ByValueChecker {
                         // because the marker's name is one this knows nothing
                         // about. `test_array_of_blob_is_pod` and
                         // `test_plain_blob_field_is_not_pod` pin the two
-                        // answers, and the integration fixture
-                        // `test_array_of_hidden_type_is_still_allowed_in_a_struct_field`
-                        // is a real header which arrives here: without this arm
-                        // it is refused for depending on
-                        // `__bindgen_marker_Opaque`.
+                        // answers.
+                        //
+                        // The integration fixture which used to arrive here
+                        // named its element through a using-declaration, which
+                        // bindgen now resolves, so it no longer does - see
+                        // `test_pod_array_of_concrete_instantiation_is_refused`,
+                        // which is what that fixture became. The unit tests
+                        // above are what pin this arm.
                         //
                         // Those two answers disagree, and reconciling them is
                         // not a question about arrays. A small blob is unwrapped
