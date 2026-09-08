@@ -43,7 +43,21 @@ const INNER_TYPE_TRAIT_PREFIX: &str = "__bindgen_has_inner_type_";
 // without it the type would inherit Unpin from the bindgen struct (whose
 // fields are plain pointers and byte arrays) and safe Rust could corrupt
 // C++ objects with no `unsafe` anywhere. See google/autocxx#1265.
-// (3) We want to ensure it's not Send or Sync
+// (3) We want to ensure it's neither Send nor Sync. A C++ object can be
+// thread-affine in ways its declaration never reveals - owning a lock it took,
+// an index into a thread-local pool, or a destructor which must run on the
+// constructing thread - and autocxx cannot tell which. `Send` is the claim that
+// a value may cross a thread boundary, so the only sound default is to withhold
+// it. The `_not_send_or_sync` field below withholds it: raw pointers are
+// neither Send nor Sync, so `PhantomData<*const u8>` is neither. Without that
+// field the wrapper inherited `Send` from the bindgen struct whenever that
+// struct held no raw pointers, which left the question "may this C++ type go to
+// another thread" answered by bindgen's choice of representation. `Sync` was
+// already withheld by the `UnsafeCell` in note (5), but only as a side effect;
+// this states it. cxx withholds both the same way for its own opaque types -
+// `cxx::private::Opaque` holds a `[*const void; 0]` - and, as there, a user who
+// knows their type is thread safe can say so with `unsafe impl Send` in their
+// own crate.
 // In addition, we want to avoid UB:
 // (4) By marking the data as MaybeUninit we ensure there's no UB
 //     by Rust assuming it's initialized
@@ -76,8 +90,10 @@ const INNER_TYPE_TRAIT_PREFIX: &str = "__bindgen_has_inner_type_";
 // Furthermore, it sometimes then discards struct definitions entirely
 // and says "type A = [u8;2];" or something else which makes our life
 // much more difficult.
-// We use (d) for abstract types. For everything else, we do (c)
-// for maximal control. See codegen_rs/mod.rs generate_type for more notes.
+// We use (d) for abstract types, except those nested in a class, for which
+// a bare "type B;" makes cxx treat the enclosing class as a namespace; those
+// come here like everything else. For all the rest we do (c) for maximal
+// control. See codegen_rs/mod.rs generate_type for more notes.
 // We could switch to (b) and earlier version of autocxx did that.
 //
 // It is worth noting that our constraints here are a bit more severe than
@@ -135,6 +151,11 @@ pub(super) fn generate_opaque_type(
             // Zero-sized, so `repr(transparent)` still applies to the field
             // above; its only job is to make this type !Unpin. See note (2).
             _pinned: ::core::marker::PhantomData<::core::marker::PhantomPinned>,
+            // Zero-sized for the same reason. Makes this type !Send and !Sync,
+            // which a raw pointer is and `PhantomPinned` above is not. The
+            // pointee type is concrete so that this adds no variance over any
+            // parameter of the type. See note (3).
+            _not_send_or_sync: ::core::marker::PhantomData<*const u8>,
         }
     })
 }
