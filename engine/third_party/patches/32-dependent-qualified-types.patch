@@ -1,0 +1,1593 @@
+Subject: Give a dependent qualified name a type instead of an opaque blob
+
+A member whose type is spelled through a template parameter:
+
+    struct InnerType {
+        typedef int related_type;
+        int foo;
+    };
+
+    template <typename ContainedType> class Container {
+        typename ContainedType::related_type contents_;
+    };
+
+    typedef Container<InnerType> Concrete;
+
+has no type until `ContainedType` is known, and there is nothing in the
+IR which can stand for "the `related_type` of whatever this is
+instantiated with". So `contents_` becomes an opaque type of no known
+size, `ContainedType` is then used by nothing and is dropped as unused,
+and `Container` - along with every type holding one, `Concrete`
+included - is left as a blob. That is what
+https://github.com/rust-lang/rust-bindgen/issues/1924 reports.
+
+Rust can say it, though, through an associated type. This adds a
+`TypeKind::DependentQualifiedType`, which remembers the type parameter
+it qualifies and the name it looks up, and renders it as a trait
+implemented by each type which has such an inner type:
+
+    pub struct InnerType {
+        pub foo: ::std::os::raw::c_int,
+    }
+    pub type InnerType_related_type = ::std::os::raw::c_int;
+    pub trait __bindgen_has_inner_type_related_type {
+        type related_type: std::fmt::Debug + Default + Copy + Clone;
+    }
+    impl __bindgen_has_inner_type_related_type for InnerType {
+        type related_type = InnerType_related_type;
+    }
+    pub struct Container<ContainedType>
+    where
+        ContainedType: __bindgen_has_inner_type_related_type,
+    {
+        pub contents_:
+            <ContainedType as __bindgen_has_inner_type_related_type>::related_type,
+        pub _phantom_0:
+            ::std::marker::PhantomData<::std::cell::UnsafeCell<ContainedType>>,
+    }
+    pub type Concrete = Container<InnerType>;
+
+which is the type C++ has, and `Concrete` now has a layout rather than a
+blob where its contents should be.
+
+It is off by default, behind `--dependent-qualified-types`, because the
+trait is a bound and not every instantiation can satisfy it: a type
+bindgen cannot see inside - blocklisted, opaque, or `replaces=`d by a
+substitute - has no inner types to implement the trait with, so
+`Container<ThatType>` does not compile where before it was a blob that
+did. Where every type a template is instantiated with is one bindgen
+generates in full, which is the case this exists for, the option is
+what turns the blob into the type.
+
+Recognising the member is `clang.rs`'s job and it already did most of
+it - but had stopped doing it. The spelling it matches on is what clang
+prints, and clang stopped printing the `typename` keyword in it: as of
+clang 21 the canonical spelling of `typename T::Inner` is
+`type-parameter-0-0::Inner`, so a pattern insisting on the keyword matches
+nothing and such a member is taken for the parameter itself - `contents_:
+T` rather than an opaque type of its own. The keyword is now optional,
+which is a fix on its own account, and `get_associated_type_name` joins
+`is_associated_type` to keep the name - where the name qualified is a single identifier, which is
+what an inner type of the parameter can be. `T::Inner::Deeper` is not
+one, and stays the opaque type it was.
+
+A dependent qualified name is a second thing which can hang off one
+template-parameter cursor, so the context's cursor-to-parameter map gains
+an inner map keyed by the name qualified - `None` for the parameter
+itself. What stops the parameter being dropped as unused is the
+used-template-parameter analysis learning that a dependent qualified type
+uses both itself and the parameter it qualifies, reached through the new
+`DependentQualifiedTypeParam` edge.
+
+A member names such a type through any number of pointers, references,
+arrays and function signatures - `const typename STRING_TYPE::value_type*
+ptr_` is the shape this was written for - so the walk which looks for them
+follows those, stopping at another comp, whose parameters are its own
+business. It carries the set of types already walked, because a template
+argument can name the instantiation it is an argument of. Each comp
+records what that walk found, which is what its
+`ContainedDependentQualifiedType` edges are traced from, and it runs
+before the graph is frozen so that those edges are there to be followed.
+
+A trait is emitted only for a name some dependent qualified type being
+generated actually looks up, so a header full of inner typedefs nobody
+reaches through does not acquire a trait apiece - and a comp which is not
+generated does not leave behind an impl of a trait that went with it.
+Walking a comp's members resolves through type refs and aliases while that
+comp is on loan from the context, hence `ItemResolver::resolve_fallible`,
+which answers `None` rather than panicking for the item that is out.
+
+The trait is declared in the root module, because that is where the
+dependent qualified types which need it are parented, so every reference
+to one names it through that module: under `--enable-cxx-namespaces` a
+bound written bare resolves in the root module and nowhere else.
+
+Three shapes this does not cover, each of which stops the bindings
+compiling rather than falling back to the blob, which is the rest of why
+it is off by default.
+
+The associated type's bounds are what the dependent qualified type itself
+derives, on the assumption that every inner type reached through the trait
+derives the same set; an inner type which derives less does not satisfy
+them.
+
+A parameter only gets the bound where a member of the class names the
+dependent qualified type, so a class holding an instantiation which needs
+it - `Outer<T>` holding a `Container<T>` - does not acquire it, and
+neither does one which has such a class as a base. That wants the bounds
+put where the trait is used rather than on the trait, which is a bigger
+change than this.
+
+A class implements the trait for each inner type it declares, and an
+inherited one is not among them, so a template instantiated over a derived
+class whose base holds the inner type has no impl to reach.
+
+--- a/clang.rs
++++ b/clang.rs
+@@ -1740,8 +1740,15 @@
+             static ASSOC_TYPE_RE: OnceLock<regex::Regex> = OnceLock::new();
+             ASSOC_TYPE_RE
+                 .get_or_init(|| {
+-                    regex::Regex::new(r"typename type\-parameter\-\d+\-\d+::.+")
+-                        .unwrap()
++                    // clang printed `typename` here until it stopped: as of
++                    // clang 21 the canonical spelling of `typename T::Inner` is
++                    // `type-parameter-0-0::Inner`, so a pattern which insists on
++                    // the keyword matches nothing and such a member is taken for
++                    // the parameter itself.
++                    regex::Regex::new(
++                        r"(?:typename )?type\-parameter\-\d+\-\d+::.+",
++                    )
++                    .unwrap()
+                 })
+                 .is_match(spelling.as_ref())
+         }
+@@ -1751,6 +1758,40 @@
+                 hacky_parse_associated_type(
+                     self.canonical_type().spelling(),
+                 ))
++    }
++
++    /// The single inner type name an associated template type looks up, where
++    /// that is what it looks up: `Associated` for `T::Associated`.
++    ///
++    /// `None` for anything which is not one, and for one which qualifies a name
++    /// that is not a single identifier - `T::Associated::Deeper` names no inner
++    /// type of `T`, so there is no trait through which to reach it. The spelling
++    /// may carry qualifiers, as `const typename T::Associated` does, and may or
++    /// may not carry the `typename` keyword depending on the clang release,
++    /// which is why only the end of it is anchored.
++    pub(crate) fn get_associated_type_name(&self) -> Option<String> {
++        // This is terrible :( - as above.
++        fn hacky_parse_associated_type_name<S: AsRef<str>>(
++            spelling: S,
++        ) -> Option<String> {
++            static ASSOC_TYPE_NAME_RE: OnceLock<regex::Regex> = OnceLock::new();
++            ASSOC_TYPE_NAME_RE
++                .get_or_init(|| {
++                    regex::Regex::new(
++                        r"(?:typename )?type\-parameter\-\d+\-\d+::(\w+)$",
++                    )
++                    .unwrap()
++                })
++                .captures(spelling.as_ref())
++                .map(|caps| caps[1].to_owned())
++        }
++
++        if self.kind() != CXType_Unexposed {
++            return None;
++        }
++        hacky_parse_associated_type_name(self.spelling()).or_else(|| {
++            hacky_parse_associated_type_name(self.canonical_type().spelling())
++        })
+     }
+ }
+ 
+--- a/codegen/impl_debug.rs
++++ b/codegen/impl_debug.rs
+@@ -154,6 +154,7 @@
+             TypeKind::ObjCInterface(..) |
+             TypeKind::ObjCId |
+             TypeKind::Comp(..) |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::ObjCSel => debug_print(name, &quote! { #name_ident }),
+ 
+             TypeKind::TemplateInstantiation(ref inst) => {
+--- a/codegen/impl_partialeq.rs
++++ b/codegen/impl_partialeq.rs
+@@ -93,6 +93,7 @@
+         TypeKind::Float(..) |
+         TypeKind::Enum(..) |
+         TypeKind::TypeParam |
++        TypeKind::DependentQualifiedType(..) |
+         TypeKind::UnresolvedTypeRef(..) |
+         TypeKind::Reference(..) |
+         TypeKind::ObjCInterface(..) |
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -321,6 +321,10 @@
+     /// that name. This lets us give each overload a unique suffix.
+     overload_counters: HashMap<String, u32>,
+ 
++    /// The inner-type traits generated so far, so each is generated exactly
++    /// once however many types implement it.
++    inner_type_traits_generated: HashSet<Ident>,
++
+     /// List of items to serialize. With optionally the argument for the wrap as
+     /// variadic transformation to be applied.
+     items_to_serialize: Vec<(ItemId, Option<WrapAsVariadic>)>,
+@@ -341,6 +345,7 @@
+             functions_seen: Default::default(),
+             vars_seen: Default::default(),
+             overload_counters: Default::default(),
++            inner_type_traits_generated: Default::default(),
+             items_to_serialize: Default::default(),
+         }
+     }
+@@ -453,6 +458,37 @@
+ 
+ /// An extension trait for `syn::Type` that lets us append any implicit
+ /// template parameters that exist for some type, if necessary.
++/// The bounds an inner-type trait's associated type carries, which are the
++/// traits the type naming it derives: a dependent qualified name stands where
++/// a concrete type would, so it has to promise the same.
++fn associated_type_bounds(
++    ctx: &BindgenContext,
++    derivable_traits: DerivableTraits,
++) -> proc_macro2::TokenStream {
++    let prefix = ctx.trait_prefix();
++    let bounds: Vec<proc_macro2::TokenStream> = Vec::<&str>::from(
++        derivable_traits,
++    )
++    .into_iter()
++    .map(|name| match name {
++        // Every derivable trait is in the prelude except these two, which have
++        // to be named by path - through `trait_prefix`, because the prelude the
++        // bindings get may be core's.
++        "Debug" => quote! { ::#prefix::fmt::Debug },
++        "Hash" => quote! { ::#prefix::hash::Hash },
++        _ => {
++            let ident = ctx.rust_ident(name);
++            quote! { #ident }
++        }
++    })
++    .collect();
++    if bounds.is_empty() {
++        quote! {}
++    } else {
++        quote! { : #( #bounds )+* }
++    }
++}
++
+ trait WithImplicitTemplateParams {
+     fn with_implicit_template_params(
+         self,
+@@ -486,6 +522,7 @@
+             TypeKind::Complex(..) |
+             TypeKind::Array(..) |
+             TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::Opaque |
+             TypeKind::Function(..) |
+             TypeKind::Enum(..) |
+@@ -959,6 +996,25 @@
+                 // NOTE(emilio): If you add to this list, make sure to also add
+                 // it to BindgenContext::compute_allowlisted_and_codegen_items.
+             }
++            TypeKind::DependentQualifiedType(_, ref associated_type_name) => {
++                let trait_name = ctx.inner_type_trait_ident(associated_type_name);
++                if result
++                    .inner_type_traits_generated
++                    .insert(trait_name.clone())
++                {
++                    let associated_type =
++                        ctx.rust_ident(associated_type_name);
++                    let bounds = associated_type_bounds(
++                        ctx,
++                        derives_of_item(item, ctx, false),
++                    );
++                    result.push(quote! {
++                        pub trait #trait_name {
++                            type #associated_type #bounds;
++                        }
++                    });
++                }
++            }
+             TypeKind::TemplateInstantiation(ref inst) => {
+                 inst.codegen(ctx, result, item);
+             }
+@@ -2477,12 +2533,46 @@
+ 
+         let mut generic_param_names = vec![];
+ 
++        // Which inner-type traits each template parameter has to be bounded
++        // by, because a field names an inner type of it.
++        let mut bounds_by_param: HashMap<TypeId, Vec<&String>> =
++            HashMap::default();
++        for ty_id in item.used_dependent_qualified_types(ctx) {
++            match ctx.resolve_type(ty_id).kind() {
++                TypeKind::DependentQualifiedType(
++                    tp_id,
++                    associated_type_name,
++                ) => {
++                    // Two members can name the same inner type of the same
++                    // parameter; the bound is one bound either way.
++                    let names = bounds_by_param.entry(*tp_id).or_default();
++                    if !names.contains(&associated_type_name) {
++                        names.push(associated_type_name);
++                    }
++                }
++                _ => unreachable!(
++                    "not a dependent qualified type: {ty_id:?}"
++                ),
++            }
++        }
++        let mut where_clause: Vec<(Ident, Vec<proc_macro2::TokenStream>)> =
++            vec![];
++
+         let (used_template_params, unused_template_params) =
+             item.used_template_params(ctx);
+         for (idx, ty) in used_template_params.iter().enumerate() {
+             let param = ctx.resolve_type(*ty);
+             let name = param.name().unwrap();
+             let ident = ctx.rust_ident(name);
++            if let Some(associated_type_names) = bounds_by_param.get(ty) {
++                where_clause.push((
++                    ident.clone(),
++                    associated_type_names
++                        .iter()
++                        .map(|name| ctx.inner_type_trait_path(name))
++                        .collect(),
++                ));
++            }
+             generic_param_names.push(ident.clone());
+ 
+             let prefix = ctx.trait_prefix();
+@@ -2877,6 +2967,16 @@
+                 (quote! {}, quote! {}, quote! {})
+             };
+ 
++        let inner_type_predicates: Vec<proc_macro2::TokenStream> = where_clause
++            .into_iter()
++            .map(|(param, traits)| quote! { #param: #( #traits )+* })
++            .collect();
++        let where_clause = if inner_type_predicates.is_empty() {
++            quote! {}
++        } else {
++            quote! { where #( #inner_type_predicates ),* }
++        };
++
+         let mut attributes = vec![];
+         let mut needs_clone_impl = false;
+         let mut needs_default_impl = false;
+@@ -3051,7 +3151,7 @@
+         };
+ 
+         tokens.append_all(quote! {
+-            #generics {
++            #generics #where_clause {
+                 #( #fields )*
+             }
+         });
+@@ -3065,6 +3165,36 @@
+             let child_item = ctx.resolve_item(*ty);
+             // assert_eq!(child_item.parent_id(), item.id());
+             child_item.codegen(ctx, result, &());
++
++            // Where a dependent qualified name elsewhere looks this inner type
++            // up, say that this type is one which has it - unless the inner
++            // type was itself left out, in which case there is nothing to
++            // implement the trait with.
++            let Some(associated_type_name) = child_item.expect_type().name()
++            else {
++                continue;
++            };
++            if !ctx.inner_type_used(associated_type_name) ||
++                !ctx.codegen_items().contains(&child_item.id()) ||
++                child_item.is_blocklisted(ctx) ||
++                !child_item.is_enabled_for_codegen(ctx)
++            {
++                continue;
++            }
++            let trait_name = ctx.inner_type_trait_path(associated_type_name);
++            let associated_type = ctx.rust_ident(associated_type_name);
++            let child_name = ctx.rust_ident(child_item.canonical_name(ctx));
++            let child_ty = syn::parse_quote! { #child_name };
++            let child_ty = syn::Type::with_implicit_template_params(
++                child_ty, ctx, child_item,
++            );
++            result.push(quote! {
++                impl #impl_generics_labels #trait_name
++                    for #canonical_ident #impl_generics_params #where_clause
++                {
++                    type #associated_type = #child_ty;
++                }
++            });
+         }
+ 
+         // NOTE: Some unexposed attributes (like alignment attributes) may
+@@ -3248,7 +3378,7 @@
+ 
+         if needs_clone_impl {
+             result.push(quote! {
+-                impl #impl_generics_labels Clone for #ty_for_impl {
++                impl #impl_generics_labels Clone for #ty_for_impl #where_clause {
+                     fn clone(&self) -> Self { *self }
+                 }
+             });
+@@ -3261,6 +3391,7 @@
+                 flex_inner_ty.as_ref(),
+                 &generic_param_names,
+                 &impl_generics_labels,
++                &where_clause,
+             ));
+         }
+ 
+@@ -3278,7 +3409,7 @@
+             // non-zero padding bytes, especially when forwards/backwards compatibility is
+             // involved.
+             result.push(quote! {
+-                impl #impl_generics_labels Default for #ty_for_impl {
++                impl #impl_generics_labels Default for #ty_for_impl #where_clause {
+                     fn default() -> Self {
+                         #body
+                     }
+@@ -3297,7 +3428,7 @@
+             let prefix = ctx.trait_prefix();
+ 
+             result.push(quote! {
+-                impl #impl_generics_labels ::#prefix::fmt::Debug for #ty_for_impl {
++                impl #impl_generics_labels ::#prefix::fmt::Debug for #ty_for_impl #where_clause {
+                     #impl_
+                 }
+             });
+@@ -3311,13 +3442,18 @@
+                 &ty_for_impl,
+                 opaque_bases.is_some(),
+             ) {
+-                let partialeq_bounds = if generic_param_names.is_empty() {
+-                    quote! {}
+-                } else {
+-                    let bounds = generic_param_names.iter().map(|t| {
+-                        quote! { #t: PartialEq }
+-                    });
+-                    quote! { where #( #bounds ),* }
++                let partialeq_bounds = {
++                    let mut predicates: Vec<proc_macro2::TokenStream> =
++                        generic_param_names
++                            .iter()
++                            .map(|t| quote! { #t: PartialEq })
++                            .collect();
++                    predicates.extend(inner_type_predicates.iter().cloned());
++                    if predicates.is_empty() {
++                        quote! {}
++                    } else {
++                        quote! { where #( #predicates ),* }
++                    }
+                 };
+ 
+                 let prefix = ctx.trait_prefix();
+@@ -3331,7 +3467,7 @@
+ 
+         if !methods.is_empty() {
+             result.push(quote! {
+-                impl #impl_generics_labels #ty_for_impl {
++                impl #impl_generics_labels #ty_for_impl #where_clause {
+                     #( #methods )*
+                 }
+             });
+@@ -3347,6 +3483,7 @@
+         flex_inner_ty: Option<&proc_macro2::TokenStream>,
+         generic_param_names: &[Ident],
+         impl_generics_labels: &proc_macro2::TokenStream,
++        where_clause: &proc_macro2::TokenStream,
+     ) -> proc_macro2::TokenStream {
+         let prefix = ctx.trait_prefix();
+ 
+@@ -3463,12 +3600,12 @@
+         };
+ 
+         quote! {
+-            impl #impl_generics_labels #dst_ty_for_impl {
++            impl #impl_generics_labels #dst_ty_for_impl #where_clause {
+                 #layout
+                 #from_ptr_dst
+             }
+ 
+-            impl #impl_generics_labels #sized_ty_for_impl {
++            impl #impl_generics_labels #sized_ty_for_impl #where_clause {
+                 #from_ptr_sized
+             }
+         }
+@@ -4969,6 +5106,15 @@
+                 let name = item.canonical_name(ctx);
+                 let ident = ctx.rust_ident(name);
+                 Ok(syn::parse_quote! { #ident })
++            }
++            TypeKind::DependentQualifiedType(_, ref associated_type_name) => {
++                let ident = ctx.rust_ident(item.canonical_name(ctx));
++                let associated_type = ctx.rust_ident(associated_type_name);
++                let trait_name =
++                    ctx.inner_type_trait_path(associated_type_name);
++                Ok(syn::parse_quote! {
++                    < #ident as #trait_name > :: #associated_type
++                })
+             }
+             TypeKind::ObjCSel => Ok(syn::parse_quote! { objc::runtime::Sel }),
+             TypeKind::ObjCId => Ok(syn::parse_quote! { id }),
+--- a/ir/analysis/derive.rs
++++ b/ir/analysis/derive.rs
+@@ -91,6 +91,8 @@
+         EdgeKind::VarType |
+         EdgeKind::TemplateArgument |
+         EdgeKind::TemplateDeclaration |
++        EdgeKind::ContainedDependentQualifiedType |
++        EdgeKind::DependentQualifiedTypeParam |
+         EdgeKind::TemplateParameterDefinition => true,
+ 
+         EdgeKind::Constructor |
+@@ -195,6 +197,7 @@
+             TypeKind::Float(..) |
+             TypeKind::Enum(..) |
+             TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::UnresolvedTypeRef(..) |
+             TypeKind::Reference(..) |
+             TypeKind::ObjCInterface(..) |
+--- a/ir/analysis/has_float.rs
++++ b/ir/analysis/has_float.rs
+@@ -48,6 +48,8 @@
+             EdgeKind::VarType |
+             EdgeKind::TemplateArgument |
+             EdgeKind::TemplateDeclaration |
++            EdgeKind::ContainedDependentQualifiedType |
++            EdgeKind::DependentQualifiedTypeParam |
+             EdgeKind::TemplateParameterDefinition => true,
+ 
+             EdgeKind::Constructor |
+@@ -118,6 +120,7 @@
+             TypeKind::Enum(..) |
+             TypeKind::Reference(..) |
+             TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::Opaque |
+             TypeKind::Pointer(..) |
+             TypeKind::UnresolvedTypeRef(..) |
+--- a/ir/analysis/has_type_param_in_array.rs
++++ b/ir/analysis/has_type_param_in_array.rs
+@@ -50,6 +50,8 @@
+             EdgeKind::VarType |
+             EdgeKind::TemplateArgument |
+             EdgeKind::TemplateDeclaration |
++            EdgeKind::ContainedDependentQualifiedType |
++            EdgeKind::DependentQualifiedTypeParam |
+             EdgeKind::TemplateParameterDefinition => true,
+ 
+             EdgeKind::Constructor |
+@@ -126,6 +128,7 @@
+             TypeKind::Enum(..) |
+             TypeKind::Reference(..) |
+             TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::Opaque |
+             TypeKind::Pointer(..) |
+             TypeKind::UnresolvedTypeRef(..) |
+--- a/ir/analysis/sizedness.rs
++++ b/ir/analysis/sizedness.rs
+@@ -231,7 +231,8 @@
+                 self.insert(id, SizednessResult::ZeroSized)
+             }
+ 
+-            TypeKind::TypeParam => {
++            TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) => {
+                 trace!(
+                     "    type params sizedness depends on what they're \
+                      instantiated as"
+--- a/ir/analysis/template_params.rs
++++ b/ir/analysis/template_params.rs
+@@ -194,6 +194,11 @@
+             // that every template parameter always used.
+             EdgeKind::TemplateDeclaration |
+             EdgeKind::TemplateParameterDefinition => false,
++
++            // A dependent qualified name is the one way a template parameter
++            // can be used without any field naming it directly.
++            EdgeKind::DependentQualifiedTypeParam |
++            EdgeKind::ContainedDependentQualifiedType => true,
+ 
+             // Since we have to be careful about which edges we consider for
+             // this analysis to be correct, we ignore generic edges. We also
+@@ -531,6 +536,13 @@
+                 trace!("    named type, trivially uses itself");
+                 used_by_this_id.insert(id);
+             }
++            // A dependent qualified name uses itself and the parameter it
++            // qualifies.
++            Some(&TypeKind::DependentQualifiedType(tp_id, ..)) => {
++                trace!("    dependent qualified type, uses its type param");
++                used_by_this_id.insert(id);
++                used_by_this_id.insert(tp_id.into());
++            }
+             // Template instantiations only use their template arguments if the
+             // template definition uses the corresponding template parameter.
+             Some(TypeKind::TemplateInstantiation(inst)) => {
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -296,6 +296,12 @@
+         match *self {
+             Field::DataMember(ref data) => {
+                 tracer.visit_kind(data.ty.into(), EdgeKind::Field);
++                for type_param in &data.dependent_qualified_types {
++                    tracer.visit_kind(
++                        type_param.into(),
++                        EdgeKind::ContainedDependentQualifiedType,
++                    );
++                }
+             }
+             Field::Bitfields(BitfieldUnit { ref bitfields, .. }) => {
+                 for bf in bitfields {
+@@ -521,6 +527,7 @@
+             public,
+             offset,
+             has_default_member_initializer,
++            dependent_qualified_types: Vec::new(),
+         })
+     }
+ }
+@@ -794,13 +801,8 @@
+         canonical_type_name: &str,
+         methods: &[Method],
+     ) {
+-        let fields = match *self {
+-            CompFields::After { ref mut fields, .. } => fields,
+-            // Nothing to do here.
+-            CompFields::Error => return,
+-            CompFields::Before(_) => {
+-                panic!("Not yet computed bitfield units.");
+-            }
++        let Some(fields) = self.fields_mut() else {
++            return;
+         };
+ 
+         for field in fields.iter_mut() {
+@@ -955,6 +957,55 @@
+     }
+ }
+ 
++impl CompFields {
++    /// The computed fields, or `None` where there are none to work with.
++    fn fields_mut(&mut self) -> Option<&mut Vec<Field>> {
++        match *self {
++            CompFields::After { ref mut fields, .. } => Some(fields),
++            // Nothing to do here.
++            CompFields::Error => None,
++            CompFields::Before(_) => {
++                panic!("Not yet computed bitfield units.");
++            }
++        }
++    }
++
++    /// Record against each field the dependent qualified types its own type
++    /// reaches, and answer with all of them.
++    fn record_dependent_qualified_types(
++        &mut self,
++        ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        let mut type_results = vec![];
++        let Some(fields) = self.fields_mut() else {
++            return type_results;
++        };
++        for field in fields.iter_mut() {
++            let Field::DataMember(field_data) = field else {
++                continue;
++            };
++            let Some(resolved) = field_data
++                .ty
++                .into_resolver()
++                .through_type_refs()
++                .through_type_aliases()
++                .resolve_fallible(ctx)
++            else {
++                continue;
++            };
++            let tid = resolved.id().expect_type_id(ctx);
++            let found =
++                resolved.expect_type().dependent_qualified_types(ctx, tid);
++            if found.is_empty() {
++                continue;
++            }
++            field_data.dependent_qualified_types = found;
++            type_results.extend(field_data.dependent_qualified_types.iter());
++        }
++        type_results
++    }
++}
++
+ impl Trace for CompFields {
+     type Extra = ();
+ 
+@@ -1005,6 +1056,9 @@
+     /// Whether the field has a default member initializer, `None` where clang
+     /// could not be asked.
+     has_default_member_initializer: Option<bool>,
++
++    /// The dependent qualified types this field's type depends on, if any.
++    dependent_qualified_types: Vec<TypeId>,
+ }
+ 
+ impl FieldMethods for FieldData {
+@@ -1140,6 +1194,10 @@
+     /// `TypeKind::TemplateInstantiation`.
+     template_params: Vec<TypeId>,
+ 
++    /// The dependent qualified types this class's fields depend on, naming
++    /// inner types of the template parameters in `template_params`.
++    dependent_qualified_type_params: Vec<TypeId>,
++
+     /// The method declarations inside this class, if in C++ mode.
+     methods: Vec<Method>,
+ 
+@@ -1218,6 +1276,7 @@
+             visibility: Visibility::Public,
+             fields: CompFields::default(),
+             template_params: vec![],
++            dependent_qualified_type_params: vec![],
+             methods: vec![],
+             constructors: vec![],
+             destructor: None,
+@@ -1608,7 +1667,8 @@
+                     ci.packed_attr = true;
+                 }
+                 CXCursor_TemplateTypeParameter => {
+-                    let param = Item::type_param(None, cur, ctx).expect(
++                    let param = Item::type_param(None, cur, ctx, None)
++                        .expect(
+                         "Item::type_param shouldn't fail when pointing \
+                          at a TemplateTypeParameter",
+                     );
+@@ -1876,6 +1936,15 @@
+             .assign_field_names(ctx, canonical_type_name, &self.methods);
+     }
+ 
++    /// Record which members depend on an inner type of a template parameter.
++    pub(crate) fn record_dependent_qualified_types(
++        &mut self,
++        ctx: &BindgenContext,
++    ) {
++        self.dependent_qualified_type_params
++            .append(&mut self.fields.record_dependent_qualified_types(ctx));
++    }
++
+     /// Returns whether the current union can be represented as a Rust `union`
+     ///
+     /// Requirements:
+@@ -2031,6 +2100,13 @@
+     fn self_template_params(&self, _ctx: &BindgenContext) -> Vec<TypeId> {
+         self.template_params.clone()
+     }
++
++    fn used_dependent_qualified_types(
++        &self,
++        _ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        self.dependent_qualified_type_params.clone()
++    }
+ }
+ 
+ impl Trace for CompInfo {
+--- a/ir/context.rs
++++ b/ir/context.rs
+@@ -316,9 +316,11 @@
+     /// item ids during parsing.
+     types: HashMap<TypeKey, TypeId>,
+ 
+-    /// Maps from a cursor to the item ID of the named template type parameter
+-    /// for that cursor.
+-    type_params: HashMap<Cursor, TypeId>,
++    /// Maps from a cursor to the item IDs of the named template type
++    /// parameters for that cursor. There is the parameter itself, keyed by
++    /// `None`, and one entry per dependent qualified name over it, keyed by the
++    /// name that qualifies.
++    type_params: HashMap<Cursor, HashMap<Option<String>, TypeId>>,
+ 
+     /// A cursor to module map. Similar reason than above.
+     modules: HashMap<Cursor, ModuleId>,
+@@ -495,6 +497,13 @@
+     /// Populated when we enter codegen by `compute_has_float`; always `None`
+     /// before that and `Some` after.
+     has_float: Option<HashSet<ItemId>>,
++
++    /// The inner type names some dependent qualified name looks up.
++    ///
++    /// Only these get an inner-type trait generated for them, so that a header
++    /// full of inner typedefs nobody reaches through does not acquire a trait
++    /// apiece. Populated by `identify_dependent_qualified_types`.
++    used_inner_type_names: HashSet<String>,
+ }
+ 
+ /// A traversal of allowlisted items.
+@@ -614,6 +623,7 @@
+             have_destructor: None,
+             has_type_param_in_array: None,
+             has_float: None,
++            used_inner_type_names: HashSet::default(),
+         }
+     }
+ 
+@@ -813,11 +823,17 @@
+     }
+ 
+     /// Add a new named template type parameter to this context's item set.
+-    pub(crate) fn add_type_param(&mut self, item: Item, definition: Cursor) {
++    pub(crate) fn add_type_param(
++        &mut self,
++        item: Item,
++        definition: Cursor,
++        associated_type_name: Option<String>,
++    ) {
+         debug!("BindgenContext::add_type_param: item = {item:?}; definition = {definition:?}");
+ 
+         assert!(
+-            item.expect_type().is_type_param(),
++            item.expect_type().is_type_param() ||
++                item.expect_type().is_dependent_qualified_type(),
+             "Should directly be a named type, not a resolved reference or anything"
+         );
+         assert_eq!(
+@@ -836,7 +852,9 @@
+ 
+         let old_named_ty = self
+             .type_params
+-            .insert(definition, id.as_type_id_unchecked());
++            .entry(definition)
++            .or_default()
++            .insert(associated_type_name, id.as_type_id_unchecked());
+         assert!(
+             old_named_ty.is_none(),
+             "should not have already associated a named type with this id"
+@@ -844,13 +862,21 @@
+     }
+ 
+     /// Get the named type defined at the given cursor location, if we've
+-    /// already added one.
+-    pub(crate) fn get_type_param(&self, definition: &Cursor) -> Option<TypeId> {
++    /// already added one. `associated_type_name` selects between the type
++    /// parameter itself and the dependent qualified names over it.
++    pub(crate) fn get_type_param(
++        &self,
++        definition: &Cursor,
++        associated_type_name: &Option<String>,
++    ) -> Option<TypeId> {
+         assert_eq!(
+             definition.kind(),
+             clang_sys::CXCursor_TemplateTypeParameter
+         );
+-        self.type_params.get(definition).copied()
++        self.type_params
++            .get(definition)
++            .and_then(|by_name| by_name.get(associated_type_name))
++            .copied()
+     }
+ 
+     // TODO: Move all this syntax crap to other part of the code.
+@@ -887,6 +913,31 @@
+         Cow::Borrowed(name)
+     }
+ 
++    /// The name of the trait which says a type has the named inner type,
++    /// through which a dependent qualified name reaches it.
++    pub(crate) fn inner_type_trait_ident(&self, name: &str) -> Ident {
++        self.rust_ident(format!("__bindgen_has_inner_type_{name}"))
++    }
++
++    /// How to name that trait from anywhere in the generated bindings.
++    ///
++    /// It is declared in the root module, because that is where the dependent
++    /// qualified types which need it are parented; under
++    /// `--enable-cxx-namespaces` a reference from a nested module has to say so,
++    /// and every module imports the root module by name.
++    pub(crate) fn inner_type_trait_path(
++        &self,
++        name: &str,
++    ) -> proc_macro2::TokenStream {
++        let ident = self.inner_type_trait_ident(name);
++        if self.options().enable_cxx_namespaces {
++            let root = self.rust_ident(self.root_module().canonical_name(self));
++            quote::quote! { #root::#ident }
++        } else {
++            quote::quote! { #ident }
++        }
++    }
++
+     /// Returns a mangled name as a rust identifier.
+     pub(crate) fn rust_ident<S>(&self, name: S) -> Ident
+     where
+@@ -1014,21 +1065,23 @@
+         }
+     }
+ 
+-    /// Assign a new generated name for each anonymous field.
+-    fn assign_field_names(&mut self) {
+-        let _t = self.timer("assign_field_names");
+-
+-        let comp_item_ids: Vec<ItemId> = self
+-            .items()
++    /// Every `TypeKind::Comp` item we parsed.
++    fn comp_item_ids(&self) -> Vec<ItemId> {
++        self.items()
+             .filter_map(|(id, item)| {
+                 if item.kind().as_type()?.is_comp() {
+                     return Some(id);
+                 }
+                 None
+             })
+-            .collect();
+-
+-        for id in comp_item_ids {
++            .collect()
++    }
++
++    /// Assign a new generated name for each anonymous field.
++    fn assign_field_names(&mut self) {
++        let _t = self.timer("assign_field_names");
++
++        for id in self.comp_item_ids() {
+             let canonical_type_name =
+                 self.resolve_item(id).canonical_name(self);
+             self.with_loaned_item(id, |ctx, item| {
+@@ -1189,6 +1242,9 @@
+ 
+         self.assign_field_names();
+ 
++        // Before the graph is frozen below, because this adds edges to it.
++        self.record_dependent_qualified_types();
++
+         self.assert_no_dangling_references();
+ 
+         // Compute the allowlisted set after processing replacements and
+@@ -1213,9 +1269,76 @@
+         self.compute_has_float();
+         self.compute_cannot_derive_hash();
+         self.compute_cannot_derive_partialord_partialeq_or_eq();
++        self.choose_inner_type_traits();
+ 
+         let ret = cb(&self)?;
+         Ok((ret, self.options))
++    }
++
++    /// Record, against each comp, which of its members depend on an inner type
++    /// of a template parameter.
++    ///
++    /// This runs before the graph is frozen, because the record is what the
++    /// `ContainedDependentQualifiedType` edges are traced from, and those are
++    /// what say a comp reaches such a type.
++    fn record_dependent_qualified_types(&mut self) {
++        if !self.options.dependent_qualified_types {
++            return;
++        }
++        let _t = self.timer("record_dependent_qualified_types");
++
++        for id in self.comp_item_ids() {
++            self.with_loaned_item(id, |ctx, item| {
++                item.kind_mut()
++                    .as_type_mut()
++                    .unwrap()
++                    .as_comp_mut()
++                    .unwrap()
++                    .record_dependent_qualified_types(ctx);
++            });
++        }
++    }
++
++    /// Decide which inner-type traits to generate: those some dependent
++    /// qualified type which is itself being generated looks up.
++    ///
++    /// It has to be those, and not every one the header mentions: a comp which
++    /// is not generated takes its dependent qualified types with it, and so the
++    /// trait declaration, while a comp which is generated would still be given
++    /// an impl of it.
++    fn choose_inner_type_traits(&mut self) {
++        if !self.options.dependent_qualified_types {
++            return;
++        }
++        let _t = self.timer("choose_inner_type_traits");
++
++        // Read off the dependent qualified types themselves, under the
++        // conditions their trait declaration is generated under, so that an
++        // impl is emitted exactly where there is a declaration to satisfy.
++        let codegen_items = self
++            .codegen_items
++            .as_ref()
++            .expect("the codegen item set is computed earlier in `gen`");
++        self.used_inner_type_names = self
++            .items()
++            .filter(|(id, item)| {
++                codegen_items.contains(id) &&
++                    !item.is_blocklisted(self) &&
++                    item.is_enabled_for_codegen(self)
++            })
++            .filter_map(|(_, item)| match item.kind().as_type()?.kind() {
++                TypeKind::DependentQualifiedType(_, name) => {
++                    Some(name.clone())
++                }
++                _ => None,
++            })
++            .collect();
++    }
++
++    /// Whether a dependent qualified name anywhere looks up this inner type
++    /// name. Only those get a trait generated for them.
++    pub(crate) fn inner_type_used(&self, name: &str) -> bool {
++        self.used_inner_type_names.contains(name)
+     }
+ 
+     /// When the `__testing_only_extra_assertions` feature is enabled, this
+@@ -2572,7 +2695,10 @@
+                                     TypeKind::Function(..) |
+                                     TypeKind::ResolvedTypeRef(..) |
+                                     TypeKind::Opaque |
+-                                    TypeKind::TypeParam => return true,
++                                    TypeKind::TypeParam |
++                                    TypeKind::DependentQualifiedType(..) => {
++                                        return true
++                                    }
+                                     _ => {}
+                                 }
+                                 if self.is_stdint_type(&name) {
+@@ -3094,17 +3220,28 @@
+ 
+     /// Finish configuring and perform the actual item resolution.
+     pub(crate) fn resolve(self, ctx: &BindgenContext) -> &Item {
++        let id = self.id;
++        self.resolve_fallible(ctx)
++            .unwrap_or_else(|| panic!("Not an item: {id:?}"))
++    }
++
++    /// As `resolve`, but `None` rather than a panic where an item along the way
++    /// is absent - which is what an item on loan looks like from here.
++    pub(crate) fn resolve_fallible(
++        self,
++        ctx: &BindgenContext,
++    ) -> Option<&Item> {
+         assert!(ctx.collected_typerefs());
+ 
+         let mut id = self.id;
+         let mut seen_ids = HashSet::default();
+         loop {
+-            let item = ctx.resolve_item(id);
++            let item = ctx.resolve_item_fallible(id)?;
+ 
+             // Detect cycles and bail out. These can happen in certain cases
+             // involving incomplete qualified dependent types (#2085).
+             if !seen_ids.insert(id) {
+-                return item;
++                return Some(item);
+             }
+ 
+             let ty_kind = item.as_type().map(|t| t.kind());
+@@ -3122,7 +3259,7 @@
+                 {
+                     id = next_id.into();
+                 }
+-                _ => return item,
++                _ => return Some(item),
+             }
+         }
+     }
+@@ -3157,6 +3294,13 @@
+ }
+ 
+ impl TemplateParameters for PartialType {
++    fn used_dependent_qualified_types(
++        &self,
++        _ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        vec![]
++    }
++
+     fn self_template_params(&self, _ctx: &BindgenContext) -> Vec<TypeId> {
+         // Maybe at some point we will eagerly parse named types, but for now we
+         // don't and this information is unavailable.
+--- a/ir/item.rs
++++ b/ir/item.rs
+@@ -1294,11 +1294,26 @@
+         ctx.resolve_item_fallible(*self)
+             .map_or(vec![], |item| item.self_template_params(ctx))
+     }
++
++    fn used_dependent_qualified_types(
++        &self,
++        ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        ctx.resolve_item_fallible(*self)
++            .map_or(vec![], |item| item.used_dependent_qualified_types(ctx))
++    }
+ }
+ 
+ impl TemplateParameters for Item {
+     fn self_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId> {
+         self.kind.self_template_params(ctx)
++    }
++
++    fn used_dependent_qualified_types(
++        &self,
++        ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        self.kind.used_dependent_qualified_types(ctx)
+     }
+ }
+ 
+@@ -1309,6 +1324,18 @@
+             // If we start emitting bindings to explicitly instantiated
+             // functions, then we'll need to check ItemKind::Function for
+             // template params.
++            ItemKind::Function(_) | ItemKind::Module(_) | ItemKind::Var(_) => {
++                vec![]
++            }
++        }
++    }
++
++    fn used_dependent_qualified_types(
++        &self,
++        ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        match *self {
++            ItemKind::Type(ref ty) => ty.used_dependent_qualified_types(ctx),
+             ItemKind::Function(_) | ItemKind::Module(_) | ItemKind::Var(_) => {
+                 vec![]
+             }
+@@ -1628,13 +1655,31 @@
+         if ty.kind() == CXType_Unexposed ||
+             location.cur_type().kind() == CXType_Unexposed
+         {
+-            if ty.is_associated_type() ||
+-                location.cur_type().is_associated_type()
++            let associated_type_name = ctx
++                .options()
++                .dependent_qualified_types
++                .then(|| {
++                    ty.get_associated_type_name().or_else(|| {
++                        location.cur_type().get_associated_type_name()
++                    })
++                })
++                .flatten();
++            // An associated type with no name to reach it through - because
++            // this is not asked for, or because what it qualifies is not a
++            // single identifier and so names no inner type - is the opaque type
++            // it always was. Otherwise this falls through where `type_param`
++            // finds no definition, because the cursor which does find one is a
++            // `TypeRef` child of this one, reached by recursing below.
++            if associated_type_name.is_none() &&
++                (ty.is_associated_type() ||
++                    location.cur_type().is_associated_type())
+             {
+                 return Ok(Item::new_opaque_type(id, ty, ctx));
+             }
+ 
+-            if let Some(param_id) = Item::type_param(None, location, ctx) {
++            if let Some(param_id) =
++                Item::type_param(None, location, ctx, associated_type_name)
++            {
+                 return Ok(ctx.build_ty_wrapper(id, param_id, None, ty));
+             }
+         }
+@@ -1759,7 +1804,7 @@
+                          id = {id:?}; spelling = {}",
+                         ty.spelling()
+                     );
+-                    Item::type_param(Some(id), location, ctx)
++                    Item::type_param(Some(id), location, ctx, None)
+                         .ok_or(ParseError::Recurse)
+                 } else {
+                     result
+@@ -1781,6 +1826,7 @@
+         with_id: Option<ItemId>,
+         location: clang::Cursor,
+         ctx: &mut BindgenContext,
++        associated_type_name: Option<String>,
+     ) -> Option<TypeId> {
+         let ty = location.cur_type();
+ 
+@@ -1788,6 +1834,7 @@
+             "Item::type_param:\n\
+              \twith_id = {with_id:?},\n\
+              \tty = {} {ty:?},\n\
++             \tassociated_type_name = {associated_type_name:?},\n\
+              \tlocation: {location:?}",
+             ty.spelling(),
+         );
+@@ -1915,7 +1962,8 @@
+         // something we know will always exist.
+         let parent = ctx.root_module().into();
+ 
+-        if let Some(id) = ctx.get_type_param(&definition) {
++        if let Some(id) = ctx.get_type_param(&definition, &associated_type_name)
++        {
+             return Some(if let Some(with_id) = with_id {
+                 ctx.build_ty_wrapper(with_id, id, Some(parent), &ty)
+             } else {
+@@ -1927,17 +1975,56 @@
+         // tests/headers/variadic_tname.hpp.
+         let name = ty_spelling.replace("const ", "").replace('.', "");
+ 
+-        let id = with_id.unwrap_or_else(|| ctx.next_item_id());
+-        let item = Item::new(
+-            id,
+-            None,
+-            None,
+-            parent,
+-            ItemKind::Type(Type::named(name)),
+-            Some(location.location()),
+-        );
+-        ctx.add_type_param(item, definition);
+-        Some(id.as_type_id_unchecked())
++        Some(match associated_type_name {
++            None => {
++                let id = with_id.unwrap_or_else(|| ctx.next_item_id());
++                let item = Item::new(
++                    id,
++                    None,
++                    None,
++                    parent,
++                    ItemKind::Type(Type::named(name)),
++                    Some(location.location()),
++                );
++                ctx.add_type_param(item, definition, None);
++                id.as_type_id_unchecked()
++            }
++            Some(associated_type_name) => {
++                // The dependent qualified type hangs off the plain type
++                // parameter for the same cursor, which may not have been seen
++                // yet: `typename T::Inner` can be the first mention of `T`.
++                let tp_id = ctx
++                    .get_type_param(&definition, &None)
++                    .unwrap_or_else(|| {
++                        let tp_id = ctx.next_item_id();
++                        let item = Item::new(
++                            tp_id,
++                            None,
++                            None,
++                            parent,
++                            ItemKind::Type(Type::named(name.clone())),
++                            Some(location.location()),
++                        );
++                        ctx.add_type_param(item, definition, None);
++                        tp_id.as_type_id_unchecked()
++                    });
++                let id = with_id.unwrap_or_else(|| ctx.next_item_id());
++                let item = Item::new(
++                    id,
++                    None,
++                    None,
++                    parent,
++                    ItemKind::Type(Type::dependent_qualified_type(
++                        name,
++                        tp_id,
++                        associated_type_name.clone(),
++                    )),
++                    Some(location.location()),
++                );
++                ctx.add_type_param(item, definition, Some(associated_type_name));
++                id.as_type_id_unchecked()
++            }
++        })
+     }
+ }
+ 
+--- a/ir/template.rs
++++ b/ir/template.rs
+@@ -104,6 +104,14 @@
+     /// anything but types, so we must treat them as opaque, and avoid
+     /// instantiating them.
+     fn self_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId>;
++
++    /// Get the `TypeId`s of the dependent qualified types this declaration
++    /// contains: the types of any fields which depend on a template parameter
++    /// without being a `TypeParam` themselves, such as `typename T::Inner`.
++    fn used_dependent_qualified_types(
++        &self,
++        _ctx: &BindgenContext,
++    ) -> Vec<TypeId>;
+ 
+     /// Get the number of free template parameters this template declaration
+     /// has.
+--- a/ir/traversal.rs
++++ b/ir/traversal.rs
+@@ -175,6 +175,18 @@
+ 
+     /// An edge from a non-templated alias or typedef to the referenced type.
+     TypeReference,
++
++    /// An edge from a comp to a dependent qualified type within it.
++    ///
++    /// This is what says the comp has to be qualified by its template
++    /// parameters even where no field names one directly.
++    ContainedDependentQualifiedType,
++
++    /// An edge from a `DependentQualifiedType` to the `TypeParam` it qualifies.
++    ///
++    /// Following `ContainedDependentQualifiedType` and then this one names
++    /// every `TypeParam` a comp reaches through a dependent qualified name.
++    DependentQualifiedTypeParam,
+ }
+ 
+ /// A predicate to allow visiting only sub-sets of the whole IR graph by
+@@ -223,6 +235,8 @@
+         EdgeKind::FunctionReturn |
+         EdgeKind::FunctionParameter |
+         EdgeKind::VarType |
++        EdgeKind::ContainedDependentQualifiedType |
++        EdgeKind::DependentQualifiedTypeParam |
+         EdgeKind::TypeReference => cc.types(),
+         EdgeKind::InnerVar => cc.vars(),
+         EdgeKind::Method => cc.methods(),
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -15,6 +15,7 @@
+ use crate::clang::{self, Cursor};
+ use crate::ir::function::Visibility;
+ use crate::parse::{ParseError, ParseResult};
++use crate::HashSet;
+ use std::borrow::Cow;
+ use std::io;
+ 
+@@ -122,6 +123,83 @@
+         matches!(self.kind, TypeKind::TypeParam)
+     }
+ 
++    /// Is this type of kind `TypeKind::DependentQualifiedType`?
++    pub(crate) fn is_dependent_qualified_type(&self) -> bool {
++        matches!(self.kind, TypeKind::DependentQualifiedType(..))
++    }
++
++    /// Every dependent qualified type reachable from this one.
++    pub(crate) fn dependent_qualified_types(
++        &self,
++        ctx: &BindgenContext,
++        tid: TypeId,
++    ) -> Vec<TypeId> {
++        let mut seen = HashSet::default();
++        self.dependent_qualified_types_seen(ctx, tid, &mut seen)
++    }
++
++    /// As `dependent_qualified_types`, carrying the set of types already
++    /// walked: a template argument can name the instantiation it is an argument
++    /// of, so the walk has to be able to stop.
++    ///
++    /// `ctx` may be mid-loan of the item this is called for, so resolution is
++    /// fallible: a type which cannot be resolved is one that cannot contribute.
++    fn dependent_qualified_types_seen(
++        &self,
++        ctx: &BindgenContext,
++        tid: TypeId,
++        seen: &mut HashSet<TypeId>,
++    ) -> Vec<TypeId> {
++        if !seen.insert(tid) {
++            return vec![];
++        }
++        let types_to_recurse_into: Vec<TypeId> = match self.kind {
++            TypeKind::DependentQualifiedType(..) => return vec![tid],
++            TypeKind::TemplateInstantiation(ref ta) => ta
++                .template_arguments()
++                .iter()
++                .copied()
++                .chain(std::iter::once(ta.template_definition()))
++                .collect(),
++            TypeKind::TemplateAlias(inner_type, ref params, _) => params
++                .iter()
++                .copied()
++                .chain(std::iter::once(inner_type))
++                .collect(),
++            // A field naming a dependent qualified type through one of these
++            // still names it, so the bound is still needed. `Comp` is not
++            // among them: another class's own template parameters are its
++            // business, not this one's.
++            TypeKind::Pointer(inner) |
++            TypeKind::BlockPointer(inner) |
++            TypeKind::Reference(inner, _) |
++            TypeKind::Array(inner, _) |
++            TypeKind::Vector(inner, _) => vec![inner],
++            // A function pointer member names one in its signature.
++            TypeKind::Function(ref sig) => sig
++                .argument_types()
++                .iter()
++                .map(|&(_, ty)| ty)
++                .chain(std::iter::once(sig.return_type()))
++                .collect(),
++            _ => return vec![],
++        };
++        types_to_recurse_into
++            .into_iter()
++            .filter_map(|tid| {
++                tid.into_resolver()
++                    .through_type_refs()
++                    .through_type_aliases()
++                    .resolve_fallible(ctx)
++            })
++            .flat_map(|item| {
++                let tid = item.id().expect_type_id(ctx);
++                item.expect_type()
++                    .dependent_qualified_types_seen(ctx, tid, seen)
++            })
++            .collect()
++    }
++
+     /// Is this a template instantiation type?
+     pub(crate) fn is_template_instantiation(&self) -> bool {
+         matches!(self.kind, TypeKind::TemplateInstantiation(..))
+@@ -153,7 +231,8 @@
+                 TypeKind::Pointer(..) |
+                 TypeKind::Int(..) |
+                 TypeKind::Float(..) |
+-                TypeKind::TypeParam
++                TypeKind::TypeParam |
++                TypeKind::DependentQualifiedType(..)
+         )
+     }
+ 
+@@ -161,6 +240,22 @@
+     pub(crate) fn named(name: String) -> Self {
+         let name = if name.is_empty() { None } else { Some(name) };
+         Self::new(name, None, TypeKind::TypeParam, false)
++    }
++
++    /// Creates a new type naming an inner type of a template parameter, as
++    /// `typename T::Inner` does.
++    pub(crate) fn dependent_qualified_type(
++        name: String,
++        type_param: TypeId,
++        associated_type_name: String,
++    ) -> Self {
++        let name = if name.is_empty() { None } else { Some(name) };
++        Self::new(
++            name,
++            None,
++            TypeKind::DependentQualifiedType(type_param, associated_type_name),
++            false,
++        )
+     }
+ 
+     /// Is this a floating point type?
+@@ -327,6 +422,7 @@
+     ) -> Option<&'tr Type> {
+         match self.kind {
+             TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::Array(..) |
+             TypeKind::Vector(..) |
+             TypeKind::Comp(..) |
+@@ -411,7 +507,9 @@
+         item: &Item,
+     ) -> Option<TypeId> {
+         match *self {
+-            TypeKind::TypeParam => Some(item.id().expect_type_id(ctx)),
++            TypeKind::TypeParam | TypeKind::DependentQualifiedType(..) => {
++                Some(item.id().expect_type_id(ctx))
++            }
+             TypeKind::ResolvedTypeRef(id) => id.as_template_param(ctx, &()),
+             _ => None,
+         }
+@@ -493,6 +591,7 @@
+             TypeKind::UnresolvedTypeRef(..) => "UnresolvedTypeRef",
+             TypeKind::ResolvedTypeRef(..) => "ResolvedTypeRef",
+             TypeKind::TypeParam => "TypeParam",
++            TypeKind::DependentQualifiedType(..) => "DependentQualifiedType",
+             TypeKind::ObjCInterface(..) => "ObjCInterface",
+             TypeKind::ObjCId => "ObjCId",
+             TypeKind::ObjCSel => "ObjCSel",
+@@ -551,6 +650,13 @@
+ impl TemplateParameters for Type {
+     fn self_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId> {
+         self.kind.self_template_params(ctx)
++    }
++
++    fn used_dependent_qualified_types(
++        &self,
++        ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        self.kind.used_dependent_qualified_types(ctx)
+     }
+ }
+ 
+@@ -579,10 +685,26 @@
+             TypeKind::Reference(..) |
+             TypeKind::UnresolvedTypeRef(..) |
+             TypeKind::TypeParam |
++            TypeKind::DependentQualifiedType(..) |
+             TypeKind::Alias(_) |
+             TypeKind::ObjCId |
+             TypeKind::ObjCSel |
+             TypeKind::ObjCInterface(_) => vec![],
++        }
++    }
++
++    fn used_dependent_qualified_types(
++        &self,
++        ctx: &BindgenContext,
++    ) -> Vec<TypeId> {
++        match *self {
++            TypeKind::ResolvedTypeRef(id) => {
++                ctx.resolve_type(id).used_dependent_qualified_types(ctx)
++            }
++            TypeKind::Comp(ref comp) => {
++                comp.used_dependent_qualified_types(ctx)
++            }
++            _ => vec![],
+         }
+     }
+ }
+@@ -683,6 +805,10 @@
+ 
+     /// A named type, that is, a template parameter.
+     TypeParam,
++
++    /// An inner type of a template parameter, named as `typename T::Inner`
++    /// names one: the `TypeParam` it qualifies, and the name it looks up.
++    DependentQualifiedType(TypeId, String),
+ 
+     /// Objective C interface. Always referenced through a pointer
+     ObjCInterface(ObjCInterface),
+@@ -942,7 +1068,7 @@
+                                         CXCursor_TemplateTypeParameter => {
+                                             declared_params += 1;
+                                             let param = Item::type_param(
+-                                                None, cur, ctx,
++                                                None, cur, ctx, None,
+                                             )
+                                             .expect(
+                                                 "Item::type_param shouldn't \
+@@ -1336,6 +1462,13 @@
+                 interface.trace(context, tracer, &());
+             }
+ 
++            TypeKind::DependentQualifiedType(type_param, _) => {
++                tracer.visit_kind(
++                    type_param.into(),
++                    EdgeKind::DependentQualifiedTypeParam,
++                );
++            }
++
+             // None of these variants have edges to other items and types.
+             TypeKind::Opaque |
+             TypeKind::UnresolvedTypeRef(_, _, None) |
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -2299,6 +2299,37 @@
+         },
+         as_args: "--wrap-unsafe-ops",
+     },
++    /// Whether to render a dependent qualified name as an associated type.
++    dependent_qualified_types: bool {
++        methods: {
++            /// Give a member whose type is named through a template parameter -
++            /// `typename T::Inner` - that type, rendered as an associated type
++            /// of a generated trait, rather than an opaque blob.
++            ///
++            /// This option is disabled by default. The trait it introduces is a
++            /// bound the template parameter has to satisfy, and a type bindgen
++            /// cannot see inside - one that is blocklisted, opaque, or replaced
++            /// - cannot satisfy it, so an instantiation over such a type does
++            /// not compile. Where every type a template is instantiated with is
++            /// one bindgen generates in full, this is what gives the
++            /// instantiation a layout instead of a blob.
++            ///
++            /// The associated type the trait declares is bounded by the traits
++            /// the bindings derive, which assumes every inner type reached
++            /// through it derives them too; one which does not will not satisfy
++            /// the bound. A class which holds an instantiation needing the bound
++            /// - rather than naming the dependent qualified type itself - does
++            /// not get the bound either, and neither does one which inherits
++            /// from such a class. An inner type a class has by inheritance is
++            /// not one it implements the trait with, so a template instantiated
++            /// over the derived class does not compile.
++            pub fn dependent_qualified_types(mut self, doit: bool) -> Self {
++                self.options.dependent_qualified_types = doit;
++                self
++            }
++        },
++        as_args: "--dependent-qualified-types",
++    },
+     /// Use DSTs to represent structures with flexible array members.
+     flexarray_dst: bool {
+         methods: {
