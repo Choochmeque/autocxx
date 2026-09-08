@@ -1,0 +1,119 @@
+Subject: Stop `safe_canonical_type` following a cycle for ever
+
+`Type::safe_canonical_type` answers what a type stands for by following the
+types which stand for other types - `ResolvedTypeRef`, `Alias`, `TemplateAlias`
+and a template instantiation's definition - and it follows them by recursing,
+with nothing to stop it coming back to where it started. Given a type graph
+which does come back round, it recurses until the stack runs out. The failure is
+a stack overflow with no diagnostic: the process dies on `SIGSEGV`, or on
+Windows `STATUS_STACK_OVERFLOW`, part-way through codegen, naming nothing.
+
+Nothing upstream of here promises the graph is acyclic. The sibling walk which
+does the same job over items, `ItemResolver::resolve`, has kept the ids it has
+seen and bailed out on a repeat since the fix for a cyclic qualified dependent
+type (rust-lang/rust-bindgen#2085); its comment says so outright. The type walk
+was left recursive, so the same shape of input reaches it and ends the process
+instead.
+
+So walk rather than recurse, and keep the types already visited. A repeat
+answers `None`, which is the answer this signature exists to give: it is the
+fallible one of the pair, and a type which stands, in the end, for itself has no
+inner type to report. Callers which have no use for `None` go through
+`canonical_type`, which asserts an answer as it always has - so a cyclic graph
+now stops at that assertion, with a stack trace naming the caller which asked,
+rather than taking the process down with the stack and naming nothing. For every acyclic graph - which is every
+graph bindgen generated correctly - the walk visits exactly the types the
+recursion did and answers the same.
+
+The set costs one allocation per call on a chain long enough to need it, against
+a recursion which was doing a call per hop regardless.
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -415,42 +415,56 @@
+     ///
+     /// For example, for a `typedef`, the canonical type would be the
+     /// `typedef`ed type, for a template instantiation, would be the template
+-    /// its specializing, and so on. Return None if the type is unresolved.
++    /// its specializing, and so on. Return None if the type is unresolved, or
++    /// if what it stands for is, in the end, itself.
++    ///
++    /// Walked rather than recursed, and with the types already visited kept,
++    /// because nothing upstream of here promises the graph is acyclic: an alias
++    /// whose target resolves back to the alias sends the walk round for ever,
++    /// which as a recursion is a stack overflow rather than an answer.
++    /// `ItemResolver::resolve` keeps the same record for the same reason.
+     pub(crate) fn safe_canonical_type<'tr>(
+         &'tr self,
+         ctx: &'tr BindgenContext,
+     ) -> Option<&'tr Type> {
+-        match self.kind {
+-            TypeKind::TypeParam |
+-            TypeKind::DependentQualifiedType(..) |
+-            TypeKind::Array(..) |
+-            TypeKind::Vector(..) |
+-            TypeKind::Comp(..) |
+-            TypeKind::Opaque |
+-            TypeKind::Int(..) |
+-            TypeKind::Float(..) |
+-            TypeKind::Complex(..) |
+-            TypeKind::Function(..) |
+-            TypeKind::Enum(..) |
+-            TypeKind::Reference(..) |
+-            TypeKind::Void |
+-            TypeKind::NullPtr |
+-            TypeKind::Pointer(..) |
+-            TypeKind::BlockPointer(..) |
+-            TypeKind::ObjCId |
+-            TypeKind::ObjCSel |
+-            TypeKind::ObjCInterface(..) => Some(self),
+-
+-            TypeKind::ResolvedTypeRef(inner) |
+-            TypeKind::Alias(inner) |
+-            TypeKind::TemplateAlias(inner, ..) => {
+-                ctx.resolve_type(inner).safe_canonical_type(ctx)
+-            }
+-            TypeKind::TemplateInstantiation(ref inst) => ctx
+-                .resolve_type(inst.template_definition())
+-                .safe_canonical_type(ctx),
++        let mut ty = self;
++        let mut seen: HashSet<TypeId> = HashSet::default();
++        loop {
++            let next = match ty.kind {
++                TypeKind::TypeParam |
++                TypeKind::DependentQualifiedType(..) |
++                TypeKind::Array(..) |
++                TypeKind::Vector(..) |
++                TypeKind::Comp(..) |
++                TypeKind::Opaque |
++                TypeKind::Int(..) |
++                TypeKind::Float(..) |
++                TypeKind::Complex(..) |
++                TypeKind::Function(..) |
++                TypeKind::Enum(..) |
++                TypeKind::Reference(..) |
++                TypeKind::Void |
++                TypeKind::NullPtr |
++                TypeKind::Pointer(..) |
++                TypeKind::BlockPointer(..) |
++                TypeKind::ObjCId |
++                TypeKind::ObjCSel |
++                TypeKind::ObjCInterface(..) => return Some(ty),
+ 
+-            TypeKind::UnresolvedTypeRef(..) => None,
++                TypeKind::ResolvedTypeRef(inner) |
++                TypeKind::Alias(inner) |
++                TypeKind::TemplateAlias(inner, ..) => inner,
++                TypeKind::TemplateInstantiation(ref inst) => {
++                    inst.template_definition()
++                }
++
++                TypeKind::UnresolvedTypeRef(..) => return None,
++            };
++
++            if !seen.insert(next) {
++                return None;
++            }
++            ty = ctx.resolve_type(next);
+         }
+     }
+ 
