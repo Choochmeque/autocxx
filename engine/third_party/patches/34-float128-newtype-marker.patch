@@ -1,0 +1,148 @@
+Subject: Mark `__float128` with a newtype wrapper
+
+Rust has no 128-bit float, so `float_kind_rust_type` renders a `__float128` as
+the integer of the same width: a bare `u128`. That is also, and correctly, how
+an `unsigned __int128` comes out. One token in the output therefore means
+either a 128-bit float or a 128-bit integer, and nothing that survives says
+which the header wrote.
+
+The two are not interchangeable. They are passed in different registers, they
+are read by different instructions, and arithmetic on one applied to the bits
+of the other produces a number rather than an error. A consumer which has to
+name the type again - to emit C++, or to pick a Rust type to do arithmetic in -
+has to guess, and a wrong guess is wrong at runtime.
+
+`--use-float128-newtype-wrapper` wraps the chosen type in
+`__bindgen_marker_Float128<T>`, the same shape `--use-opaque-newtype-wrapper`,
+`--use-reference-newtype-wrapper` and `--use-long-double-newtype-wrapper`
+already use: a fake type the caller declares itself, through `--raw-line` or by
+post-processing. What it wraps is left as it was, so a caller who declares the
+marker `#[repr(transparent)]` gets the layout bindgen chose; and the
+`unsigned __int128` beside it is left bare, which is what makes the bare `u128`
+mean one thing again.
+
+The wrap is at the `TypeKind::Float` arm of `TryToRustTy for Type`, beside the
+`long double` wrapper and outside it - a float is one kind or the other, so at
+most one marker is ever added. `TypeKind::Complex(FloatKind::Float128)` is left
+alone: a `_Complex __float128` is already `__BindgenComplex<T>`, which says on
+its face that it is not a plain integer. Off by default, so no existing output
+changes.
+
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -211,6 +211,31 @@
+     }
+ }
+ 
++/// The name of the marker newtype `float128_wrapper` puts round a
++/// `__float128`.
++const FLOAT128_MARKER: &str = "__bindgen_marker_Float128";
++
++/// A C++ `__float128`, wrapped in a marker newtype if one was asked for.
++///
++/// `ty` is what `float_kind_rust_type` chose for it, which is `u128`: Rust has
++/// no 128-bit float, so the type comes out as the integer of the same width -
++/// indistinguishable in the output from an `unsigned __int128`, which really
++/// is that integer. The marker says which of the two is being looked at,
++/// without changing either.
++pub(crate) fn float128_wrapper(
++    ty: syn::Type,
++    kind: FloatKind,
++    ctx: &BindgenContext,
++) -> syn::Type {
++    if kind == FloatKind::Float128 && ctx.options().use_float128_newtype_wrapper
++    {
++        let marker = Ident::new(FLOAT128_MARKER, Span::call_site());
++        syn::parse_quote! { #marker < #ty > }
++    } else {
++        ty
++    }
++}
++
+ /// Undoes [`const_wrapper`], for the one place which needs to *name* a type
+ /// rather than declare something of it: a newtype alias's constructor. The
+ /// marker is not part of that constructor's name, and `Marker<Inner>(v)` is
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -4838,8 +4838,12 @@
+             TypeKind::Int(ik) => {
+                 Ok(int_kind_rust_type(ctx, ik, self.layout(ctx)))
+             }
+-            TypeKind::Float(fk) => Ok(helpers::long_double_wrapper(
+-                float_kind_rust_type(ctx, fk, self.layout(ctx)),
++            TypeKind::Float(fk) => Ok(helpers::float128_wrapper(
++                helpers::long_double_wrapper(
++                    float_kind_rust_type(ctx, fk, self.layout(ctx)),
++                    fk,
++                    ctx,
++                ),
+                 fk,
+                 ctx,
+             )),
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -493,6 +493,9 @@
+     /// Wrap long double in a newtype marker
+     #[arg(long)]
+     use_long_double_newtype_wrapper: bool,
++    /// Wrap __float128 in a newtype marker
++    #[arg(long)]
++    use_float128_newtype_wrapper: bool,
+     /// Output C++ overloaded operators
+     #[arg(long)]
+     represent_cxx_operators: bool,
+@@ -712,6 +715,7 @@
+         use_reference_newtype_wrapper,
+         use_const_newtype_wrapper,
+         use_long_double_newtype_wrapper,
++        use_float128_newtype_wrapper,
+         vtable_generation,
+         sort_semantically,
+         merge_extern_blocks,
+@@ -1026,6 +1030,7 @@
+             use_reference_newtype_wrapper,
+             use_const_newtype_wrapper,
+             use_long_double_newtype_wrapper,
++            use_float128_newtype_wrapper,
+             vtable_generation,
+             sort_semantically,
+             merge_extern_blocks,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -266,6 +266,36 @@
+         as_args: "--use-long-double-newtype-wrapper",
+     },
+ 
++    /// Whether a C++ `__float128` should be marked as one.
++    ///
++    /// Rust has no 128-bit float, so bindgen renders `__float128` as the
++    /// integer of the same width, `u128`. That is also what an
++    /// `unsigned __int128` is rendered as, and correctly - so one token in the
++    /// output means either a 128-bit float or a 128-bit integer, and nothing
++    /// says which. They are not interchangeable: they take different registers
++    /// and different arithmetic, and a consumer which reads one as the other
++    /// is wrong at runtime rather than at compile time.
++    ///
++    /// `--use-float128-newtype-wrapper` wraps the `__float128` in
++    /// `__bindgen_marker_Float128<T>`, the same shape
++    /// `--use-opaque-newtype-wrapper` and `--use-reference-newtype-wrapper`
++    /// already use: a fake type the caller declares itself, through
++    /// `--raw-line` or by post-processing. What it wraps is unchanged, so a
++    /// caller who declares it `#[repr(transparent)]` gets the layout it had
++    /// before, and the `unsigned __int128` beside it is left bare. Off by
++    /// default.
++    use_float128_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap `__float128` in
++            /// `__bindgen_marker_Float128`. Disabled by default.
++            pub fn use_float128_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_float128_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-float128-newtype-wrapper",
++    },
++
+     /// Whether we should distinguish between C++'s `char16_t` and `u16`.
+     /// The C++ type `char16_t` is its own special type; it's not a typedef
+     /// of some other integer (this differs from C).
