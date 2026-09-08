@@ -20479,12 +20479,14 @@ fn test_issue_1065a() {
         directives_from_lists(&["RenderFrameHost"], &[], None),
         None,
         // Not just that it compiles: the refusal has to name what was wrong,
-        // because a `bd` which quietly vanished would compile too.
-        Some(make_string_finder(
-            ["au_bb_AutocxxConcrete", "bb", "only declares"]
-                .map(|s| s.to_string())
-                .to_vec(),
-        )),
+        // because a `bd` which quietly vanished would compile too. One
+        // contiguous phrase, so that finding `bb` somewhere else in the
+        // bindgen module cannot stand in for it.
+        Some(make_string_finder(vec![
+            "au_bb_AutocxxConcrete, a template instantiation whose argument bb is a type this \
+             header only declares"
+                .to_string(),
+        ])),
         None,
     );
 }
@@ -20560,14 +20562,77 @@ fn test_instantiation_on_incomplete_type_named_through_an_alias() {
             None,
             // `bb` rather than the alias: the refusal names the type nothing
             // defines, however the header spelt it.
-            Some(make_string_finder(
-                ["AutocxxConcrete", "bb", "only declares"]
-                    .map(|s| s.to_string())
-                    .to_vec(),
-            )),
+            Some(make_string_finder(vec![
+                "whose argument bb is a type this header only declares".to_string(),
+            ])),
             None,
         );
     }
+}
+
+/// A template name repeating in the arguments is not a circle. `au<int>`
+/// beside `au<bb>` is two instantiations, and `au<au<au<bb>>>` is three, and
+/// the walk has to reach the `bb` at the end of each rather than stop at the
+/// second `au`.
+#[test]
+fn test_instantiation_on_incomplete_type_beside_and_within_its_own_template() {
+    let hdr = indoc! {"
+        #include <memory>
+        #include <vector>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        template <typename A, typename B> class Pair { A a; B b; };
+        class bb;
+        class RenderFrameHost {
+        public:
+        virtual std::vector<Pair<au<int>, au<bb>>> &bd() = 0;
+        virtual std::vector<au<au<au<bb>>>> &be() = 0;
+        virtual ~RenderFrameHost() {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "Pair_au_int_au_bb_AutocxxConcrete, a template instantiation whose argument bb is a \
+             type this header only declares"
+                .to_string(),
+            "au_au_au_bb_AutocxxConcrete, a template instantiation whose argument bb is a type \
+             this header only declares"
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A class *with a member* of such an instantiation is generated as any other
+/// class is. Whether it can be destroyed is C++'s business - its destructor
+/// may be defined where `bb` is complete - and refusing the member would only
+/// hide its type from the analysis which decides what constructors the class
+/// has, which is how C++ deleting the copy constructor reaches Rust.
+#[test]
+fn test_member_of_instantiation_on_incomplete_type_is_still_a_member() {
+    let hdr = indoc! {"
+        class bb;
+        template <class T> struct au { T* p; au() = default; au(const au&) = delete; };
+        struct Owner { au<bb> value; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(vec!["type Owner".to_string()]),
+            // C++ deleted `Owner`'s copy constructor, because the member's is
+            // deleted. Reading the member's type is the only way to know.
+            make_string_absence_finder(vec!["synthetic_const_copy_ctor".to_string()]),
+        ])),
+        None,
+    );
 }
 
 /// Checks that `bd` came back with the concrete type in it, that the type
