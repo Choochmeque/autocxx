@@ -1,0 +1,196 @@
+Subject: Recover template arguments libclang gives no cursor for
+
+`instantiate_template` reconstructs a specialization's arguments by walking the
+cursors under the use site, because libclang exposes template arguments
+properly only for function templates. Not every argument has a cursor there. A
+builtin has none, so `h2<T, int>` puts one `TypeRef` where two arguments were
+written, and neither does an argument left to its default, so `holder<T>`
+against `template <class U, class D = U> struct holder` finds one where the
+declaration has two. Either way the count comes up short of
+`num_self_template_params`, `instantiate_template` gives up, and
+`builtin_or_resolved_ty` falls back on the bare template declaration.
+
+That fallback does not produce a usable binding. The enclosing template loses
+the parameter it passed in - nothing uses it any more - and the field is written
+as the template declaration's own name applied to the declaration's own
+parameters, which are bound nowhere in the emitted struct:
+
+    template <class U, class D = U> struct holder { D* p; };
+    template <class T> struct outer { holder<T> value; };
+
+becomes `pub struct outer { pub value: holder<D> }`, which does not compile.
+
+libclang will name the arguments itself through
+`clang_Type_getTemplateArgumentAsType`, defaults included once the canonical
+type is chained on - that is what `TemplateInstantiation::from_ty` already asks,
+and it is now shared as `template_arg_types`. Ask it when, and only when, the
+cursor walk came up with the wrong number: the walk stays the primary source,
+so nothing which parses today changes.
+
+What libclang hands back is each argument's *type*, not the cursor it was
+written at, and an argument which is a parameter of the enclosing template
+arrives as an unexposed type with no declaration - too little to build a
+`TypeParam` from, and it would become an opaque blob, losing the enclosing
+template's parameter as surely as the bare declaration did. Those arguments are
+the ones the cursor walk did find, so they are taken from it, under both the
+name they were written under and clang's canonical spelling for them, since a
+defaulted argument arrives as `type-parameter-0-0` rather than as `T`.
+
+Two things this does not recover, neither of which the bare declaration
+recovered either. An argument which is a parameter under a qualifier or an
+operator - `holder<const T>`, `holder<T*>` - is spelled as neither of those two
+keys, so the parameter under it goes opaque: the argument's own shape survives,
+a pointer argument stays a pointer, but the enclosing template loses the
+parameter, while the instantiation and its other arguments come through. And a
+non-type argument comes back from the API as an invalid type, filtered out here
+as it already is in `from_ty`, so the count stays short and the instantiation is
+still abandoned - which is the existing treatment of const-value arguments a few
+lines above.
+
+Addresses the bug reported as rust-lang/rust-bindgen#3161.
+
+--- a/ir/context.rs
++++ b/ir/context.rs
+@@ -1638,6 +1638,10 @@
+         }
+ 
+         let mut args = vec![];
++        // What each argument the walk below finds a cursor for was written as,
++        // so that the fallback at the end can put back an argument libclang
++        // gives it no declaration to recognise.
++        let mut written: HashMap<String, TypeId> = HashMap::default();
+         let mut found_const_arg = false;
+         let mut children = location.collect_children();
+ 
+@@ -1683,6 +1687,19 @@
+                         Some(template.into()),
+                         self,
+                     );
++                    written.insert(child.spelling(), ty);
++                    // An argument which is a parameter of the enclosing
++                    // template reaches the fallback below spelled as clang
++                    // canonicalises it, `type-parameter-0-0`, which is not the
++                    // name it was written under; that spelling is recorded too.
++                    // Only for a parameter: anything with a declaration of its
++                    // own the fallback resolves for itself, and keying it here
++                    // would answer with whichever spelling reached this arm.
++                    let arg_ty = child.cur_type();
++                    if !arg_ty.declaration().is_valid() {
++                        written
++                            .insert(arg_ty.canonical_type().spelling(), ty);
++                    }
+                     args.push(ty);
+                 }
+                 clang_sys::CXCursor_TemplateRef => {
+@@ -1789,6 +1806,37 @@
+             return None;
+         }
+ 
++        args.reverse();
++
++        if args.len() != num_expected_args {
++            // The walk above only sees an argument which has a cursor of its
++            // own. A builtin has none - `Foo<T, int>` puts one child where two
++            // arguments were written - and neither does an argument left to
++            // its default, so an ordinary instantiation can come up short and
++            // the caller falls back on the bare template declaration, whose own
++            // parameters nothing then binds.
++            //
++            // libclang will name the arguments itself. What it hands back is
++            // each argument's type rather than the cursor it was written at,
++            // and an argument which is a parameter of the enclosing template
++            // arrives with no declaration to build a `TypeParam` from, so those
++            // come from `written` instead, keyed by the name they were written
++            // under in this same instantiation.
++            args = TemplateInstantiation::template_arg_types(ty)
++                .into_iter()
++                .map(|arg| {
++                    written.get(&arg.spelling()).copied().unwrap_or_else(|| {
++                        Item::from_ty_or_ref(
++                            arg,
++                            arg.declaration(),
++                            Some(template.into()),
++                            self,
++                        )
++                    })
++                })
++                .collect();
++        }
++
+         if args.len() != num_expected_args {
+             warn!(
+                 "Found a template with an unexpected number of template \
+@@ -1796,8 +1844,6 @@
+             );
+             return None;
+         }
+-
+-        args.reverse();
+         let type_kind = TypeKind::TemplateInstantiation(
+             TemplateInstantiation::new(template, args),
+         );
+--- a/ir/template.rs
++++ b/ir/template.rs
+@@ -212,6 +212,33 @@
+         &self.args[..]
+     }
+ 
++    /// The types libclang reports as `ty`'s template arguments, in declaration
++    /// order.
++    ///
++    /// `clang_Type_getTemplateArgumentAsType` names every *type* argument of a
++    /// specialization, including those written with no cursor of their own: a
++    /// builtin, as in `Foo<T, int>`, and an argument left to its default. The
++    /// defaulted ones show up only on the canonical type, so the two lists are
++    /// chained, the canonical one supplying the tail the written one does not
++    /// reach. A non-type argument comes back as an invalid type and is dropped,
++    /// so a caller counting these against a declaration's parameters sees a
++    /// specialization with const-value arguments come up short.
++    pub(crate) fn template_arg_types(ty: &clang::Type) -> Vec<clang::Type> {
++        use clang_sys::CXType_Invalid;
++
++        let Some(args) = ty.template_args() else {
++            return vec![];
++        };
++        let arg_count = args.len();
++        match ty.canonical_type().template_args() {
++            Some(canonical_args) => args
++                .chain(canonical_args.skip(arg_count))
++                .filter(|t| t.kind() != CXType_Invalid)
++                .collect(),
++            None => args.filter(|t| t.kind() != CXType_Invalid).collect(),
++        }
++    }
++
+     /// Parse a `TemplateInstantiation` from a clang `Type`.
+     pub(crate) fn from_ty(
+         ty: &clang::Type,
+@@ -219,24 +246,10 @@
+     ) -> Option<TemplateInstantiation> {
+         use clang_sys::*;
+ 
+-        let template_args = ty.template_args().map_or(vec![], |args| match ty
+-            .canonical_type()
+-            .template_args()
+-        {
+-            Some(canonical_args) => {
+-                let arg_count = args.len();
+-                args.chain(canonical_args.skip(arg_count))
+-                    .filter(|t| t.kind() != CXType_Invalid)
+-                    .map(|t| {
+-                        Item::from_ty_or_ref(t, t.declaration(), None, ctx)
+-                    })
+-                    .collect()
+-            }
+-            None => args
+-                .filter(|t| t.kind() != CXType_Invalid)
+-                .map(|t| Item::from_ty_or_ref(t, t.declaration(), None, ctx))
+-                .collect(),
+-        });
++        let template_args: Vec<TypeId> = Self::template_arg_types(ty)
++            .into_iter()
++            .map(|t| Item::from_ty_or_ref(t, t.declaration(), None, ctx))
++            .collect();
+ 
+         let declaration = ty.declaration();
+         let definition = if declaration.kind() == CXCursor_TypeAliasTemplateDecl
