@@ -36,8 +36,8 @@ use super::{
         pod::PodAnalysis,
     },
     api::{
-        Api, HolderSurface, Provenance, SharedPtrShim, SubclassName, TypeKind, UniquePtrShim,
-        VectorShim, WeakPtrShim,
+        Api, ConstRefShim, HolderSurface, Provenance, SharedPtrShim, SubclassName, TypeKind,
+        UniquePtrShim, VectorShim, WeakPtrShim,
     },
     apivec::ApiVec,
     parse::CppRefQualifier,
@@ -296,6 +296,9 @@ impl<'a> CppCodeGenerator<'a> {
                         }
                         Some(HolderSurface::VectorOfPointers { .. }) => {
                             self.generate_vector_shims(api.name())
+                        }
+                        Some(HolderSurface::ConstRef { .. }) => {
+                            self.generate_const_ref_shims(api.name())
                         }
                         None => {}
                     }
@@ -754,6 +757,20 @@ impl<'a> CppCodeGenerator<'a> {
                     false,
                 )
             }
+            // The receiver has already been converted to whatever C++ needs to
+            // read a member off it, which for the `const T&` an accessor takes
+            // is `(*autocxx_gen_this)`.
+            CppFunctionBody::FieldRead(field) => (
+                format!("{}.{field}", receiver.expect("an accessor is a method")),
+                "".to_string(),
+                false,
+            ),
+            // The variable itself. The return conversion wraps this in
+            // whatever gets it to Rust - for a non-POD type, construction of
+            // the holder which refers to it.
+            CppFunctionBody::VariableRead(name) => {
+                (self.namespaced_name(name), "".to_string(), false)
+            }
             CppFunctionBody::StaticMethodCall(ns, ty_id, fn_id) => {
                 // The bindgen name flattens nesting - a `struct B` inside
                 // `struct A` is `A_B` - so joining the namespace to it would
@@ -1039,6 +1056,38 @@ impl<'a> CppCodeGenerator<'a> {
         self.additional_functions.push(ExtraCpp {
             declaration: Some(declaration),
             headers: vec![Header::System("vector"), Header::System("cstddef")],
+            ..Default::default()
+        })
+    }
+
+    /// The one C++ helper which is the whole of what Rust can do with the
+    /// opaque holder standing for a `const` reference to a C++ variable.
+    ///
+    /// Written against the holder's own typedef rather than against `T`: the
+    /// referent is spelt `H::type`, which is exactly the `const T` the
+    /// `std::reference_wrapper` was made with, so nothing here has to
+    /// re-derive a C++ name for it. `get` answers a reference which is never
+    /// null - that is what a `std::reference_wrapper` is - and its address is
+    /// the referent's own, since the holder stores a pointer rather than a
+    /// copy. `addressof` rather than `&`, because a class may overload
+    /// `operator&` and one which does would hand back whatever it likes. See
+    /// google/autocxx#94.
+    fn generate_const_ref_shims(&mut self, tn: &QualifiedName) {
+        let holder = tn.get_final_item();
+        let declaration = ConstRefShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn);
+                match shim {
+                    ConstRefShim::Get => format!(
+                        "inline {holder}::type* {name}(const {holder}& self) {{ return ::std::addressof(self.get()); }}"
+                    ),
+                }
+            })
+            .join("\n");
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
+            headers: vec![Header::System("functional"), Header::System("memory")],
             ..Default::default()
         })
     }

@@ -76,6 +76,16 @@ pub enum ConvertErrorFromCpp {
     StaticDataWithInternalLinkage(String),
     #[error("Encountered static data of type {}, which autocxx does not expose as something Rust can hold by value. A C++ variable can only be re-exported if its type is POD; try generate_pod! if that type really is trivial.", .0.to_cpp_name())]
     StaticDataOfNonPodType(QualifiedName),
+    #[error("The public C++ data member {0} is {1}, so autocxx generates no accessor for it. Add a C++ member function which returns something autocxx can express, and use that instead.")]
+    UnrepresentableDataMember(String, UnrepresentableMember),
+    #[error("The public C++ data member {0} is of type {}, which is not on the allowlist, so autocxx generates no accessor for it. autocxx generates no methods for a type it was not asked for, and hands out no references to one either; name it in a generate! or generate_pod! directive if you want to read this member.", .1.to_cpp_name())]
+    DataMemberOfNonAllowlistedType(String, QualifiedName),
+    #[error("autocxx does not know what C++ calls the variable {}, and a variable of non-POD type is reached through a getter whose C++ has to name it. bindgen reports no C++ spelling for a variable, and the name it gave this one is not the one in the mangled symbol - which is so for a static data member of a class, whose name bindgen flattens into the enclosing namespace. A member of POD type is unaffected, being re-exported through bindgen's own declaration. Add a static member function which returns the object, and bind that.", .0.to_cpp_name())]
+    StaticDataWithUnknownCppName(QualifiedName),
+    #[error("Encountered a variable of type {}, which is not one autocxx can hand back. A variable of non-POD type is reached through a getter returning an opaque holder which refers to it, and the holder's accessor has to name the type in the cxx::bridge - which only declares the types autocxx generates. bindgen records a variable's type as a bare name, so a name with template arguments arrives without them and an alias arrives as itself; neither is a type the bridge has declared. Name the type itself in a generate! directive and declare the variable with that type.", .0.to_cpp_name())]
+    StaticDataOfUnholdableType(QualifiedName),
+    #[error("The variable {} has non-POD type, so it is reached through a getter returning an opaque holder over a std::reference_wrapper - and this header already made autocxx generate that same specialization for something else, where it stands for a C++ type rather than for one of our holders. autocxx will not give one C++ type two meanings. Write the variable's type in a generate! directive and reach it another way.", .0.to_cpp_name())]
+    StaticDataHolderAlreadyTaken(QualifiedName),
     #[error("Encountered typedef to itself - this is a known bindgen bug: {0}")]
     InfinitelyRecursiveTypedef(QualifiedName),
     #[error("Unexpected 'use' statement encountered: {}", .0.as_ref().map(|s| s.as_str()).unwrap_or("<unknown>"))]
@@ -227,6 +237,40 @@ pub enum ConvertErrorFromCpp {
     ParameterWasNotAPointer(String),
     #[error("autocxx builds a C++ subclass peer by inverting each of the conversions the ordinary wrapper performs, and one of this function's has no opposite to invert to. This is an autocxx bug rather than anything wrong with the C++; please report the header which produced it.")]
     NonInvertibleConversion,
+}
+
+/// The kind of C++ data member for which autocxx generates no accessor, named
+/// in [`ConvertErrorFromCpp::UnrepresentableDataMember`].
+///
+/// Each of these is refused where the accessor is synthesized rather than left
+/// to the conversion machinery, because what the machinery would write is C++
+/// which does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnrepresentableMember {
+    /// C++ cannot return an array by value, and the reference to one it can
+    /// return is not something the bridge spells - cxx writes a Rust `[T; N]`
+    /// as `std::array<T, N>`, which is a different C++ type.
+    Array,
+    /// A reference member. Reading one through the accessor's own reference to
+    /// the object is an indirection nothing in the bridge spells, and whether
+    /// the result should be borrowed from the object or from what the member
+    /// refers to is a question C++ does not answer.
+    Reference,
+    /// Anything else the type converter made of the member which an accessor's
+    /// return type cannot be written around. It makes a field's type a path, a
+    /// pointer, an array or a reference, so this is what a fourth kind would
+    /// be answered with rather than something a reader has to check for.
+    Unrepresentable,
+}
+
+impl std::fmt::Display for UnrepresentableMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Array => "an array",
+            Self::Reference => "a reference",
+            Self::Unrepresentable => "of a kind autocxx has no accessor shape for",
+        })
+    }
 }
 
 /// Which type a [`ConvertErrorFromCpp::TypeContainingUngeneratableTypedef`]

@@ -14,7 +14,7 @@ use crate::conversion::{
     api::{FuncToConvert, UnanalyzedApi},
     convert_error::ConvertErrorWithContext,
     convert_error::ErrorContext,
-    type_helpers::strip_const_markers,
+    type_helpers::{mentions_long_double, strip_const_markers},
 };
 use crate::minisyn::{minisynize_punctuated, minisynize_vec};
 use crate::types::strip_bindgen_original_suffix_from_ident;
@@ -26,7 +26,7 @@ use crate::{
 use std::collections::HashMap;
 use syn::{
     Attribute, Block, Expr, ExprCall, ExprLit, ForeignItem, Ident, ImplItem, ItemImpl, Lit, Meta,
-    MetaNameValue, Stmt, Type,
+    MetaNameValue, PathArguments, Stmt, Type,
 };
 
 use super::linkage::{linkage_from_link_name, CppLinkage};
@@ -121,6 +121,11 @@ impl<'a> ParseForeignMod<'a> {
                 self.statics.push(UnanalyzedApi::Static {
                     name: api_name(&self.ns, item.ident.clone(), self.parse_callback_results),
                     cpp_ty,
+                    name_is_cpp_name: cpp_name_is_the_rust_ident(
+                        &item.attrs,
+                        &self.ns,
+                        &item.ident,
+                    ),
                 });
                 Ok(())
             }
@@ -191,11 +196,20 @@ impl<'a> ParseForeignMod<'a> {
 /// Any other sort of type - a pointer, a reference, an array, a function
 /// pointer - is rejected, because re-exporting it would expose `bindgen`'s raw
 /// view of the world rather than the types `autocxx` generates.
+///
+/// A `long double` is rejected here rather than left to the conversion which
+/// rejects one in a signature, because nothing converts a variable's type: the
+/// re-export hands over what bindgen wrote, and what bindgen writes for a
+/// `long double` is a marker aliasing a type of the right width on some
+/// targets and half of it on others. See [`ConvertErrorFromCpp::LongDouble`].
 fn analyze_static(
     attrs: &[Attribute],
     ty: &Type,
     ident: &Ident,
 ) -> Result<Option<QualifiedName>, ConvertErrorFromCpp> {
+    if mentions_long_double(ty) {
+        return Err(ConvertErrorFromCpp::LongDouble);
+    }
     if linkage_from_link_name(link_name_from_attrs(attrs).as_deref()) == CppLinkage::Internal {
         return Err(ConvertErrorFromCpp::StaticDataWithInternalLinkage(
             ident.to_string(),
@@ -207,6 +221,21 @@ fn analyze_static(
     // check below looks for.
     match strip_const_markers(ty) {
         Type::Path(typ) => {
+            // A variable's type is recorded as a bare name and nothing else,
+            // and the name of a template instantiation says nothing without
+            // its arguments. Everything downstream would work from `vector`
+            // where C++ wrote `std::vector<int>`, so this is turned down where
+            // the arguments are still here to be seen.
+            if typ
+                .path
+                .segments
+                .iter()
+                .any(|seg| !matches!(seg.arguments, PathArguments::None))
+            {
+                return Err(ConvertErrorFromCpp::StaticDataOfUnholdableType(
+                    QualifiedName::from_type_path(typ),
+                ));
+            }
             let is_cpp_type = typ
                 .path
                 .segments
@@ -220,6 +249,62 @@ fn analyze_static(
         }
         _ => Err(ConvertErrorFromCpp::StaticDataOfUnsupportedType),
     }
+}
+
+/// Whether the identifier `bindgen` gave a variable is also the name C++ knows
+/// it by.
+///
+/// bindgen reports the C++ spelling of a type and of a function and never of a
+/// variable, and it flattens a static data member's name into the enclosing
+/// namespace - `Anna::HELD` becomes `Anna_HELD`, which names nothing in C++.
+/// The mangled symbol is the one place the real name survives, so this asks
+/// what the symbol would be if the identifier and the namespaces were the
+/// whole of the name, and answers `true` only if that is the symbol there is.
+///
+/// Building the expected symbol rather than reading the one there is what
+/// keeps the answer exact: the components of a qualified name run together in
+/// a mangled symbol, so a namespace called `Anna_HELD` around a member
+/// `Anna::HELD` contains the flattened name without being it.
+///
+/// No symbol at all means bindgen found the identifier to be the symbol, which
+/// is what an unqualified C++ name mangles to. Anything neither scheme
+/// accounts for - a symbol given by hand with `asm`, a mangling autocxx does
+/// not know - answers `false`, which costs a variable of non-POD type its
+/// getter and nothing else.
+fn cpp_name_is_the_rust_ident(attrs: &[Attribute], ns: &Namespace, ident: &Ident) -> bool {
+    let Some(link_name) = link_name_from_attrs(attrs) else {
+        return true;
+    };
+    // bindgen marks a name to be taken literally with a leading \u{1}, and
+    // Darwin puts an underscore in front of every symbol, so the Itanium form
+    // is compared against both spellings rather than searched for.
+    let link_name = link_name.trim_start_matches('\u{1}');
+    let name = ident.to_string();
+    let itanium = if ns.is_empty() {
+        // Itanium leaves an unqualified variable's name alone.
+        name.clone()
+    } else {
+        let components: String = ns
+            .iter()
+            .chain(std::iter::once(name.as_str()))
+            .map(|segment| format!("{}{segment}", segment.len()))
+            .collect();
+        format!("_ZN{components}E")
+    };
+    // MSVC writes the scopes after the name, innermost first, and then encodes
+    // the type - so this is a prefix rather than the whole symbol.
+    let msvc = format!(
+        "?{name}@{}@",
+        ns.iter()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|s| format!("{s}@"))
+            .collect::<String>()
+    );
+    link_name == itanium
+        || link_name.strip_prefix('_') == Some(itanium.as_str())
+        || link_name.starts_with(&msvc)
 }
 
 /// The mangled symbol name which bindgen recorded for an item, if it differed

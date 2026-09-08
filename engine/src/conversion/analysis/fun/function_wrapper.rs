@@ -609,6 +609,14 @@ pub(crate) enum CppFunctionBody {
     /// in C++. The [`ReceiverMutability`] is the cast's, the receiver being a
     /// reference to `const` for a `const` member.
     BaseClassMethodCall(String, CppEffectiveName, ReceiverMutability),
+    /// Read a data member off the receiver, by the name C++ gives it. This is
+    /// the whole body of a synthesized field accessor; see
+    /// `analysis::field_accessors`.
+    FieldRead(String),
+    /// Read a C++ variable with static storage duration. This is the whole
+    /// body of the getter synthesized for one whose type Rust cannot be shown
+    /// as bindgen declared it; see `analysis::statics`.
+    VariableRead(QualifiedName),
     StaticMethodCall(Namespace, Ident, CppEffectiveName),
     PlacementNew(Namespace, Ident),
     ConstructSuperclass(String),

@@ -26,6 +26,7 @@ use crate::{
         type_helpers::array_element_type,
         ConvertErrorFromCpp,
     },
+    known_types::known_types,
     parse_callbacks::{BaseClass, DataMember, UsingDeclaration},
     types::{Namespace, QualifiedName},
     ParseCallbackResults,
@@ -178,6 +179,36 @@ pub(crate) fn analyze_pod_apis(
     );
     assert!(more_extra_apis.is_empty());
     Ok(results)
+}
+
+/// The types Rust may hold, and hand to and from C++, by value: the ones this
+/// analysis found or was told are POD, plus the built-ins whose Rust and C++
+/// spellings are the same object.
+///
+/// Everything else crosses in a `cxx::UniquePtr` or behind a reference, so
+/// this set is what decides the shape of any signature autocxx writes for
+/// itself as well as the ones it converts.
+pub(crate) fn pod_safe_types(apis: &ApiVec<PodPhase>) -> HashSet<QualifiedName> {
+    apis.iter()
+        .filter_map(|api| match api {
+            Api::Struct {
+                analysis:
+                    PodAnalysis {
+                        kind: TypeKind::Pod,
+                        ..
+                    },
+                ..
+            } => Some(api.name().clone()),
+            Api::Enum { .. } => Some(api.name().clone()),
+            Api::ExternCppType { pod: true, .. } => Some(api.name().clone()),
+            _ => None,
+        })
+        .chain(
+            known_types()
+                .get_pod_safe_types()
+                .filter_map(|(tn, is_pod_safe)| if is_pod_safe { Some(tn) } else { None }),
+        )
+        .collect()
 }
 
 fn analyze_enum(
