@@ -92,36 +92,35 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
         // tool family (so cl.exe no longer prints D9002 "ignoring unknown
         // option" once per fixture build), and emits it BEFORE per-test
         // modifier flags, so tests appending -std=c++17 still win.
-        .std("c++14")
-        .flag_if_supported("/GX"); // Enable C++ exceptions for msvc
-                                   // Ask cc for a warning set rather than leaving it to decide, because its
-                                   // own choice is conditional in a way nobody would guess: it adds one only
-                                   // when CXXFLAGS is absent from the environment. CI sets CXXFLAGS on every
-                                   // leg of the test and examples jobs - to `/EHsc` on MSVC and to the empty
-                                   // string elsewhere, which counts as set - so CI got nothing at all from
-                                   // cc, while someone running the suite locally got cc's full default.
-                                   // `warnings(true).extra_warnings(false)` is the same set whatever CXXFLAGS
-                                   // holds: `-Wall` on gcc and clang, `/W4` on MSVC, and no `-Wextra` (which
-                                   // MSVC has no equivalent of, so leaving it out is part of what makes the
-                                   // two comparable).
-                                   //
-                                   // Asking cc to turn warnings ON, rather than off and then passing the
-                                   // flags ourselves, which looks equivalent and is not: cc 1.2.50 made
-                                   // `warnings(false)` emit `-w` (rust-lang/cc-rs#1633, closing
-                                   // rust-lang/cc-rs#283 - before that release the call silently did
-                                   // nothing), and `-w`
-                                   // beats `-Wall -Werror` in either order on clang - an unused variable
-                                   // compiles clean - so a lockfile bump would have silently deleted the
-                                   // coverage this is here to pin down. This direction can only fail the
-                                   // other way: the worst a future cc can do to it is hand us a different
-                                   // set of warnings to obey, never none.
-                                   //
-                                   // What must not be done is to pass `-Wall` by hand. On gcc and clang that
-                                   // names a curated set; cl.exe reads it as `/Wall`, which Microsoft
-                                   // documents as every warning which is off by default - most of them fired
-                                   // by the C++ standard library's own headers - and which put tens of
-                                   // thousands of lines into every Windows CI log. `/W4` is the curated
-                                   // equivalent, and is what `warnings(true)` asks for.
+        .std("c++14");
+    // Ask cc for a warning set rather than leaving it to decide, because its
+    // own choice is conditional in a way nobody would guess: it adds one only
+    // when CXXFLAGS is absent from the environment. CI sets CXXFLAGS on every
+    // leg of the test and examples jobs - to `/EHsc` on MSVC and to the empty
+    // string elsewhere, which counts as set - so CI got nothing at all from
+    // cc, while someone running the suite locally got cc's full default.
+    // `warnings(true).extra_warnings(false)` is the same set whatever CXXFLAGS
+    // holds: `-Wall` on gcc and clang, `/W4` on MSVC, and no `-Wextra` (which
+    // MSVC has no equivalent of, so leaving it out is part of what makes the
+    // two comparable).
+    //
+    // Asking cc to turn warnings ON, rather than off and then passing the
+    // flags ourselves, which looks equivalent and is not: cc 1.2.50 made
+    // `warnings(false)` emit `-w` (rust-lang/cc-rs#1633, closing
+    // rust-lang/cc-rs#283 - before that release the call silently did
+    // nothing), and `-w`
+    // beats `-Wall -Werror` in either order on clang - an unused variable
+    // compiles clean - so a lockfile bump would have silently deleted the
+    // coverage this is here to pin down. This direction can only fail the
+    // other way: the worst a future cc can do to it is hand us a different
+    // set of warnings to obey, never none.
+    //
+    // What must not be done is to pass `-Wall` by hand. On gcc and clang that
+    // names a curated set; cl.exe reads it as `/Wall`, which Microsoft
+    // documents as every warning which is off by default - most of them fired
+    // by the C++ standard library's own headers - and which put tens of
+    // thousands of lines into every Windows CI log. `/W4` is the curated
+    // equivalent, and is what `warnings(true)` asks for.
     b.warnings(true).extra_warnings(false);
     if target.contains("msvc") {
         // Exception unwinding, asked for explicitly rather than through the
@@ -135,6 +134,14 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
         // resolves is any compile through this harness depending on it.
         // gcc and clang enable exceptions by default, so the other branch
         // needs nothing.
+        //
+        // The gate is the target triple, not the compiler family cc actually
+        // chose. They part company only if `CXX` is pointed at a cl-style
+        // driver for a non-MSVC triple - `CXX=clang-cl` with a
+        // `*-pc-windows-gnu` toolchain, where clang-cl defaults to exceptions
+        // off and this branch is not taken. Nothing in this repo or its CI
+        // does that; the windows-gnu leg gets MinGW g++, which has exceptions
+        // on by default.
         b.flag("/EHsc");
     }
     // Warnings are errors, in each compiler's spelling. cl.exe took until
