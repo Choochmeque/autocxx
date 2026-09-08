@@ -546,6 +546,7 @@ hold by value comes back by value, anything else comes back as a reference borro
 object, and an array or reference member gets a documented refusal instead of an accessor.
 There are no setters yet.</li>
 <li>You can't even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
+<li>You can't send one to another thread, or share one between threads: they're neither <code>Send</code> nor <code>Sync</code>, because <code>autocxx</code> can't know whether your C++ type tolerates that. See <a href="safety.html#thread-safety">thread safety</a> if you know that yours does.</li>
 </ul>
 <p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don't worry: you can't mess this up. If the C++ type doesn't in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you're <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they're trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
 <p>See <a href="storage.html">the chapter on storage</a> for lots more detail on how you can hold onto non-POD types.</p>
@@ -2215,6 +2216,40 @@ reference:</p>
 <li>cxx may allow multiple conflicting Rust references to exist to 'trivial' data types ("plain old data" or POD in autocxx parlance), but they're rare. autocxx may allow conflicting Rust references to exist even to 'opaque' (non-POD) data, and they're more common. This difference exists because opaque data is zero-sized in cxx, and zero-sized references cannot conflict. (In autocxx, we tell Rust about the size in order that we can allocate such types on the stack.)</li>
 </ul>
 <p>There are preliminary explorations to avoid this problem by using a C++ reference wrapper type. See <code>examples/reference-wrappers</code>.</p>
+<h2 id="thread-safety"><a class="header" href="#thread-safety">Thread safety</a></h2>
+<p><code>autocxx</code> assumes nothing about the thread safety of your C++ types, so the non-POD types it generates are neither <a href="https://doc.rust-lang.org/std/marker/trait.Send.html"><code>Send</code></a> nor <a href="https://doc.rust-lang.org/std/marker/trait.Sync.html"><code>Sync</code></a>. This follows cxx, which says the same of its opaque types.</p>
+<p>Nothing in a C++ class declaration reveals whether its objects may cross a thread boundary. A class might hold a lock it has taken, an index into a thread-local pool, or a destructor which has to run on the thread that constructed the object. <code>Send</code> is exactly the claim that moving a value to another thread is allowed, and <code>autocxx</code> is not in a position to make that claim on your behalf.</p>
+<p>This extends to the pointers you hold them in: <code>cxx</code> grants <code>UniquePtr&lt;T&gt;: Send</code> only where <code>T: Send</code>, so a <code>UniquePtr</code> to a non-POD type won't cross a thread boundary either.</p>
+<p>If you know a particular C++ type really is thread safe, you can say so. <code>include_cpp!</code> expands into the crate that invokes it, so in that crate the generated type is local and the impl is yours to write:</p>
+<pre><code class="language-rust ignore">// SAFETY: a MyType may be used and destroyed on any one thread.
+unsafe impl Send for ffi::MyType {}
+
+// SAFETY: MyType's const methods may additionally be called concurrently
+// through shared references.
+unsafe impl Sync for ffi::MyType {}</code></pre>
+<p>The <code>unsafe</code> is the point: those claims are yours to justify, and they are two different claims. <code>Send</code> says an object may be handed from one thread to another - so audit the destructor as well as the methods, since it runs wherever the value is finally dropped. <code>Sync</code> says two threads may use one object <em>at the same time</em> through <code>&amp;</code>, which is a stronger thing to promise: a C++ <code>const</code> method is free to update a <code>mutable</code> cache without synchronising, and that races even though nothing in Rust looks mutable.</p>
+<p>Audit the whole safe API the impl exposes, not merely the calls you have in mind today. Once written, the impl licenses every caller, including your own downstream users.</p>
+<p>Generated types with type or lifetime parameters can have the impl too, but there the claim must hold for <em>every</em> instantiation it admits, which usually means a bound:</p>
+<pre><code class="language-rust ignore">// SAFETY: MyContainer owns its element and shares nothing else, so it may go
+// wherever the element may go.
+unsafe impl&lt;T: Send&gt; Send for ffi::MyContainer&lt;T&gt; {}</code></pre>
+<p><code>T: Send</code> is not a universal answer - it suits a container which owns its elements, whereas one handing out shared access to them would want <code>T: Sync</code>, and a container which is thread-affine for reasons of its own is unsuitable whatever <code>T</code> is. Work out which the C++ actually is.</p>
+<h3 id="if-the-bindings-come-from-someone-elses-crate"><a class="header" href="#if-the-bindings-come-from-someone-elses-crate">If the bindings come from someone else's crate</a></h3>
+<p>Only the crate containing the <code>include_cpp!</code> can write that impl. If you depend on a library which generates bindings and re-exports them, the type is foreign to you and Rust's orphan rule refuses the impl - re-exporting or aliasing it doesn't change that:</p>
+<pre><code class="language-rust ignore">use their_bindings::MyType;
+unsafe impl Send for MyType {} // error[E0117]</code></pre>
+<p>Ask that library to make the claim, since its author is the one who knows the C++ type. Failing that, wrap it in a type of your own and make the claim about the wrapper:</p>
+<pre><code class="language-rust ignore">pub struct SendMyType(cxx::UniquePtr&lt;their_bindings::MyType&gt;);
+
+// SAFETY: audited - MyType may be used and destroyed on any thread.
+unsafe impl Send for SendMyType {}
+
+impl SendMyType {
+    pub fn count(&amp;self) -&gt; u32 { self.0.count() }
+}</code></pre>
+<p>Note this doesn't make <code>their_bindings::MyType</code> itself <code>Send</code>, so it won't satisfy an API which demands that bound, and you'll be forwarding any methods you need.</p>
+<h3 id="pod-types-1"><a class="header" href="#pod-types-1">POD types</a></h3>
+<p>POD types are unaffected: they're plain data, and they're <code>Send</code> and <code>Sync</code> on the same terms as any other Rust struct with the same fields. Be aware that this is a statement about the data, not a promise about the C++ methods. A POD type which is merely an integer handle into thread-local state on the C++ side is <code>Send</code> as far as Rust is concerned, and keeping its methods on the right thread is still yours to arrange.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="using-the-generated-bindings"><a class="header" href="#using-the-generated-bindings">Using the generated bindings</a></h1>
 <p>Congratulations, you've built some bindings using <code>autocxx</code>!</p>
 <p>But are they Rustic? How can you ensure that users of the bindings get Rust-like safety?</p>
