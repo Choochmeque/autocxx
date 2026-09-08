@@ -6945,7 +6945,6 @@ fn test_typedef_to_ptr_is_marked_unsafe() {
 }
 
 #[test]
-#[ignore] // https://github.com/rust-lang/rust-bindgen/issues/3160
 fn test_issue_264() {
     let hdr = indoc! {"
     namespace a {
