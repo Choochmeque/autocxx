@@ -868,7 +868,13 @@ impl<'a> CppCodeGenerator<'a> {
             headers.push(Header::System("new"));
         }
         if need_allocators {
-            headers.push(Header::System("stddef.h"));
+            // `cstddef` for `std::size_t` and `std::max_align_t`, `new` for
+            // `std::align_val_t` and `type_traits` for the tag the prelude
+            // dispatches an over-aligned type on.
+            headers.push(Header::System("cstddef"));
+            headers.push(Header::System("exception"));
+            headers.push(Header::System("new"));
+            headers.push(Header::System("type_traits"));
             headers.push(Header::NewDeletePrelude);
         }
         let needs_move_or_copy = details

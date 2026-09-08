@@ -2769,6 +2769,13 @@ impl<'a> FnAnalyzer<'a> {
         })
     }
 
+    /// The two halves of the `unsafe impl MakeCppStorage`, which promise that
+    /// the block one hands out is aligned for `T` and that the other frees it
+    /// through the allocator which produced it. Both rest entirely on the C++
+    /// they call: `new_appropriately`/`delete_appropriately`, in
+    /// `codegen_cpp::new_and_delete_prelude`. `moveit` turns the returned
+    /// pointer straight into a `&mut MaybeUninit<T>`, so an under-aligned
+    /// block is undefined behaviour on the Rust side and not only in C++.
     fn generate_alloc_or_deallocate(
         &mut self,
         ideal_rust_name: &str,
