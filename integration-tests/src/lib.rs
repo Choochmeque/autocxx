@@ -920,6 +920,32 @@ pub fn run_test_expect_fail_with_errors_ex(
     assert_error_mentions(&err, expected);
 }
 
+/// As [`run_test_expect_fail_with_error_ex`], but for a test which also needs
+/// a builder modifier - a C++ standard, say, without which the header would
+/// fail for a different reason than the one being pinned.
+pub fn run_test_expect_fail_with_error_modified(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    directives: TokenStream,
+    builder_modifier: Option<BuilderModifier>,
+    expected: &str,
+) {
+    let err = do_run_test(
+        cxx_code,
+        header_code,
+        rust_code,
+        directives,
+        builder_modifier,
+        None,
+        None,
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("Unexpected success");
+    assert_error_mentions(&err, &[expected]);
+}
+
 fn assert_error_mentions(err: &TestError, expected: &[&str]) {
     // Both renderings, because a test may want to pin either: the `Debug` form
     // names the error variants, which is what a test about *classification*

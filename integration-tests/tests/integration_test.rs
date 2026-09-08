@@ -20,8 +20,9 @@ use crate::{
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
     run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
-    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_errors,
-    run_test_expect_fail_with_errors_ex, BuilderModifier, CodeCheckerFns, TestError,
+    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_error_modified,
+    run_test_expect_fail_with_errors, run_test_expect_fail_with_errors_ex, BuilderModifier,
+    CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -17225,6 +17226,228 @@ fn test_emplace_uses_overridden_new_and_delete() {
         rs,
         &["A", "reset_flags", "was_new_called", "was_delete_called"],
         &[],
+    );
+}
+
+/// A type wanting more alignment than `operator new` promises must be
+/// allocated by the aligned `operator new` C++17 added for it; the plain one
+/// may hand back storage the object is not allowed to live in. Freeing has to
+/// match, on both routes out: `delete` for an object which got constructed,
+/// and the other half of the pair for storage whose constructor threw.
+///
+/// What makes this deterministic is the counts, not the address: the plain
+/// global `operator new` and `operator delete` are replaced here so that
+/// using either is visible, since a platform allocator may over-align by luck
+/// and make an address check pass for the wrong reason. The address is
+/// asserted too, as the thing the counts are a proxy for.
+#[test]
+fn test_emplace_of_over_aligned_type_uses_aligned_new() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <new>
+        #include <stdexcept>
+        struct alignas(32) AlignedA {
+            AlignedA(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"aligned refuses\");
+                a = x;
+            }
+            uint32_t a = 0;
+            // Padded to a size nothing else in the process is likely to ask
+            // the global operator new for, so that counting by size really
+            // does count only this object.
+            char pad[220] = {};
+            uintptr_t address() const { return reinterpret_cast<uintptr_t>(this); }
+        };
+        uint32_t plain_news();
+        uint32_t plain_deletes();
+    "};
+    let cxx = indoc! {"
+        #include <cstdlib>
+        // Counted by size, and only for this object's own: a standard library
+        // allocates through the global operator new for reasons of its own -
+        // throwing an exception carries a message - and those must not be
+        // mistaken for the allocation under test.
+        static uint32_t plain_new_count = 0;
+        static uint32_t plain_delete_count = 0;
+        static void* watched = nullptr;
+        uint32_t plain_news() { return plain_new_count; }
+        uint32_t plain_deletes() { return plain_delete_count; }
+        void* operator new(std::size_t size) {
+            void* p = std::malloc(size == 0 ? 1 : size);
+            if (p == nullptr) throw std::bad_alloc();
+            if (size == sizeof(AlignedA)) {
+                plain_new_count++;
+                watched = p;
+            }
+            return p;
+        }
+        void operator delete(void* p) noexcept {
+            if (p != nullptr && p == watched) {
+                plain_delete_count++;
+                watched = nullptr;
+            }
+            std::free(p);
+        }
+        void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
+    "};
+    let rs = quote! {
+        {
+            let a = ffi::AlignedA::new(4).try_within_unique_ptr().unwrap();
+            assert_eq!(a.address() % 32, 0);
+        }
+        // Neither end of the pair went to the plain global.
+        assert_eq!(ffi::plain_news(), 0);
+        assert_eq!(ffi::plain_deletes(), 0);
+        // And the route out for storage which was never constructed into.
+        // The counts say nothing about this one - the exception which gets it
+        // there allocates on some standard libraries - but the free still has
+        // to be the one which matches, and under the sanitizer a mismatch is
+        // not silent.
+        assert!(ffi::AlignedA::new(0).try_within_unique_ptr().is_err());
+        assert_eq!(ffi::plain_news(), 0);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("AlignedA")
+            generate!("plain_news")
+            generate!("plain_deletes")
+            throws!("AlignedA::AlignedA")
+        },
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// A class with an allocator of its own is asked first, and both ends of the
+/// pair reach it: the object is built with `AlignedB::operator new`, and
+/// storage whose constructor threw - never constructed, so never freed by
+/// `delete` - goes back through `AlignedB::operator delete`.
+#[test]
+fn test_emplace_of_over_aligned_type_uses_the_classes_own_allocator() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <new>
+        #include <stdexcept>
+        struct alignas(32) AlignedB {
+            AlignedB(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"aligned refuses\");
+                a = x;
+            }
+            static void* operator new(std::size_t count);
+            static void operator delete(void* ptr) noexcept;
+            uint32_t a = 0;
+            // Filled out to the alignment rather than left to the compiler,
+            // which would pad it there and say so - and MSVC's C4324 is an
+            // error under the warning settings these tests build with.
+            char pad[28] = {};
+            uintptr_t address() const { return reinterpret_cast<uintptr_t>(this); }
+        };
+        uint32_t class_news();
+        uint32_t class_deletes();
+    "};
+    let cxx = indoc! {"
+        static uint32_t class_new_count = 0;
+        static uint32_t class_delete_count = 0;
+        uint32_t class_news() { return class_new_count; }
+        uint32_t class_deletes() { return class_delete_count; }
+        void* AlignedB::operator new(std::size_t count) {
+            class_new_count++;
+            return ::operator new(count, std::align_val_t(alignof(AlignedB)));
+        }
+        void AlignedB::operator delete(void* ptr) noexcept {
+            class_delete_count++;
+            ::operator delete(ptr, std::align_val_t(alignof(AlignedB)));
+        }
+    "};
+    let rs = quote! {
+        {
+            let b = ffi::AlignedB::new(5).try_within_unique_ptr().unwrap();
+            assert_eq!(ffi::class_news(), 1);
+            assert_eq!(b.address() % 32, 0);
+        }
+        assert_eq!(ffi::class_deletes(), 1);
+        // A constructor which throws leaves storage nobody constructed into,
+        // which comes back through the other half of the pair.
+        assert!(ffi::AlignedB::new(0).try_within_unique_ptr().is_err());
+        assert_eq!(ffi::class_news(), 2);
+        assert_eq!(ffi::class_deletes(), 2);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("AlignedB")
+            generate!("class_news")
+            generate!("class_deletes")
+            throws!("AlignedB::AlignedB")
+        },
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// Before C++17 the language has no aligned `operator new`, so there is
+/// nothing correct to allocate an over-aligned type with. Say so at compile
+/// time rather than hand back storage the object may not live in.
+#[test]
+fn test_emplace_of_over_aligned_type_before_cpp17_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct alignas(64) AlignedC {
+            AlignedC() {}
+            uint32_t a = 1;
+            char pad[60] = {};
+        };
+    "};
+    let rs = quote! {
+        let _ = ffi::AlignedC::new().within_unique_ptr();
+    };
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        rs,
+        &["AlignedC"],
+        &[],
+        "more alignment than operator new gives",
+    );
+}
+
+/// A class whose only allocation function takes an alignment is refused.
+/// Nothing here can tell which `operator delete` would match it - a probe for
+/// one is answered by a placement overload as readily as by a usual one - so
+/// the allocation goes unpaired, and saying so beats guessing.
+#[test]
+fn test_emplace_of_over_aligned_type_with_only_an_aligned_new_is_refused() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <new>
+        struct alignas(32) AlignedE {
+            AlignedE() {}
+            static void* operator new(std::size_t count, std::align_val_t al);
+            static void operator delete(void* ptr, std::align_val_t al) noexcept;
+            uint32_t a = 7;
+            char pad[28] = {};
+        };
+    "};
+    let rs = quote! {
+        let _ = ffi::AlignedE::new().within_unique_ptr();
+    };
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["AlignedE"], &[], None),
+        make_cpp17_adder(),
+        "declares an operator new taking an alignment",
     );
 }
 
