@@ -1,0 +1,534 @@
+Subject: Mark `volatile`-qualified types with a newtype wrapper
+
+Rust has no spelling for `volatile`, so bindgen drops it at every position C++
+can write it. `volatile int` and `int` are both `c_int`; a `volatile` member is
+an ordinary field; `volatile int a[3]` is `[c_int; 3]`; and `Holder<volatile
+int>` and `Holder<int>` come out as one type, though C++ says they are
+different specializations.
+
+The position which does the most damage is a variable. `extern volatile int g`
+comes out `pub static mut g: c_int`, byte for byte what a non-volatile `int`
+gets. Worse, `extern const volatile int g` comes out `pub static g: c_int` - a
+*non-`mut`* static, because `is_const` is read and honoured on its own. An
+immutable Rust static is one the compiler may cache or constant-fold reads of,
+which is the opposite of what `const volatile` promises, and `const volatile`
+is how a read-only hardware status register is declared.
+
+`const` had the same problem and `--use-const-newtype-wrapper` already answers
+it: `Type` records `is_const`, read from `clang_isConstQualifiedType`, and
+codegen wraps such a type in `__bindgen_marker_Const<T>` for a consumer to read
+back. This does the same for `volatile`. `Type` gains an `is_volatile` beside
+`is_const`, read from `clang_isVolatileQualifiedType`, and
+`--use-volatile-newtype-wrapper` wraps in `__bindgen_marker_Volatile<T>`. Off
+by default, so no existing output changes.
+
+`volatile` needs the marker in one place `const` does not. A `const` pointee
+survives without one, because `*const T` says it. Rust has no volatile pointer
+type, so without the marker nothing about a `volatile` type survives anywhere.
+
+Five details differ from a copy of the `const` path.
+
+`Type::new` does not take the new flag. A second bool beside `is_const` in a
+four-argument constructor would be swappable with it at every one of the twelve
+call sites, and most of those build a type of bindgen's own - a builtin, a
+wrapper, a sub-instantiation - which has no C++ qualifier to report.
+`with_volatile` records it at the sites which do read one off a clang type, and
+the rest keep the default.
+
+An array is qualified by its element: C++ says an array whose element type is
+cv-qualified is itself cv-qualified, and clang reports the qualifier on the
+element. `is_volatile` is therefore derived for `CXType_ConstantArray` the same
+way `is_const` already is.
+
+A `const volatile` type carries both markers, volatile innermost, so that it
+reads back in the order C++ writes it. `strip_const_wrapper` accordingly
+becomes `strip_qualifier_wrappers` and peels repeatedly; its one caller wants
+the type's own name, and neither marker is part of it.
+
+A pointee needs the marker put back by hand. `*const T` carries a pointee's
+constness, and there is no `*volatile T` to carry the other qualifier, so the
+pointer arm reads it off the pointee before resolving through type references -
+which lands on a node that never had it - and re-applies it to the rendered
+pointee, guarding against nesting the same way the template-argument arm does.
+Without that, `Holder<volatile S*>` and `Holder<S*>` are one type in the output
+even though C++ says they are different specializations.
+
+A `volatile` variable is not lowered to a constant. `volatile int g = 1;` was
+emitted as a Rust `const` carrying the value, which fixes it at compile time -
+the one outcome the qualifier most clearly forbids - and a marker on the
+emitted type could not have undone it. The string case could not even be
+marked: it substitutes a `&[u8; N]` for the declared type and says so in a
+`TODO` of its own. With the option on, such a variable takes the `extern`
+declaration path instead, where the qualifier survives on the type.
+
+One hunk lands on code which is not upstream: the `--represent-std-array`
+lowering builds a `Type` of its own and records `is_const` without a
+counterpart. Anyone rebasing this onto a tree without that option should drop
+that hunk.
+
+One position the marker cannot reach, so `denote_data_member` reports it
+instead. A run of bitfields shares one allocation unit and each member of it
+survives only as accessors over that unit, so there is no field of the member's
+own type for a marker to land on - the accessors' signatures carry it and
+nothing else does. `DataMemberInfo` already reports `is_const` for exactly this
+reason; it now reports `is_volatile` beside it, read through aliases the same
+way.
+
+One known gap, which `--use-const-newtype-wrapper` shares for the same reason:
+a qualifier written on an alias rather than on the declaration is resolved
+through before the alias is emitted, so `typedef volatile int vi;` loses it,
+exactly as `typedef const E CE` does. (`is_volatile_through_aliases`, used by
+the data-member report, does see through such an alias; it is the *emitted
+type* which cannot.)
+
+diff -u -r bench.orig/callbacks.rs bench/callbacks.rs
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -650,6 +650,13 @@
+     /// `--use-const-newtype-wrapper`, which can only reach the accessors.
+     pub is_const: bool,
+ 
++    /// Whether C++ qualified the member's own type `volatile`. Lost the same
++    /// way `is_const` is, and for a bitfield lost even with
++    /// `--use-volatile-newtype-wrapper`: a run of bitfields shares one
++    /// allocation unit, so the marker reaches the accessors over it and there
++    /// is no field of the member's own type for it to land on.
++    pub is_volatile: bool,
++
+     /// The member's width in bits, if it is a bitfield.
+     pub bitfield_width: Option<u32>,
+ 
+diff -u -r bench.orig/codegen/helpers.rs bench/codegen/helpers.rs
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -171,6 +171,25 @@
+ /// The name of the marker newtype `const_wrapper` puts round a `const` type.
+ const CONST_MARKER: &str = "__bindgen_marker_Const";
+ 
++/// The name of the marker newtype `volatile_wrapper` puts round a `volatile`
++/// type.
++const VOLATILE_MARKER: &str = "__bindgen_marker_Volatile";
++
++/// A type which C++ qualified `volatile` in its own right, wrapped in a marker
++/// newtype if one was asked for.
++pub(crate) fn volatile_wrapper(
++    ty: syn::Type,
++    is_volatile: bool,
++    ctx: &BindgenContext,
++) -> syn::Type {
++    if is_volatile && ctx.options().use_volatile_newtype_wrapper {
++        let marker = Ident::new(VOLATILE_MARKER, Span::call_site());
++        syn::parse_quote! { #marker < #ty > }
++    } else {
++        ty
++    }
++}
++
+ /// A type which C++ qualified `const` in its own right, wrapped in a marker
+ /// newtype if one was asked for.
+ pub(crate) fn const_wrapper(
+@@ -236,26 +255,32 @@
+     }
+ }
+ 
+-/// Undoes [`const_wrapper`], for the one place which needs to *name* a type
+-/// rather than declare something of it: a newtype alias's constructor. The
+-/// marker is not part of that constructor's name, and `Marker<Inner>(v)` is
+-/// not an expression whatever the marker is defined as.
+-pub(crate) fn strip_const_wrapper(ty: &syn::Type) -> &syn::Type {
+-    let syn::Type::Path(path) = ty else {
+-        return ty;
+-    };
+-    let Some(segment) = path.path.segments.last() else {
+-        return ty;
+-    };
+-    if segment.ident != CONST_MARKER {
+-        return ty;
+-    }
+-    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+-        return ty;
+-    };
+-    match args.args.first() {
+-        Some(syn::GenericArgument::Type(inner)) => inner,
+-        _ => ty,
++/// Undoes [`const_wrapper`] and [`volatile_wrapper`], for the one place which
++/// needs to *name* a type rather than declare something of it: a newtype
++/// alias's constructor. A marker is not part of that constructor's name, and
++/// `Marker<Inner>(v)` is not an expression whatever the marker is defined as.
++///
++/// Both are peeled, and repeatedly, because a `const volatile` type carries
++/// one inside the other.
++pub(crate) fn strip_qualifier_wrappers(mut ty: &syn::Type) -> &syn::Type {
++    loop {
++        let syn::Type::Path(path) = ty else {
++            return ty;
++        };
++        let Some(segment) = path.path.segments.last() else {
++            return ty;
++        };
++        if segment.ident != CONST_MARKER && segment.ident != VOLATILE_MARKER {
++            return ty;
++        }
++        let syn::PathArguments::AngleBracketed(args) = &segment.arguments
++        else {
++            return ty;
++        };
++        match args.args.first() {
++            Some(syn::GenericArgument::Type(inner)) => ty = inner,
++            _ => return ty,
++        }
+     }
+ }
+ 
+diff -u -r bench.orig/codegen/mod.rs bench/codegen/mod.rs
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -783,7 +783,17 @@
+         let var_ty = self.ty();
+         let ty = var_ty.to_rust_ty_or_opaque(ctx, &());
+ 
+-        if let Some(val) = self.val() {
++        // A `volatile` variable is not a constant, whatever initializer it was
++        // written with: the point of the qualifier is that every read of it
++        // happens, and emitting the value fixes it at compile time instead. No
++        // marker on the emitted type could undo that, and the string case does
++        // not even keep the declared type - it substitutes a `&[u8; N]`. So
++        // such a variable is emitted as the `extern` declaration below, where
++        // the qualifier survives on the type and a consumer can act on it.
++        let is_volatile = ctx.options().use_volatile_newtype_wrapper &&
++            ctx.resolve_type(var_ty).is_volatile();
++
++        if let Some(val) = self.val().filter(|_| !is_volatile) {
+             utils::call_discovered_item_callback(ctx, item, || {
+                 DiscoveredItem::Constant {
+                     final_name: canonical_name.clone(),
+@@ -880,9 +890,9 @@
+                     )
+                 {
+                     // The alias's own newtype is what the value is built as;
+-                    // the const marker, if the type carries one, wraps that
++                    // a qualifier marker, if the type carries one, wraps that
+                     // and is not part of the constructor's name.
+-                    let ctor = helpers::strip_const_wrapper(&ty);
++                    let ctor = helpers::strip_qualifier_wrappers(&ty);
+                     val = quote! { #ctor(#val) };
+                 }
+                 result.push(quote! {
+@@ -4963,9 +4973,16 @@
+         item: &Item,
+     ) -> error::Result<syn::Type> {
+         let ty = self.try_to_unqualified_rust_ty(ctx, item)?;
+-        // A `const` qualifier on the type itself has no Rust spelling, so
+-        // unless a marker newtype was asked for it is dropped here. Constness
+-        // of a *pointee* is not this: `to_ptr` renders that as `*const T`.
++        // A `const` or `volatile` qualifier on the type itself has no Rust
++        // spelling, so unless a marker newtype was asked for it is dropped
++        // here. Constness of a *pointee* is not this: `to_ptr` renders that as
++        // `*const T`. Volatility of one is, since Rust has no volatile pointer
++        // type for it to survive in.
++        //
++        // The volatile marker goes on first so that a `const volatile` type
++        // comes out `Const<Volatile<T>>`, which reads back in the order C++
++        // writes it.
++        let ty = helpers::volatile_wrapper(ty, self.is_volatile(), ctx);
+         Ok(helpers::const_wrapper(ty, self.is_const(), ctx))
+     }
+ }
+@@ -5078,6 +5095,12 @@
+                 }
+ 
+                 let is_const = ctx.resolve_type(inner).is_const();
++                // `*const T` carries a pointee's constness, and there is no
++                // `*volatile T` for it to carry the other qualifier, so this
++                // one has to be read off the pointee before resolving - which
++                // lands on a different node - and put back on the rendered
++                // pointee below.
++                let is_volatile = ctx.resolve_type(inner).is_volatile();
+ 
+                 let inner =
+                     inner.into_resolver().through_type_refs().resolve(ctx);
+@@ -5092,6 +5115,14 @@
+                 let ty = inner
+                     .to_rust_ty_or_opaque(ctx, &())
+                     .with_implicit_template_params(ctx, inner);
++                // As in the template-argument arm: if resolution stayed put, or
++                // landed on a node which is itself `volatile`, the marker is
++                // already there and adding it again would nest it.
++                let ty = helpers::volatile_wrapper(
++                    ty,
++                    is_volatile && !inner_ty.is_volatile(),
++                    ctx,
++                );
+ 
+                 // Avoid the first function pointer level, since it's already
+                 // represented in Rust.
+@@ -5218,15 +5249,19 @@
+                 // resolving, exactly as the pointer arm of `TryToRustTy for
+                 // Type` reads a pointee's, and put it back afterwards.
+                 let is_const = ctx.resolve_type(*arg).is_const();
++                let is_volatile = ctx.resolve_type(*arg).is_volatile();
+                 let arg = arg.into_resolver().through_type_refs().resolve(ctx);
+                 let ty = arg
+                     .try_to_rust_ty(ctx, &())?
+                     .with_implicit_template_params(ctx, arg);
+                 // If resolution stayed where it was, or landed on a node which
+-                // is itself `const`, `TryToRustTy for Type` has already
++                // is itself qualified, `TryToRustTy for Type` has already
+                 // qualified `ty` and doing it again would nest the marker.
+                 let is_const = is_const &&
+                     !arg.as_type().is_some_and(|ty| ty.is_const());
++                let is_volatile = is_volatile &&
++                    !arg.as_type().is_some_and(|ty| ty.is_volatile());
++                let ty = helpers::volatile_wrapper(ty, is_volatile, ctx);
+                 Ok(helpers::const_wrapper(ty, is_const, ctx))
+             })
+             .collect::<error::Result<Vec<_>>>()?;
+@@ -6773,6 +6808,9 @@
+             // resolve away the wrapper which holds the `const` qualifier.
+             let is_const =
+                 ctx.resolve_type(member.ty()).is_const_through_aliases(ctx);
++            let is_volatile = ctx
++                .resolve_type(member.ty())
++                .is_volatile_through_aliases(ctx);
+             ctx.options().for_each_callback(|cb| {
+                 cb.denote_data_member(
+                     parent,
+@@ -6781,6 +6819,7 @@
+                         cpp_name: member.name(),
+                         is_public: member.is_public(),
+                         is_const,
++                        is_volatile,
+                         bitfield_width: member.bitfield_width(),
+                         has_default_member_initializer: member
+                             .has_default_member_initializer(),
+diff -u -r bench.orig/ir/context.rs bench/ir/context.rs
+--- a/ir/context.rs
++++ b/ir/context.rs
+@@ -2014,7 +2014,8 @@
+             ty.fallible_layout(self).ok(),
+             type_kind,
+             ty.is_const(),
+-        );
++        )
++        .with_volatile(ty.is_volatile());
+         let item = Item::new(
+             with_id,
+             None,
+@@ -2336,7 +2337,11 @@
+         let layout = ty.fallible_layout(self).ok();
+         let location = ty.declaration().location();
+         let type_kind = TypeKind::ResolvedTypeRef(wrapped_id);
+-        let ty = Type::new(Some(spelling), layout, type_kind, is_const);
++        // The wrapper stands in for the type it wraps, so a qualifier written
++        // on that type has to be carried across it - resolving through the
++        // reference otherwise lands on a node which never had it.
++        let ty = Type::new(Some(spelling), layout, type_kind, is_const)
++            .with_volatile(ty.is_volatile());
+         let item = Item::new(
+             with_id,
+             None,
+@@ -2416,9 +2421,11 @@
+ 
+         let spelling = ty.spelling();
+         let is_const = ty.is_const();
++        let is_volatile = ty.is_volatile();
+         let layout = ty.fallible_layout(self).ok();
+         let location = ty.declaration().location();
+-        let ty = Type::new(Some(spelling), layout, type_kind, is_const);
++        let ty = Type::new(Some(spelling), layout, type_kind, is_const)
++            .with_volatile(is_volatile);
+         let id = self.next_item_id();
+         let item = Item::new(
+             id,
+diff -u -r bench.orig/ir/item.rs bench/ir/item.rs
+--- a/ir/item.rs
++++ b/ir/item.rs
+@@ -1610,6 +1610,7 @@
+         debug!("New unresolved type reference: {ty:?}, {location:?}");
+ 
+         let is_const = ty.is_const();
++        let is_volatile = ty.is_volatile();
+         let kind = TypeKind::UnresolvedTypeRef(ty, location, parent_id);
+         let current_module = ctx.current_module();
+ 
+@@ -1619,7 +1620,10 @@
+                 None,
+                 None,
+                 parent_id.unwrap_or_else(|| current_module.into()),
+-                ItemKind::Type(Type::new(None, None, kind, is_const)),
++                ItemKind::Type(
++                    Type::new(None, None, kind, is_const)
++                        .with_volatile(is_volatile),
++                ),
+                 Some(location.location()),
+             ),
+             None,
+diff -u -r bench.orig/ir/ty.rs bench/ir/ty.rs
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -36,6 +36,8 @@
+     kind: TypeKind,
+     /// Whether this type is const-qualified.
+     is_const: bool,
++    /// Whether this type is volatile-qualified.
++    is_volatile: bool,
+ }
+ 
+ /// The maximum number of items in an array for which Rust implements common
+@@ -66,9 +68,21 @@
+             layout,
+             kind,
+             is_const,
++            is_volatile: false,
+         }
+     }
+ 
++    /// Record that C++ qualified this type `volatile`.
++    ///
++    /// Separate from `new` because only the sites which build a `Type` out of
++    /// a clang type can answer it; the ones which synthesize a type of
++    /// bindgen's own - a builtin, a sub-instantiation of a template - have no
++    /// C++ qualifier to carry and keep the default.
++    pub(crate) fn with_volatile(mut self, is_volatile: bool) -> Self {
++        self.is_volatile = is_volatile;
++        self
++    }
++
+     /// Construct an opaque item from a clang type.
+     pub(crate) fn new_opaque_from_clang_ty(
+         ty: &clang::Type,
+@@ -78,6 +92,7 @@
+         let ty_kind = TypeKind::Opaque;
+         let is_const = ty.is_const();
+         Type::new(None, Some(layout), ty_kind, is_const)
++            .with_volatile(ty.is_volatile())
+     }
+ 
+     /// Which kind of type is this?
+@@ -287,6 +302,32 @@
+         self.is_const
+     }
+ 
++    /// Is this a `volatile` qualified type?
++    ///
++    /// Rust has no spelling for the qualifier at all - not even the escape
++    /// `const` has, where a `const` pointee survives as `*const T` - so unless
++    /// a consumer asked for the marker newtype this is the only place the fact
++    /// exists.
++    pub(crate) fn is_volatile(&self) -> bool {
++        self.is_volatile
++    }
++
++    /// [`Self::is_const_through_aliases`], for the other qualifier.
++    pub(crate) fn is_volatile_through_aliases(
++        &self,
++        ctx: &BindgenContext,
++    ) -> bool {
++        self.is_volatile ||
++            match self.kind {
++                TypeKind::ResolvedTypeRef(inner) |
++                TypeKind::Alias(inner) |
++                TypeKind::TemplateAlias(inner, ..) => {
++                    ctx.resolve_type(inner).is_volatile_through_aliases(ctx)
++                }
++                _ => false,
++            }
++    }
++
+     /// Is this a `const` qualified type, or an alias for one? `typedef const
+     /// int ci;` puts the qualifier on the alias's target, so something
+     /// declared `ci` is `const` without its own type saying so.
+@@ -936,7 +977,8 @@
+                         layout,
+                         TypeKind::Array(inner, len),
+                         ty.is_const(),
+-                    ),
++                    )
++                    .with_volatile(ty.is_volatile()),
+                     Some(cursor.canonical()),
+                 ));
+             }
+@@ -1446,7 +1488,15 @@
+             (ty.kind() == CXType_ConstantArray &&
+                 ty.elem_type().is_some_and(|element| element.is_const()));
+ 
+-        let ty = Type::new(name, layout, kind, is_const);
++        // C++ says an array whose element type is cv-qualified is itself
++        // cv-qualified, and clang reports the qualifier on the element rather
++        // than on the array, so both qualifiers have to be read the same way.
++        let is_volatile = ty.is_volatile() ||
++            (ty.kind() == CXType_ConstantArray &&
++                ty.elem_type().is_some_and(|element| element.is_volatile()));
++
++        let ty =
++            Type::new(name, layout, kind, is_const).with_volatile(is_volatile);
+         // TODO: maybe declaration.canonical()?
+         Ok(ParseResult::New(ty, Some(cursor.canonical())))
+     }
+diff -u -r bench.orig/options/cli.rs bench/options/cli.rs
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -715,6 +715,7 @@
+         use_opaque_newtype_wrapper,
+         use_reference_newtype_wrapper,
+         use_const_newtype_wrapper,
++        use_volatile_newtype_wrapper,
+         use_long_double_newtype_wrapper,
+         use_float128_newtype_wrapper,
+         vtable_generation,
+@@ -1031,6 +1032,7 @@
+             use_opaque_newtype_wrapper,
+             use_reference_newtype_wrapper,
+             use_const_newtype_wrapper,
++            use_volatile_newtype_wrapper,
+             use_long_double_newtype_wrapper,
+             use_float128_newtype_wrapper,
+             vtable_generation,
+diff -u -r bench.orig/options/mod.rs bench/options/mod.rs
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -261,6 +261,44 @@
+         as_args: "--use-const-newtype-wrapper",
+     },
+ 
++    /// Use a newtype wrapper to denote types which C++ qualified `volatile`.
++    /// Rust has no spelling for the qualifier at any depth - `volatile int`
++    /// and `int` are both `c_int`, and unlike `const`, whose pointee case
++    /// survives as `*const T`, there is no volatile pointer type to fall back
++    /// on either - so it is otherwise dropped everywhere. The wrapper is a
++    /// fake type called `__bindgen_marker_Volatile`, to be replaced by
++    /// post-processing the output or by a `use` injected with
++    /// `--every-module-raw-line` or similar.
++    ///
++    /// The position this matters most for is a variable: `extern const
++    /// volatile int x` is otherwise a plain immutable `static`, which tells
++    /// the compiler the value never changes - the opposite of what `const
++    /// volatile` means, and the declaration every read-only hardware status
++    /// register uses.
++    ///
++    /// Like the `const` marker, and unlike the opaque and reference ones, this
++    /// lands on types in positions which also carry a *value*, so the
++    /// definition supplied for it has to be transparent, i.e. `pub type
++    /// __bindgen_marker_Volatile<T> = T;` rather than a newtype struct, unless
++    /// the output is post-processed before it is compiled.
++    ///
++    /// A qualifier written on an alias rather than on the declaration is not
++    /// reached: `typedef volatile int vi;` is resolved through before the
++    /// alias is emitted, exactly as `--use-const-newtype-wrapper` does not
++    /// reach `typedef const E CE`.
++    use_volatile_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap `volatile`-qualified types in a fake
++            /// newtype wrapper which post-processors can replace with
++            /// something more sensible.
++            pub fn use_volatile_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_volatile_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-volatile-newtype-wrapper",
++    },
++
+     /// Whether a C++ `long double` should be marked as one.
+     ///
+     /// bindgen renders `long double` by its size: `f64` where it is eight

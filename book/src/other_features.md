@@ -93,6 +93,80 @@ undefined behaviour, and so is reading one whose value C++ changes through a
 `mutable` member of an otherwise `const` object - legal C++, but not something
 you can expose this way. Use a getter function for anything C++ writes to.
 
+## `volatile`
+
+Rust has no `volatile` type. It has volatile *accesses* -
+[`read_volatile`](https://doc.rust-lang.org/std/ptr/fn.read_volatile.html) and
+[`write_volatile`](https://doc.rust-lang.org/std/ptr/fn.write_volatile.html) -
+and nothing in a type or a signature carries the promise that a read may not be
+cached, reordered or elided. So a C++ declaration mapped straight onto a Rust
+type loses it: `autocxx` would have to generate a volatile *access*, and where
+it cannot, the binding does not keep what the qualifier says.
+
+The dividing line is *where the read happens*. C++ performing the access keeps
+the promise; an ordinary Rust load of a plainly mapped type does not.
+
+**Refused, by name.** A `volatile` variable, a field of a `generate_pod!`
+struct, and a template argument. In each of these Rust would end up doing the
+access itself - a re-exported `static` is read by ordinary Rust loads, a POD
+struct's fields are ordinary Rust fields - or, for a template argument, the
+qualifier would simply be dropped from the C++ `autocxx` writes, naming a
+different specialization. Each refusal says what to do instead, and it is
+usually the same thing: write a C++ function which performs the volatile access,
+and bind that.
+
+The variable case is the one worth knowing about, because binding it looks
+harmless and is not. `extern const volatile int status;` is how a read-only
+hardware register is declared, and the `const` alone would make it an immutable
+Rust `static` - which the compiler may constant-fold reads of, the exact
+opposite of what `volatile` asked for.
+
+**Bound, and honestly - where the value is a scalar.** A `volatile` data member
+of built-in, enumeration or pointer type keeps its getter. The C++ `autocxx`
+generates for it is `obj.member`, and reading a `volatile` glvalue *is* a
+volatile access - so the read happens in C++, once per call, and what crosses to
+Rust is the copy it produced.
+
+A member of class type is refused instead, whichever shape its getter would
+take. C++ copies a class by calling a constructor, and an implicitly declared
+copy constructor takes `const T&` or `T&` - neither of which a `volatile T`
+binds to - so `obj.member` does not compile for one however copyable it
+otherwise is. A borrowed getter is no better: it hands Rust a reference and lets
+Rust do the reading.
+
+A `volatile` **return** of scalar type is bound through a wrapper. A
+cv-qualified return type is part of a function's type and `cxx` declares a
+function by taking its address, so `int (*f$)() = ::f;` does not compile for a
+`volatile int f()`. `autocxx` already meets this for a `const` return and
+answers it the same way: its own wrapper returns the unqualified type and calls
+through.
+
+A class-type `volatile` return is refused. The wrapper would have to
+copy-initialize a `T` from a `volatile T`, which needs a constructor C++ does
+not implicitly declare, and so does not compile at C++14 - the standard
+`autocxx` generates its C++ against. C++17 initializes the result directly and
+would accept it, but the refusal is pinned to that floor rather than to whichever
+standard you happen to compile with.
+
+A **by-value parameter** binds as if the qualifier were not there, because as
+far as C++ is concerned it is not: a top-level cv-qualifier on a parameter is
+no part of a function's type, so `void f(volatile int)` and `void f(int)` are
+one function.
+
+A struct with a `volatile` member is still usable, whichever of these applies;
+it simply cannot be `generate_pod!`.
+
+**Not yet handled.** A pointer or reference *to* something `volatile` -
+`volatile int*`, `volatile int&` - which is the position `volatile` is most
+often used in real headers. A refusal is not the right answer for it; what it
+needs is a generated wrapper performing the access through
+`read_volatile`/`write_volatile`, and that does not exist yet. Until it does,
+such a signature fails to build inside generated C++ rather than being reported
+against the function you asked for. A volatile-qualified *method*
+(`void f() volatile`) is likewise unhandled, and worse: `libclang` exposes no
+way to ask, so where a class has both a plain and a volatile-qualified overload
+of one name, both bind to the plain one.
+
 ## String constants
 
 Whether from a preprocessor symbol or from a C++ `char*` constant,

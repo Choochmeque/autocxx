@@ -71,6 +71,11 @@ pub struct ByValueChecker {
     /// bindgen writes in place of the base fields, so that a C++ member which
     /// happens to be spelled like that field cannot be mistaken for one.
     has_bases: HashSet<QualifiedName>,
+    /// Types with a `volatile` bitfield. A bitfield has no field of its own -
+    /// a run of them shares one allocation unit - so nothing in the struct
+    /// bindgen emitted says the qualifier is there, and the walk over field
+    /// types below cannot see it. bindgen reports it per member instead.
+    volatile_bitfields: HashSet<QualifiedName>,
 }
 
 impl ByValueChecker {
@@ -88,6 +93,7 @@ impl ByValueChecker {
             results,
             virtually_inherited: HashSet::new(),
             has_bases: HashSet::new(),
+            volatile_bitfields: HashSet::new(),
         }
     }
 
@@ -104,6 +110,18 @@ impl ByValueChecker {
             .cloned()
             .collect();
         byvalue_checker.has_bases = parse_callback_results.types_with_bases().cloned().collect();
+        byvalue_checker.volatile_bitfields = apis
+            .iter()
+            .map(|api| api.name())
+            .filter(|name| {
+                parse_callback_results
+                    .data_members(name)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|member| member.is_bitfield && member.is_volatile)
+            })
+            .cloned()
+            .collect();
         for blocklisted in config.get_blocklist() {
             let tn = QualifiedName::new_from_cpp_name(blocklisted);
             let safety = PodState::UnsafeToBePod(format!("type {tn} is on the blocklist"));
@@ -296,13 +314,46 @@ impl ByValueChecker {
     fn ingest_struct(&mut self, def: &ItemStruct, ns: &Namespace) {
         // For this struct, work out whether it _could_ be safe as a POD.
         let tyname = QualifiedName::new(ns, def.ident.clone().into());
-        let mut field_safety_problem = PodState::SafeToBePod;
+        // Settled before the fields are walked, because a bitfield is not among
+        // them: a run of bitfields is one allocation unit, and the accessors
+        // bindgen writes over it are what carry the member's own type. A POD
+        // struct re-exports those accessors as they stand, and they read and
+        // write the bits without any of what `volatile` asked for. The walk
+        // below only ever replaces this with a problem of its own.
+        let mut field_safety_problem = if self.volatile_bitfields.contains(&tyname) {
+            PodState::UnsafeToBePod(format!(
+                "Type {tyname} could not be POD because it has a `volatile` bitfield. Rust \
+                 has no volatile type, only volatile reads and writes, so the accessors \
+                 would read and write the bits as if the qualifier were not there. Add a \
+                 C++ accessor which performs the volatile access, and bind that."
+            ))
+        } else {
+            PodState::SafeToBePod
+        };
         let fieldlist = Self::get_field_types(def);
         for ty_id in &fieldlist {
             match self.results.get(ty_id) {
                 None if ty_id.get_final_item() == "__BindgenUnionField" => {
                     field_safety_problem = PodState::UnsafeToBePod(format!(
                         "Type {tyname} could not be POD because it is a union"
+                    ));
+                    break;
+                }
+                // A `volatile` member. Rust expresses volatility in the access
+                // and never in the type, so a POD struct - whose fields are
+                // ordinary Rust fields - would hand out reads and writes the
+                // compiler may cache, reorder or elide. The type stays
+                // bindable, opaquely, and the member is then reachable through
+                // the accessor analysis, which gives one of scalar type a
+                // by-value getter performing the volatile read in C++ and
+                // refuses the rest by name.
+                None if ty_id.get_final_item() == "__bindgen_marker_Volatile" => {
+                    field_safety_problem = PodState::UnsafeToBePod(format!(
+                        "Type {tyname} could not be POD because it has a `volatile` member. \
+                         Rust has no volatile type, only volatile reads and writes, so a \
+                         Rust field of one would be accessed as if the qualifier were not \
+                         there. Add a C++ accessor which performs the volatile access, and \
+                         bind that."
                     ));
                     break;
                 }

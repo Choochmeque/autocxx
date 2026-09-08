@@ -72,6 +72,12 @@ pub enum ConvertErrorFromCpp {
     LongDouble,
     #[error("This signature mentions C++'s `__float128`, a 128-bit floating-point type Rust has no equivalent for: `f128` is not a stable Rust type, and the 128-bit type Rust does have, `u128`, is an integer - the same bits read as a different kind of number. bindgen substitutes that `u128` because it is the right size, and autocxx will not put it in a signature, because the shim would compile and the arithmetic on either side of it would be wrong. `unsigned __int128`, which arrives as the same `u128` token and really is that integer, is supported as `autocxx::c_u128`. Declaring the C++ function in terms of `double`, or adding a C++ wrapper which converts, is the way across. A `__float128` *field* is unaffected: it is bytes the struct carries and Rust never reads.")]
     Float128,
+    #[error("The C++ variable {0} is `volatile`, and autocxx has no way to keep that promise. Rust expresses volatility in the *access* - `read_volatile`/`write_volatile` - and never in the type, so a re-exported C++ variable is read by ordinary loads which the compiler may cache, reorder or elide. `const volatile`, the way a read-only hardware register is declared, is worse still: the `const` alone would make it an immutable Rust `static`, which the compiler may constant-fold outright. Binding it is therefore refused rather than done wrongly. Add a C++ accessor function which performs the volatile read or write, and bind that.")]
+    VolatileVariable(String),
+    #[error("The function {0} returns a `volatile`-qualified value of a type autocxx will not copy out of C++. A cv-qualified return type is part of a function's type, and cxx declares a function by taking its address, so autocxx calls it through a wrapper of its own which returns the unqualified type - the same thing it does for a `const` return. That wrapper's body copy-initializes a `T` from a `volatile T`. For a scalar - a built-in, an enumeration or a pointer - that is a read, and the wrapper is generated. For a class it needs a constructor taking `volatile T&` or `const volatile T&`, which C++ does not implicitly declare, so the wrapper does not compile at C++14 - the standard autocxx builds its generated code at. (C++17 initializes the result directly and would accept it; autocxx does not rely on that.) Return the unqualified type, or add a C++ wrapper which copies.")]
+    VolatileReturn(String),
+    #[error("A template argument here is `volatile`-qualified, and Rust has nowhere to put the qualifier. autocxx names a concrete instantiation in the generated C++ by writing its arguments out again, so the argument would be written without the `volatile` - naming a different specialization from the one C++ declared, which would compile and be the wrong type. Declare the instantiation in C++ with a non-`volatile` argument, or add an accessor which performs the volatile access itself.")]
+    VolatileTemplateArgument,
     #[error("Encountered static data whose type autocxx can't represent - only variables of POD type, or of a type which bindgen expresses directly in Rust, are supported")]
     StaticDataOfUnsupportedType,
     #[error("The C++ variable {0} has internal linkage, so there is no symbol for Rust to link against. (A namespace-scope variable declared `static`, or declared `const` without `extern`, or declared in an anonymous namespace, exists separately in each translation unit which includes the header.) Declare it `extern` and define it in exactly one C++ file if you want to use it from Rust.")]
@@ -276,6 +282,16 @@ pub enum UnrepresentableMember {
     /// the result should be borrowed from the object or from what the member
     /// refers to is a question C++ does not answer.
     Reference,
+    /// A `volatile` member whose accessor would have to borrow.
+    ///
+    /// Only this shape. A by-value getter is `obj.member` in the generated
+    /// C++, and reading a `volatile` glvalue is a volatile access, so the read
+    /// really happens, once per call, and Rust receives the copy - those are
+    /// generated as normal. A borrowed getter instead hands Rust a reference
+    /// and lets Rust read it, which is an ordinary load; it also does not
+    /// compile, since the `const T&` it returns will not bind to a
+    /// `const volatile T`.
+    Volatile,
     /// Anything else the type converter made of the member which an accessor's
     /// return type cannot be written around. It makes a field's type a path, a
     /// pointer, an array or a reference, so this is what a fourth kind would
@@ -288,6 +304,18 @@ impl std::fmt::Display for UnrepresentableMember {
         f.write_str(match self {
             Self::Array => "an array",
             Self::Reference => "a reference",
+            Self::Volatile => {
+                "`volatile`, and not of a scalar type - a built-in, an enumeration or a \
+                 pointer - which is the only kind C++ can copy out of a `volatile` object. \
+                 Copying a class calls a constructor, and an implicitly declared copy \
+                 constructor takes `const T&` or `T&`, neither of which a `volatile T` \
+                 binds to. Handing the member back \
+                 by reference instead is no better: that leaves Rust to do the reading, as \
+                 an ordinary load with none of what the qualifier asked for, and the \
+                 `const T&` returned will not bind to a `const volatile T` either. A \
+                 `volatile` member of scalar type is unaffected: its getter reads it in \
+                 C++, where the access really is volatile"
+            }
             Self::Unrepresentable => "of a kind autocxx has no accessor shape for",
         })
     }

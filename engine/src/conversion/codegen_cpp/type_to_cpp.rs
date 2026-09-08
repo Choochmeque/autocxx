@@ -8,7 +8,10 @@
 
 use crate::{
     conversion::{
-        api::Api, apivec::ApiVec, type_helpers::unwrap_const, AnalysisPhase, ConvertErrorFromCpp,
+        api::Api,
+        apivec::ApiVec,
+        type_helpers::{unwrap_const, unwrap_volatile},
+        AnalysisPhase, ConvertErrorFromCpp,
     },
     parse_callbacks::CppOriginalName,
     types::QualifiedName,
@@ -229,6 +232,20 @@ impl CppNameMap {
                     return Ok(match inner {
                         Type::Ptr(_) => format!("{inner_cpp} const"),
                         _ => format!("const {inner_cpp}"),
+                    });
+                }
+                // The volatile marker is written back the same way and placed by
+                // the same rule. No path reaches this today: the one place a
+                // type is named in C++ without being converted first is a
+                // template instantiation's arguments, and a `volatile` argument
+                // is refused before it gets there. It is here because the
+                // alternative, should a path ever reach it, is emitting
+                // `__bindgen_marker_Volatile` as if it were a C++ type name.
+                if let Some(inner) = unwrap_volatile(typ) {
+                    let inner_cpp = self.type_to_cpp(inner)?;
+                    return Ok(match inner {
+                        Type::Ptr(_) => format!("{inner_cpp} volatile"),
+                        _ => format!("volatile {inner_cpp}"),
                     });
                 }
                 // If this is a std::unique_ptr we do need to pass

@@ -16,8 +16,9 @@ use crate::{
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
             extract_pinned_mutable_reference_type, mentions_cpp_array, mentions_float128,
-            mentions_long_double, unwrap_bitfield, unwrap_const, unwrap_float128,
-            unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double, unwrap_reference,
+            mentions_long_double, mentions_volatile, unwrap_bitfield, unwrap_const,
+            unwrap_float128, unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double,
+            unwrap_reference, unwrap_volatile,
         },
         ConvertErrorFromCpp,
     },
@@ -320,6 +321,30 @@ impl<'a> TypeConverter<'a> {
             // default constructor, and the return-type analysis in `fun`,
             // which routes a `const`-returning function through a wrapper.
             Ok(self.convert_type(ty.clone(), ns, ctx)?.marked_const())
+        } else if let Some(ty) = unwrap_volatile(&typ) {
+            // The qualifier is peeled and the type carries on as what it
+            // qualifies. Nothing is refused here, because this arm is reached
+            // for a by-value parameter or return as well, and there the
+            // qualifier is genuinely spent: C++ has copied the value by the
+            // time Rust sees it, and `volatile` on a by-value parameter governs
+            // only the callee's re-reads of its own local copy.
+            //
+            // The positions where it is not spent are refused where the type
+            // still says so, before conversion peels it: a variable
+            // (`analyze_static`), a data member's accessor (`member_shape`), a
+            // POD struct's field (`byvalue_checker`) and a template argument
+            // (below). A `volatile` *pointee* is the position still without an
+            // answer. It is not refused here, and it does not work either: cxx
+            // declares the function by taking its address, so a `volatile T*`
+            // parameter leaves the generated C++ initializing a `void (*)(T*)`
+            // from a `void (volatile T*)`, which the C++ compiler rejects.
+            // Turning that into a refusal would be an improvement on the
+            // diagnostic and not on the outcome; what the position actually
+            // needs is a synthesized accessor built on
+            // `read_volatile`/`write_volatile`, since Rust has no volatile
+            // pointer type for the marker to become. That work slots in at
+            // `convert_ptr`.
+            self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ty) = unwrap_has_opaque(&typ) {
             // bindgen could not name the C++ type here, so it substituted a
             // blob of bytes of the right size and alignment. As field data
@@ -824,7 +849,20 @@ impl<'a> TypeConverter<'a> {
         // about is one nobody resolves: it goes into an opaque holder whole,
         // and asking would turn an alias autocxx cannot follow into a refusal
         // of a type which never needed it followed.
+        //
+        // A `volatile` argument is turned down before any of that. cxx names a
+        // container's payload as a plain type, with nowhere to put the
+        // qualifier, so `UniquePtr<T>` is what would be declared for a
+        // `std::unique_ptr<volatile T>` - a different C++ type, which the shim
+        // cxx writes then fails to bind against. Lowering to a holder is what
+        // rescues the `const` case and cannot rescue this one: the holder's
+        // accessors would still have to hand the payload to Rust, and Rust has
+        // no volatile type to hand it as. Asked here, before the branches
+        // below convert the arguments and peel the marker off.
         let generic_behavior = known_types().cxx_generic_behavior(&tn);
+        if generic_behavior != CxxGenericType::Not && mentions_volatile(&Type::Path(typ.clone())) {
+            return Err(ConvertErrorFromCpp::VolatileTemplateArgument);
+        }
         let payload_is_const = generic_behavior != CxxGenericType::Not
             && self.generic_args_are_const_qualified(&typ)?;
         if matches!(
@@ -1008,6 +1046,16 @@ impl<'a> TypeConverter<'a> {
                 }
                 if mentions_float128(&Type::Path(typ.clone())) {
                     return Err(ConvertErrorFromCpp::Float128);
+                }
+                // Same reasoning, and one step worse: writing the arguments out
+                // again drops the qualifier rather than leaking a marker name,
+                // so `Holder<volatile T>` would be named as `Holder<T>` - a
+                // specialization C++ declared separately, or did not declare at
+                // all. That compiles and is the wrong type. `std::array` is
+                // turned down for this in bindgen, before autocxx sees it; this
+                // covers every other template.
+                if mentions_volatile(&Type::Path(typ.clone())) {
+                    return Err(ConvertErrorFromCpp::VolatileTemplateArgument);
                 }
                 let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
                 extra_apis.extend(api.into_iter());

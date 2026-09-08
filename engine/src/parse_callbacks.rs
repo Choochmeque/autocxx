@@ -223,6 +223,10 @@ pub(crate) struct DataMember {
     pub(crate) is_public: bool,
     /// Whether C++ declared the member's own type `const`.
     pub(crate) is_const: bool,
+    /// Whether C++ declared the member's own type `volatile`. For a bitfield
+    /// this is the only thing which says so: there is no field of the member's
+    /// own type for bindgen's marker to land on.
+    pub(crate) is_volatile: bool,
     /// Whether the member is a bitfield, and so has no field of its own in the
     /// struct bindgen emitted.
     pub(crate) is_bitfield: bool,
@@ -911,6 +915,7 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                 cpp_name: member.cpp_name.map(str::to_string),
                 is_public: member.is_public,
                 is_const: member.is_const,
+                is_volatile: member.is_volatile,
                 is_bitfield: member.bitfield_width.is_some(),
                 // bindgen answers `None` where it could not ask clang - a
                 // member declared by a macro expansion - and its own
