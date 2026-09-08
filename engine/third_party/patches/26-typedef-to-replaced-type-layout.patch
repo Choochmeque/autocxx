@@ -1,0 +1,127 @@
+Subject: Size a field through a typedef, so a replaced type still pads
+
+`<div rustbindgen replaces="X"></div>` tells bindgen to bind `X` as some other
+type the header declares, and that other type is usually a different size: the
+annotation exists to substitute a Rust-shaped stand-in for a C++ type Rust
+cannot express. bindgen already knows how to keep the layout of a struct with
+such a field honest. It records the replacement as a `ResolvedTypeRef` on the
+replaced type, and `FieldData::codegen` resolves the field's type through
+`ResolvedTypeRef`s before asking `StructLayoutTracker` for the field's layout,
+so the tracker sees the size the emitted Rust field really has and pads the
+struct out to the size clang reported for it.
+
+A typedef in between defeats that. `ItemResolver` deliberately does not follow
+`Alias`, so
+
+    struct Real { unsigned long a; unsigned long b; unsigned long c; };
+    /** <div rustbindgen replaces="Real"></div> */
+    struct Stand { void* p; };
+    typedef Real my_real;
+    struct A { my_real a; };
+    struct B { Real a; };
+
+pads `B` by sixteen bytes and `A` not at all, though C++ calls their one field
+the same type. The tracker was handed the typedef, whose layout is the one
+clang computed - the size of `Real`, not the size of `Stand`, which is what the
+field is written as - concluded the field filled the struct, and emitted no
+trailing padding. `A` is then a third of the width of the object C++ hands it,
+and every object crossing the boundary is truncated.
+
+Follow aliases as well, for the layout query alone. Everything else the arm does
+with the field's type - the incomplete-array and flexible-array-member checks,
+the type name it reports through `ParseCallbacks` - keeps looking at the type
+the field was declared with, which is the type those want.
+
+The walk stops where codegen writes something sized from the alias rather than
+from what it aliases. Two of those are exactly the conditions the `Alias` arms
+of `TryToRustTy for Type` and `CodeGenerator for Type` test: an alias which is
+opaque, written as a blob of its own layout, and an alias named for a type Rust
+already has, `uint64_t` and `size_t` among them, written as that type whatever
+it was declared over. The third is deliberately wider than the arm it guards -
+an aliased type with no layout is written as a blob of the alias's layout only
+once conversion has failed - but a type with no layout has no answer to give a
+layout question either, so the walk stops on the missing layout alone. It also
+stops on a repeated item, so a typedef cycle cannot spin.
+
+Addresses the bug reported as rust-lang/rust-bindgen#3158.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -33,7 +33,7 @@
+     Bitfield, BitfieldUnit, CompInfo, CompKind, Field, FieldData, FieldMethods,
+     Method, MethodKind,
+ };
+-use crate::ir::context::{BindgenContext, ItemId};
++use crate::ir::context::{BindgenContext, ItemId, TypeId};
+ use crate::ir::derive::{
+     CanDerive, CanDeriveCopy, CanDeriveDebug, CanDeriveDefault, CanDeriveEq,
+     CanDeriveHash, CanDeriveOrd, CanDerivePartialEq, CanDerivePartialOrd,
+@@ -1574,6 +1574,53 @@
+     }
+ }
+ 
++/// The item whose layout the Rust type written for a field actually has.
++///
++/// Usually that is the type the field was declared with, but not when a
++/// `replaces=` annotation stands another type in its place: the replacement is
++/// recorded as a `ResolvedTypeRef` on the replaced type, which goes on carrying
++/// the layout C++ gave it, while the type written for the field is the
++/// replacement's and has the replacement's size. `ItemResolver` follows
++/// `ResolvedTypeRef` for that reason, but it does not follow `Alias`, so a
++/// typedef in front of a replaced type hides the substitution and the struct is
++/// laid out - and padded - for a size the emitted field does not have.
++///
++/// So follow aliases too, and stop where the `TypeKind::Alias` arms of
++/// `TryToRustTy for Type` and `CodeGenerator for Type` write something sized
++/// from the alias rather than from what it aliases. An opaque alias is a blob
++/// of the alias's own layout, and an alias named for a type Rust already has is
++/// written as that type whatever it was declared over; those two are exactly
++/// the arms' own conditions. The third stop is deliberately wider than the arm
++/// it guards: an aliased type with no layout is only *sometimes* written as a
++/// blob of the alias's layout - conversion has to fail first - but the layout
++/// question has no answer either way, so the walk stops on the layout alone.
++fn field_representation<'a>(ctx: &'a BindgenContext, ty: TypeId) -> &'a Item {
++    let mut item = ty.into_resolver().through_type_refs().resolve(ctx);
++    let mut seen = HashSet::default();
++    while seen.insert(item.id()) {
++        let Some(alias) = item.as_type() else {
++            break;
++        };
++        let TypeKind::Alias(inner) = *alias.kind() else {
++            break;
++        };
++        if item.is_opaque(ctx, &()) ||
++            alias
++                .name()
++                .and_then(|name| utils::type_from_named(ctx, name))
++                .is_some()
++        {
++            break;
++        }
++        let next = inner.into_resolver().through_type_refs().resolve(ctx);
++        if next.as_type().and_then(|ty| ty.layout(ctx)).is_none() {
++            break;
++        }
++        item = next;
++    }
++    item
++}
++
+ impl FieldCodegen<'_> for FieldData {
+     type Extra = ();
+ 
+@@ -1675,9 +1722,11 @@
+         let field_name = field_name.as_str();
+         let field_ident = ctx.rust_ident_raw(field_name);
+ 
+-        if let Some(padding_field) =
+-            struct_layout.saw_field(field_name, field_ty, self.offset())
+-        {
++        if let Some(padding_field) = struct_layout.saw_field(
++            field_name,
++            field_representation(ctx, self.ty()).expect_type(),
++            self.offset(),
++        ) {
+             fields.extend(Some(padding_field));
+         }
+ 

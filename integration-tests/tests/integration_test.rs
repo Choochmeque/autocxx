@@ -6224,7 +6224,6 @@ fn test_up_in_struct() {
 }
 
 #[test]
-#[ignore] // https://github.com/rust-lang/rust-bindgen/issues/3158
 fn test_typedef_to_std_in_struct() {
     let hdr = indoc! {"
         #include <string>
@@ -6945,7 +6944,6 @@ fn test_typedef_to_ptr_is_marked_unsafe() {
 }
 
 #[test]
-#[ignore] // https://github.com/rust-lang/rust-bindgen/issues/3160
 fn test_issue_264() {
     let hdr = indoc! {"
     namespace a {
@@ -18207,7 +18205,82 @@ fn test_pass_rust_str_and_return_struct() {
 }
 
 #[test]
-#[ignore] // https://github.com/rust-lang/rust-bindgen/issues/3161
+fn test_template_argument_with_no_cursor_of_its_own() {
+    // `holder<at, int>` writes two template arguments and libclang gives a
+    // cursor to only one of them, `int` being a builtin. See
+    // rust-lang/rust-bindgen#3161.
+    let hdr = indoc! {"
+        template <typename U, typename V> class holder { U* p; V* q; };
+        template <typename at> class au { holder<at, int> aw; };
+        class bb;
+        using bc = au<bb>;
+        class RenderFrameHost {
+        public:
+        virtual bc &bd() = 0;
+        virtual ~RenderFrameHost() {}
+        };
+    "};
+    let rs = quote! {};
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        // Not just that it compiles: both arguments have to come back, and as
+        // themselves. `au` losing `at`, or either argument arriving as an
+        // opaque blob, still compiles and is still the wrong binding.
+        Some(make_rust_code_finder(vec![quote! {
+            aw: root::holder<at, ::std::os::raw::c_int>
+        }])),
+        None,
+    );
+}
+
+#[test]
+fn test_template_argument_left_to_its_default() {
+    // The same as above for the other kind of cursorless argument: `holder`'s
+    // second parameter is defaulted, so `holder<at>` writes one argument where
+    // the template declares two. The default is the first parameter, so the
+    // argument bindgen has to put back is `at` under the name clang
+    // canonicalises it to; and `holder` uses both, so recovering the wrong
+    // type for it cannot be hidden by used-parameter filtering.
+    let hdr = indoc! {"
+        template <typename U, typename D = U> class holder { U* p; D* q; };
+        template <typename at> class au { holder<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        class RenderFrameHost {
+        public:
+        virtual bc &bd() = 0;
+        virtual ~RenderFrameHost() {}
+        };
+    "};
+    let rs = quote! {};
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        // The second `at` is the assertion that matters: the defaulted argument
+        // arrives under clang's canonical spelling rather than the name it was
+        // written under, and recovering it as an opaque blob instead compiles
+        // perfectly well.
+        Some(make_rust_code_finder(vec![quote! {
+            aw: root::holder<at, at>
+        }])),
+        None,
+    );
+}
+
+#[test]
+// The bindgen half of this is fixed: `au<bb>` keeps its template argument now,
+// which is what rust-lang/rust-bindgen#3161 was about and what the two tests
+// above cover. What is left is autocxx's: it emits `impl UniquePtr<T>` for the
+// concrete instantiation, and cxx's deleter for that instantiates
+// `~std::unique_ptr<bb>`, which C++ rejects while `bb` is only declared.
+#[ignore]
 fn test_issue_1065a() {
     let hdr = indoc! {"
         #include <memory>

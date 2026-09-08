@@ -63,7 +63,9 @@
 //! would have to guess at each reference site, and guessing wrong
 //! silently rewires an FFI signature to the wrong type. Instead we
 //! collapse the collision into a single opaque placeholder, so that
-//! every reference still resolves and the mod compiles.
+//! every reference still resolves and the mod compiles. The placeholder
+//! derives `Default`, which the struct holding a field of the collapsed
+//! type already claims - see below for why that derive is there.
 //!
 //! That is only sound for a name the *parse phase* recorded as
 //! duplicated, which is why the caller passes that set in rather than
@@ -1066,8 +1068,20 @@ fn collapse_in_mod(
                     log::info!(
                         "Multiple bindgen items are named {ident}; replacing them all with an opaque type."
                     );
+                    // `Default` because a struct with a field of one of the
+                    // collapsed types keeps the `#[derive(Default)]` bindgen
+                    // wrote for it, and would otherwise stop compiling - the
+                    // one thing this pass exists to prevent. The placeholder
+                    // is zero-sized, so that derive has a single inhabitant
+                    // to produce. It is the only derive autocxx's bindgen
+                    // configuration asks for: `derive_copy` and `derive_debug`
+                    // are off (`engine/src/lib.rs`) and bindgen only derives
+                    // `Clone` alongside `Copy`. A `derive=` annotation in a
+                    // header can still ask bindgen for one directly, and a
+                    // holder carrying that would fail as this one used to.
                     replaced.push(parse_quote! {
                         #[repr(C)]
+                        #[derive(Default)]
                         pub struct #ident {
                             _unused: [u8; 0],
                         }
@@ -1521,6 +1535,52 @@ mod tests {
         };
         collapse_colliding_type_names(&mut m, &duplicated_names(&["iterator"]));
         assert_eq!(type_names_in(&m, "root"), vec!["iterator"]);
+    }
+
+    #[test]
+    fn collapsed_placeholder_derives_default() {
+        // A struct with a field of the collapsed type keeps the
+        // `#[derive(Default)]` bindgen wrote for it, so the placeholder
+        // has to satisfy it or the mod stops compiling - which is the
+        // one thing collapsing exists to prevent.
+        let mut m: ItemMod = parse_quote! {
+            mod bindgen {
+                pub mod root {
+                    pub type iterator = u8;
+                    #[repr(C)]
+                    pub struct iterator {
+                        _unused: [u8; 0],
+                    }
+                    #[repr(C)]
+                    #[derive(Default)]
+                    pub struct Cursor {
+                        pub it: root::iterator,
+                    }
+                }
+            }
+        };
+        collapse_colliding_type_names(&mut m, &duplicated_names(&["iterator"]));
+        let root = match &m.content.as_ref().unwrap().1[0] {
+            Item::Mod(root) => root,
+            _ => panic!("expected root mod"),
+        };
+        let placeholder = root
+            .content
+            .as_ref()
+            .unwrap()
+            .1
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(s) if s.ident == "iterator" => Some(s),
+                _ => None,
+            })
+            .expect("collapsed placeholder");
+        assert!(placeholder.attrs.iter().any(|attr| {
+            attr.path().is_ident("derive")
+                && quote::ToTokens::to_token_stream(attr)
+                    .to_string()
+                    .contains("Default")
+        }));
     }
 
     #[test]
