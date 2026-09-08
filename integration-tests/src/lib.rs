@@ -248,9 +248,9 @@ fn lock_builder() -> MutexGuard<'static, LinkableTryBuilder> {
 }
 
 /// TryBuild which maintains a directory of libraries to link.
-/// This is desirable because otherwise, if we alter the RUSTFLAGS
+/// This is desirable because otherwise, if we alter the rustc flags
 /// then trybuild rebuilds *everything* including all the dev-dependencies.
-/// This object exists purely so that we use the same RUSTFLAGS for every
+/// This object exists purely so that we use the same flags for every
 /// test case.
 struct LinkableTryBuilder {
     /// Directory in which we'll keep any linkable libraries
@@ -308,26 +308,90 @@ impl LinkableTryBuilder {
                 generated_rs.file_name().unwrap().to_str().unwrap(),
             );
         }
-        let temp_path = self.temp_dir.path().to_str().unwrap();
-        // This string REPLACES whatever RUSTFLAGS the run was started with, so a
-        // choice made there has to be restated here or the child falls back to
-        // the profile default - for debug info, the dev profile's 2. `=1` is
-        // what CI asks of workspace builds, for reasons that hold here too: the
-        // file and line in a panic backtrace, which is how a fixture that builds
-        // and then fails at runtime says what went wrong, and a PDB on
-        // windows-msvc, without which those backtraces are bare addresses. The
-        // asan job picks `=0` for its own workspace build; its fixtures get `=1`
-        // like everyone else's, which only lets a sanitizer report name a line.
-        let mut rustflags = format!("-L {temp_path} -Cdebuginfo=1");
-        if std::env::var_os("AUTOCXX_ASAN").is_some() {
-            rustflags.push_str(" -Z sanitizer=address -Clinker=clang++ -Clink-arg=-fuse-ld=lld");
-        }
+        let asan = std::env::var_os("AUTOCXX_ASAN").is_some();
         run_trybuild(
             rs_path,
-            &rustflags,
+            &fixture_rustflags(self.temp_dir.path(), asan),
             &rs_find_env(rs_find_mode, self.temp_dir.path()),
         )
     }
+}
+
+/// The rustc flags a fixture builds with, one command-line argument per
+/// element.
+///
+/// These REPLACE whatever RUSTFLAGS the run was started with, so a choice made
+/// there has to be restated here or the child falls back to the profile
+/// default - for debug info, the dev profile's 2. `=1` is what CI asks of
+/// workspace builds, for reasons that hold here too: the file and line in a
+/// panic backtrace, which is how a fixture that builds and then fails at
+/// runtime says what went wrong, and a PDB on windows-msvc, without which those
+/// backtraces are bare addresses. The asan job picks `=0` for its own workspace
+/// build; its fixtures get `=1` like everyone else's, which only lets a
+/// sanitizer report name a line.
+///
+/// The search path is a separate element from the `-L` introducing it, which is
+/// what lets it contain a space; see [`encoded_rustflags`]. `--cfg trybuild -A
+/// dead_code` is trybuild's own contribution, restated here for the reason
+/// given there.
+fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
+    let mut flags = vec!["-L".into(), temp_dir.into(), "-Cdebuginfo=1".into()];
+    if asan {
+        flags.extend(
+            [
+                "-Z",
+                "sanitizer=address",
+                "-Clinker=clang++",
+                "-Clink-arg=-fuse-ld=lld",
+            ]
+            .map(OsString::from),
+        );
+    }
+    flags.extend(["--cfg", "trybuild", "-A", "dead_code"].map(OsString::from));
+    flags
+}
+
+/// Joins flags with the `0x1f` separator `CARGO_ENCODED_RUSTFLAGS` uses.
+///
+/// That variable rather than `RUSTFLAGS`, which cargo splits on whitespace with
+/// no quoting or escaping of any kind - so the `-L` naming the temporary
+/// directory cannot be expressed there at all once that path contains a space.
+/// A Windows profile under `C:\Users\First Last` or a `TMPDIR` with a space in
+/// it gave `error: multiple input filenames provided`, every fixture, always.
+///
+/// Cargo takes extra flags from exactly one of four sources - the first of
+/// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, `target.*.rustflags`,
+/// `build.rustflags` that is set - and never merges them. That is why
+/// [`fixture_rustflags`] ends with `--cfg trybuild -A dead_code`: trybuild adds
+/// those two itself, by reading `$RUSTFLAGS` and re-exporting it with them
+/// appended (1.0.81 `src/rustflags.rs`) and by writing them into the fixture
+/// crate's `build.rustflags`, and taking the encoded channel makes cargo ignore
+/// both. Restating them keeps what rustc sees identical. The dependency is
+/// pinned to `=1.0.81` - see `Cargo.toml`, which pins it for a second reason -
+/// so that list cannot change underneath this.
+///
+/// `RUSTFLAGS` is cleared from the child rather than left for cargo to ignore,
+/// so that only one answer to the question is present.
+fn encoded_rustflags(flags: &[OsString]) -> OsString {
+    let mut encoded = OsString::new();
+    for (i, flag) in flags.iter().enumerate() {
+        if i > 0 {
+            encoded.push("\u{1f}");
+        }
+        encoded.push(flag);
+    }
+    // Cargo reads this one as a `String` and ignores it otherwise, falling
+    // through to sources this deliberately replaced - so a temporary directory
+    // whose path is not Unicode would lose every flag here, including the `-L`,
+    // and fail somewhere much further along. Said here instead. The spelling
+    // this replaced could not carry such a path either: it went through
+    // `to_str().unwrap()`.
+    assert!(
+        encoded.to_str().is_some(),
+        "the fixture's rustc flags are not valid Unicode, which \
+         CARGO_ENCODED_RUSTFLAGS has to be: {encoded:?}"
+    );
+    encoded
 }
 
 /// Every variable that can tell generated code where to find its bindings.
@@ -426,7 +490,7 @@ pub fn run_trybuild_child_if_requested() -> bool {
 /// carry it in every listing of its tests, and in every ignored count, forever.
 fn run_trybuild(
     rs_path: &Path,
-    rustflags: &str,
+    rustflags: &[OsString],
     rs_find_env: &[(String, OsString)],
 ) -> Result<(), String> {
     let child_bin = match find_trybuild_child_bin() {
@@ -435,7 +499,8 @@ fn run_trybuild(
     };
     let mut cmd = std::process::Command::new(child_bin);
     cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
-        .env("RUSTFLAGS", rustflags)
+        .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags))
+        .env_remove("RUSTFLAGS")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -500,8 +565,9 @@ const TRYBUILD_CHILD_SEARCH_DEPTH: usize = 8;
 /// executable's own directory upwards.
 ///
 /// Nothing here reads a variable that this process might have set for itself.
-/// The harness and its tests write to the environment (`OUT_DIR`, `RUSTFLAGS`,
-/// the `AUTOCXX_RS*` family) while other tests are running, and a search that
+/// The harness and its tests write to the environment (`OUT_DIR`,
+/// `CARGO_ENCODED_RUSTFLAGS`, the `AUTOCXX_RS*` family) while other tests are
+/// running, and a search that
 /// consulted those would find whatever the last test happened to leave behind.
 ///
 /// The `Err` is the reason to show whoever ends up reading a build failure
@@ -554,7 +620,7 @@ fn find_bin_in_ancestors(dir: &Path, file_name: &str) -> Option<PathBuf> {
 /// cannot be recovered, so the error says why.
 fn build_in_process(
     rs_path: &Path,
-    rustflags: &str,
+    rustflags: &[OsString],
     rs_find_env: &[(String, OsString)],
     reason: &str,
 ) -> Result<(), String> {
@@ -579,8 +645,21 @@ fn build_in_process(
     });
     // Unlike the child, this has to go through the process environment. Callers
     // hold the builder mutex, so two of these cannot overlap, but the variables
-    // are visible to the rest of the process for as long as this takes.
-    std::env::set_var("RUSTFLAGS", rustflags);
+    // are visible to the rest of the process for as long as this takes - so both
+    // rustflags variables are put back afterwards, on the panicking path too.
+    // Leaving `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving
+    // `RUSTFLAGS` behind, which is what this used to do: it outranks `RUSTFLAGS`,
+    // so a later unrelated build that set its own would silently keep getting
+    // these instead.
+    let restore_rustflags = [
+        (
+            "CARGO_ENCODED_RUSTFLAGS",
+            std::env::var_os("CARGO_ENCODED_RUSTFLAGS"),
+        ),
+        ("RUSTFLAGS", std::env::var_os("RUSTFLAGS")),
+    ];
+    std::env::set_var("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags));
+    std::env::remove_var("RUSTFLAGS");
     for key in RS_FIND_KEYS {
         std::env::remove_var(key);
     }
@@ -593,6 +672,12 @@ fn build_in_process(
         let test_cases = trybuild::TestCases::new();
         test_cases.pass(rs_path);
     }));
+    for (key, value) in restore_rustflags {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
     match outcome {
         Ok(()) => Ok(()),
         Err(_) => Err(format!(
@@ -1272,7 +1357,10 @@ impl BuilderModifierFns for ForceWrapperGeneration {
 /// binary that used to sit in `<profile>/deps` is five directories further down.
 #[cfg(test)]
 mod tests {
-    use super::{find_bin_in_ancestors, find_trybuild_child_bin, TRYBUILD_CHILD_SEARCH_DEPTH};
+    use super::{
+        encoded_rustflags, find_bin_in_ancestors, find_trybuild_child_bin, fixture_rustflags,
+        OsString, Path, TRYBUILD_CHILD_SEARCH_DEPTH,
+    };
     use tempfile::tempdir;
 
     /// Lays out `dirs` under a temporary root and puts `helper` in the root's
@@ -1341,6 +1429,74 @@ mod tests {
             before.as_ref().map(|found| found.as_path()),
             polluted.as_ref().map(|found| found.as_path()),
             "OUT_DIR changed where the helper was looked for"
+        );
+    }
+
+    /// The arguments cargo will hand rustc: what the harness composed, put
+    /// through the encoding and taken back out again. Compared as a list rather
+    /// than as one joined string, because joining is exactly what loses the
+    /// boundaries these tests are about - `["--cfg trybuild"]` and `["--cfg",
+    /// "trybuild"]` join to the same thing and encode to different ones.
+    fn decoded(flags: &[OsString]) -> Vec<String> {
+        encoded_rustflags(flags)
+            .to_str()
+            .unwrap()
+            .split('\u{1f}')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The whole point of the encoded channel: a search path containing a space
+    /// arrives as ONE argument. Through `$RUSTFLAGS`, which cargo splits on
+    /// whitespace, the tail of the path became a second input filename and
+    /// every fixture failed to build.
+    #[test]
+    fn a_search_path_containing_a_space_stays_one_argument() {
+        let args = decoded(&fixture_rustflags(
+            Path::new("/tmp/space dir/.tmp01"),
+            false,
+        ));
+        let l = args.iter().position(|a| a == "-L").unwrap();
+        assert_eq!(args[l + 1], "/tmp/space dir/.tmp01");
+        assert!(
+            !args.iter().any(|a| a == "dir/.tmp01"),
+            "the path was split on its space: {args:?}"
+        );
+    }
+
+    /// A path without a space produces exactly the arguments this harness
+    /// passed when it composed `$RUSTFLAGS` by hand and cargo split it again -
+    /// including the two trybuild used to append for us, which the encoded
+    /// channel makes cargo ignore.
+    #[test]
+    fn a_space_free_path_gives_the_flags_it_always_did() {
+        assert_eq!(
+            decoded(&fixture_rustflags(Path::new("/tmp/plain"), false)),
+            [
+                "-L",
+                "/tmp/plain",
+                "-Cdebuginfo=1",
+                "--cfg",
+                "trybuild",
+                "-A",
+                "dead_code"
+            ]
+        );
+        assert_eq!(
+            decoded(&fixture_rustflags(Path::new("/tmp/plain"), true)),
+            [
+                "-L",
+                "/tmp/plain",
+                "-Cdebuginfo=1",
+                "-Z",
+                "sanitizer=address",
+                "-Clinker=clang++",
+                "-Clink-arg=-fuse-ld=lld",
+                "--cfg",
+                "trybuild",
+                "-A",
+                "dead_code"
+            ]
         );
     }
 }
