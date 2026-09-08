@@ -424,7 +424,9 @@ macro_rules! subclass {
 }
 
 /// Indicates that a C++ type can definitely be instantiated. This has effect
-/// only in a very specific case:
+/// in two cases, both of them types autocxx cannot inspect for itself:
+///
+/// First:
 /// * the type is a typedef to something else
 /// * the 'something else' can't be fully inspected by autocxx, possibly
 ///   becaue it relies on dependent qualified types or some other template
@@ -436,6 +438,40 @@ macro_rules! subclass {
 /// a [`cxx::UniquePtr`]. If you know that no forward declarations are involved,
 /// you can declare the typedef type is instantiable and then you'll be able to
 /// own it within Rust.
+///
+/// Second, the type is a concrete instantiation of a C++ class template -
+/// named either by a typedef, `typedef A<uint32_t> C;`, or by a
+/// [`concrete!`] directive. `bindgen` reports the template, never the
+/// specialization, so autocxx is told nothing about such a type: not its
+/// members, not its bases, not one constructor it declares. Declaring it
+/// instantiable is you saying that C++ gives it a default constructor, and
+/// autocxx then generates a `new()` for it. Your C++ compiler is the arbiter:
+/// if the class hasn't really got one - because it declares a constructor of
+/// its own, or because a `const` template argument deletes it - the generated
+/// C++ fails to compile rather than misbehaving. Without the directive such a
+/// type keeps its previous shape, usable by reference and through the
+/// functions which return one.
+///
+/// Unlike every other `new()` autocxx generates, this one hands back a
+/// [`cxx::UniquePtr`] directly rather than something to finish with
+/// `.within_unique_ptr()`. autocxx does not know how big such a type is - it
+/// is declared to `cxx` as a plain opaque type - so only C++ can allocate one,
+/// and there is no choice of storage to offer. That is the same rule autocxx
+/// already applies to a function which *returns* one of these types.
+///
+/// Copy and move constructors are not generated for the same reason: both
+/// build the new object into storage the caller provides, which for one of
+/// these types Rust cannot provide. A destructor is, so that C++ destroys the
+/// object however Rust lets go of it.
+///
+/// One thing does not follow the alias: `throws!` on such a constructor has
+/// to name the instantiation the way autocxx names it, because a designation
+/// is matched against a function's own C++ name and nothing resolves a typedef
+/// on the way. A `concrete!` type answers to the identifier that directive
+/// gives it - `throws!("AConc")` - but an instantiation reached through a
+/// typedef answers only to autocxx's generated name. An undesignated
+/// constructor which does throw terminates the process, as any undesignated
+/// function does.
 ///
 /// The syntax is:
 /// `instantiable!("CppNameGoesHere")`

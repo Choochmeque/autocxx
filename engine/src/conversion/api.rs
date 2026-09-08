@@ -817,6 +817,14 @@ pub(crate) enum Api<T: AnalysisPhase> {
         /// template instantiation cxx cannot spell to. `None` for every other
         /// concrete type.
         holder_surface: Option<HolderSurface>,
+        /// The special members and allocators autocxx synthesized for this
+        /// instantiation, which the garbage collector must keep alongside it.
+        /// A method is a garbage-collection root only where its type is named
+        /// by an allowlist directive, and a concrete type usually is not: the
+        /// user names the typedef which resolves to it. Empty until
+        /// [`crate::conversion::analysis::constructor_deps::decorate_types_with_constructor_deps`],
+        /// as for the same field on a struct.
+        constructor_and_allocator_deps: Vec<QualifiedName>,
     },
     /// A simple note that we want to make a constructor for
     /// a `std::string` on the heap.

@@ -7,6 +7,7 @@
 // except according to those terms.
 
 use indexmap::map::IndexMap as HashMap;
+use indexmap::set::IndexSet as HashSet;
 
 use crate::{
     conversion::{
@@ -19,8 +20,8 @@ use crate::{
 };
 
 use super::fun::{
-    FnAnalysis, FnKind, FnPhase, FnPrePhase3, PodAndConstructorAnalysis, PodAndDepAnalysis,
-    TraitMethodKind,
+    FnAnalysis, FnKind, FnPhase, FnPrePhase3, MethodKind, PodAndConstructorAnalysis,
+    PodAndDepAnalysis, TraitMethodKind,
 };
 
 /// We've now analyzed all functions (including both implicit and explicit
@@ -42,7 +43,36 @@ pub(crate) fn decorate_types_with_constructor_deps(apis: ApiVec<FnPrePhase3>) ->
         Api::typedef_unchanged,
         Api::subclass_unchanged,
     );
+    // `convert_apis` passes a concrete type through untouched, so decorate
+    // those separately. They need it for the same reason a struct does, and
+    // more urgently: a concrete type is usually reached as a typedef's
+    // dependency rather than named by an allowlist directive, so its special
+    // members are not roots in their own right the way an allowlisted class's
+    // are. See google/autocxx#723.
     results
+        .into_iter()
+        .map(|api| match api {
+            Api::ConcreteType {
+                name,
+                rs_definition,
+                cpp_definition,
+                holder_surface,
+                ..
+            } => {
+                let constructor_and_allocator_deps = constructors_and_allocators_by_type
+                    .remove(&name.name)
+                    .unwrap_or_default();
+                Api::ConcreteType {
+                    name,
+                    rs_definition,
+                    cpp_definition,
+                    holder_surface,
+                    constructor_and_allocator_deps,
+                }
+            }
+            _ => api,
+        })
+        .collect()
 }
 
 fn decorate_struct(
@@ -74,32 +104,59 @@ fn decorate_struct(
 fn find_important_constructors(
     apis: &ApiVec<FnPrePhase3>,
 ) -> HashMap<QualifiedName, Vec<QualifiedName>> {
+    // A class named by an allowlist directive is already what makes its own
+    // `new()` and destructor garbage-collection roots, so those are not listed
+    // for one. A concrete type usually has no such directive naming it - the
+    // user writes the typedef which resolves to it - so it has to list them.
+    // See google/autocxx#723.
+    let concrete_types: HashSet<&QualifiedName> = apis
+        .iter()
+        .filter_map(|api| match api {
+            Api::ConcreteType { name, .. } => Some(&name.name),
+            _ => None,
+        })
+        .collect();
     let mut results: HashMap<QualifiedName, Vec<QualifiedName>> = HashMap::new();
     for api in apis.iter() {
         if let Api::Function {
             name,
             analysis:
                 FnAnalysis {
-                    kind:
-                        FnKind::TraitMethod {
-                            kind:
-                                TraitMethodKind::Alloc
-                                | TraitMethodKind::Dealloc
-                                | TraitMethodKind::CopyConstructor
-                                | TraitMethodKind::MoveConstructor,
-                            impl_for,
-                            ..
-                        },
+                    kind,
                     ignore_reason: Ok(_),
                     ..
                 },
             ..
         } = api
         {
-            results
-                .entry(impl_for.clone())
-                .or_default()
-                .push(name.name.clone())
+            let impl_for = match kind {
+                FnKind::TraitMethod {
+                    kind:
+                        TraitMethodKind::Alloc
+                        | TraitMethodKind::Dealloc
+                        | TraitMethodKind::CopyConstructor
+                        | TraitMethodKind::MoveConstructor,
+                    impl_for,
+                    ..
+                } => Some(impl_for),
+                FnKind::TraitMethod {
+                    kind: TraitMethodKind::Destructor,
+                    impl_for,
+                    ..
+                }
+                | FnKind::Method {
+                    impl_for,
+                    method_kind: MethodKind::Constructor { .. },
+                    ..
+                } if concrete_types.contains(impl_for) => Some(impl_for),
+                _ => None,
+            };
+            if let Some(impl_for) = impl_for {
+                results
+                    .entry(impl_for.clone())
+                    .or_default()
+                    .push(name.name.clone())
+            }
         }
     }
     results

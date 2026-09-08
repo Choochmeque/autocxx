@@ -145,6 +145,7 @@ impl<'a> ParseBindgen<'a> {
                         cpp_definition: cpp_definition.clone(),
                         rs_definition: None,
                         holder_surface: None,
+                        constructor_and_allocator_deps: Vec::new(),
                     }
                 }),
         );

@@ -17,7 +17,10 @@ use crate::{
         analysis::type_converter::{
             add_analysis, Annotated, TypeConversionContext, TypeConverter, TypeKind,
         },
-        api::{AnalysisPhase, Api, ApiName, NullPhase, OpaqueTypedefReason, TypedefKind},
+        api::{
+            AnalysisPhase, Api, ApiName, NestedCppNames, NullPhase, OpaqueTypedefReason,
+            TypedefKind,
+        },
         apivec::ApiVec,
         check_for_fatal_attrs,
         convert_error::{ConvertErrorWithContext, ErrorContext},
@@ -333,6 +336,97 @@ pub(crate) fn typedef_targets<P: AnalysisPhase<TypedefAnalysis = TypedefAnalysis
             _ => None,
         })
         .collect()
+}
+
+/// The concrete template instantiations an `instantiable!` directive says
+/// Rust may own: those it names outright, and those a typedef it names
+/// resolves to.
+///
+/// Only these are given the special members and allocators of
+/// google/autocxx#723, and the reason it takes a directive is that bindgen
+/// reports *nothing* about a specialization - not its members, not its
+/// bases, not one constructor it declares - so autocxx has no evidence for
+/// which special members C++ actually gives it and can only claim them and
+/// let the compiler arbitrate. Claiming them for every instantiation which
+/// happened to pass through a signature emits C++ which the class may not
+/// permit, and three shapes in the test suite prove it: a template declaring
+/// a constructor of its own has no default one
+/// (`test_cycle_generic_type`), and a `const` template argument makes a
+/// `const` member, which deletes it
+/// (`test_template_class_with_const_record_argument_is_its_own_type` and its
+/// two siblings). All three are valid C++ which used to build.
+///
+/// `instantiable!` is the user saying they know better, which is what it has
+/// always meant - see its documentation - so this widens that directive
+/// rather than inventing one.
+///
+/// Excludes the opaque holders autocxx lowers a smart pointer to: what one of
+/// those wraps is made and destroyed by the shims beside it, and a
+/// default-constructed `std::shared_ptr` owns nothing at all.
+pub(crate) fn instantiable_concrete_types<P: AnalysisPhase<TypedefAnalysis = TypedefAnalysis>>(
+    apis: &ApiVec<P>,
+    config: &IncludeCppConfig,
+) -> HashSet<QualifiedName> {
+    // A `concrete!` type answers to the C++ expression the user wrote for it
+    // as well as to the Rust name they gave it, since they wrote both in the
+    // one directive.
+    let concrete: HashMap<QualifiedName, Option<&str>> = apis
+        .iter()
+        .filter_map(|api| match api {
+            Api::ConcreteType {
+                name,
+                cpp_definition,
+                holder_surface: None,
+                ..
+            } => Some((name.name.clone(), Some(cpp_definition.as_str()))),
+            _ => None,
+        })
+        .collect();
+    if concrete.is_empty() {
+        return HashSet::new();
+    }
+    let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
+    let spellings = |name: &QualifiedName, extra: Option<&str>| -> Vec<String> {
+        nested_cpp_names
+            .spellings(name)
+            .chain(extra.map(ToString::to_string))
+            .collect()
+    };
+    // Every name which resolves to an instantiation gets a say, and a
+    // `block_constructors!` on any of them beats an `instantiable!` on any
+    // other: an instantiation may be named by several aliases, all of which
+    // are now the same Rust type, so a block written against one of them would
+    // otherwise be lifted by a permission written against another.
+    let mut instantiable: HashSet<QualifiedName> = HashSet::new();
+    let mut blocked: HashSet<QualifiedName> = HashSet::new();
+    let mut consider = |target: &QualifiedName, spellings: Vec<String>| {
+        if spellings
+            .iter()
+            .any(|spelling| config.instantiable.contains(spelling))
+        {
+            instantiable.insert(target.clone());
+        }
+        if spellings
+            .iter()
+            .any(|spelling| config.is_on_constructor_blocklist(spelling))
+        {
+            blocked.insert(target.clone());
+        }
+    };
+    for (name, cpp_definition) in &concrete {
+        consider(name, spellings(name, *cpp_definition));
+    }
+    let targets = typedef_targets(apis);
+    for api in apis.iter() {
+        if let Api::Typedef { name, .. } = api {
+            let target = resolve_typedefs(&targets, &name.name);
+            if concrete.contains_key(&target) {
+                consider(&target, spellings(&name.name, None));
+            }
+        }
+    }
+    instantiable.retain(|name| !blocked.contains(name));
+    instantiable
 }
 
 /// Follow `targets` from `name` to the type it finally names.

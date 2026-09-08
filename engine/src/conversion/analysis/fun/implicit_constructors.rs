@@ -495,6 +495,7 @@ fn found_if_user_defined(explicit: Option<&ExplicitFound>) -> SpecialMemberFound
 /// the existing code in this phase to figure out what to do with it.
 pub(super) fn find_constructors_present(
     apis: &ApiVec<FnPrePhase1>,
+    instantiable_concrete_types: &HashSet<QualifiedName>,
 ) -> HashMap<QualifiedName, ItemsFound> {
     let ExplicitItems {
         explicits,
@@ -1260,6 +1261,58 @@ pub(super) fn find_constructors_present(
                     .insert(name.name.clone(), items_found)
                     .is_none(),
                 "Duplicate struct: {name:?}"
+            );
+        }
+    }
+
+    // A concrete template instantiation is a class C++ can construct like any
+    // other, but none of the rules above can be run over it: bindgen reports
+    // the template, never the specialization, so there are no bases, no fields
+    // and no explicit declarations for this instantiation at all. Claim the
+    // default constructor and let the C++ compiler arbitrate.
+    // `instantiable_concrete_types` is the user's word that this is safe, and
+    // says why nothing less will do. See google/autocxx#723.
+    //
+    // That one and the destructor. The copy and move constructors are left
+    // out: they become `CopyNew` and `MoveNew` impls, which construct into
+    // *Rust* storage, and the Rust side of a concrete type is cxx's zero-sized
+    // opaque type, so there is none of the right size. `new()` escapes that
+    // only because `generate_constructor_impl` hands back a `UniquePtr` rather
+    // than a recipe. Recovering the two wants a Rust type of the right size,
+    // which is the same thing `moveit_safe_types` is waiting for.
+    //
+    // The destructor is not optional, though it looks like it: `UniquePtr`
+    // destroys its payload through C++ and needs nothing from Rust, but
+    // `moveit`'s `AsMove for UniquePtr<T>` asks only for `MakeCppStorage`,
+    // which the allocators above provide, and the `MoveRef` it hands out drops
+    // by running Rust's `Drop` and then freeing the C++ storage. With no
+    // `impl Drop` that is a safe path which frees the object without
+    // destroying it.
+    //
+    // Deliberately after the loop above, so that a struct with a field or base
+    // of one of these types still counts it as a type we don't understand and
+    // stays conservative: the claim here is one the user vouched for, not
+    // evidence to run another class's rules on.
+    for api in apis.iter() {
+        if let Api::ConcreteType { name, .. } = api {
+            if !instantiable_concrete_types.contains(&name.name) {
+                continue;
+            }
+            all_items_found.insert(
+                name.name.clone(),
+                ItemsFound {
+                    default_constructor: SpecialMemberFound::Implicit,
+                    destructor: SpecialMemberFound::Implicit,
+                    const_copy_constructor: SpecialMemberFound::NotPresent,
+                    non_const_copy_constructor: SpecialMemberFound::NotPresent,
+                    move_constructor: SpecialMemberFound::NotPresent,
+                    const_move_constructor: None,
+                    // Nothing is known of the members, so nothing says
+                    // destroying one does nothing.
+                    destructor_is_trivial: false,
+                    name: Some(name.clone()),
+                    why_no_constructors: Default::default(),
+                },
             );
         }
     }

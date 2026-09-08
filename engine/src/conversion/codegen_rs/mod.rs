@@ -49,6 +49,7 @@ use super::{
         doc_label::make_doc_attrs,
         fun::{FnKind, FnPhase, PodAndDepAnalysis, ReceiverMutability, SubclassAnalysis},
         pod::PodAnalysis,
+        tdef::{resolve_typedefs, typedef_targets},
     },
     api::{
         AnalysisPhase, Api, HolderSurface, SharedPtrShim, SubclassName, TypeKind, UniquePtrShim,
@@ -248,6 +249,8 @@ impl<'a> RsCodeGenerator<'a> {
         let subclasses_with_a_single_trivial_constructor =
             find_trivially_constructed_subclasses(&all_apis);
         let non_pod_types = find_non_pod_types(&all_apis);
+        let concrete_typedefs = find_concrete_typedefs(&all_apis);
+        let concrete_types = find_concrete_types(&all_apis);
         // Now let's generate the Rust code.
         let (rs_codegen_results_and_namespaces, additional_cpp_needs): (Vec<_>, Vec<_>) = all_apis
             .into_iter()
@@ -259,6 +262,8 @@ impl<'a> RsCodeGenerator<'a> {
                     &methods_by_superclass,
                     &subclasses_with_a_single_trivial_constructor,
                     &non_pod_types,
+                    &concrete_typedefs,
+                    &concrete_types,
                 );
                 ((name, gen), more_cpp_needed)
             })
@@ -520,6 +525,8 @@ impl<'a> RsCodeGenerator<'a> {
         associated_methods: &HashMap<QualifiedName, SuperclassTraitContents>,
         subclasses_with_a_single_trivial_constructor: &HashSet<QualifiedName>,
         non_pod_types: &HashSet<QualifiedName>,
+        concrete_typedefs: &HashMap<QualifiedName, QualifiedName>,
+        concrete_types: &HashSet<QualifiedName>,
     ) -> RsCodegenResult {
         let name = api.name().clone();
         let id = name.get_final_ident();
@@ -543,11 +550,23 @@ impl<'a> RsCodeGenerator<'a> {
                     ..Default::default()
                 }
             }
-            Api::Function { fun, analysis, .. } => {
-                gen_function(&name, *fun, analysis, non_pod_types, self.bridge_type_names)
-            }
-            Api::Const { .. } | Api::Typedef { .. } => RsCodegenResult {
+            Api::Function { fun, analysis, .. } => gen_function(
+                &name,
+                *fun,
+                analysis,
+                non_pod_types,
+                concrete_types,
+                self.bridge_type_names,
+            ),
+            Api::Const { .. } => RsCodegenResult {
                 output_mod_items: vec![Self::generate_bindgen_use_stmt(&name)],
+                ..Default::default()
+            },
+            Api::Typedef { .. } => RsCodegenResult {
+                output_mod_items: vec![match concrete_typedefs.get(&name) {
+                    Some(target) => Self::generate_concrete_typedef(&name, target),
+                    None => Self::generate_bindgen_use_stmt(&name),
+                }],
                 ..Default::default()
             },
             Api::Static { .. } => RsCodegenResult {
@@ -1887,6 +1906,24 @@ impl<'a> RsCodeGenerator<'a> {
         })
     }
 
+    /// Declare a typedef which finally names a concrete template
+    /// instantiation as an alias for the type autocxx made for that
+    /// instantiation.
+    ///
+    /// The alternative - re-exporting the typedef as bindgen wrote it - names
+    /// bindgen's rendering of the class template with its arguments filled in,
+    /// `root::A<u32>`, which is a Rust type cxx has never heard of: it can be
+    /// neither constructed nor passed anywhere. See google/autocxx#723.
+    fn generate_concrete_typedef(name: &QualifiedName, target: &QualifiedName) -> Item {
+        let id = name.get_final_ident();
+        let segs = find_output_mod_root(name.get_namespace())
+            .chain(target.get_namespace().iter().map(make_ident))
+            .chain(std::iter::once(target.get_final_ident()));
+        Item::Type(parse_quote! {
+            pub type #id = #(#segs)::*;
+        })
+    }
+
     /// Re-export a C++ variable, spelling out the assumption Rust makes about
     /// anything it can take a reference to.
     fn generate_static_use_stmt(name: &QualifiedName) -> Item {
@@ -2059,6 +2096,51 @@ fn find_non_pod_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
                 ..
             }
             | Api::ConcreteType { name, .. } => Some(name.name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every concrete template instantiation autocxx made a type for.
+///
+/// Read for one thing only: such a type is declared to cxx as a plain opaque
+/// type, so the Rust side of it is zero-sized and nothing may build a C++
+/// object in Rust storage of that type. See `generate_constructor_impl`.
+fn find_concrete_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
+    apis.iter()
+        .filter_map(|api| match api {
+            Api::ConcreteType { name, .. } => Some(name.name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each typedef which finally names a concrete template instantiation, and
+/// the instantiation it names.
+///
+/// Follows chains, because C++ allows them: `typedef A<uint32_t> B; typedef B
+/// C;` - and it is the last hop which knows whether a concrete type is what
+/// this alias is for. See google/autocxx#723.
+fn find_concrete_typedefs(apis: &ApiVec<FnPhase>) -> HashMap<QualifiedName, QualifiedName> {
+    let concrete_types: HashSet<QualifiedName> = apis
+        .iter()
+        .filter_map(|api| match api {
+            Api::ConcreteType { name, .. } => Some(name.name.clone()),
+            _ => None,
+        })
+        .collect();
+    if concrete_types.is_empty() {
+        return HashMap::new();
+    }
+    let targets = typedef_targets(apis);
+    apis.iter()
+        .filter_map(|api| match api {
+            Api::Typedef { name, .. } => {
+                let target = resolve_typedefs(&targets, &name.name);
+                concrete_types
+                    .contains(&target)
+                    .then(|| (name.name.clone(), target))
+            }
             _ => None,
         })
         .collect()

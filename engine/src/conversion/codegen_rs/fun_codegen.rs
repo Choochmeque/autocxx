@@ -91,6 +91,7 @@ pub(super) fn gen_function(
     fun: FuncToConvert,
     analysis: FnAnalysis,
     non_pod_types: &HashSet<QualifiedName>,
+    concrete_types: &HashSet<QualifiedName>,
     bridge_type_names: &BridgeTypeNames,
 ) -> RsCodegenResult {
     if analysis.ignore_reason.is_err() || !analysis.externally_callable {
@@ -150,7 +151,10 @@ pub(super) fn gen_function(
                 ..
             } => {
                 // Constructor.
-                impl_entry = Some(fn_generator.generate_constructor_impl(impl_for));
+                impl_entry = Some(
+                    fn_generator
+                        .generate_constructor_impl(impl_for, concrete_types.contains(impl_for)),
+                );
             }
             FnKind::Method {
                 ref impl_for,
@@ -600,13 +604,42 @@ impl<'a> FnGenerator<'a> {
 
     /// Generate a 'impl Type { methods-go-here }' item which is a constructor
     /// for use with moveit traits.
+    ///
+    /// `size_unknown_in_rust` types are the exception, and hand back a
+    /// [`cxx::UniquePtr`] instead of a recipe. A `New` recipe lets its holder
+    /// choose the storage - `within_box`, `moveit!`, `stack_slot!` all place
+    /// the C++ object in Rust storage - and that is only sound where the Rust
+    /// type is the size of the C++ one. A concrete template instantiation is
+    /// declared to cxx as a plain opaque type, whose Rust side is zero-sized,
+    /// so its constructor must not offer the choice: it allocates in C++ and
+    /// hands back the pointer. This is the rule `convert_return_type` already
+    /// applies to a *function* returning such a type - see its
+    /// `moveit_safe_types` branch - now applied to constructors too.
     fn generate_constructor_impl(
         &self,
         impl_block_type_name: &QualifiedName,
+        size_unknown_in_rust: bool,
     ) -> Box<ImplBlockDetails> {
         let ret_type = placement_return_type(&parse_quote! { Self }, self.may_throw);
         let (lifetime_tokens, wrapper_params, ret_type, call_body) =
             self.common_parts(true, &None, Some(ret_type));
+        let (ret_type, call_body) = if size_unknown_in_rust {
+            if self.may_throw {
+                (
+                    std::borrow::Cow::Owned(parse_quote! {
+                        -> Result<::cxx::UniquePtr<Self>, ::cxx::Exception>
+                    }),
+                    quote! { autocxx::TryWithinUniquePtr::try_within_unique_ptr(#call_body) },
+                )
+            } else {
+                (
+                    std::borrow::Cow::Owned(parse_quote! { -> ::cxx::UniquePtr<Self> }),
+                    quote! { autocxx::WithinUniquePtr::within_unique_ptr(#call_body) },
+                )
+            }
+        } else {
+            (ret_type, call_body)
+        };
         let rust_name = make_ident(self.rust_name);
         let doc_attrs = self.doc_attrs;
         let deprecation = self.deprecation;

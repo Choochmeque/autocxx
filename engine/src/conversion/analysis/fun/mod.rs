@@ -80,7 +80,7 @@ use super::{
     depth_first::HasFieldsAndBases,
     doc_label::make_doc_attrs,
     pod::{PodAnalysis, PodPhase},
-    tdef::TypedefAnalysis,
+    tdef::{instantiable_concrete_types, TypedefAnalysis},
     type_converter::Annotated,
 };
 
@@ -395,6 +395,10 @@ pub(crate) struct FnAnalyzer<'a> {
     nested_type_name_map: HashMap<QualifiedName, String>,
     nested_cpp_names: NestedCppNames<'a>,
     generic_types: HashSet<QualifiedName>,
+    /// The template instantiations the user declared `instantiable!`. No
+    /// allowlist directive can name one, so the allowlist check on methods
+    /// exempts them - see `analyze_foreign_fn`.
+    instantiable_concrete_types: HashSet<QualifiedName>,
     types_in_anonymous_namespace: HashSet<QualifiedName>,
     existing_superclass_trait_api_names: HashSet<QualifiedName>,
     cpp_names_taken_on_peer_classes: HashSet<String>,
@@ -437,6 +441,7 @@ impl<'a> FnAnalyzer<'a> {
             nested_type_name_map: Self::build_nested_type_map(&apis),
             nested_cpp_names: NestedCppNames::new(config, apis.iter().map(|api| api.name_info())),
             generic_types: Self::build_generic_type_set(&apis),
+            instantiable_concrete_types: instantiable_concrete_types(&apis, config),
             existing_superclass_trait_api_names: HashSet::new(),
             cpp_names_taken_on_peer_classes: Self::build_virtual_method_cpp_names(&apis),
             types_in_anonymous_namespace: Self::build_types_in_anonymous_namespace(&apis),
@@ -516,6 +521,21 @@ impl<'a> FnAnalyzer<'a> {
 
     /// Return the set of 'moveit safe' types. That must include only types where
     /// the size is known to be correct.
+    ///
+    /// Read for return values only. A constructor asks
+    /// `generate_constructor_impl` instead, which hands back a `UniquePtr`
+    /// rather than a `New` for a concrete template instantiation - the one
+    /// type here whose Rust side is cxx's zero-sized opaque type.
+    ///
+    /// A subclass peer is the same shape and does *not* do that: it keeps a
+    /// `new()` returning `impl New<Output = Self>`, and every way of cashing
+    /// such a recipe other than `within_unique_ptr` - `within_box`,
+    /// `within_cpp_pin`, `moveit!`, `stack_slot!`, and `Box`/`Rc`/`Arc`'s own
+    /// `emplace` - builds the C++ object in Rust storage sized for nothing.
+    /// That predates this and is not fixed here; fixing it wants either a Rust
+    /// stand-in of the right size or a bound which stops such a type
+    /// implementing `New` at all, since bounding autocxx's own helpers leaves
+    /// `moveit`'s.
     fn build_correctly_sized_type_set(apis: &ApiVec<PodPhase>) -> HashSet<QualifiedName> {
         apis.iter()
             .filter(|api| {
@@ -1698,11 +1718,25 @@ impl<'a> FnAnalyzer<'a> {
                 {
                     set_ignore_reason(ConvertErrorFromCpp::UnsupportedReceiver);
                 }
-                FnKind::Method { ref impl_for, .. } if !self.is_on_allowlist(impl_for) => {
+                FnKind::Method { ref impl_for, .. }
+                    if !self.is_on_allowlist(impl_for)
+                        && !self.instantiable_concrete_types.contains(impl_for) =>
+                {
                     // Bindgen will output methods for types which have been encountered
                     // virally as arguments on other allowlisted types. But we don't want
                     // to generate methods unless the user has specifically asked us to.
                     // It may, for instance, be a private type.
+                    //
+                    // An `instantiable!` concrete template instantiation is
+                    // exempt because the allowlist usually cannot name it:
+                    // autocxx invents the name of an instantiation it meets,
+                    // and the user asks for one by naming the typedef which
+                    // resolves to it. (A `concrete!` type is the exception -
+                    // the user named it, and `is_on_allowlist` says so.) Nor
+                    // can this let anything unasked-for through, since bindgen
+                    // reports no members at all for a class template: every
+                    // method such a type has is one autocxx synthesized for
+                    // it. See google/autocxx#723.
                     set_ignore_reason(ConvertErrorFromCpp::MethodOfNonAllowlistedType);
                 }
                 FnKind::Method { ref impl_for, .. } | FnKind::TraitMethod { ref impl_for, .. } => {
@@ -2880,7 +2914,7 @@ impl<'a> FnAnalyzer<'a> {
     /// Also fills out the [`PodAndConstructorAnalysis::constructors`] fields with information useful
     /// for further analysis phases.
     fn add_constructors_present(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase2> {
-        let all_items_found = find_constructors_present(&apis);
+        let all_items_found = find_constructors_present(&apis, &self.instantiable_concrete_types);
         // The types Rust holds by value, and so the only ones for which an
         // `impl Drop` costs anything - see the destructor case below.
         let pod_types: HashSet<QualifiedName> = apis
