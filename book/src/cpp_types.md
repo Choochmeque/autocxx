@@ -263,13 +263,22 @@ A `std::array<T, N>` crosses as a Rust `[T; N]`, by value, in either direction:
 `cxx` spells a Rust array as `std::array<T, N>`, so what the bridge declares is
 the type the header was written with, and there is no wrapper in between.
 
-Two things do not:
+The element can be any type which crosses by value itself:
 
-* An element `cxx` will not hold in an array. It has to be one of `cxx`'s own
-  atoms, which for a type written in a header means `uint8_t` or `int8_t`, a
-  `float` or a `double`, a `bool`, or a `char`. A class is not one, and neither
-  is an integer whose width the platform chooses, such as `int` or `unsigned` -
-  which rules out the typedefs to them, `uint32_t` and `size_t` among them.
+* one of `cxx`'s own atoms - `uint8_t` or `int8_t`, a `float` or a `double`, a
+  `bool`, a `char`;
+* an integer whose width the platform chooses, such as `int` or `unsigned` and
+  the typedefs to them, `uint32_t` and `size_t` among them. Those arrive as the
+  matching `autocxx::c_*` newtype, so `std::array<uint32_t, 4>` is
+  `[autocxx::c_uint; 4]`;
+* a class or enum `autocxx` passes by value, which for a class means one
+  `generate_pod!` accepts.
+
+Two things do not cross:
+
+* An element `autocxx` will not pass by value, which is a class it can hold
+  only behind a pointer. An array of those is not a run of bytes to be moved
+  whole.
 * A `std::array` behind a reference or a pointer. `const T (&)[N]` and `const
   std::array<T, N>&` reach `autocxx` as the same Rust type, and `cxx` writes
   the second for either, so binding one would silently be binding the other.

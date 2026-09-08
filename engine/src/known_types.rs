@@ -573,25 +573,27 @@ impl TypeDatabase {
             .unwrap_or(true)
     }
 
-    /// Whether cxx can hold `ty` as the element of an array.
+    /// Whether cxx holds `ty` in an array with nothing else asked of it: one
+    /// of its own atoms.
     ///
     /// cxx spells a Rust `[T; N]` as `std::array<T, N>` and moves one whole,
     /// so `T` has to be something it holds by value with no indirection of its
-    /// own - which for cxx means one of its atoms.
+    /// own. An atom is that outright.
     ///
-    /// An extern type a bridge declares would qualify in principle, and cxx
-    /// says so: `is_unsized` counts an alias as sized once something requires
-    /// it to be trivially movable. What decides that is
+    /// An extern type the bridge declares is that too, but only once something
+    /// in the bridge requires it to be trivially movable: `is_unsized` counts
+    /// an alias as sized exactly then, and what decides it is
     /// `required_trivial_reasons`, cxx-gen 0.7.200
     /// `src/syntax/trivial.rs:30`, which reads a function argument, a return,
-    /// a struct field, a `Box`, a `Vec` and a slice - and no array. So
-    /// `[autocxx::c_uint; 4]` is accepted exactly when some *other* signature
-    /// in the same bridge happens to take a `c_uint` by value, which is not a
-    /// rule anyone can be given. Turn every one of them down instead, and say
-    /// why.
+    /// a struct field, a `Box`, a `Vec` and a slice - and no array. So an
+    /// alias is held in an array exactly when some *other* signature in the
+    /// same bridge happens to take one by value, which is not a rule anyone
+    /// can be given. autocxx states the requirement itself instead, in one of
+    /// the forms cxx does read - see `array_element_witnesses`.
     ///
-    /// Unknown to this database means a type the header declared, which is the
-    /// same case: it reaches the bridge as an alias.
+    /// Unknown to this database means a type the header declared. That is the
+    /// alias case, and whether it may be an element is decided by whether
+    /// autocxx proved it POD, which the caller is the one to know.
     pub(crate) fn permissible_within_array(&self, ty: &QualifiedName) -> bool {
         self.get(ty)
             .map(|x| {
@@ -600,6 +602,21 @@ impl TypeDatabase {
                     Behavior::CByValue | Behavior::CByValueVecSafe | Behavior::CChar
                 )
             })
+            .unwrap_or(false)
+    }
+
+    /// Whether `ty` is one of the newtypes autocxx declares to the bridge
+    /// under a name of its own, each a transparent wrapper over a Rust
+    /// primitive.
+    ///
+    /// These are trivially relocatable whatever width the platform gave the C
+    /// type, so the only thing between one and an array element is the
+    /// certificate cxx will not write for itself. That makes
+    /// `[autocxx::c_uint; 4]` reachable, which is what a header saying
+    /// `std::array<uint32_t, 4>` asks for.
+    pub(crate) fn relocatable_newtype(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|x| matches!(x.behavior, Behavior::CIntegerWrapper | Behavior::CCharacter))
             .unwrap_or(false)
     }
 
