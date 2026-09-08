@@ -3430,6 +3430,587 @@ fn test_no_methods_for_types_not_declared_instantiable() {
     );
 }
 
+/// A member function *template* on an ordinary class. libclang reports one as
+/// `CXCursor_FunctionTemplate`, which bindgen's member visitor lists among the
+/// cursors it does not handle, so the member was in no callback and in no IR
+/// and the bindings said nothing whatever about it: the class arrived with the
+/// template member simply missing, and nothing distinguished that from a class
+/// which never declared one.
+///
+/// autocxx cannot bind it - calling one means choosing its template arguments,
+/// and neither autocxx nor cxx has a syntax which says what they are - so what
+/// the member gets is the note every other unbindable member gets. The members
+/// beside it are bound as usual.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_member_function_template_on_a_concrete_class_is_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Concrete {
+        public:
+            Concrete() : a(12) {}
+            template<typename T> void tmethod(T t);
+            uint32_t plain() const { return a; }
+        private:
+            uint32_t a;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::Concrete::new().within_unique_ptr();
+            assert_eq!(c.plain(), 12);
+        },
+        quote! {
+            generate!("Concrete")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn tmethod (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "autocxx does not bind member function templates".to_string(),
+            "template parameters of its own (1 of them)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A member function template of a *class* template, reached through a
+/// concrete instantiation. The members of a class template are reported and
+/// bound for an instantiation, and a member function template among them was
+/// the one kind which was not reported at all - bindgen discards a class
+/// template's ordinary members while parsing and never parsed a member function
+/// template as a member in the first place, so keeping the former left the
+/// latter exactly as silent as before.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_member_function_template_on_an_instantiation_is_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename A>
+        class Templated {
+        public:
+            uint32_t plain() const { return 12; }
+            template<typename T> void tmethod(T t);
+        private:
+            A a[2];
+        };
+
+        typedef Templated<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::C::new();
+            assert_eq!(c.plain(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn tmethod (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "The class template this type instantiates declares a member function template"
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A member function template beside a non-template overload of the same name.
+/// The non-template one binds exactly as it did before, and the note standing
+/// in for the template one is numbered by the same overload tracker, because
+/// the note is a method of the class like any other: without that the two are
+/// two `fn both` in one `impl` block, which Rust rejects.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_member_function_template_beside_a_non_template_overload() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Overloaded {
+        public:
+            Overloaded() {}
+            template<typename T> void both(T t);
+            uint32_t both(uint32_t t) const { return t + 1; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = ffi::Overloaded::new().within_unique_ptr();
+            assert_eq!(o.both(3), 4);
+        },
+        quote! {
+            generate!("Overloaded")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn both1 (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// `static` and `const` member function templates, and one declaring two
+/// parameters. All are members which cannot be bound and all leave the note;
+/// what this pins is that none of them is missed, not how they differ - autocxx
+/// takes the same route for each, and keeps the parameter count alone. The
+/// count is what the note quotes.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_static_and_const_member_function_templates_are_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Kinds {
+        public:
+            Kinds() {}
+            template<typename T> T tconst(T t) const;
+            template<typename T> static T tstatic(T t);
+            template<typename T, typename U> void ttwo(T t, U u);
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::Kinds::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("Kinds")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn tconst (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn tstatic (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn ttwo (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "template parameters of its own (2 of them)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A private member function template gets no note, for the reason a private
+/// anything gets none: generated code outside the class may not name it, so
+/// there is nothing the user could do about it and nothing to tell them.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_private_member_function_template_is_not_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Hidden {
+        public:
+            Hidden() {}
+            uint32_t plain() const { return 12; }
+        private:
+            template<typename T> void secret(T t);
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let h = ffi::Hidden::new().within_unique_ptr();
+            assert_eq!(h.plain(), 12);
+        },
+        quote! {
+            generate!("Hidden")
+        },
+        None,
+        Some(make_string_absence_finder(vec!["secret".to_string()])),
+        None,
+    );
+}
+
+/// A member template *constructor* is reported by bindgen along with the rest -
+/// libclang says `CXXConstructor` for what kind of member it is - and autocxx
+/// leaves it alone, exactly as it leaves a class template's declared
+/// constructors alone. Which constructors a class has is settled elsewhere, and
+/// a note taking the name `new` would collide with the constructor autocxx does
+/// generate.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_member_template_constructor_leaves_the_constructor_alone() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Ctor {
+        public:
+            Ctor() : a(12) {}
+            template<typename T> Ctor(T t);
+            uint32_t plain() const { return a; }
+        private:
+            uint32_t a;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::Ctor::new().within_unique_ptr();
+            assert_eq!(c.plain(), 12);
+        },
+        quote! {
+            generate!("Ctor")
+        },
+        None,
+        // The refusal itself, not a name it might have taken: a note for the
+        // constructor template would be named after the class rather than
+        // `new`, and an assertion naming `new` would pass either way.
+        Some(make_string_absence_finder(vec![
+            "member function template".to_string()
+        ])),
+        None,
+    );
+}
+
+/// An explicit specialization of a class template. bindgen generates nothing
+/// for a specialization - `CompInfo::codegen` returns before it reaches one -
+/// so the members a specialization declares of its own have never been bound
+/// and are not bound now. What autocxx has for an instantiation is what the
+/// primary template declares, which is what `instantiable!` gives it
+/// permission to claim.
+///
+/// So the note here says the primary template's `tmethod` is a member function
+/// template, and the specialization's own `only_in_the_specialization` is
+/// absent, exactly as before. Both halves are pinned: the second is the
+/// pre-existing limitation, and the first is the claim, which an explicit
+/// specialization is free to contradict in the same way it may contradict the
+/// members bound beside it.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_explicit_class_specialization_is_read_from_the_primary_template() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename A>
+        class HasSpecialization {
+        public:
+            template<typename T> void tmethod(T t);
+        private:
+            A a[2];
+        };
+
+        template<>
+        class HasSpecialization<uint32_t> {
+        public:
+            uint32_t only_in_the_specialization() const { return 7; }
+        };
+
+        typedef HasSpecialization<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::C::new();
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(vec![
+                "fn tmethod (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            ]),
+            // The other half: what the specialization declares of its own is
+            // not bound, and was not before.
+            make_string_absence_finder(vec!["only_in_the_specialization".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// An explicit specialization of a member function template, written out of
+/// class. libclang reports one as a `CXCursor_CXXMethod` whose lexical parent
+/// is the translation unit rather than the class, so it is not among the
+/// class's children and bindgen never reaches it as a member: it does not bind,
+/// and did not before.
+///
+/// The template it specializes is still a member function template and still
+/// gets the note. That is the honest answer rather than a convenient one: C++
+/// has provided a callable function here and autocxx cannot see it, which is
+/// exactly why the note tells the reader to write a wrapper instead of the
+/// specialization this header writes.
+///
+/// The note being named `tspec` is what says nothing was bound: a binding would
+/// have taken that name from the same overload tracker and left the note as
+/// `tspec1`.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_explicit_function_specialization_does_not_bind() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Spec {
+        public:
+            Spec() {}
+            template<typename T> uint32_t tspec(T t) const;
+            uint32_t plain() const { return 12; }
+        };
+        template<> inline uint32_t Spec::tspec<uint32_t>(uint32_t t) const { return t + 1; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let s = ffi::Spec::new().within_unique_ptr();
+            assert_eq!(s.plain(), 12);
+        },
+        quote! {
+            generate!("Spec")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn tspec (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// An operator declared as a member function template. Its C++ name is not an
+/// identifier, so there is no name for a note to take: what to call an operator
+/// in Rust is bindgen's `--represent-cxx-operators` question, and that renaming
+/// happens on a path a member function template never reaches. Nothing is noted
+/// for one, and the members beside it are unaffected.
+///
+/// Worth its own test because the first draft of this asked
+/// `validate_ident_ok_for_rust`, which builds the identifier before testing it
+/// and so panicked instead of refusing - on any header including `<vector>`,
+/// whose standard library classes declare these.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_operator_member_function_templates_are_not_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Ops {
+        public:
+            Ops() {}
+            template<typename T> void operator()(T t);
+            template<typename T> Ops& operator=(T t);
+            template<typename T> bool operator==(T t) const;
+            uint32_t plain() const { return 12; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = ffi::Ops::new().within_unique_ptr();
+            assert_eq!(o.plain(), 12);
+        },
+        quote! {
+            generate!("Ops")
+        },
+        None,
+        Some(make_string_absence_finder(vec![
+            "member function template".to_string()
+        ])),
+        None,
+    );
+}
+
+/// A note must not take a name from a type autocxx manufactures while analyzing
+/// signatures. Those are merged in after these notes are made, so a collision
+/// costs both: `ApiVec` replaces a same-named pair with a single error, which
+/// would take the concrete type `Pkt<uint32_t>` with it and every function using it.
+///
+/// `Pkt_uint32_t` here declares a member function template called
+/// `AutocxxConcrete`, which is the name autocxx gives the type it manufactures
+/// for `Pkt<uint32_t>`.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_member_function_template_note_avoids_a_manufactured_type() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T> struct Pkt { T value; };
+        struct Pkt_uint32_t {
+            template<typename T> void AutocxxConcrete(T t);
+        };
+        inline uint32_t take_pkt(const Pkt<uint32_t>& pkt) { return pkt.value; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("take_pkt")
+            generate!("Pkt_uint32_t")
+        },
+        None,
+        Some(make_checks_without_building(vec![
+            // The note is still there, under a name of its own.
+            make_string_finder(vec![
+                "(_uhoh : autocxx :: BindingGenerationFailure)".to_string()
+            ]),
+            // And nothing was thrown away for having two of one name.
+            make_string_absence_finder(vec!["Duplicate item".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// A member function template whose C++ name ends in an underscore, which is
+/// how bindgen escapes a name of its own, and one which is a Rust keyword. The
+/// note is named from the C++ name rather than from the identifier autocxx
+/// files it under, so `f_` is `f_` and not `Named_f_`.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_awkwardly_named_member_function_templates_are_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Named {
+        public:
+            Named() {}
+            template<typename T> void f_(T t);
+            template<typename T> void type(T t);
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::Named::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("Named")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn f_ (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn type_ (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A conversion function template. bindgen passes over one, where it passes
+/// over a conversion function of any other kind, and libclang does not spell
+/// this one usefully anyway - `operator type-parameter-0-0` rather than
+/// `operator T`. Two exclusions would each be enough on their own, the engine
+/// refusing an operator name as well, and what this pins is the outcome: no
+/// note, and the ordinary members beside it unaffected.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_conversion_function_template_is_not_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Converting {
+        public:
+            Converting() {}
+            template<typename T> operator T();
+            uint32_t plain() const { return 12; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::Converting::new().within_unique_ptr();
+            assert_eq!(c.plain(), 12);
+        },
+        quote! {
+            generate!("Converting")
+        },
+        None,
+        Some(make_string_absence_finder(vec!["operator".to_string()])),
+        None,
+    );
+}
+
+/// A member function template of a class template which nobody declared
+/// `instantiable!`. Nothing is claimed about such an instantiation - the
+/// ordinary members are not bound for it either - so there is no note.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_no_member_function_template_notes_without_instantiable() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename A>
+        class Templated {
+        public:
+            template<typename T> void tmethod(T t);
+        private:
+            A a[2];
+        };
+
+        typedef Templated<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("C")
+        },
+        None,
+        Some(make_string_absence_finder(vec!["tmethod".to_string()])),
+        None,
+    );
+}
+
+/// Member function templates of a class in a namespace, which is where the
+/// note has to be filed under the class's own namespace rather than the root.
+///
+/// Addresses the member-function-template half of the bug reported upstream as
+/// google/autocxx#109.
+#[test]
+fn test_member_function_templates_in_a_namespace_are_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            class Nested {
+            public:
+                Nested() {}
+                template<typename T> void tmethod(T t);
+                uint32_t plain() const { return 12; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let n = ffi::fx_ns::Nested::new().within_unique_ptr();
+            assert_eq!(n.plain(), 12);
+        },
+        quote! {
+            generate!("fx_ns::Nested")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn tmethod (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
 /// The opaque holders autocxx lowers a `std::shared_ptr<const T>` and friends
 /// to are concrete types too, and must *not* pick up the constructor above
 /// even where the user declares their alias `instantiable!`: what such a
