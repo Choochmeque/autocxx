@@ -9556,6 +9556,534 @@ fn test_std_array_of_volatile_element_refused() {
     );
 }
 
+// The `volatile` tests below. Rust states volatility in the *access* -
+// `read_volatile`/`write_volatile` - and never in the type, so there is no
+// signature autocxx can give a binding which carries the promise C++ made.
+// Every position where the qualifier still means something at the boundary is
+// therefore refused by name; the two where it is spent by the time Rust sees
+// the value are bound as before, and have tests of their own saying so.
+//
+// Before this was handled, each of these produced a binding indistinguishable
+// from the non-`volatile` one: the two variables below both came out
+// `pub static mut ...: c_int` and `pub static ...: c_int`, `Regs::status`
+// received an ordinary getter, and `Holder<volatile uint32_t>` and
+// `Holder<uint32_t>` collapsed onto one concrete type.
+
+/// A namespace-scope `volatile` variable is turned down rather than
+/// re-exported. Reading it through the `pub use` bindgen's declaration gets is
+/// an ordinary load, which the compiler may cache, reorder or elide.
+#[test]
+fn test_volatile_variable_refused() {
+    let hdr = indoc! {"
+        extern volatile int g_flag;
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["g_flag"],
+        &[],
+        "The C++ variable g_flag is `volatile`",
+    );
+}
+
+/// The motivating case. `const volatile` is how a read-only hardware status
+/// register is declared, and it is the one position where honouring half the
+/// declaration is worse than honouring neither: `is_const` alone made this an
+/// immutable Rust `static`, which the compiler is entitled to constant-fold
+/// reads of - the exact opposite of what `volatile` asks for.
+#[test]
+fn test_const_volatile_variable_refused() {
+    let hdr = indoc! {"
+        extern const volatile int g_status;
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["g_status"],
+        &[],
+        "The C++ variable g_status is `volatile`",
+    );
+}
+
+/// A `volatile` variable whose initializer bindgen could see does not arrive
+/// as a `static` at all - bindgen lowers it to a Rust `const` carrying the
+/// value. That is the worst of the variable cases rather than the mildest:
+/// a `const` is fixed at compile time, so Rust would never read the object.
+#[test]
+fn test_initialized_volatile_variable_refused() {
+    let hdr = indoc! {"
+        volatile int g_init = 1;
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["g_init"],
+        &[],
+        "The C++ variable g_init is `volatile`",
+    );
+}
+
+/// A string initializer took a different route again: bindgen substitutes a
+/// `&[u8; N]` for the declared type entirely, so no marker on the emitted type
+/// could have carried the qualifier. A `volatile` variable is not a constant
+/// whatever it was written with, so none of them is lowered to one.
+#[test]
+fn test_volatile_string_variable_refused() {
+    let hdr = indoc! {"
+        volatile char v_arr[] = \"hello\";
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["v_arr"],
+        &[],
+        "The C++ variable v_arr is `volatile`",
+    );
+}
+
+/// The refusal is about the qualifier and nothing else: a variable of the same
+/// type without it still binds, `const` one included.
+#[test]
+fn test_non_volatile_variables_still_bind() {
+    let cxx = indoc! {"
+        int g_plain = 3;
+        extern const int g_readonly = 4;
+    "};
+    let hdr = indoc! {"
+        extern int g_plain;
+        extern const int g_readonly;
+    "};
+    let rs = quote! {
+        assert_eq!(unsafe { ffi::g_plain }, 3);
+        assert_eq!(unsafe { ffi::g_readonly }, 4);
+    };
+    run_test(cxx, hdr, rs, &["g_plain", "g_readonly"], &[]);
+}
+
+/// A `volatile` member of built-in type keeps its getter, and that getter is
+/// honest. The C++ autocxx writes for it is `obj.status`, and reading a
+/// `volatile` glvalue is a volatile access - so the read happens in C++, once
+/// per call, and what crosses to Rust is the copy it produced. Refusing this
+/// would turn down something which already keeps the promise.
+#[test]
+fn test_volatile_member_of_builtin_type_keeps_its_getter() {
+    let cxx = indoc! {"
+        uint32_t read_twice(const Regs& r) { return r.status + r.status; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Regs {
+            Regs() : status(1), plain(2) {}
+            volatile uint32_t status;
+            uint32_t plain;
+        };
+        uint32_t read_twice(const Regs& r);
+    "};
+    let rs = quote! {
+        let regs = ffi::Regs::new().within_unique_ptr();
+        assert_eq!(regs.status(), 1);
+        assert_eq!(regs.plain(), 2);
+    };
+    run_test(cxx, hdr, rs, &["Regs", "read_twice"], &[]);
+}
+
+/// The borrowed shape is the one which cannot work. A member of class type is
+/// handed back by reference, which would leave the reading to Rust - an
+/// ordinary load - and does not compile in any case, since the `const T&` the
+/// accessor returns will not bind to a `const volatile T`. The class still
+/// binds and its other members keep their accessors.
+///
+/// `Inner` is given a copy constructor taking `const volatile Inner&` so that
+/// this test is about the accessor and nothing else. Without one, a `volatile`
+/// member of class type deletes `Outer`'s own implicitly declared copy and move
+/// constructors - C++ has no way to copy the member - and autocxx synthesizes
+/// them regardless, which is a separate problem in the constructor analysis.
+#[test]
+fn test_volatile_member_needing_a_borrowed_getter_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner {
+            uint32_t a;
+            Inner(uint32_t a) : a(a) {}
+            Inner(const volatile Inner& o) : a(o.a) {}
+        };
+        struct Outer {
+            Outer() : inner(1), plain(2) {}
+            volatile Inner inner;
+            uint32_t plain;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let outer = ffi::Outer::new().within_unique_ptr();
+            assert_eq!(outer.plain(), 2);
+        },
+        directives_from_lists(&["Outer", "Inner"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["Outer::inner", "`volatile`"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// A pointer is a scalar as well, and a `volatile` one - `T* volatile`, the
+/// pointer itself qualified rather than what it points at - is copied by
+/// reading it. The getter and the wrapped return both have to accept that,
+/// which the return gate would not if it only looked at named types.
+#[test]
+fn test_volatile_pointer_member_and_return_still_bind() {
+    let cxx = indoc! {"
+        int target = 7;
+        int* volatile give() { return &target; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Dev {
+            Dev() : reg(nullptr), plain(2) {}
+            int* volatile reg;
+            uint32_t plain;
+        };
+        int* volatile give();
+    "};
+    let rs = quote! {
+        let dev = ffi::Dev::new().within_unique_ptr();
+        assert!(dev.reg().is_null());
+        assert!(!unsafe { ffi::give() }.is_null());
+    };
+    run_test(cxx, hdr, rs, &["Dev", "give"], &[]);
+}
+
+/// An enumeration is a scalar too, so a `volatile` member of one is read by
+/// value exactly as a built-in is. It is not in autocxx's known-types database,
+/// which is why it has to be recognised as an enum rather than looked up there.
+#[test]
+fn test_volatile_member_of_enum_type_keeps_its_getter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum Mode { Idle = 0, Busy = 1 };
+        struct Dev {
+            Dev() : mode(Busy), plain(2) {}
+            volatile Mode mode;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        let dev = ffi::Dev::new().within_unique_ptr();
+        assert!(matches!(dev.mode(), ffi::Mode::Busy));
+    };
+    run_test("", hdr, rs, &["Dev", "Mode"], &[]);
+}
+
+/// The same for a return: an enumeration return is copied by reading it, so it
+/// takes the wrapper route rather than the refusal.
+#[test]
+fn test_volatile_enum_return_binds_through_a_wrapper() {
+    let hdr = indoc! {"
+        enum Mode { Idle = 0, Busy = 1 };
+        inline volatile Mode give() { return Busy; }
+    "};
+    let rs = quote! {
+        assert!(matches!(ffi::give(), ffi::Mode::Busy));
+    };
+    run_test("", hdr, rs, &["give", "Mode"], &[]);
+}
+
+/// Being copyable is not enough to earn the by-value getter. C++ copies a
+/// class by calling a constructor, and an implicitly declared copy constructor
+/// takes `const T&` or `T&` - neither of which a `volatile T` lvalue binds to -
+/// so `obj.member` does not compile for a `volatile std::string`, however
+/// ordinary that class's copy constructor is. Only a scalar can be read out of
+/// a `volatile` object, because C++ copies one by reading it.
+#[test]
+fn test_volatile_member_of_copyable_class_type_is_still_refused() {
+    let hdr = indoc! {"
+        #include <string>
+        #include <cstdint>
+        struct Holder {
+            Holder();
+            Holder(const Holder&) = delete;
+            Holder(Holder&&) = delete;
+            volatile std::string s;
+            uint32_t plain;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Holder"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["Holder::s", "`volatile`"].map(|s| s.to_string()).to_vec(),
+        )),
+        None,
+    );
+}
+
+/// A `volatile` array member is refused as an array, which it also is: C++
+/// cannot return one by value, so the by-value getter which rescues a scalar
+/// `volatile` member does not exist for it. It is the qualifier which keeps the
+/// struct from being POD, so Rust cannot reach the elements either way.
+#[test]
+fn test_volatile_array_member_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Ports {
+            Ports() : gpio{}, plain(1) {}
+            volatile uint32_t gpio[4];
+            uint32_t plain;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Ports"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["Ports::gpio", "an array"].map(|s| s.to_string()).to_vec(),
+        )),
+        None,
+    );
+}
+
+/// A struct with a `volatile` member cannot be POD, because a POD struct's
+/// fields are ordinary Rust fields and reading one is an ordinary load. Asking
+/// for it by `generate_pod!` says so rather than handing over the field.
+#[test]
+fn test_volatile_member_is_not_pod() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Regs {
+            volatile uint32_t status;
+            uint32_t plain;
+        };
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["Regs"],
+        "could not be POD because it has a `volatile` member",
+    );
+}
+
+/// A `volatile` *bitfield* is the position bindgen's marker cannot reach, and
+/// the one which mattered most in practice: a register map is written as a
+/// struct of `volatile` bitfields. A run of bitfields shares one allocation
+/// unit, so there is no field of the member's own type to mark - the accessors
+/// bindgen writes over the unit carry it instead, and a POD struct re-exports
+/// those accessors as they stand. `Ctrl::enable()` and `Ctrl::set_enable()`
+/// were public, ordinary, non-volatile reads and writes of a member C++
+/// declared `volatile`. bindgen reports the qualifier per member for this case,
+/// and such a struct is no longer POD.
+#[test]
+fn test_volatile_bitfield_is_not_pod() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Ctrl {
+            volatile uint32_t enable : 1;
+            uint32_t mode : 3;
+        };
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["Ctrl"],
+        "could not be POD because it has a `volatile` bitfield",
+    );
+}
+
+/// The same struct asked for without `generate_pod!` is still bindable; it is
+/// opaque, so bindgen's bitfield accessors are not reachable from Rust at all.
+#[test]
+fn test_volatile_bitfield_class_still_binds_opaquely() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Ctrl {
+            Ctrl() : enable(0), mode(0) {}
+            volatile uint32_t enable : 1;
+            uint32_t mode : 3;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ctrl = ffi::Ctrl::new().within_unique_ptr();
+        },
+        directives_from_lists(&["Ctrl"], &[], None),
+        None,
+        Some(make_string_finder(vec!["Ctrl".to_string()])),
+        None,
+    );
+}
+
+/// A bitfield with no `volatile` on it is unaffected, so the struct above is
+/// refused for its qualifier rather than for having bitfields at all.
+#[test]
+fn test_non_volatile_bitfield_is_still_pod() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Ctrl {
+            uint32_t enable : 1;
+            uint32_t mode : 3;
+        };
+    "};
+    let rs = quote! {
+        let mut ctrl = ffi::Ctrl::default();
+        ctrl.set_enable(1);
+        assert_eq!(ctrl.enable(), 1);
+    };
+    run_test("", hdr, rs, &[], &["Ctrl"]);
+}
+
+/// A `volatile` template argument, for a template which is not `std::array` -
+/// bindgen turns that one down before autocxx sees it. autocxx names a
+/// concrete instantiation in the generated C++ by writing its arguments out
+/// again, and the qualifier does not survive that, so the C++ would name
+/// `Holder<uint32_t>`: a different specialization, silently.
+#[test]
+fn test_volatile_template_argument_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> struct Holder { T value; };
+        using VolatileHolder = Holder<volatile uint32_t>;
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["VolatileHolder"],
+        &[],
+        "template argument here is `volatile`-qualified",
+    );
+}
+
+/// A template argument which is a *pointer to* something `volatile`. The
+/// argument is written back out verbatim to name the instantiation, so
+/// `Holder<volatile S*>` was named as `Holder<S*>` - a different
+/// specialization, with nothing said. The qualifier has to survive being
+/// resolved through the pointee for the refusal above to see it at all.
+#[test]
+fn test_volatile_pointee_template_argument_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct S { uint32_t a; };
+        template <typename T> struct Holder { T value; };
+        using VolPtrHolder = Holder<volatile S*>;
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["VolPtrHolder"],
+        &[],
+        "template argument here is `volatile`-qualified",
+    );
+}
+
+/// The same template with an unqualified argument is unaffected, which is what
+/// makes the refusal above about the qualifier rather than about templates.
+#[test]
+fn test_non_volatile_template_argument_still_binds() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template <typename T> struct Holder { T value; };
+        using PlainHolder = Holder<uint32_t>;
+    "};
+    run_test("", hdr, quote! {}, &["PlainHolder"], &[]);
+}
+
+/// `volatile` on a by-value parameter is spent before Rust sees the value: C++
+/// has copied it across the boundary, and the qualifier governs only the
+/// callee's re-reads of its own local copy. C++ agrees, and says so in the
+/// type system - a top-level cv-qualifier on a parameter is not part of the
+/// function's type at all, so `void f(volatile int)` and `void f(int)` are one
+/// function. This therefore binds as it always did, deliberately, rather than
+/// being swept up by the refusals above.
+#[test]
+fn test_volatile_by_value_parameter_still_binds() {
+    let hdr = indoc! {"
+        inline int take(volatile int x) { return x + 1; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::take(autocxx::c_int(1)), autocxx::c_int(2));
+    };
+    run_test("", hdr, rs, &["take"], &[]);
+}
+
+/// A `volatile` *return* needs more than nothing, because a cv-qualified
+/// return type - unlike a parameter's - is part of the function's type. cxx
+/// declares a function by taking its address, so it wrote
+/// `int (*give$)() = ::give;` against an `int volatile ()` and the C++
+/// compiler rejected it: a build failure deep in generated code naming neither
+/// `volatile` nor the function asked for. autocxx already meets exactly this
+/// problem for a `const` return (google/autocxx#1191) and answers it by calling
+/// through a wrapper of its own, which returns the unqualified type; a
+/// `volatile` return now takes the same route. The value has been copied out of
+/// C++ by then, so nothing is lost.
+#[test]
+fn test_volatile_return_binds_through_a_wrapper() {
+    let hdr = indoc! {"
+        inline volatile int give() { return 41; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::give(), autocxx::c_int(41));
+    };
+    run_test("", hdr, rs, &["give"], &[]);
+}
+
+/// A `volatile` return of *class* type gets no wrapper. The wrapper's body
+/// copy-initializes an unqualified `T` from a `volatile T`, which for a scalar
+/// is a read and for a class needs a constructor taking `volatile T&` or
+/// `const volatile T&` - which C++ does not implicitly declare - so
+/// `return give();` does not compile at the C++14 autocxx generates for. C++17
+/// initializes the result directly and would accept it; the refusal is pinned
+/// to the floor rather than to whichever standard a user happens to build
+/// with.
+#[test]
+fn test_volatile_class_return_refused() {
+    let hdr = indoc! {"
+        #include <string>
+        inline volatile std::string give() { return std::string(); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["give"],
+        &[],
+        "returns a `volatile`-qualified value of a type autocxx will not copy",
+    );
+}
+
+/// `const volatile` together, which is the qualifier pair a read-only hardware
+/// register is declared with. The `const` half already forced a wrapper; this
+/// pins that adding the `volatile` half did not change that.
+#[test]
+fn test_const_volatile_return_binds_through_a_wrapper() {
+    let hdr = indoc! {"
+        inline const volatile int give() { return 41; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::give(), autocxx::c_int(41));
+    };
+    run_test("", hdr, rs, &["give"], &[]);
+}
+
 /// A concrete instantiation autocxx names in C++ by writing its arguments out
 /// again is refused where one of them is an array, because `std::array<T, N>`
 /// is what the writing produces and a `T[N]` argument would be renamed into a
