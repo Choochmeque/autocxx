@@ -293,7 +293,14 @@ fn test_float128_field_makes_a_type_non_pod() {
         directives_from_lists(&["HasF128"], &[], None),
         float128_target(),
         Some(make_checks_without_building(vec![make_string_finder(
-            vec!["`__float128`".to_string()],
+            [
+                // The type survives - an error stub for the whole of it would
+                // satisfy the message on its own.
+                "impl UniquePtr < HasF128 >",
+                "`__float128`",
+            ]
+            .map(|s| s.to_string())
+            .to_vec(),
         )])),
         None,
     );
@@ -20509,6 +20516,58 @@ fn test_instantiation_on_incomplete_type_is_still_reachable_by_reference() {
         Some(Box::new(SmartPointerImplsWithheld)),
         None,
     );
+}
+
+/// An argument written as an alias is the same argument. `au<Alias>` is one
+/// specialization with `au<bb>`, and an alias for the specialization itself is
+/// another way to write the same thing - and the arguments are read before
+/// anything converts them, so neither resolves itself.
+#[test]
+fn test_instantiation_on_incomplete_type_named_through_an_alias() {
+    for hdr in [
+        indoc! {"
+            #include <memory>
+            #include <vector>
+            template <typename at> class au { std::unique_ptr<at> aw; };
+            class bb;
+            using Alias = bb;
+            using bc = au<Alias>;
+            class RenderFrameHost {
+            public:
+            virtual std::vector<bc> &bd() = 0;
+            virtual ~RenderFrameHost() {}
+            };
+        "},
+        indoc! {"
+            #include <memory>
+            #include <vector>
+            template <typename at> class au { std::unique_ptr<at> aw; };
+            class bb;
+            using Inner = au<bb>;
+            template <typename T> struct Outer { T value; };
+            class RenderFrameHost {
+            public:
+            virtual std::vector<Outer<Inner>> &bd() = 0;
+            virtual ~RenderFrameHost() {}
+            };
+        "},
+    ] {
+        run_test_ex(
+            "",
+            hdr,
+            quote! {},
+            directives_from_lists(&["RenderFrameHost"], &[], None),
+            None,
+            // `bb` rather than the alias: the refusal names the type nothing
+            // defines, however the header spelt it.
+            Some(make_string_finder(
+                ["AutocxxConcrete", "bb", "only declares"]
+                    .map(|s| s.to_string())
+                    .to_vec(),
+            )),
+            None,
+        );
+    }
 }
 
 /// Checks that `bd` came back with the concrete type in it, that the type
