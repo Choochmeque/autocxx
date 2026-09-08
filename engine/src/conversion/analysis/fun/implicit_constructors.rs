@@ -16,7 +16,7 @@ use itertools::Itertools;
 use syn::{PatType, Type};
 
 use crate::conversion::analysis::type_converter::TypeKind;
-use crate::conversion::type_helpers::{array_element_type, type_is_reference, unwrap_reference};
+use crate::conversion::type_helpers::{array_element_type, unwrap_reference};
 use crate::{
     conversion::{
         analysis::{
@@ -34,8 +34,7 @@ use crate::{
 };
 
 use super::{
-    special_member_to_string, FnAnalysis, FnKind, FnPrePhase1, MethodKind, ReceiverMutability,
-    TraitMethodKind,
+    special_member_to_string, FnAnalysis, FnKind, FnPrePhase1, MethodKind, TraitMethodKind,
 };
 
 /// Indicates what we found out about a category of special member function.
@@ -408,7 +407,7 @@ impl ItemsFound {
         self.destructor.exists_implicit()
     }
 }
-#[derive(Hash, Eq, PartialEq)]
+#[derive(Hash, Eq, PartialEq, Debug)]
 enum ExplicitKind {
     DefaultConstructor,
     ConstCopyConstructor,
@@ -1436,7 +1435,6 @@ fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
                 analysis:
                     FnAnalysis {
                         kind: FnKind::Method { impl_for, .. },
-                        param_details,
                         ignore_reason:
                             Ok(())
                             | Err(ConvertErrorWithContext(ConvertErrorFromCpp::AssignmentOperator, _)),
@@ -1449,29 +1447,7 @@ fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
                 Some(SpecialMemberKind::AssignmentOperator)
             ) =>
             {
-                let is_move_assignment_operator = !any_input_is_rvalue_reference(&fun.inputs);
-                merge_fun(
-                    impl_for.clone(),
-                    if is_move_assignment_operator {
-                        ExplicitKind::MoveAssignmentOperator
-                    } else {
-                        let receiver_mutability = &param_details
-                            .iter()
-                            .next()
-                            .unwrap()
-                            .self_type
-                            .as_ref()
-                            .unwrap()
-                            .1;
-                        match receiver_mutability {
-                            ReceiverMutability::Const => ExplicitKind::ConstCopyAssignmentOperator,
-                            ReceiverMutability::Mutable => {
-                                ExplicitKind::NonConstCopyAssignmentOperator
-                            }
-                        }
-                    },
-                    fun,
-                )
+                merge_fun(impl_for.clone(), assignment_operator_kind(&fun.inputs), fun)
             }
             Api::Function {
                 analysis:
@@ -1579,13 +1555,47 @@ fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
     }
 }
 
-fn any_input_is_rvalue_reference(
+/// Which of the three assignment-operator slots a declared `operator=`
+/// belongs in.
+///
+/// C++ asks one question of the parameter and one only: an rvalue reference
+/// makes it a move assignment operator, and anything else which takes the
+/// class - `T`, `T&`, `const T&` and their `volatile` spellings - makes it a
+/// copy assignment operator ([class.copy.assign]). The copy pair is then split
+/// on whether the *source* may be `const`, which is the same axis
+/// `analyze_foreign_fn` splits the copy constructors on and the same question
+/// a containing class asks when deciding what it can assign from a `const`
+/// member.
+///
+/// bindgen puts the receiver first and the source immediately after it, and
+/// writes a reference as `__bindgen_marker_Reference<P>` - or
+/// `__bindgen_marker_RValueReference<P>` - where `P` is a pointer carrying the
+/// constness of the referent. A source which is neither, so a by-value `T`,
+/// is filed with the const-qualified form, the split being on the parameter's
+/// own spelling: whether a `const` source can in fact be assigned from turns
+/// on the class's copy constructor as well, which the parameter does not say
+/// and no rule here asks about.
+///
+/// Nothing reaches this today, for the reason written where
+/// `is_assignment_operator` is computed; it is what the reader-back needs the
+/// moment such a function does arrive.
+fn assignment_operator_kind(
     inputs: &syn::punctuated::Punctuated<crate::minisyn::FnArg, syn::token::Comma>,
-) -> bool {
-    inputs.iter().any(|input| match &input.0 {
-        syn::FnArg::Receiver(_) => false,
-        syn::FnArg::Typed(PatType { ty, .. }, ..) => type_is_reference(ty.as_ref(), true),
-    })
+) -> ExplicitKind {
+    let source = match inputs.iter().nth(1).map(|input| &input.0) {
+        Some(syn::FnArg::Typed(PatType { ty, .. }, ..)) => match ty.as_ref() {
+            Type::Path(typ) => Some(typ),
+            _ => None,
+        },
+        _ => None,
+    };
+    match source {
+        Some(typ) if unwrap_reference(typ, true).is_some() => ExplicitKind::MoveAssignmentOperator,
+        Some(typ) if matches!(unwrap_reference(typ, false), Some(ptr) if ptr.mutability.is_some()) => {
+            ExplicitKind::NonConstCopyAssignmentOperator
+        }
+        _ => ExplicitKind::ConstCopyAssignmentOperator,
+    }
 }
 
 /// Whether the object a constructor moves *from* is a `const T&&`.
@@ -1631,5 +1641,59 @@ fn known_type_items_found(constructor_details: KnownTypeConstructorDetails) -> I
         destructor_is_trivial: constructor_details.destructor_is_trivial,
         name: None,
         why_no_constructors: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assignment_operator_kind, ExplicitKind};
+    use syn::parse_quote;
+
+    /// The parameter list bindgen writes for a member `operator=` whose source
+    /// parameter is spelled `source`: the receiver first, then the source.
+    macro_rules! inputs {
+        ($($source:tt)*) => {
+            parse_quote! { this: *mut Thing, other: $($source)* }
+        };
+    }
+
+    #[test]
+    fn move_assignment_operator_is_recognised_by_its_rvalue_reference() {
+        assert_eq!(
+            assignment_operator_kind(&inputs!(__bindgen_marker_RValueReference<*mut Thing>)),
+            ExplicitKind::MoveAssignmentOperator
+        );
+    }
+
+    /// C++ counts `T& operator=(const T&&)` as a move assignment operator like
+    /// any other, so the constness of an rvalue source decides nothing.
+    #[test]
+    fn move_assignment_operator_from_a_const_source_is_still_a_move() {
+        assert_eq!(
+            assignment_operator_kind(&inputs!(__bindgen_marker_RValueReference<*const Thing>)),
+            ExplicitKind::MoveAssignmentOperator
+        );
+    }
+
+    #[test]
+    fn copy_assignment_operator_is_split_on_the_source_being_const() {
+        assert_eq!(
+            assignment_operator_kind(&inputs!(__bindgen_marker_Reference<*const Thing>)),
+            ExplicitKind::ConstCopyAssignmentOperator
+        );
+        assert_eq!(
+            assignment_operator_kind(&inputs!(__bindgen_marker_Reference<*mut Thing>)),
+            ExplicitKind::NonConstCopyAssignmentOperator
+        );
+    }
+
+    /// `T& operator=(T)` is a copy assignment operator too, and is filed with
+    /// the const-qualified form.
+    #[test]
+    fn copy_assignment_operator_taking_its_source_by_value() {
+        assert_eq!(
+            assignment_operator_kind(&inputs!(Thing)),
+            ExplicitKind::ConstCopyAssignmentOperator
+        );
     }
 }
