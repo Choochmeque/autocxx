@@ -57,6 +57,7 @@ pub(crate) fn decorate_types_with_constructor_deps(apis: ApiVec<FnPrePhase3>) ->
                 rs_definition,
                 cpp_definition,
                 holder_surface,
+                incomplete_argument,
                 ..
             } => {
                 let constructor_and_allocator_deps = constructors_and_allocators_by_type
@@ -68,6 +69,7 @@ pub(crate) fn decorate_types_with_constructor_deps(apis: ApiVec<FnPrePhase3>) ->
                     cpp_definition,
                     holder_surface,
                     constructor_and_allocator_deps,
+                    incomplete_argument,
                 }
             }
             _ => api,

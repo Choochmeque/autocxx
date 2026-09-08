@@ -124,6 +124,18 @@ pub enum ConvertErrorFromCpp {
         culprit: QualifiedName,
         reason: Box<ConvertErrorFromCpp>,
     },
+    /// A template instantiation on a type the header only declares. The
+    /// instantiation itself is a complete type, so C++ is happy to name one
+    /// and to pass references and pointers to it around; but instantiating its
+    /// destructor may need the argument to be complete - `au<bb>` holding a
+    /// `std::unique_ptr<bb>` is the shape google/autocxx#1065 reported - and
+    /// nothing autocxx sees says whether it does. Every position which would
+    /// make a C++ compiler instantiate that destructor is turned down here.
+    #[error("Found an attempt at using {}, a template instantiation whose argument {} is a type this header only declares. Naming one of these is fine, and so is holding a reference or a pointer to one - but a cxx container of it, or a by-value use, makes C++ destroy one, and destroying a template instantiation can need its argument to be complete. Define {} where autocxx can see it if you need this position.", .instantiation.to_cpp_name(), .argument.to_cpp_name(), .argument.to_cpp_name())]
+    InstantiationOnIncompleteType {
+        instantiation: QualifiedName,
+        argument: QualifiedName,
+    },
     #[error("Found an attempt at using a type marked as blocked! ({})", .0.to_cpp_name())]
     Blocked(QualifiedName),
     #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]

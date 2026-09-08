@@ -676,7 +676,8 @@ impl<'a> RsCodeGenerator<'a> {
                     kind,
                     constructors.move_constructor && deletable,
                     constructors.destructor && deletable,
-                    || Some((Item::Struct(details.item.into()), doc_attrs)),
+                    || Some(Item::Struct(details.item.into())),
+                    doc_attrs,
                     associated_methods,
                     num_generics,
                 )
@@ -689,19 +690,48 @@ impl<'a> RsCodeGenerator<'a> {
                     TypeKind::Pod,
                     true,
                     true,
-                    || Some((Item::Enum(item.into()), doc_attrs)),
+                    || Some(Item::Enum(item.into())),
+                    doc_attrs,
                     associated_methods,
                     0,
                 )
             }
-            Api::ConcreteType { holder_surface, .. } => {
+            Api::ConcreteType {
+                holder_surface,
+                incomplete_argument,
+                ..
+            } => {
+                // A template instantiation built on a type this header only
+                // declares is a complete type - C++ will name one and pass
+                // references to it - but destroying one needs whatever the
+                // template did with that argument, which may be a
+                // `std::unique_ptr` of it. The smart-pointer trio is where
+                // cxx writes C++ which destroys the payload, so it is withheld
+                // and said so; every other position which would destroy one is
+                // refused during analysis. See
+                // `ConvertErrorFromCpp::InstantiationOnIncompleteType`.
+                let mut doc_attrs = Vec::new();
+                if let Some(argument) = &incomplete_argument {
+                    doc_attrs.extend(make_doc_attrs(format!(
+                        "autocxx has not added its usual `UniquePtr`, `SharedPtr` and `WeakPtr` \
+                         support for this type, because it is a template instantiation whose \
+                         argument `{}` is a type this header only declares. Each of those asks \
+                         C++ to destroy one, and destroying a template instantiation can need \
+                         its argument to be complete. You can still reach one through a \
+                         reference or a pointer obtained from C++. Define `{}` where autocxx can \
+                         see it if you need to own one.",
+                        argument.to_cpp_name(),
+                        argument.to_cpp_name(),
+                    )));
+                }
                 let mut result = self.generate_type(
                     &name,
                     bridge_id.clone(),
                     TypeKind::Abstract,
                     false, // assume for now that these types can't be kept in a Vector
-                    true,  // assume for now that these types can be put in a smart pointer
+                    incomplete_argument.is_none(),
                     || None,
+                    doc_attrs,
                     associated_methods,
                     0,
                 );
@@ -731,6 +761,7 @@ impl<'a> RsCodeGenerator<'a> {
                 false, // these types can't be kept in a Vector
                 false, // these types can't be put in a smart pointer
                 || None,
+                Vec::new(),
                 associated_methods,
                 0,
             ),
@@ -1541,11 +1572,12 @@ impl<'a> RsCodeGenerator<'a> {
         movable: bool,
         destroyable: bool,
         item_creator: F,
+        doc_attrs: Vec<Attribute>,
         associated_methods: &HashMap<QualifiedName, SuperclassTraitContents>,
         num_generics: usize,
     ) -> RsCodegenResult
     where
-        F: FnOnce() -> Option<(Item, Vec<Attribute>)>,
+        F: FnOnce() -> Option<Item>,
     {
         let mut output_mod_items = Vec::new();
         Self::add_superclass_stuff_to_type(
@@ -1554,15 +1586,10 @@ impl<'a> RsCodeGenerator<'a> {
             associated_methods.get(name),
             self.unsafe_policy,
         );
-        let orig_item = item_creator();
-        let doc_attrs = orig_item
-            .as_ref()
-            .map(|maybe_item| maybe_item.1.clone())
-            .unwrap_or_default();
         // The generic parameters bindgen declared, carried verbatim into any
         // wrapper this generates: a parameter can have a bound, which a fresh
         // parameter of our own invention could not reproduce.
-        let bindgen_generics = match orig_item.as_ref().map(|(item, _)| item) {
+        let bindgen_generics = match item_creator() {
             Some(Item::Struct(s)) => s.generics.clone(),
             _ => Generics::default(),
         };

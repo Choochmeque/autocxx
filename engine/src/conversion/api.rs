@@ -871,6 +871,16 @@ pub(crate) enum Api<T: AnalysisPhase> {
         /// [`crate::conversion::analysis::constructor_deps::decorate_types_with_constructor_deps`],
         /// as for the same field on a struct.
         constructor_and_allocator_deps: Vec<QualifiedName>,
+        /// A template argument of this instantiation which the header only
+        /// declares, if there is one.
+        ///
+        /// Such an instantiation is a complete type - it can be named, and
+        /// referred to - but whether its destructor can be instantiated
+        /// depends on what the template does with the argument, and nothing
+        /// autocxx sees says which. Anything which would instantiate that
+        /// destructor is therefore withheld: see
+        /// [`ConvertErrorFromCpp::InstantiationOnIncompleteType`].
+        incomplete_argument: Option<QualifiedName>,
     },
     /// A simple note that we want to make a constructor for
     /// a `std::string` on the heap.

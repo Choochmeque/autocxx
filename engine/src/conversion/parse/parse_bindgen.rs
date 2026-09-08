@@ -146,6 +146,10 @@ impl<'a> ParseBindgen<'a> {
                         rs_definition: None,
                         holder_surface: None,
                         constructor_and_allocator_deps: Vec::new(),
+                        // A `concrete!` directive names the C++ type itself,
+                        // so its arguments are whatever the user wrote and
+                        // autocxx never parses them.
+                        incomplete_argument: None,
                     }
                 }),
         );
