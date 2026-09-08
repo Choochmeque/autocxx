@@ -20,8 +20,8 @@ answers `None`, which is the answer this signature exists to give: it is the
 fallible one of the pair, and a type which stands, in the end, for itself has no
 inner type to report. Callers which have no use for `None` go through
 `canonical_type`, which asserts an answer as it always has - so a cyclic graph
-now stops at an assertion naming the type it could not resolve, rather than
-taking the process down with the stack. For every acyclic graph - which is every
+now stops at that assertion, at a named line and with a backtrace to the caller
+where one is enabled, rather than taking the process down with the stack. For every acyclic graph - which is every
 graph bindgen generated correctly - the walk visits exactly the types the
 recursion did and answers the same.
 
