@@ -100,7 +100,7 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
                         // to. Better than the alternative, which is a
                         // dependent left naming an error stub.
                         iterate_again = true;
-                        let err = ConvertErrorFromCpp::UnknownDependentType(missing_dep);
+                        let err = unknown_dependent_type(missing_dep);
                         ignored_items.insert(api.name().clone(), err.clone());
                         create_ignore_item(api, err)
                     } else {
@@ -111,6 +111,22 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
             .collect();
     }
     apis
+}
+
+/// Why an item which depends on a type nothing declares is being discarded.
+///
+/// `u128` gets its own answer because it is not one type: bindgen renders
+/// `unsigned __int128`, a 16-byte `long double` and `__float128` as that same
+/// bare token, and nothing which reaches us says which the header wrote. It is
+/// therefore not a type we have simply never heard of - it is one we could not
+/// bind without guessing, and guessing wrong is a miscompile rather than a
+/// build failure. See the note at the end of `known_types::create_type_database`.
+fn unknown_dependent_type(missing_dep: QualifiedName) -> ConvertErrorFromCpp {
+    if missing_dep == QualifiedName::new_from_cpp_name("u128") {
+        ConvertErrorFromCpp::Ambiguous128BitType
+    } else {
+        ConvertErrorFromCpp::UnknownDependentType(missing_dep)
+    }
 }
 
 fn create_ignore_item(api: Api<FnPhase>, err: ConvertErrorFromCpp) -> Api<FnPhase> {

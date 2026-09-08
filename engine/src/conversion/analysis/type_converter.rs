@@ -659,7 +659,11 @@ impl<'a> TypeConverter<'a> {
         let generic_behavior = known_types().cxx_generic_behavior(&tn);
         let payload_is_const = generic_behavior != CxxGenericType::Not
             && self.generic_args_are_const_qualified(&typ)?;
-        if generic_behavior == CxxGenericType::CppPtr && payload_is_const {
+        if matches!(
+            generic_behavior,
+            CxxGenericType::CppUniquePtr | CxxGenericType::CppSharedPtr
+        ) && payload_is_const
+        {
             let mut extra_apis = ApiVec::new();
             let surface = self.const_smart_pointer_surface(&tn, &typ, ns, &mut extra_apis)?;
             return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
@@ -751,12 +755,29 @@ impl<'a> TypeConverter<'a> {
                     if payload_is_const {
                         return Err(ConvertErrorFromCpp::ConstCxxContainerPayload(tn.clone()));
                     }
+                    // The payload names as bindgen wrote them, read before
+                    // conversion because that is the only moment an alias can
+                    // be told from what it resolves to.
+                    let payloads_as_written = payload_names_as_written(&ab.args);
                     let mut innerty = self.convert_punctuated(
                         ab.args.clone(),
                         ns,
                         &TypeConversionContext::WithinContainer,
                     )?;
                     ab.args = innerty.ty;
+                    match generic_behavior {
+                        CxxGenericType::CppUniquePtr => {
+                            rename_unique_ptr_payloads(
+                                &mut ab.args,
+                                &payloads_as_written,
+                                &mut deps,
+                            );
+                        }
+                        CxxGenericType::CppSharedPtr => {
+                            refuse_aliased_atom_payload(&ab.args, &payloads_as_written)?;
+                        }
+                        _ => {}
+                    }
                     // Converting the payload may have manufactured a type -
                     // the opaque holder of a `std::shared_ptr<const T>`, or
                     // any other concrete instantiation - and the bridge names
@@ -1322,8 +1343,13 @@ impl<'a> TypeConverter<'a> {
                                 return Ok(TypeKind::Regular);
                             }
                         }
-                        CxxGenericType::CppPtr => {
+                        CxxGenericType::CppUniquePtr => {
                             if !known_types().permissible_within_unique_ptr(&inner_qn) {
+                                return Err(ConvertErrorFromCpp::InvalidTypeForCppPtr(inner_qn));
+                            }
+                        }
+                        CxxGenericType::CppSharedPtr => {
+                            if !known_types().permissible_within_shared_or_weak_ptr(&inner_qn) {
                                 return Err(ConvertErrorFromCpp::InvalidTypeForCppPtr(inner_qn));
                             }
                         }
@@ -1549,4 +1575,108 @@ pub(crate) fn find_types<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashSet<Qualifie
         })
         .cloned()
         .collect()
+}
+
+/// The name bindgen gave each of a container's payloads, before conversion
+/// resolved any alias among them.
+///
+/// Read at that moment because it is the only one at which an alias can be
+/// told from what it resolves to, and that matters because bindgen drops a
+/// `const` off an alias's target: `using CU32 = const uint32_t` reaches us as
+/// `pub type CU32 = u32`, with nothing anywhere saying the payload is really a
+/// `const uint32_t`. Both callers below need to know.
+fn payload_names_as_written(
+    args: &Punctuated<GenericArgument, Comma>,
+) -> Vec<Option<QualifiedName>> {
+    args.iter()
+        .map(|arg| match arg {
+            GenericArgument::Type(Type::Path(payload)) => {
+                Some(QualifiedName::from_type_path(payload))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether this payload is one bindgen wrote itself, rather than the target an
+/// alias of its own resolved to. See [`payload_names_as_written`].
+fn payload_was_written_verbatim(
+    arg: &GenericArgument,
+    as_written: Option<&Option<QualifiedName>>,
+) -> bool {
+    match (arg, as_written) {
+        (GenericArgument::Type(Type::Path(payload)), Some(Some(written))) => {
+            *written == QualifiedName::from_type_path(payload)
+        }
+        _ => false,
+    }
+}
+
+/// Name a `std::unique_ptr`'s payloads with the `autocxx::c_*` wrapper of the
+/// same C++ type, where cxx will not take the payload's own name.
+///
+/// cxx turns down a `unique_ptr` of any of its own atoms, so
+/// `std::unique_ptr<uint32_t>` has no cxx spelling; `autocxx::c_u32` is that
+/// same `uint32_t` under a name cxx treats as any other, and the explicit shim
+/// trait impls in `autocxx::c_type_vectors` give it the `UniquePtrTarget` cxx
+/// would otherwise be missing. The wrapper's own name is recorded as a
+/// dependency so that the generated C++ declares its typedef. See
+/// google/autocxx#422.
+///
+/// Only a payload bindgen wrote as the atom itself is renamed: one reached
+/// through an alias may be a `const uint32_t` whose qualifier bindgen dropped,
+/// and naming that with the wrapper would declare a `unique_ptr` of a mutable
+/// one, which the shim would fail to bind - costing the whole bridge instead
+/// of the one function.
+///
+/// The character types cannot be caught up in this: bindgen gives `char32_t`,
+/// `wchar_t` and their siblings markers of their own, so none of them arrives
+/// as a bare atom and none is a key in the wrapper map. They are refused by
+/// the payload predicate instead, for want of container glue, which costs the
+/// one function - see `test_character_types_within_unique_ptr_are_refused`.
+fn rename_unique_ptr_payloads(
+    args: &mut Punctuated<GenericArgument, Comma>,
+    as_written: &[Option<QualifiedName>],
+    deps: &mut HashSet<QualifiedName>,
+) {
+    for (index, arg) in args.iter_mut().enumerate() {
+        if !payload_was_written_verbatim(arg, as_written.get(index)) {
+            continue;
+        }
+        if let GenericArgument::Type(Type::Path(payload)) = arg {
+            let name = QualifiedName::from_type_path(payload);
+            if let Some(wrapper) = known_types().unique_ptr_payload_wrapper(&name) {
+                deps.insert(wrapper.clone());
+                *payload = wrapper.to_type_path();
+            }
+        }
+    }
+}
+
+/// Turn down a `std::shared_ptr` or `std::weak_ptr` whose payload is an atom
+/// reached through an alias.
+///
+/// Those two take atoms a `unique_ptr` will not, and the bridge names such a
+/// payload by its atom - so an alias which was really a `const uint32_t`, with
+/// the qualifier dropped by bindgen, would declare a container of a mutable
+/// one and the shim would fail to bind. Refusing it here keeps the clean
+/// per-function rejection those signatures had before the atoms were let in at
+/// all; an alias to a named type is unaffected, and so is a payload bindgen
+/// wrote itself.
+fn refuse_aliased_atom_payload(
+    args: &Punctuated<GenericArgument, Comma>,
+    as_written: &[Option<QualifiedName>],
+) -> Result<(), ConvertErrorFromCpp> {
+    for (index, arg) in args.iter().enumerate() {
+        if payload_was_written_verbatim(arg, as_written.get(index)) {
+            continue;
+        }
+        if let GenericArgument::Type(Type::Path(payload)) = arg {
+            let name = QualifiedName::from_type_path(payload);
+            if !known_types().permissible_within_unique_ptr(&name) {
+                return Err(ConvertErrorFromCpp::InvalidTypeForCppPtr(name));
+            }
+        }
+    }
+    Ok(())
 }

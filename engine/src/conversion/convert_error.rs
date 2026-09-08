@@ -126,6 +126,8 @@ pub enum ConvertErrorFromCpp {
     BindgenOpaqueBlob(String),
     #[error("This item relies on a type not known to autocxx ({})", .0.to_cpp_name())]
     UnknownDependentType(QualifiedName),
+    #[error("This item relies on a 128-bit type which bindgen renders as a bare `u128`, and two different C++ types arrive that way: `unsigned __int128` and `__float128`. Nothing that reaches autocxx says which of them the header wrote, so binding it would mean naming one of the two in the generated C++ and being wrong - silently, at runtime - for the other. `__int128` itself is supported, as `autocxx::c_i128`; a 16-byte `long double`, which used to be a third claimant on this token, is now refused by name of its own.")]
+    Ambiguous128BitType,
     #[error("This item depends on some other type(s) which autocxx could not generate, some of them are: {}. {} could not be generated because: {}", .deps.iter().join(", "), .culprit, .reason)]
     IgnoredDependent {
         deps: HashSet<QualifiedName>,
@@ -191,9 +193,9 @@ pub enum ConvertErrorFromCpp {
     ConstructorWithOnlyOneParam,
     #[error("A copy or move constructor was found to take extra parameters. These are likely to be parameters with defaults, which are not yet supported by autocxx, so this constructor has been ignored.")]
     ConstructorWithMultipleParams,
-    #[error("A C++ unique_ptr, shared_ptr or weak_ptr was found containing some type that cxx can't accommodate in that position ({})", .0.to_cpp_name())]
+    #[error("A C++ unique_ptr, shared_ptr or weak_ptr was found containing a type which cannot go in that position ({}): either cxx does not accept it there - the three differ, so a shared_ptr may take what a unique_ptr will not - or it is an autocxx integer wrapper for which this crate ships no cxx container glue, which is the case for `autocxx::c_i128` because MSVC has no `__int128`.", .0.to_cpp_name())]
     InvalidTypeForCppPtr(QualifiedName),
-    #[error("A C++ std::vector was found containing some type that cxx can't accommodate as a vector element ({})", .0.to_cpp_name())]
+    #[error("A C++ std::vector was found containing a type which cannot be a vector element ({}): either cxx does not accept it there, or it is an autocxx integer wrapper for which this crate ships no cxx container glue, which is the case for `autocxx::c_i128` because MSVC has no `__int128`.", .0.to_cpp_name())]
     InvalidTypeForCppVector(QualifiedName),
     #[error("A C++ {} was found whose payload C++ qualified `const`. cxx names a container's payload as a plain type, with nowhere to put the qualifier, so the only thing autocxx could declare is a container of a mutable payload - a different C++ type. std::shared_ptr, std::unique_ptr and std::weak_ptr are lowered to an opaque C++ holder instead; this container is not.", .0.to_cpp_name())]
     ConstCxxContainerPayload(QualifiedName),

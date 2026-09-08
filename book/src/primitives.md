@@ -27,6 +27,16 @@ fn main() {
 )
 ```
 
+### Inside a `unique_ptr`
+
+`cxx` will not put one of its own integer types inside a `UniquePtr`, so a
+`std::unique_ptr<uint32_t>` arrives as a `UniquePtr<autocxx::c_u32>` rather
+than a `UniquePtr<u32>`. There is one of these wrappers per fixed width -
+`c_u8` through `c_u64` and `c_i8` through `c_i64` - and each is a transparent
+newtype over the Rust integer of that width, so `.0` or `.into()` gets the
+value back. Anywhere else - by value, in a `std::vector`, in a
+`std::shared_ptr` - a `uint32_t` is a plain `u32` as before.
+
 ## Character types
 
 C++'s `char16_t`, `char32_t`, `char8_t` and `wchar_t` are distinct types - a
@@ -54,6 +64,15 @@ and on AArch64 Linux an IEEE binary128, and Rust has no type for either. A
 function whose signature mentions one is refused with an error saying that. A
 `long double` *field* is fine - those bytes are carried around, not passed
 between the languages - though a struct with one cannot be `generate_pod!`.
+
+### 128-bit integers
+
+A C++ `__int128` is [`c_i128`](https://docs.rs/autocxx/latest/autocxx/struct.c_i128.html),
+another transparent newtype. There is no `c_u128`: `bindgen` cannot tell an
+`unsigned __int128` from a 16-byte `long double` or a `__float128`, so
+`autocxx` refuses any function which mentions one rather than guess. Neither
+128-bit type may go inside a `UniquePtr` or a `CxxVector`, because MSVC has no
+`__int128` and the glue which would make that work is compiled everywhere.
 
 ## Strings
 

@@ -152,7 +152,6 @@ fn test_nested_module() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/681
 #[cfg(target_pointer_width = "64")]
 fn test_return_big_ints() {
     let cxx = indoc! {"
@@ -171,47 +170,125 @@ fn test_return_big_ints() {
         inline int64_t give_i64() {
             return 5;
         }
-        inline __int128 give_i128() {
-            return 5;
-        }
     "};
     let rs = quote! {
         assert_eq!(ffi::give_u32(), 5);
         assert_eq!(ffi::give_u64(), 5);
         assert_eq!(ffi::give_i32(), 5);
         assert_eq!(ffi::give_i64(), 5);
-        assert_eq!(ffi::give_i128(), 5);
     };
     run_test(
         cxx,
         hdr,
         rs,
-        &["give_u32", "give_u64", "give_i32", "give_i64", "give_i128"],
+        &["give_u32", "give_u64", "give_i32", "give_i64"],
         &[],
     );
 }
 
-/// Still gated on `cxx`. `cxx::UniquePtr<T>` needs `T: UniquePtrTarget`, and
-/// that trait's methods bottom out in `extern "C"` shims named
-/// `cxxbridge1$unique_ptr$...`, which only the `#[cxx::bridge]` macro can emit.
+/// `__int128`, which was the rest of `test_return_big_ints` while it was
+/// ignored. cxx has no atom that wide, so it travels under a name of its own
+/// exactly as `autocxx::c_int` does. Rust settled `i128`'s C ABI in 1.78,
+/// which "completed the announced `u128`/`i128` ABI change for x86-32 and
+/// x86-64 targets" and closed rust-lang/rust#54341 - the thing the upstream
+/// report was waiting for.
 ///
-/// For a named type - `autocxx::c_int`, say - that macro will emit them on
-/// request, which is how `test_give_up_ctype` below works. It will not do so
-/// for a `u32`: `check_type_unique_ptr` in cxxbridge-macro turns down any
-/// `unique_ptr` whose target is one of cxx's own built-in atoms, and `u32` is
-/// one. There is no request to make and no impl to write, so this one is out
-/// of reach from here however the shims are arranged.
-///
-/// So we reject the function up front rather than emit a bridge that will not
-/// compile: `known_types::permissible_within_unique_ptr` turns down the
-/// built-in widths, and this test dies as
-/// `DidNotGenerateAnythingUsable("give_up", InvalidTypeForCppPtr(u32))`.
-///
-/// Nobody has filed a `cxx` issue for `UniquePtr` of a primitive; the nearest
-/// live thread is dtolnay/cxx#1538, on supporting arbitrary `T` in
-/// `CxxVector<T>` and friends.
+/// Not compiled for MSVC, which has no `__int128` at all.
 #[test]
-#[ignore]
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_return_int128() {
+    let hdr = indoc! {"
+        inline __int128 give_i128() {
+            return 5;
+        }
+        inline __int128 round_trip_i128(__int128 x) {
+            return x;
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::give_i128(), autocxx::c_i128(5));
+        assert_eq!(ffi::round_trip_i128(autocxx::c_i128(i128::MIN + 7)).0, i128::MIN + 7);
+    };
+    run_test("", hdr, rs, &["give_i128", "round_trip_i128"], &[]);
+}
+
+/// `unsigned __int128` is not one type by the time it reaches us: bindgen
+/// renders it and a `__float128` as the same bare `u128` token, and nothing
+/// that survives to this side says which was written. (A 16-byte `long
+/// double` used to be a third claimant; it is now marked and refused by name
+/// of its own.) Binding it would mean picking one of the three and emitting C++
+/// that says so, which is a miscompile for the other two - so the token is
+/// refused with that as the reason instead. See the note beside the ctypes in
+/// `engine/src/known_types.rs`.
+///
+/// `__int128` has no such problem: `i128` means that and nothing else, which
+/// is why `test_return_int128` above works.
+#[test]
+#[ignore] // Two C++ types share this token; see the doc comment.
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_return_uint128() {
+    let hdr = indoc! {"
+        inline unsigned __int128 give_u128() {
+            return 5;
+        }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::give_u128(), 5);
+    };
+    run_test("", hdr, rs, &["give_u128"], &[]);
+}
+
+/// What that refusal looks like today, so that it stays a refusal which says
+/// why rather than reverting to a bare "unknown type".
+#[test]
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_uint128_is_refused_by_name() {
+    let hdr = indoc! {"
+        inline unsigned __int128 give_u128() {
+            return 5;
+        }
+    "};
+    run_test_expect_fail_with_error("", hdr, quote! {}, &["give_u128"], &[], "unsigned __int128");
+}
+
+/// A container of a `__int128` is refused: `autocxx::c_type_vectors` is
+/// compiled on every target autocxx supports and MSVC has no `__int128`, so
+/// there is no `UniquePtrTarget` for `c_i128` to be had and letting the
+/// signature through would buy a missing `cxxbridge1$unique_ptr$...` symbol at
+/// link time.
+#[test]
+#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
+fn test_int128_containers_are_refused() {
+    let hdr = indoc! {"
+        #include <memory>
+        #include <vector>
+        class Thing {
+        public:
+            Thing() {}
+            std::unique_ptr<__int128> up() const { return nullptr; }
+            const std::vector<__int128>& vec() const;
+            __int128 plain() const { return 3; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().plain(), autocxx::c_i128(3));
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
+}
+
+/// `cxx::UniquePtr<T>` needs `T: UniquePtrTarget`, and that trait's methods
+/// bottom out in `extern "C"` shims named `cxxbridge1$unique_ptr$...` which
+/// only the `#[cxx::bridge]` macro can emit. For a named type - `c_int`, say -
+/// the macro emits them on request, which is how `test_give_up_ctype` below
+/// works; for a `u32` there is no request to make, because
+/// `check_type_unique_ptr` turns down any `unique_ptr` whose target is one of
+/// cxx's own atoms.
+///
+/// `uint32_t` and `unsigned int` are the same C++ type here, though, and only
+/// one of the two spellings is an atom - so name the payload the way the one
+/// that works is named. `autocxx::c_u32` is a `uint32_t` under a name cxx
+/// takes, and the wrapper is what Rust receives.
+#[test]
 fn test_give_up_int() {
     let cxx = indoc! {"
         std::unique_ptr<uint32_t> give_up() {
@@ -224,9 +301,128 @@ fn test_give_up_int() {
         std::unique_ptr<uint32_t> give_up();
     "};
     let rs = quote! {
-        assert_eq!(ffi::give_up().as_ref().unwrap(), 12);
+        assert_eq!(*ffi::give_up().as_ref().unwrap(), autocxx::c_u32(12));
     };
     run_test(cxx, hdr, rs, &["give_up"], &[]);
+}
+
+/// A `char32_t` or a `wchar_t` inside a `unique_ptr` is not caught up in the
+/// fixed-width substitution: bindgen gives each character type a marker of its
+/// own, so neither arrives as the bare `u32` a `uint32_t` does and neither is
+/// a key in the wrapper map. They are refused instead - autocxx ships no cxx
+/// container glue for the character newtypes, so a `UniquePtr<c_char32_t>`
+/// would want a `UniquePtrTarget` nobody wrote - and the refusal costs those
+/// two methods rather than the bridge.
+#[test]
+fn test_character_types_within_unique_ptr_are_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        class Thing {
+        public:
+            Thing() {}
+            std::unique_ptr<char32_t> up() const {
+                return std::make_unique<char32_t>(U'x');
+            }
+            std::unique_ptr<wchar_t> wp() const {
+                return std::make_unique<wchar_t>(L'y');
+            }
+            uint32_t unrelated() const { return 7; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().unrelated(), 7);
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
+}
+
+/// A payload reached through an alias keeps its atom, and the refusal that
+/// goes with it.
+///
+/// `bindgen` drops the `const` off an alias's target - `using CU32 = const
+/// uint32_t` arrives as `pub type CU32 = u32` - so by the time autocxx sees
+/// this payload nothing anywhere says it is really a `const uint32_t`. Naming
+/// it with the wrapper would declare a `unique_ptr` of a mutable one and the
+/// shim would not bind, which costs the whole bridge instead of the one
+/// function. Only a payload `bindgen` wrote as the atom itself is renamed.
+///
+/// The lost `const` is its own bug and an older one: the same header with a
+/// class payload gets that same C++ error today, with no wrapper involved.
+#[test]
+fn test_const_alias_within_unique_ptr_is_still_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        using CU32 = const uint32_t;
+        class Thing {
+        public:
+            Thing() {}
+            std::unique_ptr<CU32> up() const { return nullptr; }
+            uint32_t unrelated() const { return 7; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().unrelated(), 7);
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
+}
+
+/// The rest of the fixed-width family, each one round-tripped so that the
+/// wrapper is proved to carry the value rather than merely to compile.
+/// `int8_t` and `uint64_t` are the interesting ends: the first is `signed
+/// char`, which is not cxx's `c_char`, and the second is `unsigned long` on
+/// some targets and `unsigned long long` on others - the wrapper mirrors what
+/// C++ wrote either way. `u32` is covered by `test_give_up_int` above.
+#[test]
+fn test_cycle_fixed_width_ints_through_unique_ptr() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        inline std::unique_ptr<uint8_t> up_u8(uint8_t v) {
+            return std::make_unique<uint8_t>(v);
+        }
+        inline std::unique_ptr<int8_t> up_i8(int8_t v) {
+            return std::make_unique<int8_t>(v);
+        }
+        inline std::unique_ptr<uint16_t> up_u16(uint16_t v) {
+            return std::make_unique<uint16_t>(v);
+        }
+        inline std::unique_ptr<int16_t> up_i16(int16_t v) {
+            return std::make_unique<int16_t>(v);
+        }
+        inline std::unique_ptr<int32_t> up_i32(int32_t v) {
+            return std::make_unique<int32_t>(v);
+        }
+        inline std::unique_ptr<uint64_t> up_u64(uint64_t v) {
+            return std::make_unique<uint64_t>(v);
+        }
+        inline std::unique_ptr<int64_t> up_i64(int64_t v) {
+            return std::make_unique<int64_t>(v);
+        }
+        inline uint64_t take_u64(std::unique_ptr<uint64_t> v) { return *v; }
+        inline int8_t take_i8(std::unique_ptr<int8_t> v) { return *v; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::up_u8(255).as_ref().unwrap().0, 255u8);
+        assert_eq!(ffi::up_i8(-5).as_ref().unwrap().0, -5i8);
+        assert_eq!(ffi::up_u16(65535).as_ref().unwrap().0, 65535u16);
+        assert_eq!(ffi::up_i16(i16::MIN).as_ref().unwrap().0, i16::MIN);
+        assert_eq!(ffi::up_i32(i32::MIN).as_ref().unwrap().0, i32::MIN);
+        assert_eq!(ffi::up_u64(u64::MAX).as_ref().unwrap().0, u64::MAX);
+        assert_eq!(ffi::up_i64(i64::MIN).as_ref().unwrap().0, i64::MIN);
+        assert_eq!(ffi::take_u64(ffi::up_u64(7)), 7);
+        assert_eq!(ffi::take_i8(ffi::up_i8(-3)), -3);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "up_u8", "up_i8", "up_u16", "up_i16", "up_i32", "up_u64", "up_i64", "take_u64",
+            "take_i8",
+        ],
+        &[],
+    );
 }
 
 /// A `std::unique_ptr<int>`, which is to say of `autocxx::c_int`. Unlike
@@ -252,10 +448,10 @@ fn test_give_up_ctype() {
     run_test(cxx, hdr, rs, &["give_up"], &[]);
 }
 
-/// The other two C++ smart pointers of a plain C integer. One check in the
-/// engine decides all three, so all three need the shim trait impls, or
-/// letting `unique_ptr` through would turn a clean rejection of these into a
-/// link error.
+/// The other two C++ smart pointers of a plain C integer. `autocxx::c_int` is
+/// a named type to cxx, which all three containers accept, so all three need
+/// the shim trait impls - letting `unique_ptr` through alone would turn a
+/// clean rejection of these into a link error.
 #[test]
 fn test_share_ctype() {
     let hdr = indoc! {"
@@ -280,6 +476,103 @@ fn test_share_ctype() {
         &["share_up", "take_shared", "shared_to_weak"],
         &[],
     );
+}
+
+/// cxx takes every numeric atom, and `bool`, inside a `shared_ptr` or a
+/// `weak_ptr` - `check_type_shared_ptr` and `check_type_weak_ptr` in cxx-gen
+/// 0.7.200 `src/syntax/check.rs`, lines 165 and 188 - and implements
+/// `SharedPtrTarget`/`WeakPtrTarget` for each. Only `check_type_unique_ptr`
+/// (line 147) turns them down, so asking the `unique_ptr` question of all
+/// three refused these for no reason. `bool` is the one `std::vector` will
+/// not take, and `double` the one nothing objects to anywhere.
+#[test]
+fn test_share_atoms() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        inline std::shared_ptr<uint32_t> share_up() {
+            return std::make_shared<uint32_t>(12);
+        }
+        inline uint32_t take_shared(std::shared_ptr<uint32_t> a) { return *a; }
+        inline std::weak_ptr<uint32_t> shared_to_weak(std::shared_ptr<uint32_t> a) {
+            return std::weak_ptr<uint32_t>(a);
+        }
+        inline std::shared_ptr<bool> share_bool() { return std::make_shared<bool>(true); }
+        inline std::shared_ptr<double> share_double() { return std::make_shared<double>(1.5); }
+    "};
+    let rs = quote! {
+        let a = ffi::share_up();
+        assert_eq!(ffi::take_shared(a.clone()), 12);
+        assert_eq!(*ffi::shared_to_weak(a.clone()).upgrade().as_ref().unwrap(), 12);
+        assert!(*ffi::share_bool().as_ref().unwrap());
+        assert_eq!(*ffi::share_double().as_ref().unwrap(), 1.5);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "share_up",
+            "take_shared",
+            "shared_to_weak",
+            "share_bool",
+            "share_double",
+        ],
+        &[],
+    );
+}
+
+/// An atom reached through an alias is refused, because bindgen drops the
+/// `const` off an alias's target - `using CU32 = const uint32_t` arrives as
+/// `pub type CU32 = u32` - and the bridge would then declare a `shared_ptr` of
+/// a mutable one, which the shim cannot bind. That costs the whole bridge
+/// where a refusal costs the one function, and these payloads were refused
+/// outright before the atoms were let in.
+#[test]
+fn test_const_alias_within_shared_ptr_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        using CU32 = const uint32_t;
+        class Thing {
+        public:
+            Thing() {}
+            std::shared_ptr<CU32> sp() const { return nullptr; }
+            std::weak_ptr<CU32> wp() const { return std::weak_ptr<CU32>(); }
+            uint32_t unrelated() const { return 7; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().unrelated(), 7);
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
+}
+
+/// The other half of the same split. cxx turns down a `shared_ptr` of a
+/// `vector` - "std::shared_ptr<std::vector> is not supported yet",
+/// `check_type_shared_ptr` again - where it takes a `unique_ptr` of one. Ask
+/// the `unique_ptr` question and the bridge is emitted and then rejected
+/// whole, which costs every other binding in the same `include_cpp!`;
+/// refusing it here costs only the function.
+#[test]
+fn test_shared_ptr_of_vector_refused_without_the_rest_of_the_bridge() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        #include <vector>
+        class Thing {
+        public:
+            Thing() {}
+            std::shared_ptr<std::vector<uint32_t>> share_vec() const {
+                return std::make_shared<std::vector<uint32_t>>();
+            }
+            uint32_t unrelated() const { return 7; }
+        };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Thing::new().within_unique_ptr().unrelated(), 7);
+    };
+    run_test("", hdr, rs, &["Thing"], &[]);
 }
 
 #[test]
