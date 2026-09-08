@@ -91,7 +91,7 @@ pub(super) fn gen_function(
     fun: FuncToConvert,
     analysis: FnAnalysis,
     non_pod_types: &HashSet<QualifiedName>,
-    concrete_types: &HashSet<QualifiedName>,
+    types_with_no_rust_storage: &HashSet<QualifiedName>,
     bridge_type_names: &BridgeTypeNames,
 ) -> RsCodegenResult {
     if analysis.ignore_reason.is_err() || !analysis.externally_callable {
@@ -151,10 +151,10 @@ pub(super) fn gen_function(
                 ..
             } => {
                 // Constructor.
-                impl_entry = Some(
-                    fn_generator
-                        .generate_constructor_impl(impl_for, concrete_types.contains(impl_for)),
-                );
+                impl_entry = Some(fn_generator.generate_constructor_impl(
+                    impl_for,
+                    types_with_no_rust_storage.contains(impl_for),
+                ));
             }
             FnKind::Method {
                 ref impl_for,
@@ -607,14 +607,22 @@ impl<'a> FnGenerator<'a> {
     ///
     /// `size_unknown_in_rust` types are the exception, and hand back a
     /// [`cxx::UniquePtr`] instead of a recipe. A `New` recipe lets its holder
-    /// choose the storage - `within_box`, `moveit!`, `stack_slot!` all place
-    /// the C++ object in Rust storage - and that is only sound where the Rust
-    /// type is the size of the C++ one. A concrete template instantiation is
-    /// declared to cxx as a plain opaque type, whose Rust side is zero-sized,
-    /// so its constructor must not offer the choice: it allocates in C++ and
-    /// hands back the pointer. This is the rule `convert_return_type` already
-    /// applies to a *function* returning such a type - see its
-    /// `moveit_safe_types` branch - now applied to constructors too.
+    /// choose the storage - `within_box`, `within_cpp_pin`, `moveit!`,
+    /// `stack_slot!` and `Box`/`Rc`/`Arc`'s own `emplace` all place the C++
+    /// object in Rust storage - and that is only sound where the Rust type is
+    /// the size of the C++ one. A concrete template instantiation and a
+    /// subclass's C++ peer are both declared to cxx as a plain opaque type,
+    /// whose Rust side is zero-sized, so their constructors must not offer the
+    /// choice: they allocate in C++ and hand back the pointer. See
+    /// `find_types_with_no_rust_storage`, and the rule `convert_return_type`
+    /// applies to a *function* returning such a type - its `moveit_safe_types`
+    /// branch.
+    ///
+    /// Bounding autocxx's own helpers would not have done: `moveit` implements
+    /// `Emplace` for `Box`, `Rc` and `Arc` itself, and `moveit!` and
+    /// `stack_slot!` are macros over `MaybeUninit`, so anything handing out a
+    /// `New` over a zero-sized type reaches all of those without passing
+    /// through autocxx at all.
     fn generate_constructor_impl(
         &self,
         impl_block_type_name: &QualifiedName,

@@ -14991,7 +14991,7 @@ fn test_subclass_no_safety() {
                 &mut self,
                 peer_holder: CppSubclassRustPeerHolder<Self>,
             ) -> UniquePtr<ffi::MyObserverCpp> {
-                UniquePtr::emplace(unsafe { ffi::MyObserverCpp::new(peer_holder) })
+                unsafe { ffi::MyObserverCpp::new(peer_holder) }
             }
         }
 
@@ -15002,6 +15002,114 @@ fn test_subclass_no_safety() {
     };
 
     do_run_test_manual("", hdr, unexpanded_rust, None, None).unwrap()
+}
+
+/// A subclass's C++ peer class is declared to cxx as a plain opaque type, so
+/// the Rust side of it is cxx's opaque stand-in, which is zero-sized. Its
+/// constructor therefore hands back the `cxx::UniquePtr` itself rather than a
+/// `moveit::New` recipe: a recipe lets its holder pick the storage, and a peer
+/// can only live in C++'s. autocxx writes the peer class after bindgen has
+/// run, so nothing ever measured it and no Rust stand-in of the right size
+/// exists.
+#[test]
+fn test_subclass_peer_constructor_hands_back_a_unique_ptr() {
+    // The superclass constructor takes an argument, so autocxx leaves
+    // `CppPeerConstructor` to us and the impl below is the one which counts.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer(uint8_t a) : a(a) {}
+        virtual uint32_t foo() const = 0;
+        virtual ~Observer() {}
+        uint64_t a;
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(
+                std::mem::size_of::<ffi::MyObserverCpp>(), 0,
+                "the peer's Rust side is cxx's zero-sized opaque type; \
+                 that is why its constructor may not offer Rust storage"
+            );
+            let obs = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(obs.borrow().foo(), 7);
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::prelude::*;
+            use ffi::Observer_methods;
+            #[subclass]
+            #[derive(Default)]
+            pub struct MyObserver;
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 { 7 }
+            }
+            impl CppPeerConstructor<ffi::MyObserverCpp> for MyObserver {
+                fn make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> cxx::UniquePtr<ffi::MyObserverCpp> {
+                    // The whole body. Written out with its type to pin what
+                    // `new` hands back: a recipe would need a finisher here.
+                    let peer: cxx::UniquePtr<ffi::MyObserverCpp> =
+                        ffi::MyObserverCpp::new(peer_holder, 3u8);
+                    peer
+                }
+            }
+        }),
+    );
+}
+
+/// The other half of that rule. Were the peer's constructor to hand back a
+/// `moveit::New`, safe code could cash it into Rust storage sized for nothing:
+/// `within_box` allocates for a zero-sized type, which is no allocation at all,
+/// and the C++ constructor then writes a whole object over whatever the
+/// resulting dangling pointer addresses. So it must not compile.
+#[test]
+fn test_subclass_peer_cannot_be_built_in_rust_storage() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const = 0;
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {
+            let holder = CppSubclassRustPeerHolder::Owned(std::rc::Rc::new(
+                std::cell::RefCell::new(MyObserver { cpp_peer: Default::default() })));
+            let _ = ffi::MyObserverCpp::new(holder).within_box();
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        Some(quote! {
+            use autocxx::subclass::prelude::*;
+            use ffi::Observer_methods;
+            #[subclass]
+            #[derive(Default)]
+            pub struct MyObserver;
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 { 7 }
+            }
+        }),
+        // The error code rather than its prose, which rustc rewords between
+        // releases; the method name says which call was refused.
+        &["E0599", "within_box"],
+    );
 }
 
 #[test]
@@ -15966,7 +16074,7 @@ fn test_pv_subclass_constructors() {
             }
             impl CppPeerConstructor<ffi::MyTestObserverCpp> for MyTestObserver {
                 fn make_peer(&mut self, peer_holder: CppSubclassRustPeerHolder<Self>) -> cxx::UniquePtr<ffi::MyTestObserverCpp> {
-                    ffi::MyTestObserverCpp::new1(peer_holder, 3u8).within_unique_ptr()
+                    ffi::MyTestObserverCpp::new1(peer_holder, 3u8)
                 }
             }
         }),
@@ -27685,7 +27793,7 @@ fn test_subclass_with_a_throwing_superclass_constructor() {
                     &mut self,
                     peer_holder: CppSubclassRustPeerHolder<Self>,
                 ) -> Result<cxx::UniquePtr<ffi::MySubCpp>, cxx::Exception> {
-                    ffi::MySubCpp::new(peer_holder, self.arg).try_within_unique_ptr()
+                    ffi::MySubCpp::new(peer_holder, self.arg)
                 }
             }
         }),
@@ -27827,6 +27935,7 @@ fn test_throwing_copy_constructor_terminates_the_process() {
             generate!("fx_install_terminate_marker")
             throws!("fx_Suicidal::fx_Suicidal")
         },
+        None,
         &[
             // Only printed once trybuild has built the code and gone on to run
             // it, so this also says the generated Rust compiled.

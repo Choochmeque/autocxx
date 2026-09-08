@@ -299,10 +299,17 @@ impl CppPeerConstructor<ffi::MySubclassCpp> for MySubclass {
 
     fn try_make_peer(&mut self, holder: CppSubclassRustPeerHolder<Self>)
         -> Result<cxx::UniquePtr<ffi::MySubclassCpp>, cxx::Exception> {
-        ffi::MySubclassCpp::new(holder, self.arg).try_within_unique_ptr()
+        ffi::MySubclassCpp::new(holder, self.arg)
     }
 }
 ```
+
+Note that there is no finisher on that last line. A peer's `new` hands back the
+`cxx::UniquePtr` itself rather than something to place, so the fallible one
+hands back the `Result` and there is nothing left to do to it.
+[The subclass chapter](rust_calls.md#subclasses-without-a-safety-policy) says
+why. The constructor of a concrete template instantiation behaves the same way,
+for the same reason - see [`instantiable!`](https://docs.rs/autocxx/latest/autocxx/macro.instantiable.html).
 
 ## How it works
 

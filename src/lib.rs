@@ -452,12 +452,12 @@ macro_rules! subclass {
 /// type keeps its previous shape, usable by reference and through the
 /// functions which return one.
 ///
-/// Unlike every other `new()` autocxx generates, this one hands back a
-/// [`cxx::UniquePtr`] directly rather than something to finish with
-/// `.within_unique_ptr()`. autocxx does not know how big such a type is - it
-/// is declared to `cxx` as a plain opaque type - so only C++ can allocate one,
-/// and there is no choice of storage to offer. That is the same rule autocxx
-/// already applies to a function which *returns* one of these types.
+/// This `new()` hands back a [`cxx::UniquePtr`] directly rather than something
+/// to finish with `.within_unique_ptr()`. autocxx does not know how big such a
+/// type is - it is declared to `cxx` as a plain opaque type - so only C++ can
+/// allocate one, and there is no choice of storage to offer. That is the same
+/// rule autocxx applies to a function which *returns* one of these types, and
+/// to a subclass's C++ peer, which is opaque to cxx for its own reasons.
 ///
 /// Copy and move constructors are not generated for the same reason: both
 /// build the new object into storage the caller provides, which for one of
@@ -510,6 +510,11 @@ macro_rules! instantiable {
 /// of the ways an ordinary constructor is finished. The same is true of a
 /// `throws!` function which returns a non-POD type by value, which C++ builds
 /// into a caller-provided place in just the same way.
+///
+/// The exceptions are the constructors which never offered a choice of place
+/// to begin with - a subclass's C++ peer and a concrete template instantiation,
+/// both of which allocate in C++ - and whose fallible form therefore hands back
+/// a `Result<cxx::UniquePtr<Self>, cxx::Exception>` with nothing left to finish.
 ///
 /// See the book's exceptions chapter for the whole picture, including what to
 /// do about a subclass whose superclass constructor throws.

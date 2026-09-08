@@ -614,7 +614,7 @@ fn test_subclass_constructor_ref_param_cpprefs() {
                     &mut self,
                     peer_holder: CppSubclassRustPeerHolder<Self>,
                 ) -> cxx::UniquePtr<ffi::MyGrowerCpp> {
-                    ffi::MyGrowerCpp::new(peer_holder, self.seed).within_unique_ptr()
+                    ffi::MyGrowerCpp::new(peer_holder, self.seed)
                 }
             }
         }),

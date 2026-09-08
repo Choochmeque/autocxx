@@ -1278,8 +1278,9 @@ pub(super) fn find_constructors_present(
     // *Rust* storage, and the Rust side of a concrete type is cxx's zero-sized
     // opaque type, so there is none of the right size. `new()` escapes that
     // only because `generate_constructor_impl` hands back a `UniquePtr` rather
-    // than a recipe. Recovering the two wants a Rust type of the right size,
-    // which is the same thing `moveit_safe_types` is waiting for.
+    // than a recipe - see `find_types_with_no_rust_storage`. Recovering the two
+    // wants a Rust stand-in of the right size, which nothing measures: bindgen
+    // reports no layout for a specialization it never saw.
     //
     // The destructor is not optional, though it looks like it: `UniquePtr`
     // destroys its payload through C++ and needs nothing from Rust, but
