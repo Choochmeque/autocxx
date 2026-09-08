@@ -417,9 +417,15 @@ as well as <code>make_peer</code>, and construct the subclass with <code>try_new
 
     fn try_make_peer(&amp;mut self, holder: CppSubclassRustPeerHolder&lt;Self&gt;)
         -&gt; Result&lt;cxx::UniquePtr&lt;ffi::MySubclassCpp&gt;, cxx::Exception&gt; {
-        ffi::MySubclassCpp::new(holder, self.arg).try_within_unique_ptr()
+        ffi::MySubclassCpp::new(holder, self.arg)
     }
 }</code></pre>
+<p>Note that there is no finisher on that last line. A peer's <code>new</code> hands back the
+<code>cxx::UniquePtr</code> itself rather than something to place, so the fallible one
+hands back the <code>Result</code> and there is nothing left to do to it.
+<a href="rust_calls.html#subclasses-without-a-safety-policy">The subclass chapter</a> says
+why. The constructor of a concrete template instantiation behaves the same way,
+for the same reason - see <a href="https://docs.rs/autocxx/latest/autocxx/macro.instantiable.html"><code>instantiable!</code></a>.</p>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
 <p>Under the hood, <code>autocxx</code> leverages <a href="https://cxx.rs/binding/result.html">cxx's native exception handling</a>.
 When a function is marked with <code>throws!</code>, the generated cxx bridge declaration

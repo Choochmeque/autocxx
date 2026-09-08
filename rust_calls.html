@@ -277,13 +277,20 @@ impl CppPeerConstructor&lt;ffi::MyObserverCpp&gt; for MyObserver {
         &amp;mut self,
         peer_holder: CppSubclassRustPeerHolder&lt;Self&gt;,
     ) -&gt; UniquePtr&lt;ffi::MyObserverCpp&gt; {
-        UniquePtr::emplace(unsafe { ffi::MyObserverCpp::new(peer_holder) })
+        unsafe { ffi::MyObserverCpp::new(peer_holder) }
     }
 }</code></pre>
 <p>This is the same impl you would write under a <code>safety!</code> policy for a
 superclass with several constructors, or one which takes arguments - see the
 trait's documentation. Nothing else about the subclass changes: the ownership
 constructors, the <code>_methods</code> trait and the casts all behave as they do above.</p>
+<p>The peer's <code>new</code> hands back the <code>UniquePtr</code> itself, so the body is just the
+call - no <code>.within_unique_ptr()</code> and nothing to emplace. Most constructors
+autocxx generates hand back a <code>moveit::new::New</code> instead, letting the caller
+put the object where it likes, including in Rust storage. That cannot be
+offered here: autocxx writes the peer class itself, after <code>bindgen</code> has run, so
+nothing ever measures it, and its Rust side is <code>cxx</code>'s zero-sized opaque type.
+Only C++ can allocate a peer.</p>
 <h2 id="calling-superclass-methods"><a class="header" href="#calling-superclass-methods">Calling superclass methods</a></h2>
 <p>Each subclass also implements a trait called <code>&lt;superclass name&gt;_supers</code> which
 includes all superclass methods. You can call methods on that, and if you

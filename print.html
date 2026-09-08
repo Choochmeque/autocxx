@@ -1658,9 +1658,15 @@ as well as <code>make_peer</code>, and construct the subclass with <code>try_new
 
     fn try_make_peer(&amp;mut self, holder: CppSubclassRustPeerHolder&lt;Self&gt;)
         -&gt; Result&lt;cxx::UniquePtr&lt;ffi::MySubclassCpp&gt;, cxx::Exception&gt; {
-        ffi::MySubclassCpp::new(holder, self.arg).try_within_unique_ptr()
+        ffi::MySubclassCpp::new(holder, self.arg)
     }
 }</code></pre>
+<p>Note that there is no finisher on that last line. A peer's <code>new</code> hands back the
+<code>cxx::UniquePtr</code> itself rather than something to place, so the fallible one
+hands back the <code>Result</code> and there is nothing left to do to it.
+<a href="rust_calls.html#subclasses-without-a-safety-policy">The subclass chapter</a> says
+why. The constructor of a concrete template instantiation behaves the same way,
+for the same reason - see <a href="https://docs.rs/autocxx/latest/autocxx/macro.instantiable.html"><code>instantiable!</code></a>.</p>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
 <p>Under the hood, <code>autocxx</code> leverages <a href="https://cxx.rs/binding/result.html">cxx's native exception handling</a>.
 When a function is marked with <code>throws!</code>, the generated cxx bridge declaration
@@ -1815,13 +1821,20 @@ impl CppPeerConstructor&lt;ffi::MyObserverCpp&gt; for MyObserver {
         &amp;mut self,
         peer_holder: CppSubclassRustPeerHolder&lt;Self&gt;,
     ) -&gt; UniquePtr&lt;ffi::MyObserverCpp&gt; {
-        UniquePtr::emplace(unsafe { ffi::MyObserverCpp::new(peer_holder) })
+        unsafe { ffi::MyObserverCpp::new(peer_holder) }
     }
 }</code></pre>
 <p>This is the same impl you would write under a <code>safety!</code> policy for a
 superclass with several constructors, or one which takes arguments - see the
 trait's documentation. Nothing else about the subclass changes: the ownership
 constructors, the <code>_methods</code> trait and the casts all behave as they do above.</p>
+<p>The peer's <code>new</code> hands back the <code>UniquePtr</code> itself, so the body is just the
+call - no <code>.within_unique_ptr()</code> and nothing to emplace. Most constructors
+autocxx generates hand back a <code>moveit::new::New</code> instead, letting the caller
+put the object where it likes, including in Rust storage. That cannot be
+offered here: autocxx writes the peer class itself, after <code>bindgen</code> has run, so
+nothing ever measures it, and its Rust side is <code>cxx</code>'s zero-sized opaque type.
+Only C++ can allocate a peer.</p>
 <h2 id="calling-superclass-methods"><a class="header" href="#calling-superclass-methods">Calling superclass methods</a></h2>
 <p>Each subclass also implements a trait called <code>&lt;superclass name&gt;_supers</code> which
 includes all superclass methods. You can call methods on that, and if you
