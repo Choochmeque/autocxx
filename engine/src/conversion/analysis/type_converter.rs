@@ -688,8 +688,20 @@ impl<'a> TypeConverter<'a> {
         if let Type::Path(newpp) = &newp.ty {
             let qn = QualifiedName::from_type_path(newpp);
             if !ctx.allow_instantiation_of_forward_declaration() {
-                if let Some(err) = self.incompleteness_of(&qn) {
-                    return Err(err);
+                if self.forward_declarations.contains_key(&qn) {
+                    return Err(self.incomplete_type_error(qn));
+                }
+                // Not in a struct field, unlike the forward declaration
+                // above: an instantiation built on one is a complete type,
+                // and a class may have a member of it. Whether *that*
+                // class can then be destroyed is C++'s business and its
+                // author's, and refusing the member would only hide the
+                // member's type from the analysis which decides what
+                // constructors the class has.
+                if !ctx.within_struct_field() {
+                    if let Some(err) = self.instantiation_on_incomplete_type_error(&qn) {
+                        return Err(err);
+                    }
                 }
             }
             // Special handling because rust_Str (as emitted by bindgen)
@@ -1492,8 +1504,9 @@ impl<'a> TypeConverter<'a> {
     /// was, and asking cxx to own one of *those* reaches the same C++.
     /// Deciding that needs to know whether the enclosing class's destructor is
     /// defined in this translation unit, which nothing here records - a class
-    /// whose destructor is defined out of line is fine, and refusing it
-    /// alongside would cost more than it buys.
+    /// whose destructor is defined out of line is fine - and turning the
+    /// member down instead would only hide it from the analysis which works
+    /// out what constructors the enclosing class has.
     fn incomplete_argument_of(&self, rs_definition: &Type) -> Option<QualifiedName> {
         self.incomplete_argument_within(rs_definition, &mut HashSet::new())
     }
@@ -1542,18 +1555,25 @@ impl<'a> TypeConverter<'a> {
             return None;
         };
         let qn = QualifiedName::from_type_path(typ);
-        if !seen.insert(qn.clone()) {
-            return None;
-        }
         if self.forward_declarations.contains_key(&qn) {
             return Some(qn);
         }
         if let Some(argument) = self.instantiations_on_incomplete_types.get(&qn) {
             return Some(argument.clone());
         }
+        // `seen` gates only this, the one step which leaves the type in hand
+        // for another. Walking the arguments below is walking a finite piece
+        // of syntax, and a name repeating in it - `Pair<au<int>, au<bb>>`, or
+        // `au<au<bb>>` - is not a circle. `QualifiedName` drops the arguments,
+        // so barring a name here would bar the second `au` in each of those
+        // and lose the `bb` inside it. Re-expanding an alias already expanded
+        // would find what it found the first time, which was nothing, or this
+        // would have returned.
         if let Some(target) = self.alias_targets.get(&qn) {
-            if let Some(found) = self.incompleteness_of_argument(target, seen) {
-                return Some(found);
+            if seen.insert(qn.clone()) {
+                if let Some(found) = self.incompleteness_of_argument(target, seen) {
+                    return Some(found);
+                }
             }
         }
         self.incomplete_argument_within(arg, seen)
@@ -1571,7 +1591,10 @@ impl<'a> TypeConverter<'a> {
                 GenericArgument::Type(Type::Path(typ)) => {
                     let inner_qn = QualifiedName::from_type_path(typ);
                     if !forward_declarations_ok {
-                        if let Some(err) = self.incompleteness_of(&inner_qn) {
+                        if self.forward_declarations.contains_key(&inner_qn) {
+                            return Err(self.incomplete_type_error(inner_qn));
+                        }
+                        if let Some(err) = self.instantiation_on_incomplete_type_error(&inner_qn) {
                             return Err(err);
                         }
                     }
@@ -1715,12 +1738,12 @@ impl<'a> TypeConverter<'a> {
             .collect()
     }
 
-    /// Why `qn` may not be used where it was, if it may not be: it is a type
-    /// we have only a stand-in for, or a template instantiation on one.
-    fn incompleteness_of(&self, qn: &QualifiedName) -> Option<ConvertErrorFromCpp> {
-        if self.forward_declarations.contains_key(qn) {
-            return Some(self.incomplete_type_error(qn.clone()));
-        }
+    /// Why `qn` may not be destroyed here, if it may not be: it is a template
+    /// instantiation built on a type nothing defines.
+    fn instantiation_on_incomplete_type_error(
+        &self,
+        qn: &QualifiedName,
+    ) -> Option<ConvertErrorFromCpp> {
         self.instantiations_on_incomplete_types.get(qn).map(|arg| {
             ConvertErrorFromCpp::InstantiationOnIncompleteType {
                 instantiation: qn.clone(),
