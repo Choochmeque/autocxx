@@ -1,0 +1,335 @@
+Subject: Resolve a type named through a using-declaration
+
+`using std::string;` followed by `void f(string a)` binds `a` as
+`std::basic_string<...>` - and, where that type is opaque, as a blob of bytes -
+rather than as the `std::string` the parameter was written with, which is what
+the same function written `void f(std::string a)` binds it as.
+
+The declaration is lost one level below bindgen. clang has a `UsingType` sugar
+node for a name introduced by a using-declaration, and libclang has no `CXType`
+for it: `clang_getTypeDeclaration` answers `CXCursor_NoDeclFound`, and
+`Type::canonical_declaration`'s one rescue for a declaration-less type is
+template-specific, so the type falls through to its canonical type and is bound
+as whatever that is. Nothing is wrong with the canonical type except that it is
+not what the header says: an alias replaced by
+`<div rustbindgen replaces="...">`, an alias whose target is opaque, and an
+alias asked for by name in an allowlist all bind as something else.
+
+What does survive is the name clang prints for the type. Namespace-scope
+using-declarations are visited during parsing, so record the type declarations
+each of them introduces, keyed on the name clang prints for each, and resolve a
+declaration-less type through the record. A printed name is not a proof, so a
+candidate is a match only where its canonical type is the type's as well.
+
+The name is compared as clang prints it, because that is the one description of
+a name which is the same across libclang versions, and they do not agree here.
+Through clang 21 such a type arrives as `CXType_Elaborated` over an unexposed
+node, and that node carries the *qualified* name of the declaration and none of
+the qualifiers written in front of it: `std::string` for a parameter written
+`string`. From clang 22 it arrives unexposed with no such node, spelling the
+name as it was written and the qualifiers with it: `const fx_BU`. Asking
+`clang_Type_getNamedType` where it answers, and taking the type's own qualifiers
+off the name, covers both. A `const T&` parameter is what shows why both halves
+are needed: from clang 22 its pointee would otherwise look for a name nothing
+was recorded under.
+
+Since the name which leaves that is not always qualified, it is the type behind
+it that settles a candidate, and the comparison is structural rather than a
+second comparison of printed names. Two canonical types can print alike - two
+classes local to different functions both print as `X` - so where the canonical
+type has a declaration, the declarations are compared, which also ignores the
+qualifiers a parameter may add; where it has none, being a builtin or a pointer,
+the types themselves are compared. A name which two candidates answer to with
+one type resolves to neither: they are two names for the same thing and nothing
+here says which was written, so choosing would be a guess.
+
+Two details of what libclang exposes. `clang_getNumOverloadedDecls` answers zero
+asked on the using-declaration cursor; the declarations it introduces hang off
+its `CXCursor_OverloadedDeclRef` child. And the record is made at the top of
+`Item::parse` because a using-declaration never reaches the `match cursor.kind()`
+at the end of it: `cursor.definition()` answers with that same
+`CXCursor_OverloadedDeclRef`, which is not the cursor itself, so the type
+handling above the match returns an `UnresolvedTypeRef` for the declaration
+first. The arm listing `CXCursor_UsingDeclaration` among the kinds deliberately
+not handled is therefore already dead, and is left as it is.
+
+Only type declarations are recorded, and a template is not one: a
+using-declaration naming a function, a variable or a template introduces
+nothing a type can be written as, since a use of a template carries template
+arguments and has a declaration of its own. Recording a template would only
+offer `builtin_or_resolved_ty` a template-like declaration to instantiate -
+recursively, through every argument - which is not a thing this should be able
+to start.
+--- a/clang.rs
++++ b/clang.rs
+@@ -480,6 +480,22 @@
+                 None
+             }
+         }
++    }
++
++    /// The declarations this cursor names, if it is an overloaded declaration
++    /// reference.
++    ///
++    /// This is how a using-declaration says what it introduces: asked on the
++    /// `CXCursor_UsingDeclaration` itself libclang reports no declarations at
++    /// all, and the set hangs off its `CXCursor_OverloadedDeclRef` child
++    /// instead.
++    pub(crate) fn overloaded_decls(&self) -> Vec<Cursor> {
++        let count = unsafe { clang_getNumOverloadedDecls(self.x) };
++        (0..count)
++            .map(|index| Cursor {
++                x: unsafe { clang_getOverloadedDecl(self.x, index) },
++            })
++            .collect()
+     }
+ 
+     /// Assuming that this cursor's referent is a template declaration, get the
+@@ -1395,6 +1411,16 @@
+             }
+         }
+ 
++        self.canonical_declaration_of(declaration)
++    }
++
++    /// Pair this type with the canonical form of `declaration`, for a
++    /// declaration recovered by something other than
++    /// `clang_getTypeDeclaration`.
++    pub(crate) fn canonical_declaration_of(
++        &self,
++        declaration: Cursor,
++    ) -> Option<CanonicalTypeDeclaration> {
+         let canonical = declaration.canonical();
+         if canonical.is_valid() && canonical.kind() != CXCursor_NoDeclFound {
+             Some(CanonicalTypeDeclaration(*self, canonical))
+@@ -1430,6 +1456,11 @@
+         unsafe { clang_isConstQualifiedType(self.x) != 0 }
+     }
+ 
++    /// Is this type volatile qualified?
++    pub(crate) fn is_volatile(&self) -> bool {
++        unsafe { clang_isVolatileQualifiedType(self.x) != 0 }
++    }
++
+     /// Is this C++20's `char8_t`?
+     ///
+     /// There is no `CXType_Char8` to compare against: libclang's kinds go
+--- a/ir/context.rs
++++ b/ir/context.rs
+@@ -304,6 +304,35 @@
+ enum TypeKey {
+     Usr(String),
+     Declaration(Cursor),
++}
++
++/// A type's name as clang prints it, without its own qualifiers, so that
++/// `const fx_BU` and `fx_BU` are the one name.
++///
++/// Only the qualifiers the type reports are taken off, and on whichever side
++/// clang prints them: a name which merely begins with one of those words keeps
++/// it, and so does `const int *`, which is a pointer that is not itself const.
++/// `restrict` is not among them - it qualifies a pointer, and a pointer is not
++/// a name a using-declaration introduces.
++fn unqualified_spelling(ty: &clang::Type) -> String {
++    let mut name = ty.qualified_spelling();
++    for (qualified, qualifier) in
++        [(ty.is_const(), "const"), (ty.is_volatile(), "volatile")]
++    {
++        if !qualified {
++            continue;
++        }
++        if let Some(rest) = name.strip_prefix(qualifier) {
++            if let Some(rest) = rest.strip_prefix(' ') {
++                name = rest.to_owned();
++                continue;
++            }
++        }
++        if let Some(rest) = name.strip_suffix(qualifier) {
++            name = rest.trim_end().to_owned();
++        }
++    }
++    name
+ }
+ 
+ /// A context used during parsing and generation of structs.
+@@ -337,6 +366,13 @@
+     /// outside of the parent class.
+     semantic_parents: HashMap<Cursor, ItemId>,
+ 
++    /// The type declarations namespace-scope using-declarations have made
++    /// visible, keyed on the qualified name clang prints for each.
++    ///
++    /// This is the only channel back to the declaration a type named through a
++    /// using-declaration was written with; see `using_declared_declaration`.
++    using_declared_types: HashMap<String, Vec<Cursor>>,
++
+     /// A stack with the current type declarations and types we're parsing. This
+     /// is needed to avoid infinite recursion when parsing a type like:
+     ///
+@@ -586,6 +622,7 @@
+             root_module: root_module_id,
+             current_module: root_module_id,
+             semantic_parents: Default::default(),
++            using_declared_types: Default::default(),
+             currently_parsed_types: vec![],
+             parsed_macros: Default::default(),
+             replacements: Default::default(),
+@@ -1888,6 +1925,124 @@
+             .copied()
+     }
+ 
++    /// Record what a namespace-scope using-declaration makes visible.
++    ///
++    /// bindgen generates nothing for the declaration itself - it is a second
++    /// name for an entity which already has one - but a type written through
++    /// it arrives with no declaration of its own, and this is the only channel
++    /// back to the one it names. See `using_declared_declaration`.
++    pub(crate) fn note_using_declaration(&mut self, using: &Cursor) {
++        use clang_sys::{
++            CXCursor_ClassDecl, CXCursor_EnumDecl, CXCursor_OverloadedDeclRef,
++            CXCursor_StructDecl, CXCursor_TypeAliasDecl, CXCursor_TypedefDecl,
++            CXCursor_UnionDecl,
++        };
++
++        // Asked on the using-declaration itself libclang reports no overloaded
++        // declarations at all; the ones it introduces hang off its
++        // `CXCursor_OverloadedDeclRef` child.
++        for child in using.collect_children() {
++            if child.kind() != CXCursor_OverloadedDeclRef {
++                continue;
++            }
++            for declaration in child.overloaded_decls() {
++                // A template is not a type, so a name introduced for one is
++                // never a name this resolves: a use of it carries template
++                // arguments and has a declaration of its own. Recording one
++                // would only offer `builtin_or_resolved_ty` a template-like
++                // declaration to instantiate, which is a recursion this has no
++                // business starting.
++                if !matches!(
++                    declaration.kind(),
++                    CXCursor_TypedefDecl |
++                        CXCursor_TypeAliasDecl |
++                        CXCursor_StructDecl |
++                        CXCursor_UnionDecl |
++                        CXCursor_ClassDecl |
++                        CXCursor_EnumDecl
++                ) {
++                    continue;
++                }
++                let name = unqualified_spelling(&declaration.cur_type());
++                if name.is_empty() {
++                    continue;
++                }
++                debug!("note_using_declaration: {name} is {declaration:?}");
++                let entry = self.using_declared_types.entry(name).or_default();
++                if !entry.contains(&declaration) {
++                    entry.push(declaration);
++                }
++            }
++        }
++    }
++
++    /// The declaration a using-declaration made visible under the name this
++    /// type is written with.
++    ///
++    /// A type named through a using-declaration reaches bindgen with no
++    /// declaration: the sugar node clang uses for such a name is a `UsingType`,
++    /// which libclang has no `CXType` for and reports as unexposed, and
++    /// `clang_getTypeDeclaration` answers `CXCursor_NoDeclFound` for both it
++    /// and the elaborated type wrapping it. Left there the type falls through
++    /// to its canonical type, so `using std::string;` followed by
++    /// `void f(string)` generates `f` over `basic_string<...>` - or, where that
++    /// is opaque, over a blob of bytes - rather than over the name the
++    /// parameter was written with, which is what the same function written
++    /// `void f(std::string)` generates.
++    ///
++    /// What does survive is the name clang prints for the type - `std::string`
++    /// for a parameter written `string`. That is the name the declaration was
++    /// recorded under, so no lookup through the scopes the name is visible in
++    /// is needed. A printed name is not a proof, though, so a candidate is a
++    /// match only where its canonical type is this type's as well.
++    ///
++    /// The name is compared as clang prints it, because that is the one
++    /// description of a name which is the same across the libclang versions
++    /// this has to work on. Through clang 21 a name written through a
++    /// using-declaration arrives as `CXType_Elaborated` over an unexposed node
++    /// which carries the *qualified* name of the declaration and none of the
++    /// qualifiers written in front of it; from clang 22 it arrives unexposed
++    /// with no such node, spelling the name as it was written and the
++    /// qualifiers with it. Asking the named node where there is one, and
++    /// taking the type's own qualifiers off the name, covers both. Since the
++    /// name that leaves is not always qualified, it is the type behind it
++    /// which has to settle a candidate.
++    fn using_declared_declaration(&self, ty: &clang::Type) -> Option<Cursor> {
++        if self.using_declared_types.is_empty() {
++            return None;
++        }
++
++        let named = ty.named();
++        let named = if named.is_valid() { named } else { *ty };
++
++        let candidates = self
++            .using_declared_types
++            .get(&unqualified_spelling(&named))?;
++
++        // A declaration identifies a type without its qualifiers, which is
++        // what a parameter written `const T` needs: what a using-declaration
++        // names is never itself qualified. It also tells two types apart which
++        // print the same, as two local classes of one name do. Where the
++        // canonical type has no declaration - a builtin, a pointer - the types
++        // are compared instead, qualifiers and all.
++        let canonical = named.canonical_type();
++        let declaration = canonical.declaration();
++        let mut matches = candidates.iter().filter(|candidate| {
++            let theirs = candidate.cur_type().canonical_type();
++            if declaration.is_valid() {
++                theirs.declaration() == declaration
++            } else {
++                theirs == canonical
++            }
++        });
++
++        // Two declarations of one name and one type are two names for the same
++        // thing, and nothing in what clang hands over says which of them was
++        // written. Resolving to either would be a guess.
++        let found = matches.next()?;
++        matches.next().is_none().then_some(*found)
++    }
++
+     /// Looks up for an already resolved type, either because it's builtin, or
+     /// because we already have it in the map.
+     pub(crate) fn builtin_or_resolved_ty(
+@@ -1903,7 +2058,13 @@
+         };
+         debug!("builtin_or_resolved_ty: {ty:?}, {location:?}, {with_id:?}, {parent_id:?}");
+ 
+-        if let Some(decl) = ty.canonical_declaration(location.as_ref()) {
++        let declaration =
++            ty.canonical_declaration(location.as_ref()).or_else(|| {
++                self.using_declared_declaration(ty)
++                    .and_then(|found| ty.canonical_declaration_of(found))
++            });
++
++        if let Some(decl) = declaration {
+             if let Some(id) = self.get_resolved_type(&decl) {
+                 debug!(
+                     "Already resolved ty {id:?}, {decl:?}, {ty:?} {location:?}"
+--- a/ir/item.rs
++++ b/ir/item.rs
+@@ -1380,6 +1380,16 @@
+ 
+         if !cursor.is_valid() {
+             return Err(ParseError::Continue);
++        }
++
++        // Nothing is generated for a using-declaration - it is a second name
++        // for an entity which already has one - but a type written through it
++        // reaches bindgen with no declaration of its own, so record what this
++        // one names for `BindgenContext::using_declared_declaration` to
++        // resolve such a type against. It happens here because the type
++        // handling below returns before the cursor kind is ever matched on.
++        if cursor.kind() == CXCursor_UsingDeclaration {
++            ctx.note_using_declaration(&cursor);
+         }
+ 
+         let comment = cursor.raw_comment();
