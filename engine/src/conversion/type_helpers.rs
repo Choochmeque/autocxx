@@ -132,6 +132,17 @@ pub(crate) fn unwrap_const(ty: &TypePath) -> Option<&syn::Type> {
     unwrap_bindgen_marker(ty, "__bindgen_marker_Const")
 }
 
+/// If `ty` is a type C++ qualified `volatile` in its own right, return the
+/// type it qualifies.
+///
+/// Rust has no spelling for the qualifier at any depth. `const` has one escape,
+/// since a `const` pointee survives as `*const T`; `volatile` has none, there
+/// being no volatile pointer type, so without the marker bindgen drops the fact
+/// everywhere.
+pub(crate) fn unwrap_volatile(ty: &TypePath) -> Option<&syn::Type> {
+    unwrap_bindgen_marker(ty, "__bindgen_marker_Volatile")
+}
+
 /// If `ty` is a C++ `long double`, return the Rust type bindgen substituted
 /// for it - which is the right size and nothing else. See
 /// [`crate::conversion::ConvertErrorFromCpp::LongDouble`] for why that is not
@@ -161,6 +172,28 @@ pub(crate) fn mentions_long_double(ty: &Type) -> bool {
 /// [`mentions_long_double`], for the other float autocxx turns down by name.
 pub(crate) fn mentions_float128(ty: &Type) -> bool {
     mentions_marker(ty, "__bindgen_marker_Float128")
+}
+
+/// Whether `ty` is, or contains, a type C++ qualified `volatile` - a pointee
+/// or a template argument included.
+///
+/// For a template argument that breadth is the point: the argument is written
+/// back out verbatim to name the instantiation in C++, so a qualifier anywhere
+/// inside it makes the name a different specialization. Where the question is
+/// instead whether *this* object is volatile, ask
+/// [`is_volatile_qualified`] - a pointer to something volatile is not itself
+/// volatile, and reading it is an ordinary read.
+pub(crate) fn mentions_volatile(ty: &Type) -> bool {
+    mentions_marker(ty, "__bindgen_marker_Volatile")
+}
+
+/// Whether C++ qualified `ty` itself `volatile`, as opposed to something it
+/// points at or is parameterized over.
+///
+/// Looks through the `const` marker, because `const volatile` carries both and
+/// bindgen nests them in the order C++ writes them.
+pub(crate) fn is_volatile_qualified(ty: &Type) -> bool {
+    matches!(strip_const_markers(ty), Type::Path(typ) if unwrap_volatile(typ).is_some())
 }
 
 fn mentions_marker(ty: &Type, marker: &str) -> bool {

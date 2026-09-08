@@ -32,7 +32,8 @@ use crate::{
         parse::CppRefQualifier,
         type_helpers::extract_pinned_mutable_reference_type,
         type_helpers::{
-            cpp_array_element, denotes_indirect_cpp_array, type_is_reference, unwrap_has_opaque,
+            cpp_array_element, denotes_indirect_cpp_array, is_volatile_qualified,
+            type_is_reference, unwrap_has_opaque,
         },
         CppEffectiveName, CppOriginalName,
     },
@@ -219,6 +220,11 @@ pub(crate) struct ReturnTypeAnalysis {
     /// `-> c_int` is rejected by C++ at `int (*f$)() = ::f;`. Calling it
     /// through a wrapper of our own sidesteps that. See google/autocxx#1191.
     was_const: bool,
+    /// Whether C++ qualified the return type itself `volatile`, which is the
+    /// same problem as `was_const` and takes the same way out. The qualifier
+    /// is spent once the value has been copied out of C++, so the wrapper
+    /// returns the unqualified type and calls through.
+    was_volatile: bool,
     deps: HashSet<QualifiedName>,
     placement_param_needed: Option<(FnArg, ArgumentAnalysis)>,
 }
@@ -232,6 +238,7 @@ impl Default for ReturnTypeAnalysis {
             was_mutable_reference: false,
             was_rvalue_reference: false,
             was_const: false,
+            was_volatile: false,
             deps: Default::default(),
             placement_param_needed: None,
         }
@@ -417,6 +424,9 @@ pub(crate) struct FnAnalyzer<'a> {
     /// enumerators are members of the enumeration rather than of the class it
     /// is nested in.
     scoped_enums: HashSet<QualifiedName>,
+    /// Every enumeration, scoped or not. An enum is a scalar, which is what
+    /// decides whether a `volatile` value of it can be copied out of C++.
+    enums: HashSet<QualifiedName>,
     /// For each class template some concrete instantiation in these APIs
     /// instantiates, the member functions bindgen reported for it. Keyed on the
     /// template, because that is the only thing bindgen says anything about: it
@@ -510,6 +520,13 @@ impl<'a> FnAnalyzer<'a> {
             using_declarations_by_base: Self::build_using_declarations_by_base(&apis, &ancestry),
             ancestry,
             scoped_enums,
+            enums: apis
+                .iter()
+                .filter_map(|api| match api {
+                    Api::Enum { name, .. } => Some(name.name.clone()),
+                    _ => None,
+                })
+                .collect(),
             template_member_functions: Self::build_template_member_functions(
                 &apis,
                 parse_callback_results,
@@ -2507,6 +2524,7 @@ impl<'a> FnAnalyzer<'a> {
         let mut ret_type = return_analysis.rt;
         let ret_type_conversion = return_analysis.conversion;
         let ret_type_was_const = return_analysis.was_const;
+        let ret_type_was_volatile = return_analysis.was_volatile;
 
         // Do we need to convert either parameters or return type?
         let param_conversion_needed = param_details.iter().any(|b| b.conversion.cpp_work_needed());
@@ -2610,6 +2628,12 @@ impl<'a> FnAnalyzer<'a> {
             // caller is copying out of C++ anyway - and calls through.
             // google/autocxx#1191.
             _ if ret_type_was_const => true,
+            // `volatile` on a return type is part of the function's type in
+            // exactly the same way, and cxx rejects `int (*f$)() = ::f;` for a
+            // `volatile int f()` for exactly the same reason. The value has
+            // been copied out of C++ by the time the wrapper returns it, so
+            // there is nothing left for the qualifier to govern.
+            _ if ret_type_was_volatile => true,
             // cxx names the C++ function in the shim it generates, and a
             // deprecated function drawn from a file autocxx does not write is
             // a `-Wdeprecated-declarations` nobody can silence. Our own
@@ -3410,10 +3434,40 @@ impl<'a> FnAnalyzer<'a> {
         Ok(match rt {
             ReturnType::Default => ReturnTypeAnalysis::default(),
             ReturnType::Type(rarrow, boxed_type) => {
+                // Asked of the type as bindgen wrote it, since conversion peels
+                // the marker off. Looked for underneath the `const` marker too,
+                // because a `const volatile` return carries both. Only the top
+                // level: a qualifier deeper in - on a pointee - is a position
+                // autocxx does not handle at all, and a wrapper would not
+                // rescue it, since the pointer type itself would still differ.
+                let was_volatile = is_volatile_qualified(boxed_type);
                 let annotated_type = self.convert_boxed_type(boxed_type.clone(), ns)?;
                 let was_const = annotated_type.is_const;
                 let boxed_type = annotated_type.ty;
                 let ty: &Type = boxed_type.as_ref();
+                // The wrapper `was_volatile` asks for has `return f();` for a
+                // body, copy-initializing an unqualified `T` from a `volatile
+                // T`. For a scalar - a built-in, an enumeration or a pointer -
+                // that is a read. For a class it needs a constructor taking
+                // `volatile T&` or `const volatile T&`, which C++ does not
+                // implicitly declare, so the wrapper does not compile at the
+                // C++14 autocxx generates for. C++17 initializes the result
+                // directly and would accept it; the floor is what is built
+                // against, so the class case is turned down rather than made
+                // to depend on the standard in use.
+                let copyable_out_of_volatile = match ty {
+                    Type::Ptr(_) => true,
+                    Type::Path(p) => {
+                        let tn = QualifiedName::from_type_path(p);
+                        known_types().copyable_from_volatile(&tn) || self.enums.contains(&tn)
+                    }
+                    _ => false,
+                };
+                if was_volatile && !copyable_out_of_volatile {
+                    return Err(ConvertErrorFromCpp::VolatileReturn(
+                        diagnostic_name.to_cpp_name(),
+                    ));
+                }
                 // As for a parameter.
                 check_signature_array(ty)?;
                 match ty {
@@ -3453,6 +3507,7 @@ impl<'a> FnAnalyzer<'a> {
                                     ty.clone(),
                                 )),
                                 was_const,
+                                was_volatile,
                                 deps: annotated_type.types_encountered,
                                 placement_param_needed: Some((fnarg, analysis)),
                                 ..Default::default()
@@ -3469,6 +3524,7 @@ impl<'a> FnAnalyzer<'a> {
                                 rt: ReturnType::Type(*rarrow, boxed_type),
                                 conversion,
                                 was_const,
+                                was_volatile,
                                 deps: annotated_type.types_encountered,
                                 ..Default::default()
                             }
@@ -3515,6 +3571,7 @@ impl<'a> FnAnalyzer<'a> {
                             was_mutable_reference,
                             was_rvalue_reference,
                             was_const,
+                            was_volatile,
                             deps: annotated_type.types_encountered,
                             placement_param_needed: None,
                         }

@@ -14,7 +14,9 @@ use crate::conversion::{
     api::{FuncToConvert, UnanalyzedApi},
     convert_error::ConvertErrorWithContext,
     convert_error::ErrorContext,
-    type_helpers::{mentions_float128, mentions_long_double, strip_const_markers},
+    type_helpers::{
+        is_volatile_qualified, mentions_float128, mentions_long_double, strip_const_markers,
+    },
 };
 use crate::minisyn::{minisynize_punctuated, minisynize_vec};
 use crate::types::strip_bindgen_original_suffix_from_ident;
@@ -213,6 +215,14 @@ fn analyze_static(
     }
     if mentions_float128(ty) {
         return Err(ConvertErrorFromCpp::Float128);
+    }
+    // The variable's own type, not anything it points at: a `volatile int *`
+    // variable is an ordinary pointer, and reading it is an ordinary read.
+    // `const volatile` is the case which matters most, and the check looks
+    // through the `const` marker to find it. bindgen has already emitted the
+    // declaration, so a refusal here is what stops autocxx re-exporting it.
+    if is_volatile_qualified(ty) {
+        return Err(ConvertErrorFromCpp::VolatileVariable(ident.to_string()));
     }
     if linkage_from_link_name(link_name_from_attrs(attrs).as_deref()) == CppLinkage::Internal {
         return Err(ConvertErrorFromCpp::StaticDataWithInternalLinkage(

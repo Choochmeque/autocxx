@@ -20,7 +20,7 @@ use crate::{
         apivec::ApiVec,
         convert_error::{ErrorContext, UnrepresentableMember},
         parse::CppRefQualifier,
-        type_helpers::{is_pointer_like, strip_const_markers},
+        type_helpers::{is_pointer_like, is_volatile_qualified, strip_const_markers},
         ConvertErrorFromCpp, CppOriginalName,
     },
     known_types::known_types,
@@ -64,7 +64,9 @@ const ACCESSOR_SUFFIX: &str = "_autocxx_field";
 ///
 /// * a bitfield, which has no field of its own in the struct bindgen emitted
 ///   and no reported type either, so nothing says what a getter would return.
-///   `denote_data_member` reports its width and no more.
+///   `denote_data_member` reports facts about it - its width, whether it is
+///   `const` or `volatile` - but not a type, and the volatile case is answered
+///   by refusing the class POD status rather than by a refusal here.
 /// * a member of an anonymous union or struct, which bindgen neither names nor
 ///   generates a field for; the member is reported with no name at all.
 ///
@@ -83,10 +85,13 @@ const ACCESSOR_SUFFIX: &str = "_autocxx_field";
 /// the reason a borrowed accessor is not to be assumed safer than a by-value
 /// one.
 ///
-/// A `volatile` member reaches C++ codegen as an ordinary one, and the
-/// generated `const T&` cannot bind to a `const volatile T` - a compile error
-/// in the generated C++, and one instance of autocxx having no notion of
-/// `volatile` anywhere.
+/// A `volatile` member gets a by-value getter like any other, and that getter
+/// is honest: its body is `obj.member`, and reading a `volatile` glvalue is a
+/// volatile access in C++, so the read happens once per call in the generated
+/// C++ and Rust receives the copy. Only the borrowed shape is refused
+/// (`UnrepresentableMember::Volatile`), because it would leave the reading to
+/// Rust - and because the `const T&` it returns will not bind to a
+/// `const volatile T` anyway.
 pub(crate) fn add_field_accessors(
     apis: ApiVec<PodPhase>,
     config: &IncludeCppConfig,
@@ -390,7 +395,29 @@ fn member_shape(
     // enumerations, which have no special members at all.
     let copyable_by_construction = types.enums.contains(&tn)
         || (known_types().is_known_type(&tn) && !known_types().lacks_copy_constructor(&tn));
-    if copyable_by_construction && types.pod_safe.contains(&tn) {
+    let by_value = copyable_by_construction && types.pod_safe.contains(&tn);
+    if is_volatile_qualified(&field.ty) {
+        // A `volatile` member is readable by value, and only by value: the
+        // getter's body is `obj.member`, and reading a `volatile` glvalue is a
+        // volatile access in C++, so the read happens in the generated C++,
+        // once per call, and what crosses to Rust is the copy it produced.
+        //
+        // Only for a scalar, though - a built-in, an enumeration or a
+        // pointer. Copying a class calls a constructor, and an implicitly
+        // declared copy constructor takes `const T&` or `T&`, neither of which
+        // a `volatile T` binds to, so `obj.member` does not compile for one
+        // however copyable it otherwise is. The borrowed shape does not work
+        // either: it would leave Rust to do the reading, as an ordinary load,
+        // and its `const T&` return will not bind to a `const volatile T`.
+        return if by_value
+            && (known_types().copyable_from_volatile(&tn) || types.enums.contains(&tn))
+        {
+            Ok(Shape::ByValue)
+        } else {
+            Err(Refusal::Kind(UnrepresentableMember::Volatile))
+        };
+    }
+    if by_value {
         Ok(Shape::ByValue)
     } else {
         Ok(Shape::ByReference)

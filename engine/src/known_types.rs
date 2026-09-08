@@ -391,6 +391,31 @@ impl TypeDatabase {
             .unwrap_or(false)
     }
 
+    /// Whether a value of this type can be copied out of a `volatile` object.
+    ///
+    /// Being copyable is not enough. C++ copies a class by calling a
+    /// constructor, and an implicitly declared copy constructor takes
+    /// `const T&` or `T&` - neither of which a `volatile T` lvalue binds to -
+    /// so `std::string`, `rust::String` and everything else class-shaped here
+    /// cannot be read out of a `volatile` member however ordinary its copy
+    /// constructor is. What can is a scalar: C++ copies one by reading it, and
+    /// reading a `volatile` glvalue is exactly the volatile access which makes
+    /// such a getter honest.
+    pub(crate) fn copyable_from_volatile(&self, tn: &QualifiedName) -> bool {
+        self.get(tn)
+            .map(|td| {
+                matches!(
+                    td.behavior,
+                    Behavior::CByValue
+                        | Behavior::CByValueVecSafe
+                        | Behavior::CChar
+                        | Behavior::CCharacter
+                        | Behavior::CIntegerWrapper
+                )
+            })
+            .unwrap_or(false)
+    }
+
     /// Whether this can only be passed around using `std::move`
     pub(crate) fn lacks_copy_constructor(&self, tn: &QualifiedName) -> bool {
         self.get(tn)

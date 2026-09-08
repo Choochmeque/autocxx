@@ -390,7 +390,12 @@ impl IncludeCppEngine {
             "LongDouble",
             "Float128",
         ];
-        let bindgen_marker_aliases = ["Const"];
+        // `Volatile` is an alias for the same reason `Const` is, and reaches
+        // one of the same value-carrying positions: a `volatile` bitfield's
+        // accessors cast between the field type and the allocation unit's
+        // integer, so they return `__bindgen_marker_Volatile<u32>` out of a
+        // `... as u32 as _`, which a newtype makes `error[E0605]`.
+        let bindgen_marker_aliases = ["Const", "Volatile"];
         let raw_line = bindgen_marker_newtypes
             .iter()
             .map(|t| {
@@ -459,6 +464,7 @@ impl IncludeCppEngine {
             .use_opaque_newtype_wrapper(true)
             .use_reference_newtype_wrapper(true)
             .use_const_newtype_wrapper(true)
+            .use_volatile_newtype_wrapper(true)
             .use_long_double_newtype_wrapper(true)
             .use_float128_newtype_wrapper(true)
             .represent_cxx_operators(true)
