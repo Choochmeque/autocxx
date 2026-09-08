@@ -755,12 +755,20 @@ referenced in Rust references.</p>
 <p>If you're using one of the generic types which is supported natively by cxx,
 e.g. <code>std::unique_ptr</code>, it should work as you expect. For other generic types,
 we synthesize a concrete Rust type, corresponding to a C++ typedef, for each
-concrete instantiation of the type. Such generated types are always opaque,
-and never have methods attached. That's therefore enough to pass them
+concrete instantiation of the type. Such generated types are always opaque, so
+by default that's enough to pass them
 between return types and parameters of other functions within <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>s
 but not really enough to do anything else with these types yet<sup class="footnote-reference" id="fr-templated-1"><a href="#footnote-templated">1</a></sup>.</p>
-<p>To make them more useful, you might have to add extra C++ functions to extract
-data or otherwise deal with them.</p>
+<p>An
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.instantiable.html"><code>instantiable!</code></a>
+directive naming one of them goes further: it gives the instantiation a <code>new()</code>
+and binds the member functions its class template declares, so that an
+<code>ffi::Boba</code> can be made and asked to do things. <code>bindgen</code> tells <code>autocxx</code>
+nothing at all about a specialization, so that directive is you vouching for
+what it generates and your C++ compiler is the arbiter; see its documentation
+for what is claimed and for the members it cannot reach. Otherwise,
+to make these types more useful, you might have to add extra C++ functions to
+extract data or otherwise deal with them.</p>
 <p>Usually, such concrete types are synthesized automatically because they're
 parameters or return values from functions. Very rarely, you may
 want to synthesize them yourself - you can do this using the
