@@ -20518,6 +20518,63 @@ fn test_wchar_t_values() {
     );
 }
 
+/// The same two questions asked of the C++ compiler at its own compile time,
+/// where an answer it disagrees with is an error rather than a wrong value.
+///
+/// `test_wchar_t_values` can only speak for a platform the test suite runs on.
+/// A user's C++ compiler may be told `-fshort-wchar`, which makes `wchar_t` two
+/// bytes where the platform says four; nothing in cxx checks the width of a
+/// trivial extern type, so a `c_wchar_t` would simply be read from the wrong
+/// bytes. The generated header says what width autocxx built for, so that the
+/// compiler which disagrees says so.
+#[test]
+fn test_wchar_t_width_is_asserted_in_generated_cpp() {
+    let hdr = indoc! {"
+        inline wchar_t next_wchar(wchar_t c) { return c + 1; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_wchar(autocxx::c_wchar_t(65)), autocxx::c_wchar_t(66));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["next_wchar"], &[], None),
+        None,
+        // The build which follows is the other half of the check: the assertion
+        // holds on whatever platform this is running on, or nothing compiles.
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &["static_assert(sizeof(wchar_t) =="],
+            &[],
+        ))])),
+        None,
+    );
+}
+
+/// A header which never mentions `wchar_t` gets no assertion about it: the
+/// typedef it belongs to is emitted only where the type is used.
+#[test]
+fn test_no_wchar_t_assertion_without_wchar_t() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t fx_plain(uint32_t c) { return c + 1; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_plain(65), 66);
+        },
+        directives_from_lists(&["fx_plain"], &[], None),
+        None,
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &[],
+            &["static_assert(sizeof(wchar_t)"],
+        ))])),
+        None,
+    );
+}
+
 #[test]
 fn test_char32_t() {
     let hdr = indoc! {"

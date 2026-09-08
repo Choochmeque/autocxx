@@ -79,6 +79,11 @@ const LOG_APIS: bool = true;
 pub(crate) struct BridgeConverter<'a> {
     include_list: &'a [String],
     config: &'a IncludeCppConfig,
+    /// What the generated C++ is to assert `sizeof(wchar_t)` is. Decided where
+    /// the clang arguments are known rather than read from the environment here,
+    /// because an explicit `--target` is part of the answer. See
+    /// [`crate::clang_target::expected_wchar_t_size`].
+    wchar_t_size: u32,
 }
 
 /// C++ and Rust code generation output.
@@ -89,10 +94,15 @@ pub(crate) struct CodegenResults {
 }
 
 impl<'a> BridgeConverter<'a> {
-    pub fn new(include_list: &'a [String], config: &'a IncludeCppConfig) -> Self {
+    pub fn new(
+        include_list: &'a [String],
+        config: &'a IncludeCppConfig,
+        wchar_t_size: u32,
+    ) -> Self {
         Self {
             include_list,
             config,
+            wchar_t_size,
         }
     }
 
@@ -250,6 +260,7 @@ impl<'a> BridgeConverter<'a> {
                     &codegen_options.cpp_codegen_options,
                     &cxxgen_header_name,
                     &parse_observations.shadowed_types,
+                    self.wchar_t_size,
                 )
                 .map_err(ConvertError::Cpp)?;
                 let rs = RsCodeGenerator::generate_rs_code(

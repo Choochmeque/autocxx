@@ -671,7 +671,11 @@ impl IncludeCppEngine {
             .cloned()
             .unwrap_or_else(|| Rc::new("".to_string()));
 
-        let converter = BridgeConverter::new(&self.config.inclusions, &self.config);
+        let converter = BridgeConverter::new(
+            &self.config.inclusions,
+            &self.config,
+            clang_target::expected_wchar_t_size(extra_clang_args),
+        );
 
         let conversion = converter
             .convert(

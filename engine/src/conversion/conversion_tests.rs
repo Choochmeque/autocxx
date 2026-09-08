@@ -29,7 +29,9 @@ fn do_test(input: ItemMod) {
     // no allowlist directive at all the config is still `Unspecified` and
     // asking whether anything is allowlisted panics.
     let tc = parse_quote! { generate_all!() };
-    let bc = BridgeConverter::new(&[], &tc);
+    // Any `wchar_t` width: these tests read the Rust side of the conversion and
+    // never the generated C++.
+    let bc = BridgeConverter::new(&[], &tc, 4);
     let inclusions = "".into();
     let parse_callback_results = UnindexedParseCallbackResults::with_only_a_root_mod().index();
     bc.convert(
