@@ -226,6 +226,16 @@ pub(crate) struct TypeConverter<'a> {
     original_name_map: CppNameMap,
 }
 
+/// What resolving a typedef left [`TypeConverter::resolve_typedef_target`]
+/// with: the path to carry on converting, or a type it converted outright.
+enum ResolvedTypedef {
+    Path(TypePath, QualifiedName),
+    /// Boxed because it is several times the size of the other variant, and
+    /// this enum is returned at every level of a nested type - through the
+    /// stack frames this split exists to shrink.
+    Converted(Box<Annotated<Type>>),
+}
+
 impl<'a> TypeConverter<'a> {
     pub(crate) fn new<A: AnalysisPhase>(config: &'a IncludeCppConfig, apis: &ApiVec<A>) -> Self
     where
@@ -259,37 +269,8 @@ impl<'a> TypeConverter<'a> {
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         let result = match ty {
             Type::Path(p) => self.convert_type_path(p, ns, ctx)?,
-            Type::Reference(mut r) => {
-                let innerty = self.convert_boxed_type(r.elem, ns, &ctx.behind_reference())?;
-                r.elem = innerty.ty;
-                Annotated::new(
-                    Type::Reference(r),
-                    innerty.types_encountered,
-                    innerty.extra_apis,
-                    TypeKind::Reference,
-                )
-            }
-            Type::Array(mut arr) => {
-                let innerty = self.convert_type(*arr.elem, ns, &ctx.behind_reference())?;
-                // An array of `const` elements is as unassignable as a `const`
-                // scalar, and C++ says so outright: an array type whose element
-                // type is cv-qualified is itself cv-qualified. bindgen agrees -
-                // it folds a const element into the array's own constness - but
-                // it also leaves the marker on the element, and for
-                // `const T a[2][3]` the outermost node we are handed is the
-                // array rather than a marker. So the fact has to come up from
-                // the element here, or a multidimensional const array looks
-                // assignable.
-                let is_const = innerty.is_const;
-                arr.elem = Box::new(innerty.ty);
-                Annotated::new(
-                    Type::Array(arr),
-                    innerty.types_encountered,
-                    innerty.extra_apis,
-                    TypeKind::Regular,
-                )
-                .marked_const_if(is_const)
-            }
+            Type::Reference(r) => self.convert_reference(r, ns, ctx)?,
+            Type::Array(arr) => self.convert_array(arr, ns, ctx)?,
             Type::Ptr(ptr) => self.convert_ptr(ptr, ns, ctx)?,
             _ => {
                 return Err(ConvertErrorFromCpp::UnknownType(
@@ -367,119 +348,338 @@ impl<'a> TypeConverter<'a> {
             // just that storage.
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ptr) = unwrap_reference(&typ, false) {
-            // LValue reference
-            let mutability = ptr.mutability;
-            let elem = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
-            // A `rust::Str` referent has already been turned into `&str` by the
-            // `should_dereference_in_cpp` branch below, so a C++ `rust::Str&`
-            // gets wrapped again here into `&&str`. That is deliberate and
-            // correct: cxx spells `&str` as a `rust::Str` value and `&T` as
-            // `const T&`, so `&&str` *is* `const rust::Str&`, and `rust::Str`
-            // has the same (pointer, length) layout as Rust's `&str`.
-            // `test_pass_rust_str_by_ref` runs that shape end to end, and
-            // `test_pass_rust_str` the plain value it wraps.
-            //
-            // A *mutable* `rust::Str&` is refused, which is what the check
-            // below does. It would become `Pin<&mut &str>`: the slot belongs
-            // to C++, which is free to write a fat pointer of its own into it,
-            // after which Rust holds a `&str` whose lifetime nothing checked.
-            // Under `ReferencesWrappedAllFunctionsSafe` the same parameter
-            // becomes a `CppMutRef` instead, which Rust never dereferences
-            // except through an unsafe call the caller vouches for, so there
-            // it is kept - `test_pass_rust_str_by_mut_ref_cpprefs` covers it.
-            // The const case is untouched either way, because `&&str` hands
-            // Rust no way to write to the slot.
-            //
-            // `rust::Str` is the only type autocxx represents as a borrowed
-            // fat pointer, so it is the only shape this catches.
-            // `rust::Slice<T>` is not a known type at all: bindgen discards
-            // its template parameter, so any signature mentioning one is
-            // already turned down with `UnusedTemplateParam` before reaching
-            // here, by value and by reference alike
-            // (`test_rust_slice_never_reaches_this`). `rust::String&` is a
-            // different problem, not this one - it owns its contents, so there
-            // is no unchecked borrow, and what goes wrong there is that cxx
-            // wants `&mut String` where autocxx writes `Pin<&mut String>`.
-            //
-            // A struct *field* is exempt, because no `Pin<&mut &str>` reaches
-            // Rust from one. A struct with a reference field is never POD -
-            // `generate_pod!` on one already fails, bindgen's reference marker
-            // not being a type the POD analysis knows - so such a struct is
-            // always opaque, and its fields are bytes Rust cannot name, let
-            // alone write through. Refusing the field instead loses autocxx
-            // the knowledge that the struct has a reference member, and it
-            // then offers a default constructor C++ has deleted; see
-            // `test_rust_str_reference_field_is_left_alone`.
-            //
-            // `using StrRef = rust::Str&` is refused at the alias itself,
-            // where the context is `WithinTypedef` and no use is in sight yet.
-            // A signature mentioning the alias then loses the alias it depends
-            // on, which is the right answer; a struct field of that type stays
-            // fine, because the struct was going to be opaque either way.
-            // `test_rust_str_reference_field_is_left_alone` covers the field
-            // spelt both ways.
-            if mutability.is_some()
-                && !ctx.within_struct_field()
-                && Self::is_rust_str(&elem.ty)
-                && !self.config.unsafe_policy.requires_cpprefs()
-            {
-                return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
-            }
-            let mut outer = elem.map(|elem| match mutability {
-                Some(_) => Type::Path(parse_quote! {
-                    ::core::pin::Pin < & #mutability #elem >
-                }),
-                None => Type::Reference(parse_quote! {
-                    & #elem
-                }),
-            });
-            outer.kind = if mutability.is_some() {
-                TypeKind::MutableReference
-            } else {
-                TypeKind::Reference
-            };
-            Ok(outer)
+            self.convert_lvalue_reference(ptr, ns, ctx)
         } else if let Some(ptr) = unwrap_reference(&typ, true) {
-            // RValue reference
-            Self::ensure_pointee_is_valid(ptr, ctx)?;
-            let innerty = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
-            let mut ptr = ptr.clone();
-            ptr.elem = innerty.ty;
-            Ok(Annotated::new(
-                Type::Ptr(ptr),
-                innerty.types_encountered,
-                innerty.extra_apis,
-                TypeKind::RValueReference,
-            ))
+            self.convert_rvalue_reference(ptr, ns, ctx)
         } else {
-            // An actual path
-            let newp = self.convert_type_path_which_is_not_a_reference(typ, ns, ctx)?;
-            if let Type::Path(newpp) = &newp.ty {
-                let qn = QualifiedName::from_type_path(newpp);
-                if !ctx.allow_instantiation_of_forward_declaration()
-                    && self.forward_declarations.contains_key(&qn)
-                {
-                    return Err(self.incomplete_type_error(qn));
+            self.convert_path_which_is_not_a_reference(typ, ns, ctx)
+        }
+    }
+
+    /// What [`Self::convert_type_path_which_is_not_a_reference`] does before
+    /// it has a path to work on: resolve a typedef, and answer either with the
+    /// path it resolved to or with the converted type outright, for the
+    /// targets which are not paths at all.
+    ///
+    /// Its own function, and never inlined, so that the locals of all these
+    /// cases are gone before the caller recurses through a template argument.
+    /// A debug build gives every one of them a stack slot which lives as long
+    /// as the call it is written in, and that call is a recursive one.
+    #[inline(never)]
+    fn resolve_typedef_target(
+        &mut self,
+        typ: TypePath,
+        original_tn: QualifiedName,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+        deps: &mut HashSet<QualifiedName>,
+        target_is_const: bool,
+    ) -> Result<ResolvedTypedef, ConvertErrorFromCpp> {
+        let resolved = match self.resolve_typedef(&original_tn)? {
+            None => ResolvedTypedef::Path(typ, original_tn),
+            Some(TypedefTargetInfo {
+                ty: Type::Path(resolved_tp),
+                ..
+            }) => {
+                // The typedef may resolve to a C function pointer - see
+                // `function_pointer`, which decides what to do with one and is
+                // the only thing that should: nothing within it needs
+                // converting, and the `Option` wrapping it must not be
+                // mistaken for a type we should go looking for.
+                if let Some(result) = Self::function_pointer(resolved_tp, ctx) {
+                    return result
+                        .map(|mut annotated| {
+                            annotated.types_encountered.extend(std::mem::take(deps));
+                            annotated.marked_const_if(target_is_const)
+                        })
+                        .map(Box::new)
+                        .map(ResolvedTypedef::Converted);
                 }
-                // Special handling because rust_Str (as emitted by bindgen)
-                // doesn't simply get renamed to a different type _identifier_.
-                // This plain type-by-value (as far as bindgen is concerned)
-                // is actually a &str.
-                if known_types().should_dereference_in_cpp(&qn) {
-                    Ok(Annotated::new(
-                        Type::Reference(parse_quote! {
-                            &str
-                        }),
-                        newp.types_encountered,
-                        newp.extra_apis,
-                        TypeKind::Reference,
-                    ))
-                } else {
-                    Ok(newp)
+                // `Pin<&mut T>` is not a name to go looking for: it is what
+                // analysing the typedef already made of a C++ mutable
+                // reference, and it is finished. Read as a name it is the
+                // generic `core::pin::Pin`, which cxx knows nothing about, so
+                // autocxx would invent a concrete type for it and write
+                // `T&*` into the generated C++. See google/autocxx#1363.
+                if extract_pinned_mutable_reference_type(resolved_tp).is_some() {
+                    return Ok(ResolvedTypedef::Converted(Box::new(Annotated::new(
+                        Type::Path(resolved_tp.clone()),
+                        std::mem::take(deps),
+                        ApiVec::new(),
+                        TypeKind::MutableReference,
+                    ))));
                 }
+                let resolved_tn = QualifiedName::from_type_path(resolved_tp);
+                deps.insert(resolved_tn.clone());
+                ResolvedTypedef::Path(resolved_tp.clone(), resolved_tn)
+            }
+            Some(TypedefTargetInfo {
+                ty: Type::Ptr(resolved_tp),
+                kind,
+                ..
+            }) => {
+                // The typedef resolves to a pointer. Its pointee may
+                // itself involve typedefs (e.g. typedef char C;
+                // typedef C* S;), so convert it like any directly
+                // written pointer instead of passing it through
+                // verbatim — otherwise the unresolved pointee name
+                // reaches cxx and generation fails with
+                // "unsupported type". See google/autocxx#1368.
+                let is_rvalue_reference = matches!(kind, TypeKind::RValueReference);
+                let mut annotated = self.convert_ptr(resolved_tp.clone(), ns, ctx)?;
+                annotated.types_encountered.extend(std::mem::take(deps));
+                // A C++ rvalue reference converts to a pointer as well, so
+                // which of the two this alias names cannot be read back off
+                // the type; that is why the typedef's analysis recorded it.
+                // Calling `typedef T&& R` a pointer costs the caller the one
+                // fact it needs - the parameter is something to move from -
+                // and the C++ shim it then writes takes `T*` and hands it
+                // straight to a function wanting `T&&`, which no compiler
+                // accepts. See google/autocxx#1363.
+                if is_rvalue_reference {
+                    annotated.kind = TypeKind::RValueReference;
+                }
+                return Ok(ResolvedTypedef::Converted(Box::new(
+                    annotated.marked_const_if(target_is_const),
+                )));
+            }
+            Some(TypedefTargetInfo { ty: other, .. }) => {
+                // Anything else the typedef resolved to was converted when the
+                // typedef itself was analysed, so take it as it stands - but
+                // say what kind it is. A typedef to a C++ reference lands here
+                // as `&T`, and calling that `Regular` costs the caller the one
+                // fact it needs: whether the value borrows, which decides
+                // lifetimes on a returned reference and how a parameter
+                // crosses the bridge. Here the type says which it is, so read
+                // it; what the typedef recorded is only needed where two
+                // different C++ constructs converge on one Rust type, which is
+                // the pointer arm above. See google/autocxx#1363.
+                let kind = match other {
+                    Type::Reference(reference) if reference.mutability.is_some() => {
+                        TypeKind::MutableReference
+                    }
+                    Type::Reference(_) => TypeKind::Reference,
+                    _ => TypeKind::Regular,
+                };
+                return Ok(ResolvedTypedef::Converted(Box::new(
+                    Annotated::new(other.clone(), std::mem::take(deps), ApiVec::new(), kind)
+                        .marked_const_if(target_is_const),
+                )));
+            }
+        };
+        Ok(resolved)
+    }
+
+    /// The `T&` arm of [`Self::convert_type`].
+    ///
+    /// Its own function, and never inlined, because a debug build gives every
+    /// arm of a `match` a stack slot of its own and holds them all for the
+    /// length of the call. `convert_type` recurses through here, so every
+    /// arm's locals would otherwise be paid for at each level of a nested
+    /// type.
+    #[inline(never)]
+    fn convert_reference(
+        &mut self,
+        mut r: syn::TypeReference,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        let innerty = self.convert_boxed_type(r.elem, ns, &ctx.behind_reference())?;
+        r.elem = innerty.ty;
+        Ok(Annotated::new(
+            Type::Reference(r),
+            innerty.types_encountered,
+            innerty.extra_apis,
+            TypeKind::Reference,
+        ))
+    }
+
+    /// The array arm of [`Self::convert_type`]. Not inlined, for the reason
+    /// [`Self::convert_reference`] gives.
+    #[inline(never)]
+    fn convert_array(
+        &mut self,
+        mut arr: syn::TypeArray,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        let innerty = self.convert_type(*arr.elem, ns, &ctx.behind_reference())?;
+        // An array of `const` elements is as unassignable as a `const`
+        // scalar, and C++ says so outright: an array type whose element
+        // type is cv-qualified is itself cv-qualified. bindgen agrees -
+        // it folds a const element into the array's own constness - but
+        // it also leaves the marker on the element, and for
+        // `const T a[2][3]` the outermost node we are handed is the
+        // array rather than a marker. So the fact has to come up from
+        // the element here, or a multidimensional const array looks
+        // assignable.
+        let is_const = innerty.is_const;
+        arr.elem = Box::new(innerty.ty);
+        Ok(Annotated::new(
+            Type::Array(arr),
+            innerty.types_encountered,
+            innerty.extra_apis,
+            TypeKind::Regular,
+        )
+        .marked_const_if(is_const))
+    }
+
+    /// The `T&` case of [`Self::convert_type_path`].
+    ///
+    /// Its own function, and never inlined, because a debug build gives every
+    /// branch of a function a stack slot of its own and holds them all for the
+    /// length of the call. `convert_type` recurses through here, so each
+    /// branch's locals would otherwise be paid for at every level of a nested
+    /// type.
+    #[inline(never)]
+    fn convert_lvalue_reference(
+        &mut self,
+        ptr: &syn::TypePtr,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        // LValue reference
+        let mutability = ptr.mutability;
+        let elem = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
+        // A `rust::Str` referent has already been turned into `&str` by the
+        // `should_dereference_in_cpp` branch below, so a C++ `rust::Str&`
+        // gets wrapped again here into `&&str`. That is deliberate and
+        // correct: cxx spells `&str` as a `rust::Str` value and `&T` as
+        // `const T&`, so `&&str` *is* `const rust::Str&`, and `rust::Str`
+        // has the same (pointer, length) layout as Rust's `&str`.
+        // `test_pass_rust_str_by_ref` runs that shape end to end, and
+        // `test_pass_rust_str` the plain value it wraps.
+        //
+        // A *mutable* `rust::Str&` is refused, which is what the check
+        // below does. It would become `Pin<&mut &str>`: the slot belongs
+        // to C++, which is free to write a fat pointer of its own into it,
+        // after which Rust holds a `&str` whose lifetime nothing checked.
+        // Under `ReferencesWrappedAllFunctionsSafe` the same parameter
+        // becomes a `CppMutRef` instead, which Rust never dereferences
+        // except through an unsafe call the caller vouches for, so there
+        // it is kept - `test_pass_rust_str_by_mut_ref_cpprefs` covers it.
+        // The const case is untouched either way, because `&&str` hands
+        // Rust no way to write to the slot.
+        //
+        // `rust::Str` is the only type autocxx represents as a borrowed
+        // fat pointer, so it is the only shape this catches.
+        // `rust::Slice<T>` is not a known type at all: bindgen discards
+        // its template parameter, so any signature mentioning one is
+        // already turned down with `UnusedTemplateParam` before reaching
+        // here, by value and by reference alike
+        // (`test_rust_slice_never_reaches_this`). `rust::String&` is a
+        // different problem, not this one - it owns its contents, so there
+        // is no unchecked borrow, and what goes wrong there is that cxx
+        // wants `&mut String` where autocxx writes `Pin<&mut String>`.
+        //
+        // A struct *field* is exempt, because no `Pin<&mut &str>` reaches
+        // Rust from one. A struct with a reference field is never POD -
+        // `generate_pod!` on one already fails, bindgen's reference marker
+        // not being a type the POD analysis knows - so such a struct is
+        // always opaque, and its fields are bytes Rust cannot name, let
+        // alone write through. Refusing the field instead loses autocxx
+        // the knowledge that the struct has a reference member, and it
+        // then offers a default constructor C++ has deleted; see
+        // `test_rust_str_reference_field_is_left_alone`.
+        //
+        // `using StrRef = rust::Str&` is refused at the alias itself,
+        // where the context is `WithinTypedef` and no use is in sight yet.
+        // A signature mentioning the alias then loses the alias it depends
+        // on, which is the right answer; a struct field of that type stays
+        // fine, because the struct was going to be opaque either way.
+        // `test_rust_str_reference_field_is_left_alone` covers the field
+        // spelt both ways.
+        if mutability.is_some()
+            && !ctx.within_struct_field()
+            && Self::is_rust_str(&elem.ty)
+            && !self.config.unsafe_policy.requires_cpprefs()
+        {
+            return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
+        }
+        let mut outer = elem.map(|elem| match mutability {
+            Some(_) => Type::Path(parse_quote! {
+                ::core::pin::Pin < & #mutability #elem >
+            }),
+            None => Type::Reference(parse_quote! {
+                & #elem
+            }),
+        });
+        outer.kind = if mutability.is_some() {
+            TypeKind::MutableReference
+        } else {
+            TypeKind::Reference
+        };
+        Ok(outer)
+    }
+
+    /// The `T&&` case of [`Self::convert_type_path`].
+    ///
+    /// Its own function, and never inlined, because a debug build gives every
+    /// branch of a function a stack slot of its own and holds them all for the
+    /// length of the call. `convert_type` recurses through here, so each
+    /// branch's locals would otherwise be paid for at every level of a nested
+    /// type.
+    #[inline(never)]
+    fn convert_rvalue_reference(
+        &mut self,
+        ptr: &syn::TypePtr,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        // RValue reference
+        Self::ensure_pointee_is_valid(ptr, ctx)?;
+        let innerty = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
+        let mut ptr = ptr.clone();
+        ptr.elem = innerty.ty;
+        Ok(Annotated::new(
+            Type::Ptr(ptr),
+            innerty.types_encountered,
+            innerty.extra_apis,
+            TypeKind::RValueReference,
+        ))
+    }
+
+    /// The plain-path case of [`Self::convert_type_path`].
+    ///
+    /// Its own function, and never inlined, because a debug build gives every
+    /// branch of a function a stack slot of its own and holds them all for the
+    /// length of the call. `convert_type` recurses through here, so each
+    /// branch's locals would otherwise be paid for at every level of a nested
+    /// type.
+    #[inline(never)]
+    fn convert_path_which_is_not_a_reference(
+        &mut self,
+        typ: TypePath,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        // An actual path
+        let newp = self.convert_type_path_which_is_not_a_reference(typ, ns, ctx)?;
+        if let Type::Path(newpp) = &newp.ty {
+            let qn = QualifiedName::from_type_path(newpp);
+            if !ctx.allow_instantiation_of_forward_declaration()
+                && self.forward_declarations.contains_key(&qn)
+            {
+                return Err(self.incomplete_type_error(qn));
+            }
+            // Special handling because rust_Str (as emitted by bindgen)
+            // doesn't simply get renamed to a different type _identifier_.
+            // This plain type-by-value (as far as bindgen is concerned)
+            // is actually a &str.
+            if known_types().should_dereference_in_cpp(&qn) {
+                Ok(Annotated::new(
+                    Type::Reference(parse_quote! {
+                        &str
+                    }),
+                    newp.types_encountered,
+                    newp.extra_apis,
+                    TypeKind::Reference,
+                ))
             } else {
                 Ok(newp)
             }
+        } else {
+            Ok(newp)
         }
     }
 
@@ -550,90 +750,16 @@ impl<'a> TypeConverter<'a> {
             .resolve_typedef(&original_tn)?
             .is_some_and(|target| target.is_const);
         // First let's see if this is a typedef.
-        let (mut typ, tn) = match self.resolve_typedef(&original_tn)? {
-            None => (typ, original_tn),
-            Some(TypedefTargetInfo {
-                ty: Type::Path(resolved_tp),
-                ..
-            }) => {
-                // The typedef may resolve to a C function pointer - see
-                // `function_pointer`, which decides what to do with one and is
-                // the only thing that should: nothing within it needs
-                // converting, and the `Option` wrapping it must not be
-                // mistaken for a type we should go looking for.
-                if let Some(result) = Self::function_pointer(resolved_tp, ctx) {
-                    return result.map(|mut annotated| {
-                        annotated.types_encountered.extend(deps);
-                        annotated.marked_const_if(target_is_const)
-                    });
-                }
-                // `Pin<&mut T>` is not a name to go looking for: it is what
-                // analysing the typedef already made of a C++ mutable
-                // reference, and it is finished. Read as a name it is the
-                // generic `core::pin::Pin`, which cxx knows nothing about, so
-                // autocxx would invent a concrete type for it and write
-                // `T&*` into the generated C++. See google/autocxx#1363.
-                if extract_pinned_mutable_reference_type(resolved_tp).is_some() {
-                    return Ok(Annotated::new(
-                        Type::Path(resolved_tp.clone()),
-                        deps,
-                        ApiVec::new(),
-                        TypeKind::MutableReference,
-                    ));
-                }
-                let resolved_tn = QualifiedName::from_type_path(resolved_tp);
-                deps.insert(resolved_tn.clone());
-                (resolved_tp.clone(), resolved_tn)
-            }
-            Some(TypedefTargetInfo {
-                ty: Type::Ptr(resolved_tp),
-                kind,
-                ..
-            }) => {
-                // The typedef resolves to a pointer. Its pointee may
-                // itself involve typedefs (e.g. typedef char C;
-                // typedef C* S;), so convert it like any directly
-                // written pointer instead of passing it through
-                // verbatim — otherwise the unresolved pointee name
-                // reaches cxx and generation fails with
-                // "unsupported type". See google/autocxx#1368.
-                let is_rvalue_reference = matches!(kind, TypeKind::RValueReference);
-                let mut annotated = self.convert_ptr(resolved_tp.clone(), ns, ctx)?;
-                annotated.types_encountered.extend(deps);
-                // A C++ rvalue reference converts to a pointer as well, so
-                // which of the two this alias names cannot be read back off
-                // the type; that is why the typedef's analysis recorded it.
-                // Calling `typedef T&& R` a pointer costs the caller the one
-                // fact it needs - the parameter is something to move from -
-                // and the C++ shim it then writes takes `T*` and hands it
-                // straight to a function wanting `T&&`, which no compiler
-                // accepts. See google/autocxx#1363.
-                if is_rvalue_reference {
-                    annotated.kind = TypeKind::RValueReference;
-                }
-                return Ok(annotated.marked_const_if(target_is_const));
-            }
-            Some(TypedefTargetInfo { ty: other, .. }) => {
-                // Anything else the typedef resolved to was converted when the
-                // typedef itself was analysed, so take it as it stands - but
-                // say what kind it is. A typedef to a C++ reference lands here
-                // as `&T`, and calling that `Regular` costs the caller the one
-                // fact it needs: whether the value borrows, which decides
-                // lifetimes on a returned reference and how a parameter
-                // crosses the bridge. Here the type says which it is, so read
-                // it; what the typedef recorded is only needed where two
-                // different C++ constructs converge on one Rust type, which is
-                // the pointer arm above. See google/autocxx#1363.
-                let kind = match other {
-                    Type::Reference(reference) if reference.mutability.is_some() => {
-                        TypeKind::MutableReference
-                    }
-                    Type::Reference(_) => TypeKind::Reference,
-                    _ => TypeKind::Regular,
-                };
-                return Ok(Annotated::new(other.clone(), deps, ApiVec::new(), kind)
-                    .marked_const_if(target_is_const));
-            }
+        let (mut typ, tn) = match self.resolve_typedef_target(
+            typ,
+            original_tn,
+            ns,
+            ctx,
+            &mut deps,
+            target_is_const,
+        )? {
+            ResolvedTypedef::Path(typ, tn) => (typ, tn),
+            ResolvedTypedef::Converted(annotated) => return Ok(*annotated),
         };
 
         // A cxx smart pointer whose payload C++ qualified `const` -
