@@ -206,6 +206,13 @@ pub trait CppPeerConstructor<CppPeer: CppSubclassCppPeer>: Sized {
     /// or its only constructor takes parameters. In such a case you'll need to
     /// implement this by calling a `new` method on the `<my subclass name>Cpp`
     /// type, passing `peer_holder` as the first argument.
+    ///
+    /// A peer's `new` hands back the [`UniquePtr`] itself, unlike most
+    /// constructors autocxx generates, which hand back a
+    /// [`moveit::new::New`] for the caller to place where it likes. Only C++
+    /// can allocate a peer: the peer class is one autocxx writes for itself
+    /// after `bindgen` has run, so nothing ever measured it, and its Rust side
+    /// is `cxx`'s zero-sized opaque type. So the body is just the call.
     fn make_peer(&mut self, peer_holder: CppSubclassRustPeerHolder<Self>) -> UniquePtr<CppPeer>;
 
     /// Create the C++ peer, reporting an exception thrown by its constructor
@@ -214,15 +221,15 @@ pub trait CppPeerConstructor<CppPeer: CppSubclassCppPeer>: Sized {
     /// Override this when the peer's constructor is named by a `throws!`
     /// directive - which it must be if the C++ superclass's constructor can
     /// throw, since otherwise the exception reaches an `extern "C"` boundary
-    /// and terminates the process. A peer constructor so named hands back an
-    /// `impl TryNew` rather than an `impl New`, so the implementation reads:
+    /// and terminates the process. A peer constructor so named hands back a
+    /// `Result` rather than the pointer itself, so the implementation reads:
     ///
     /// ```ignore
     /// fn try_make_peer(
     ///     &mut self,
     ///     peer_holder: CppSubclassRustPeerHolder<Self>,
     /// ) -> Result<UniquePtr<MySubclassCpp>, cxx::Exception> {
-    ///     MySubclassCpp::new(peer_holder, self.arg).try_within_unique_ptr()
+    ///     MySubclassCpp::new(peer_holder, self.arg)
     /// }
     /// ```
     ///

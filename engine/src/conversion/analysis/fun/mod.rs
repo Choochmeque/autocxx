@@ -534,19 +534,30 @@ impl<'a> FnAnalyzer<'a> {
     /// the size is known to be correct.
     ///
     /// Read for return values only. A constructor asks
-    /// `generate_constructor_impl` instead, which hands back a `UniquePtr`
-    /// rather than a `New` for a concrete template instantiation - the one
-    /// type here whose Rust side is cxx's zero-sized opaque type.
+    /// `find_types_with_no_rust_storage` instead, and
+    /// `generate_constructor_impl` hands back a `UniquePtr` rather than a
+    /// `New` for anything in it.
     ///
-    /// A subclass peer is the same shape and does *not* do that: it keeps a
-    /// `new()` returning `impl New<Output = Self>`, and every way of cashing
-    /// such a recipe other than `within_unique_ptr` - `within_box`,
-    /// `within_cpp_pin`, `moveit!`, `stack_slot!`, and `Box`/`Rc`/`Arc`'s own
-    /// `emplace` - builds the C++ object in Rust storage sized for nothing.
-    /// That predates this and is not fixed here; fixing it wants either a Rust
-    /// stand-in of the right size or a bound which stops such a type
-    /// implementing `New` at all, since bounding autocxx's own helpers leaves
-    /// `moveit`'s.
+    /// A struct stays in here even if `mark_types_abstract` later makes it a
+    /// `TypeKind::Abstract`, whose Rust side *is* cxx's zero-sized opaque
+    /// type - this set is built before abstractness is worked out. A function
+    /// returning such a type by value therefore gets an `impl New` over a
+    /// zero-sized Rust type, and the only bar to that is the C++ compiler:
+    /// the shim autocxx generates *calls* that function, which C++ refuses for
+    /// a genuinely abstract class (the declaration alone is accepted by both
+    /// gcc and clang, whatever [class.abstract]/3 says; the diagnosis comes at
+    /// the call). Constructors, `CopyNew` and `MoveNew` are removed for such a
+    /// type, so the by-value return is the only way in at all.
+    ///
+    /// What that leaves is a class autocxx calls abstract while C++ does not,
+    /// where the shim would compile. Two attempts to build one failed - a
+    /// private override and a typedef'd parameter type, both of which
+    /// `mark_types_abstract` sees through - but "no counterexample found" is
+    /// not the same as "cannot happen", and that analysis reconstructs
+    /// inheritance and compares converted `syn::Type` signatures rather than
+    /// asking C++. The fix if one is ever found is to decide the return shape
+    /// from the final Rust representation rather than from a set built four
+    /// phases earlier.
     fn build_correctly_sized_type_set(apis: &ApiVec<PodPhase>) -> HashSet<QualifiedName> {
         apis.iter()
             .filter(|api| {

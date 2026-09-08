@@ -250,7 +250,7 @@ impl<'a> RsCodeGenerator<'a> {
             find_trivially_constructed_subclasses(&all_apis);
         let non_pod_types = find_non_pod_types(&all_apis);
         let concrete_typedefs = find_concrete_typedefs(&all_apis);
-        let concrete_types = find_concrete_types(&all_apis);
+        let types_with_no_rust_storage = find_types_with_no_rust_storage(&all_apis);
         // Now let's generate the Rust code.
         let (rs_codegen_results_and_namespaces, additional_cpp_needs): (Vec<_>, Vec<_>) = all_apis
             .into_iter()
@@ -263,7 +263,7 @@ impl<'a> RsCodeGenerator<'a> {
                     &subclasses_with_a_single_trivial_constructor,
                     &non_pod_types,
                     &concrete_typedefs,
-                    &concrete_types,
+                    &types_with_no_rust_storage,
                 );
                 ((name, gen), more_cpp_needed)
             })
@@ -526,7 +526,7 @@ impl<'a> RsCodeGenerator<'a> {
         subclasses_with_a_single_trivial_constructor: &HashSet<QualifiedName>,
         non_pod_types: &HashSet<QualifiedName>,
         concrete_typedefs: &HashMap<QualifiedName, QualifiedName>,
-        concrete_types: &HashSet<QualifiedName>,
+        types_with_no_rust_storage: &HashSet<QualifiedName>,
     ) -> RsCodegenResult {
         let name = api.name().clone();
         let id = name.get_final_ident();
@@ -555,7 +555,7 @@ impl<'a> RsCodeGenerator<'a> {
                 *fun,
                 analysis,
                 non_pod_types,
-                concrete_types,
+                types_with_no_rust_storage,
                 self.bridge_type_names,
             ),
             Api::Const { .. } => RsCodegenResult {
@@ -952,11 +952,28 @@ impl<'a> RsCodeGenerator<'a> {
             }
         }
         if generate_peer_constructor {
+            // The peer's `new` allocates in C++ and hands back the pointer, so
+            // this is the whole body - see `find_types_with_no_rust_storage`.
+            //
+            // `find_trivially_constructed_subclasses` picks the subclasses
+            // which get this impl and does not ask whether the constructor is
+            // fallible, so a subclass of a class with one no-argument
+            // constructor, whose *peer* constructor is designated -
+            // `throws!("MyObserverCpp::MyObserverCpp")`; designating the
+            // superclass's own constructor marks a different function - gets
+            // an impl whose body hands back a `Result` where `make_peer`
+            // promises a `UniquePtr`: a type error in generated code.
+            // Pre-existing; before the constructor handed back a pointer, the
+            // same case failed as `impl TryNew: New` unsatisfied. Nor can the
+            // author work around it by writing the impl themselves, because
+            // this one is still generated and the two conflict. The fix is for
+            // autocxx to decline to write this impl when the peer constructor
+            // is fallible, and say so, leaving the author the `make_peer` and
+            // `try_make_peer` pair the book's exceptions chapter describes.
             output_mod_items.push(parse_quote! {
                 impl autocxx::subclass::CppPeerConstructor<#cpp_id> for super::#id {
                     fn make_peer(&mut self, peer_holder: autocxx::subclass::CppSubclassRustPeerHolder<Self>) -> cxx::UniquePtr<#cpp_path> {
-                        use autocxx::moveit::Emplace;
-                        cxx::UniquePtr::emplace(#cpp_id :: new(peer_holder))
+                        #cpp_id :: new(peer_holder)
                     }
                 }
             })
@@ -2175,15 +2192,33 @@ fn find_non_pod_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
         .collect()
 }
 
-/// Every concrete template instantiation autocxx made a type for.
+/// The constructor-bearing types autocxx declares to cxx as a plain opaque
+/// `type T;`.
 ///
-/// Read for one thing only: such a type is declared to cxx as a plain opaque
-/// type, so the Rust side of it is zero-sized and nothing may build a C++
-/// object in Rust storage of that type. See `generate_constructor_impl`.
-fn find_concrete_types(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
+/// Read for one thing only: the Rust side of such a type is cxx's opaque
+/// stand-in, which is zero-sized, so no Rust storage of that type can hold the
+/// C++ object and nothing may build one there. See
+/// `generate_constructor_impl`.
+///
+/// Two kinds of type are in it, and autocxx knows the size of neither:
+///
+/// * a concrete template instantiation, because bindgen reports the template
+///   and never the specialization;
+/// * a subclass's C++ peer class, because autocxx writes that class itself
+///   *after* bindgen has run, so nothing ever measures it. Its superclass is
+///   opaque to autocxx too.
+///
+/// The rest of the opaque `type T;` population - an abstract class, a forward
+/// declaration, an opaque typedef - reaches no constructor, so leaving them
+/// out changes nothing here: `mark_types_abstract` deletes an abstract class's
+/// constructors along with its `CopyNew` and `MoveNew`, and the other two are
+/// types whose members autocxx never learns. What an abstract class can still
+/// reach is the by-value *return* path; see `build_correctly_sized_type_set`.
+fn find_types_with_no_rust_storage(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
     apis.iter()
         .filter_map(|api| match api {
             Api::ConcreteType { name, .. } => Some(name.name.clone()),
+            Api::Subclass { name, .. } => Some(name.cpp()),
             _ => None,
         })
         .collect()

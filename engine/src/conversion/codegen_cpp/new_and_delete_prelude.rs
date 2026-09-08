@@ -13,6 +13,18 @@ use indoc::indoc;
 /// The SFINAE magic here is: int is a better match than long,
 /// and so the versions which match class-specific operator new/delete
 /// will be used in preference to the general global ::operator new/delete.
+///
+/// The fallbacks name the *unaligned* global overloads, so a type whose
+/// alignment exceeds `__STDCPP_DEFAULT_NEW_ALIGNMENT__` gets storage which
+/// does not satisfy it - which a `new T` expression would not, since C++17
+/// routes those to the `std::align_val_t` overloads. Reproduced on macOS with
+/// `class alignas(64) Wide { virtual ~Wide(); uint64_t a; };`: the object
+/// lands on a 16-aligned address and Rust's own debug assertion aborts on the
+/// first dereference. Every `within_unique_ptr` goes through here, so this is
+/// not particular to any one kind of type. Fixing it means calling the aligned
+/// overloads under `#if __cpp_aligned_new`, matched on both sides; the pair
+/// must stay matched, because C++ requires an aligned allocation to be freed
+/// by an aligned deallocation.
 pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
     #ifndef AUTOCXX_NEW_AND_DELETE_PRELUDE
     #define AUTOCXX_NEW_AND_DELETE_PRELUDE

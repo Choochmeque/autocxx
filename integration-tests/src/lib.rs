@@ -878,11 +878,19 @@ pub fn run_test_expect_fail_with_error_ex(
     directives: TokenStream,
     expected: &str,
 ) {
-    run_test_expect_fail_with_errors_ex(cxx_code, header_code, rust_code, directives, &[expected])
+    run_test_expect_fail_with_errors_ex(
+        cxx_code,
+        header_code,
+        rust_code,
+        directives,
+        None,
+        &[expected],
+    )
 }
 
 /// As [`run_test_expect_fail_with_error_ex`], but insisting on several things
-/// at once.
+/// at once, and taking `extra_rust` for a test whose Rust needs items outside
+/// `main` - a `#[subclass]` struct and its trait impls, say.
 ///
 /// The failure a test pins this way need not be a build failure: the harness
 /// builds the generated Rust in a child process and runs it, so a test whose
@@ -894,6 +902,7 @@ pub fn run_test_expect_fail_with_errors_ex(
     header_code: &str,
     rust_code: TokenStream,
     directives: TokenStream,
+    extra_rust: Option<TokenStream>,
     expected: &[&str],
 ) {
     let err = do_run_test(
@@ -903,7 +912,7 @@ pub fn run_test_expect_fail_with_errors_ex(
         directives,
         None,
         None,
-        None,
+        extra_rust,
         "unsafe_ffi",
         None,
     )
