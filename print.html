@@ -977,6 +977,14 @@ fn main() {
     assert_eq!(ffi::do_math(c_int(12), c_int(13)), c_int(25));
 }
 </code></pre>
+<h3 id="inside-a-unique_ptr"><a class="header" href="#inside-a-unique_ptr">Inside a <code>unique_ptr</code></a></h3>
+<p><code>cxx</code> will not put one of its own integer types inside a <code>UniquePtr</code>, so a
+<code>std::unique_ptr&lt;uint32_t&gt;</code> arrives as a <code>UniquePtr&lt;autocxx::c_u32&gt;</code> rather
+than a <code>UniquePtr&lt;u32&gt;</code>. There is one of these wrappers per fixed width -
+<code>c_u8</code> through <code>c_u64</code> and <code>c_i8</code> through <code>c_i64</code> - and each is a transparent
+newtype over the Rust integer of that width, so <code>.0</code> or <code>.into()</code> gets the
+value back. Anywhere else - by value, in a <code>std::vector</code>, in a
+<code>std::shared_ptr</code> - a <code>uint32_t</code> is a plain <code>u32</code> as before.</p>
 <h2 id="character-types"><a class="header" href="#character-types">Character types</a></h2>
 <p>C++'s <code>char16_t</code>, <code>char32_t</code>, <code>char8_t</code> and <code>wchar_t</code> are distinct types - a
 <code>char32_t</code> is not a <code>uint32_t</code>, and a C++ compiler asked for the exact type of a
@@ -1001,6 +1009,13 @@ and on AArch64 Linux an IEEE binary128, and Rust has no type for either. A
 function whose signature mentions one is refused with an error saying that. A
 <code>long double</code> <em>field</em> is fine - those bytes are carried around, not passed
 between the languages - though a struct with one cannot be <code>generate_pod!</code>.</p>
+<h3 id="128-bit-integers"><a class="header" href="#128-bit-integers">128-bit integers</a></h3>
+<p>A C++ <code>__int128</code> is <a href="https://docs.rs/autocxx/latest/autocxx/struct.c_i128.html"><code>c_i128</code></a>,
+another transparent newtype. There is no <code>c_u128</code>: <code>bindgen</code> cannot tell an
+<code>unsigned __int128</code> from a 16-byte <code>long double</code> or a <code>__float128</code>, so
+<code>autocxx</code> refuses any function which mentions one rather than guess. Neither
+128-bit type may go inside a <code>UniquePtr</code> or a <code>CxxVector</code>, because MSVC has no
+<code>__int128</code> and the glue which would make that work is compiled everywhere.</p>
 <h2 id="strings"><a class="header" href="#strings">Strings</a></h2>
 <p><code>autocxx</code> uses <a href="https://docs.rs/cxx/latest/cxx/struct.CxxString.html"><code>cxx::CxxString</code></a>. However, as noted above, we can't
 just pass a C++ string by value, so we'll box and unbox it automatically
