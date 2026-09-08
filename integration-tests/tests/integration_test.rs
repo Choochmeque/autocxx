@@ -8460,6 +8460,432 @@ fn test_array_pointer_through_alias_refused() {
     );
 }
 
+/// `std::array<T, N>` by value: the shape reported upstream as
+/// google/autocxx#266, which asks for arrays and gets this half of them.
+///
+/// bindgen cannot model `std::array`'s own definition - its member has type
+/// `T[N]`, and `N` is not a type - so every specialization used to arrive as an
+/// opaque blob of bytes, and a signature mentioning one was refused for
+/// carrying a type C++ never wrote.
+/// `third_party/patches/35-std-array-as-rust-array.patch` says what the class
+/// is laid out as instead, and cxx spells a Rust `[T; N]` back as
+/// `std::array<T, N>` - so the bridge names the type the header declared, and
+/// the value crosses in both directions with no wrapper of autocxx's in
+/// between.
+#[test]
+fn test_std_array_by_value() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline std::array<uint8_t, 6> get_ivs() { return {1, 2, 3, 4, 5, 6}; }
+    inline uint32_t sum_ivs(std::array<uint8_t, 6> a) { return a[0] + a[5]; }
+    "};
+    let rs = quote! {
+        let ivs = ffi::get_ivs();
+        assert_eq!(ivs, [1u8, 2, 3, 4, 5, 6]);
+        assert_eq!(ffi::sum_ivs(ivs), 7);
+    };
+    run_test("", hdr, rs, &["get_ivs", "sum_ivs"], &[]);
+}
+
+/// The element has to be one of cxx's own atoms, and a class is not one, even
+/// a POD class autocxx would otherwise pass by value. cxx counts the extern
+/// type a bridge declares as sized only where something else in the bridge
+/// requires it to be trivially movable, and it does not read an array element
+/// as such a requirement - see `permissible_within_array`, which names the cxx
+/// source. Left to cxx the refusal arrives as "unsupported array element
+/// type", pointing at generated code the user did not write.
+#[test]
+fn test_std_array_of_pod_class_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Elem { uint32_t x; };
+    inline std::array<Elem, 3> get_elems() { return {Elem{7}, Elem{8}, Elem{9}}; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["get_elems"],
+        &["Elem"],
+        "cxx will not hold in one",
+    );
+}
+
+/// A C integer whose width varies by platform is not an atom either: it
+/// reaches Rust as `autocxx::c_uint`, which the bridge declares as a type of
+/// its own, and cxx will not put one in an array. `uint32_t` is a typedef to
+/// one of those, so this is the shape a header is most likely to be written
+/// with after the byte array which does work.
+#[test]
+fn test_std_array_of_platform_width_integer_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline std::array<uint32_t, 4> get_u32s() { return {1, 2, 3, 4}; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["get_u32s"],
+        &[],
+        "cxx will not hold in one",
+    );
+}
+
+/// A method's `std::array`, which reaches Rust through the receiver rather
+/// than as a free function's parameter list.
+#[test]
+fn test_std_array_on_a_method() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    class Keys {
+    public:
+        Keys() : first(4) {}
+        std::array<uint8_t, 3> get() const { return {first, 5, 6}; }
+        uint32_t total(std::array<uint8_t, 3> a) const { return a[0] + a[1] + a[2]; }
+    private:
+        uint8_t first;
+    };
+    "};
+    let rs = quote! {
+        let keys = ffi::Keys::new().within_unique_ptr();
+        let got = keys.get();
+        assert_eq!(got, [4u8, 5, 6]);
+        assert_eq!(keys.total(got), 15);
+    };
+    run_test("", hdr, rs, &["Keys"], &[]);
+}
+
+/// An array of arrays is an array whose element is one, and both halves are
+/// `std::array`, so cxx writes the nesting straight back out.
+#[test]
+fn test_std_array_of_std_array_by_value() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline std::array<std::array<uint8_t, 2>, 3> get_grid() {
+        return {{{1, 2}, {3, 4}, {5, 6}}};
+    }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::get_grid(), [[1u8, 2], [3, 4], [5, 6]]);
+    };
+    run_test("", hdr, rs, &["get_grid"], &[]);
+}
+
+/// A static method is where the `std::array` reaches the C++ autocxx writes:
+/// autocxx wraps a static member function, and the wrapper declares the return
+/// type in C++ itself, so `type_to_cpp` has to name the class rather than
+/// refuse the array. An ordinary method does not go that way, so
+/// `test_std_array_on_a_method` does not cover this.
+#[test]
+fn test_std_array_from_a_static_method() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Keys {
+        static std::array<uint8_t, 3> get() { return {1, 2, 3}; }
+    };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Keys::get(), [1u8, 2, 3]);
+    };
+    run_test("", hdr, rs, &["Keys"], &[]);
+}
+
+/// The elements cxx will hold in an array, beside the `uint8_t` the case above
+/// is written with: a `char`, a `bool`, a `float` and a `double`. What they
+/// have in common is that each is a cxx atom under a spelling of its own,
+/// rather than a name for an integer whose width the platform chooses.
+#[test]
+fn test_std_array_of_each_atom_kind() {
+    let hdr = indoc! {"
+    #include <array>
+    inline std::array<char, 2> get_chars() { return {'a', 'b'}; }
+    inline std::array<bool, 2> get_bools() { return {true, false}; }
+    inline std::array<float, 2> get_floats() { return {1.5f, 2.5f}; }
+    inline std::array<double, 2> get_doubles() { return {3.5, 4.5}; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::get_chars(), [b'a' as std::os::raw::c_char, b'b' as std::os::raw::c_char]);
+        assert_eq!(ffi::get_bools(), [true, false]);
+        assert_eq!(ffi::get_floats(), [1.5f32, 2.5]);
+        assert_eq!(ffi::get_doubles(), [3.5f64, 4.5]);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["get_chars", "get_bools", "get_floats", "get_doubles"],
+        &[],
+    );
+}
+
+/// `size_t` is not one of them, which is the same fact as `uint32_t` not being
+/// one: it is a typedef to an integer whose width the platform chooses, so it
+/// reaches Rust as an `autocxx::c_*` newtype rather than as `usize`.
+#[test]
+fn test_std_array_of_size_t_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstddef>
+    inline std::array<size_t, 2> get_sizes() { return {3, 4}; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["get_sizes"],
+        &[],
+        "cxx will not hold in one",
+    );
+}
+
+/// An element which is itself a C++ array is turned down, because `[T; N]`
+/// would not name it back: `std::array<uint8_t[2], 3>` and
+/// `std::array<std::array<uint8_t, 2>, 3>` are different classes with the same
+/// layout, and both would be `[[u8; 2]; 3]`. Where a header declares both,
+/// binding one would have called the other.
+#[test]
+fn test_std_array_of_raw_array_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline uint32_t sum_raw(std::array<uint8_t[2], 3> a) { return a[0][0]; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["sum_raw"],
+        &[],
+        "opaque blob of bytes",
+    );
+}
+
+/// A `const` element is turned down for the same reason. The qualifier is part
+/// of the template argument and Rust has nowhere to put it, so
+/// `std::array<const uint8_t, 3>` would be spelled back as
+/// `std::array<uint8_t, 3>`, which is a different class.
+#[test]
+fn test_std_array_of_const_element_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline uint32_t sum_const(std::array<const uint8_t, 3> a) { return a[0]; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["sum_const"],
+        &[],
+        "opaque blob of bytes",
+    );
+}
+
+/// `volatile` is the other qualifier bindgen drops, and it makes the same
+/// difference to which specialization the class is.
+#[test]
+fn test_std_array_of_volatile_element_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline uint32_t sum_volatile(std::array<volatile uint8_t, 3> a) { return a[0]; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["sum_volatile"],
+        &[],
+        "opaque blob of bytes",
+    );
+}
+
+/// A concrete instantiation autocxx names in C++ by writing its arguments out
+/// again is refused where one of them is an array, because `std::array<T, N>`
+/// is what the writing produces and a `T[N]` argument would be renamed into a
+/// specialization the header never made. `std::shared_ptr<const T[N]>` is one
+/// of those: its payload is `const`, so the whole thing is lowered to a holder
+/// whose C++ definition is written out that way.
+#[test]
+fn test_shared_ptr_of_const_array_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <memory>
+    inline uint8_t first(std::shared_ptr<const uint8_t[3]> p) { return p ? 1 : 0; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["first"],
+        &[],
+        "C++ array among its arguments",
+    );
+}
+
+/// A `std::array` reached through a `using` is the same class, and naming the
+/// alias is not a second type: bindgen resolves it to the same
+/// specialization. The parameter is the half which says the class is not
+/// decayed on the way: an alias is where an array parameter still looks like
+/// an array by the time bindgen applies C's decay rule, so a `std::array`
+/// written this way is what would be adjusted to a pointer if the rule did not
+/// know the difference.
+#[test]
+fn test_std_array_through_alias() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    using IVs = std::array<uint8_t, 4>;
+    inline IVs get_ivs() { return {9, 8, 7, 6}; }
+    inline uint32_t first_iv(IVs a) { return a[0]; }
+    "};
+    let rs = quote! {
+        let ivs = ffi::get_ivs();
+        assert_eq!(ivs, [9u8, 8, 7, 6]);
+        assert_eq!(ffi::first_iv(ivs), 9);
+    };
+    run_test("", hdr, rs, &["get_ivs", "first_iv"], &[]);
+}
+
+/// The other side of that: a C++ array parameter written through an alias is
+/// still adjusted to a pointer, which is what C++ does with one. This is the
+/// case bindgen's own decay rule exists for - a directly written `T a[N]` has
+/// already been adjusted by the time bindgen looks - and it is the case which
+/// would break if `std::array` were let through by relaxing that rule instead
+/// of by telling the two apart.
+#[test]
+fn test_take_array_through_alias_decays() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    using A4 = uint32_t[4];
+    inline uint32_t take_alias(A4 a) { return a[0] + a[2]; }
+    "};
+    let rs = quote! {
+        let mut c: [u32; 4] = [10, 20, 30, 40];
+        unsafe {
+            assert_eq!(ffi::take_alias(c.as_mut_ptr()), 40);
+        }
+    };
+    run_test("", hdr, rs, &["take_alias"], &[]);
+}
+
+/// A POD struct's `std::array` member is the array it is laid out as, and the
+/// field is readable from Rust as one. It used to be a blob of bytes, which
+/// kept the layout right and told a caller nothing about what was in it.
+#[test]
+fn test_std_array_field_in_pod_struct() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Packet { uint32_t tag; std::array<uint8_t, 4> body; };
+    inline Packet make_packet() { return Packet{7, {1, 2, 3, 4}}; }
+    inline uint32_t read_body(Packet p) { return p.body[1]; }
+    "};
+    let rs = quote! {
+        let packet = ffi::make_packet();
+        assert_eq!(packet.tag, 7);
+        assert_eq!(packet.body, [1u8, 2, 3, 4]);
+        assert_eq!(ffi::read_body(ffi::Packet { tag: 0, body: [0, 5, 0, 0] }), 5);
+    };
+    run_test("", hdr, rs, &["make_packet", "read_body"], &["Packet"]);
+}
+
+/// A `std::array` alongside the container holders, to show the lowering does
+/// not disturb them: the `std::vector` still crosses as a `CxxVector` and the
+/// `std::shared_ptr` as a `SharedPtr`, in the same bridge.
+#[test]
+fn test_std_array_beside_cxx_containers() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    #include <memory>
+    #include <vector>
+    inline std::array<uint8_t, 2> get_pair() { return {3, 4}; }
+    inline std::unique_ptr<std::vector<uint32_t>> get_vec() {
+        return std::make_unique<std::vector<uint32_t>>(std::vector<uint32_t>{5, 6, 7});
+    }
+    inline std::shared_ptr<uint32_t> get_shared() { return std::make_shared<uint32_t>(8); }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::get_pair(), [3u8, 4]);
+        assert_eq!(ffi::get_vec().as_ref().unwrap().len(), 3);
+        assert_eq!(*ffi::get_shared().as_ref().unwrap(), 8);
+    };
+    run_test("", hdr, rs, &["get_pair", "get_vec", "get_shared"], &[]);
+}
+
+/// `std::array<T, 0>` is not `[T; 0]`. C++ gives the empty one a size anyway -
+/// libc++ gives it a whole `T` - and a Rust zero-length array has none, so the
+/// two are different objects and the lowering does not claim otherwise.
+/// What is left is what a specialization bindgen cannot model has always been:
+/// a blob, refused in a signature.
+#[test]
+fn test_std_array_of_zero_length_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline std::array<uint8_t, 0> get_none() { return {}; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["get_none"],
+        &[],
+        "opaque blob of bytes",
+    );
+}
+
+/// Only `std::array` is lowered. A class template of one's own with a length
+/// parameter is laid out the same way and says nothing about what
+/// `std::array` promises, so it keeps the blob - and the signature keeps the
+/// refusal.
+#[test]
+fn test_array_like_user_template_still_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    template <class T, int N> struct Arr { T d[N]; };
+    inline Arr<uint32_t, 3> get_arr() { return {}; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["get_arr"],
+        &[],
+        "opaque blob of bytes",
+    );
+}
+
+/// A reference to a `std::array` is still turned down, and the reason is that
+/// autocxx cannot see which of two C++ types it has: `const T (&)[N]` and
+/// `const std::array<T, N>&` both reach it as `&[T; N]`, and cxx writes the
+/// second for either. By value there is no such pair - C++ decays an array
+/// parameter and cannot return one at all - which is why that case is bound.
+#[test]
+fn test_std_array_reference_param_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline uint32_t sum(const std::array<uint8_t, 4>& a) { return a[0] + a[3]; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["sum"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
 /// A `const` member is moved by whatever accepts a `const M&&`, and
 /// `M(const M&&)` is exactly that - C++ counts it as a move constructor, and it
 /// is the one spelling of one a const member can use. `fx_CRM` has no copy

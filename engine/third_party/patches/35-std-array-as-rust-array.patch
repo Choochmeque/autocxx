@@ -1,0 +1,317 @@
+Subject: Represent std::array<T, N> as the Rust array [T; N]
+
+bindgen cannot model a class template with a non-type parameter, and
+`std::array`'s definition is one: its member has type `T[N]`. So the template
+declaration is opaque, `TemplateInstantiation::is_opaque` reports every
+specialization of it opaque in turn, and codegen writes each as a blob of bytes
+of the right size and alignment.
+
+What that costs is the element type. `__BindgenOpaqueArray<[u32; 3usize]>` is
+what a caller is told about `std::array<uint32_t, 3>`, about
+`std::array<Elem, 3>` for a four-byte `Elem`, and about any other twelve-byte
+class laid out to four-byte alignment - three different C++ types with one
+Rust spelling and nothing in it to tell them apart. A signature mentioning one
+cannot be bound: the blob is a different type from the one C++ wrote.
+
+The standard makes `std::array<T, N>` an aggregate holding those `N` `T`s
+contiguously, so Rust's `[T; N]` is that object, with that layout. Under
+`--represent-std-array`, emit it.
+
+The two facts this needs are ones libclang will give and bindgen was not
+asking for. `clang_Type_getTemplateArgumentAsType` reports a non-type argument
+as an invalid type and `TemplateInstantiation::from_ty` drops it, so `N` is not
+reachable from the type; `clang_Cursor_getNumTemplateArguments` and its
+companions report every argument of the specialization's cursor with its kind,
+and an integral one with its value. `Cursor::template_arguments` is that, and
+`std_array_shape` reads the pair `std::array` is written with.
+
+The substitution is made only where `[T; N]` names the same C++ type back.
+`sizeof(std::array<T, N>)` is not mandated to be `N * sizeof(T)`, so the size
+and alignment clang reports for the specialization are compared against the
+array's, and an implementation which laid one out otherwise keeps today's blob.
+`N == 0` never matches: a zero-length `std::array` is an object with a size and
+`[T; 0]` has none. Nor does an element which is itself a C array, since
+`std::array<uint8_t[2], 3>` and `std::array<std::array<uint8_t, 2>, 3>` are
+different classes with the same layout, or a `const` or `volatile` one, which
+is a template argument Rust cannot spell.
+
+The decay rule for an array parameter learns the difference at the same time. C
+adjusts a parameter declared as an array to a pointer, and a class passed by
+value is not adjusted; a C++ array type has no declaration to take a name from,
+so the name this puts on the array is what tells the two apart.
+
+Off by default: for anyone reading `std::array` out of a struct field today,
+the blob and the array occupy the same bytes but are not the same Rust type.
+
+--- a/clang.rs
++++ b/clang.rs
+@@ -1140,6 +1140,66 @@
+     pub(crate) fn is_inline_namespace(&self) -> bool {
+         unsafe { clang_Cursor_isInlineNamespace(self.x) != 0 }
+     }
++
++    /// The template arguments of a specialization, as libclang reports them
++    /// on the cursor.
++    ///
++    /// `Type::template_args` names only the *type* arguments - a non-type
++    /// argument comes back from it as an invalid type - so a specialization
++    /// written with a constant cannot be told apart from one written without
++    /// it. This asks the cursor instead, where each argument carries its kind
++    /// and, for an integral one, its value.
++    ///
++    /// `None` where the referent is not a specialization.
++    pub(crate) fn template_arguments(&self) -> Option<Vec<TemplateArgument>> {
++        let count: c_int =
++            unsafe { clang_Cursor_getNumTemplateArguments(self.x) };
++        if count < 0 {
++            return None;
++        }
++        Some(
++            (0..count as c_uint)
++                .map(|i| {
++                    let kind = unsafe {
++                        clang_Cursor_getTemplateArgumentKind(self.x, i)
++                    };
++                    match kind {
++                        CXTemplateArgumentKind_Type => {
++                            TemplateArgument::Type(Type {
++                                x: unsafe {
++                                    clang_Cursor_getTemplateArgumentType(
++                                        self.x, i,
++                                    )
++                                },
++                            })
++                        }
++                        CXTemplateArgumentKind_Integral => {
++                            TemplateArgument::Integral(unsafe {
++                                clang_Cursor_getTemplateArgumentValue(self.x, i)
++                                    as i64
++                            })
++                        }
++                        _ => TemplateArgument::Other,
++                    }
++                })
++                .collect(),
++        )
++    }
++}
++
++/// One argument of a template specialization, as libclang reports it on the
++/// specialization's cursor.
++#[derive(Debug)]
++pub(crate) enum TemplateArgument {
++    /// A type argument.
++    Type(Type),
++    /// A constant of integral type, as the value it was written with. Read
++    /// signed: a `std::size_t` argument larger than `i64::MAX` comes back
++    /// negative, and every caller here rejects a negative length.
++    Integral(i64),
++    /// Anything else - a template, a pack, an expression libclang did not
++    /// evaluate.
++    Other,
+ }
+ 
+ /// A struct that owns the tokenizer result from a given cursor.
+@@ -1438,6 +1498,11 @@
+         unsafe { clang_isConstQualifiedType(self.x) != 0 }
+     }
+ 
++    /// Is this type `volatile`-qualified?
++    pub(crate) fn is_volatile(&self) -> bool {
++        unsafe { clang_isVolatileQualifiedType(self.x) != 0 }
++    }
++
+     /// Is this C++20's `char8_t`?
+     ///
+     /// There is no `CXType_Char8` to compare against: libclang's kinds go
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -6392,8 +6392,15 @@
+         //     the array type derivation.
+         //
+         // [1]: http://c0x.coding-guidelines.com/6.7.5.3.html
+-        match *arg_ty.canonical_type(ctx).kind() {
+-            TypeKind::Array(t, _) => {
++        //
++        // A *named* array is not a declaration of a parameter as "array of
++        // type". C++ gives an array type no declaration to take a name from,
++        // so the name says this is a class which was lowered to the array it
++        // is laid out as - `std::array<T, N>`, under `--represent-std-array` -
++        // and a class parameter is passed by value, with nothing adjusted.
++        let arg_canonical_ty = arg_ty.canonical_type(ctx);
++        match *arg_canonical_ty.kind() {
++            TypeKind::Array(t, _) if arg_canonical_ty.name().is_none() => {
+                 let stream = if ctx.options().array_pointers_in_arguments {
+                     arg_ty.to_rust_ty_or_opaque(ctx, arg_item)
+                 } else {
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -778,6 +778,30 @@
+             ));
+         }
+ 
++        // A `std::array<T, N>` is the array `[T; N]`; see `std_array_shape`.
++        // Asked before the template-instantiation branch below, which is where
++        // the opaque `std::array` template declaration would otherwise make
++        // every specialization of it an opaque blob.
++        if ctx.options().represent_std_array {
++            if let Some((element, len)) = std_array_shape(ty, ctx) {
++                let inner = Item::from_ty_or_ref(element, location, None, ctx);
++                // Named, unlike an array written as one: a C++ array type has
++                // no declaration to take a name from, so a name on an array
++                // says it is the layout of a class. `codegen`'s decay rule for
++                // an array *parameter* reads exactly that, because a class
++                // passed by value does not decay to a pointer.
++                return Ok(ParseResult::New(
++                    Self::new(
++                        name,
++                        layout,
++                        TypeKind::Array(inner, len),
++                        ty.is_const(),
++                    ),
++                    Some(cursor.canonical()),
++                ));
++            }
++        }
++
+         let kind = if location.kind() == CXCursor_TemplateRef ||
+             (ty.template_args().is_some() && ty_kind != CXType_Typedef)
+         {
+@@ -1350,3 +1374,104 @@
+         }
+     }
+ }
++
++/// The element type and length of a `std::array<T, N>` which `[T; N]` is the
++/// same object as, or `None` for anything else.
++///
++/// bindgen cannot model `std::array`'s own definition - its member has type
++/// `T[N]`, and `N` is a non-type template parameter - so the template
++/// declaration is opaque and so is every specialization of it. What that costs
++/// is the element type: a `std::array<uint32_t, 3>` and a `std::array<Elem, 3>`
++/// are both twelve bytes, and both come out as the same blob.
++///
++/// The standard makes `std::array<T, N>` an aggregate holding those `N` `T`s
++/// contiguously, so `[T; N]` is that object. It does not say `sizeof` is
++/// `N * sizeof(T)`, so the layout clang reports is checked rather than assumed,
++/// and an implementation which put anything else in one keeps the blob.
++///
++/// `N == 0` never matches. A zero-length `std::array` is still an object with a
++/// size - libc++ gives one a whole `T` - and `[T; 0]` has none, so the two are
++/// not the same type however they are spelled.
++fn std_array_shape(
++    ty: &clang::Type,
++    ctx: &BindgenContext,
++) -> Option<(clang::Type, usize)> {
++    let declaration = ty.declaration();
++    if declaration.spelling() != "array" || !is_directly_in_std(&declaration) {
++        return None;
++    }
++    let arguments = declaration.template_arguments()?;
++    let [
++        clang::TemplateArgument::Type(element),
++        clang::TemplateArgument::Integral(len),
++    ] = arguments.as_slice()
++    else {
++        return None;
++    };
++    let len = usize::try_from(*len).ok()?;
++    if len == 0 {
++        return None;
++    }
++    // The element has to be one `[T; N]` names as the same C++ type it was
++    // written with, and two kinds are not.
++    //
++    // A C array: `std::array<uint8_t[2], 3>` and
++    // `std::array<std::array<uint8_t, 2>, 3>` are different classes laid out
++    // the same way, and both would be `[[u8; 2]; 3]`.
++    //
++    // A `const` or `volatile` one: the qualifier is part of the template
++    // argument, Rust has nowhere to put it, and `std::array<const uint8_t, 3>`
++    // would come out spelled as `std::array<uint8_t, 3>`.
++    let canonical_element = element.canonical_type();
++    if element.is_const() ||
++        canonical_element.is_const() ||
++        element.is_volatile() ||
++        canonical_element.is_volatile() ||
++        matches!(
++            canonical_element.kind(),
++            clang_sys::CXType_ConstantArray |
++                clang_sys::CXType_IncompleteArray |
++                clang_sys::CXType_VariableArray |
++                clang_sys::CXType_DependentSizedArray
++        )
++    {
++        return None;
++    }
++    let element_size = element.fallible_size(ctx).ok()?;
++    if ty.fallible_size(ctx).ok()? != element_size.checked_mul(len)? ||
++        ty.fallible_align(ctx).ok()? != element.fallible_align(ctx).ok()?
++    {
++        return None;
++    }
++    Some((*element, len))
++}
++
++/// Whether `declaration` is declared in namespace `std` itself.
++///
++/// A standard library puts its declarations in an inline namespace inside
++/// `std` for versioning - `std::__1` in libc++, `std::__cxx11` in libstdc++ -
++/// and C++ finds a name in one by looking in `std`, which is the sense in
++/// which `std::array` is the class those declare. So those are stepped over
++/// here. (The mangled name keeps them, which is why this cannot be done by
++/// spelling.)
++fn is_directly_in_std(declaration: &Cursor) -> bool {
++    let mut scope = declaration.fallible_semantic_parent();
++    while let Some(parent) = scope {
++        if parent.kind() != clang_sys::CXCursor_Namespace {
++            return false;
++        }
++        if !parent.is_inline_namespace() {
++            // Nothing may enclose it: `std` is a top-level namespace, and a
++            // `mine::std::array` is not the one this is about.
++            return parent.spelling() == "std" &&
++                match parent.fallible_semantic_parent() {
++                    None => true,
++                    Some(grandparent) => {
++                        grandparent.kind() != clang_sys::CXCursor_Namespace
++                    }
++                };
++        }
++        scope = parent.fallible_semantic_parent();
++    }
++    false
++}
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -383,6 +383,30 @@
+             }
+         },
+         as_args: "--represent-cxx-operators",
++    },
++    /// Whether a `std::array<T, N>` should be represented as the Rust array
++    /// `[T; N]` rather than as an opaque blob of bytes.
++    ///
++    /// bindgen cannot model a class template with a non-type parameter, so
++    /// `std::array`'s own definition - a member of type `T[N]` - is opaque,
++    /// and so is every specialization of it. That loses the element type: two
++    /// specializations of the same size become the same Rust type, and neither
++    /// says what it holds.
++    ///
++    /// A `std::array<T, N>` is an aggregate whose only member is that array,
++    /// so `[T; N]` is the same object with the same layout - which is checked
++    /// against the layout clang reports before the substitution is made, so a
++    /// standard library which laid one out differently keeps today's blob.
++    represent_std_array: bool {
++        methods: {
++            /// If this is true, represent `std::array<T, N>` as `[T; N]`.
++            /// Disabled by default.
++            pub fn represent_std_array(mut self, doit: bool) -> Builder {
++                self.options.represent_std_array = doit;
++                self
++            }
++        },
++        as_args: "--represent-std-array",
+     },
+ 
+     /// Types that have been blocklisted and should not appear anywhere in the generated code.

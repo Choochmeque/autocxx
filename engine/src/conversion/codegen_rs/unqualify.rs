@@ -87,6 +87,16 @@ pub(super) fn unqualify_type(typ: Type, bridge_type_names: &BridgeTypeNames) -> 
             typeptr.elem = unqualify_boxed_type(typeptr.elem, bridge_type_names);
             Type::Ptr(typeptr)
         }
+        // An array's element is a type in the bridge like any other, and cxx
+        // reads a `[T; N]` as `std::array<T, N>`, so `T` has to be spelled the
+        // way the bridge spells it. This is a `std::array` - a C++ function
+        // cannot pass or return an array itself - and its element may be a
+        // class, which is when the qualified spelling would reach cxx and be
+        // turned down as an unsupported type.
+        Type::Array(mut typearray) => {
+            typearray.elem = unqualify_boxed_type(typearray.elem, bridge_type_names);
+            Type::Array(typearray)
+        }
         _ => typ,
     }
 }

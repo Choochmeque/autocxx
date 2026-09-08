@@ -96,8 +96,12 @@ pub enum ConvertErrorFromCpp {
     TemplatedTypeContainingNonPathArg(QualifiedName),
     #[error("Pointer pointed to an array, which is not yet supported")]
     InvalidArrayPointee,
-    #[error("This function or method keeps a C++ array in its signature ({0}). cxx writes a Rust '[T; N]' as 'std::array<T, N>', which is a different C++ type from the 'T[N]' this was, so the bridge would declare a signature C++ does not have. An array parameter which C++ decays to a pointer is unaffected: that arrives as a pointer and is bound as one.")]
+    #[error("This function or method keeps a C++ array in its signature, behind a reference or a pointer ({0}). cxx writes a Rust '[T; N]' as 'std::array<T, N>', which is a different C++ type from the 'T[N]' this was, so the bridge would declare a signature C++ does not have - and the two are spelled the same here, so autocxx cannot tell a 'const T (&)[N]' from a 'const std::array<T, N>&'. An array parameter which C++ decays to a pointer is unaffected: that arrives as a pointer and is bound as one. A 'std::array' passed or returned by value is unaffected too: no C++ function does that with an array, so there is nothing to confuse it with.")]
     CppArrayInSignature(String),
+    #[error("Type {0} is a template instantiation with a C++ array among its arguments. autocxx names such an instantiation in C++ by writing its arguments out again, and it cannot tell a 'T[N]' argument from a 'std::array<T, N>' one - both reach it as a Rust '[T; N]' - so the name it wrote would be a specialization the header never made.")]
+    CppArrayInTemplateArgument(String),
+    #[error("This function or method has a 'std::array' whose element cxx will not hold in one ({0}). cxx spells a Rust '[T; N]' as 'std::array<T, N>' and moves it whole, so the element has to be a type cxx holds by value with no indirection - one of its own atoms, which for a type written in a C++ header means uint8_t or int8_t, a float or a double, a bool, or a char. A class is not one of those, and neither is an integer whose width the platform chooses - which includes 'int' and 'unsigned' and so includes the typedefs to them, 'uint32_t' and 'size_t' among them, because those reach Rust as an 'autocxx::c_*' newtype rather than as a Rust integer.")]
+    CppArrayElementNotSupported(String),
     #[error("Pointer pointed to another pointer, which is not yet supported")]
     InvalidPointerPointee,
     #[error("Pointer pointed to something unsupported (autocxx only supports pointers to named types): {0}")]

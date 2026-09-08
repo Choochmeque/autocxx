@@ -256,6 +256,29 @@ fn main() {
 )
 ```
 
+## `std::array`
+
+A `std::array<T, N>` crosses as a Rust `[T; N]`, by value, in either direction:
+`cxx` spells a Rust array as `std::array<T, N>`, so what the bridge declares is
+the type the header was written with, and there is no wrapper in between.
+
+Two things do not:
+
+* An element `cxx` will not hold in an array. It has to be one of `cxx`'s own
+  atoms, which for a type written in a header means `uint8_t` or `int8_t`, a
+  `float` or a `double`, a `bool`, or a `char`. A class is not one, and neither
+  is an integer whose width the platform chooses, such as `int` or `unsigned` -
+  which rules out the typedefs to them, `uint32_t` and `size_t` among them.
+* A `std::array` behind a reference or a pointer. `const T (&)[N]` and `const
+  std::array<T, N>&` reach `autocxx` as the same Rust type, and `cxx` writes
+  the second for either, so binding one would silently be binding the other.
+  By value there is no such pair: no C++ function takes or returns a plain
+  array that way.
+
+Both get a refusal which says so. `std::array<T, 0>` gets one too: C++ gives
+the empty array a size and Rust's `[T; 0]` has none, so they are not the same
+object.
+
 ## Forward declarations
 
 A type which is incomplete in the C++ headers (i.e. represented only by a forward
