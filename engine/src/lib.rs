@@ -494,7 +494,13 @@ impl IncludeCppEngine {
             // skips an assertion only for types it decided were opaque itself,
             // and `layout_tests` is one global switch, so there is no asking
             // for the second set without the first.
-            .layout_tests(false);
+            .layout_tests(false)
+            // The member functions of a class template, which bindgen
+            // otherwise discards while parsing. They are the only description
+            // of what a concrete instantiation can be asked to do: bindgen
+            // generates nothing for a specialization, so autocxx writes its own
+            // shims from these. See google/autocxx#723.
+            .report_template_member_functions(true);
 
         // 3. Passes allowlist and other options to the bindgen::Builder equivalent
         //    to --output-style=cxx --allowlist=<as passed in>

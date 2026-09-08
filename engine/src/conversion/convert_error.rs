@@ -205,6 +205,10 @@ pub enum ConvertErrorFromCpp {
     MethodOfNonAllowlistedType,
     #[error("This type is templated, so we can't generate bindings. We will instead generate bindings for each instantiation.")]
     MethodOfGenericType,
+    #[error("autocxx could not read the Rust signature bindgen reported for this member function of a class template: {0}. Nothing about the C++ decides this - bindgen renders that signature from the Rust types it would itself have generated - so there is nothing to change in the header; please report it.")]
+    TemplateMemberSignatureNotRust(String),
+    #[error("This member function of a class template has a signature which mentions a template parameter, and bindgen reports nothing about a specialization, so autocxx has no way to know what that parameter became in this instantiation. Only the members whose signatures mention no template parameter can be generated for an instantiation. See https://github.com/google/autocxx/issues/723.")]
+    TemplateMemberWithDependentSignature,
     #[error("bindgen generated multiple different APIs (functions/types) with this name. autocxx doesn't know how to disambiguate them, so we won't generate bindings for any of them.")]
     DuplicateItemsFoundInParsing,
     #[error("C++ declares a type of this name in the same scope, which hides this function. Only one of the two can keep the name in the bindings we generate, and it has to be the type, because other bindings may depend on it. Rename the function in C++ if you need to call it from Rust.")]

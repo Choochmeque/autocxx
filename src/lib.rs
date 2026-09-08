@@ -442,8 +442,8 @@ macro_rules! subclass {
 /// Second, the type is a concrete instantiation of a C++ class template -
 /// named either by a typedef, `typedef A<uint32_t> C;`, or by a
 /// [`concrete!`] directive. `bindgen` reports the template, never the
-/// specialization, so autocxx is told nothing about such a type: not its
-/// members, not its bases, not one constructor it declares. Declaring it
+/// specialization, so autocxx is told nothing about the instantiation itself:
+/// not its bases, and not one constructor it declares. Declaring it
 /// instantiable is you saying that C++ gives it a default constructor, and
 /// autocxx then generates a `new()` for it. Your C++ compiler is the arbiter:
 /// if the class hasn't really got one - because it declares a constructor of
@@ -451,6 +451,22 @@ macro_rules! subclass {
 /// C++ fails to compile rather than misbehaving. Without the directive such a
 /// type keeps its previous shape, usable by reference and through the
 /// functions which return one.
+///
+/// The directive also brings the class template's member functions, which are
+/// called on the instantiation - `a.foo()` - and which are otherwise missing
+/// for the same reason: `bindgen` generates nothing for the members of a class
+/// template, since the set of instantiations is open ended. What it claims for
+/// them is the same sort of claim as the constructor: that the instantiation
+/// has the members the template declares, which an explicit specialization may
+/// contradict. Everything autocxx declines to bind on an ordinary class it
+/// declines here too - a private member, a `= delete`d one, a `&&`-qualified
+/// one - and two more limitations belong to templates alone. A member whose
+/// signature mentions a template parameter cannot be generated at all: the
+/// signature it has for `A<uint32_t>` is the template's with `uint32_t` put in
+/// for `T`, and nothing reaching autocxx performs that substitution. One of
+/// those is documented in place of the method, saying so. A member function
+/// *template* is left out silently instead: `bindgen` does not parse one as a
+/// member of the class at all, so autocxx never hears that it exists.
 ///
 /// This `new()` hands back a [`cxx::UniquePtr`] directly rather than something
 /// to finish with `.within_unique_ptr()`. autocxx does not know how big such a
