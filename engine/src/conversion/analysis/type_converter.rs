@@ -225,6 +225,14 @@ pub(crate) struct TypeConverter<'a> {
     /// have only a stand-in for, mapped to that argument. See
     /// [`ConvertErrorFromCpp::InstantiationOnIncompleteType`].
     instantiations_on_incomplete_types: HashMap<QualifiedName, QualifiedName>,
+    /// Every alias, mapped to the target bindgen wrote for it.
+    ///
+    /// Not `typedefs`, which is the *analysed* target and so is empty in the
+    /// phase which manufactures template instantiations: that analysis is what
+    /// is being run. This is bindgen's own text, available in every phase, and
+    /// is read only by [`Self::incompleteness_of_argument`], which has to see
+    /// through an alias in a template argument before anything converts it.
+    alias_targets: HashMap<QualifiedName, Type>,
     ignored_types: HashSet<QualifiedName>,
     config: &'a IncludeCppConfig,
     original_name_map: CppNameMap,
@@ -251,6 +259,7 @@ impl<'a> TypeConverter<'a> {
             concrete_templates: Self::find_concrete_templates(apis),
             forward_declarations: Self::find_incomplete_types(apis),
             instantiations_on_incomplete_types: Self::find_instantiations_on_incomplete_types(apis),
+            alias_targets: Self::find_alias_targets(apis),
             ignored_types: Self::find_ignored_types(apis),
             config,
             original_name_map: CppNameMap::new_for_analysis(apis),
@@ -1471,8 +1480,32 @@ impl<'a> TypeConverter<'a> {
     /// incomplete type is a complete type itself, and a template which keeps
     /// one - `holder<at> { at* p; }` - destroys perfectly well; it is the
     /// `std::unique_ptr<at>` kind of member which does not.
+    ///
+    /// This is a conservative rule rather than a theorem: a template which
+    /// holds its argument by value may still be destructible where the
+    /// argument is not, and one which does not may still be undestructible for
+    /// reasons of its own. It is the shape which matters in practice and the
+    /// most that can be decided from a template's arguments alone.
+    ///
+    /// What it does *not* decide is whether some other type may hold one of
+    /// these by value: a class with such a member is generated as it always
+    /// was, and asking cxx to own one of *those* reaches the same C++.
+    /// Deciding that needs to know whether the enclosing class's destructor is
+    /// defined in this translation unit, which nothing here records - a class
+    /// whose destructor is defined out of line is fine, and refusing it
+    /// alongside would cost more than it buys.
     fn incomplete_argument_of(&self, rs_definition: &Type) -> Option<QualifiedName> {
-        let Type::Path(typ) = rs_definition else {
+        self.incomplete_argument_within(rs_definition, &mut HashSet::new())
+    }
+
+    /// [`Self::incomplete_argument_of`], carrying the names already looked at
+    /// so that a chain of aliases cannot walk in a circle.
+    fn incomplete_argument_within(
+        &self,
+        ty: &Type,
+        seen: &mut HashSet<QualifiedName>,
+    ) -> Option<QualifiedName> {
+        let Type::Path(typ) = ty else {
             return None;
         };
         typ.path
@@ -1484,16 +1517,46 @@ impl<'a> TypeConverter<'a> {
             })
             .flatten()
             .find_map(|arg| match arg {
-                GenericArgument::Type(inner @ Type::Path(inner_typ)) => {
-                    let inner_qn = QualifiedName::from_type_path(inner_typ);
-                    if self.forward_declarations.contains_key(&inner_qn) {
-                        Some(inner_qn)
-                    } else {
-                        self.incomplete_argument_of(inner)
-                    }
-                }
+                GenericArgument::Type(inner) => self.incompleteness_of_argument(inner, seen),
                 _ => None,
             })
+    }
+
+    /// Whether one template argument reaches a type nothing defines - as
+    /// itself, through the aliases it may be written as, or inside its own
+    /// arguments.
+    ///
+    /// The aliases matter because this runs before anything converts these
+    /// arguments, so they are here under whatever name the header wrote:
+    /// `au<Alias>`, where `using Alias = bb`, is the same instantiation as
+    /// `au<bb>` and used to be classified as if it were not. An alias for an
+    /// instantiation which was itself classified this way - `using Inner =
+    /// au<bb>` - is caught through the same lookup, because a typedef's
+    /// recorded target is what its own conversion made of it.
+    fn incompleteness_of_argument(
+        &self,
+        arg: &Type,
+        seen: &mut HashSet<QualifiedName>,
+    ) -> Option<QualifiedName> {
+        let Type::Path(typ) = arg else {
+            return None;
+        };
+        let qn = QualifiedName::from_type_path(typ);
+        if !seen.insert(qn.clone()) {
+            return None;
+        }
+        if self.forward_declarations.contains_key(&qn) {
+            return Some(qn);
+        }
+        if let Some(argument) = self.instantiations_on_incomplete_types.get(&qn) {
+            return Some(argument.clone());
+        }
+        if let Some(target) = self.alias_targets.get(&qn) {
+            if let Some(found) = self.incompleteness_of_argument(target, seen) {
+                return Some(found);
+            }
+        }
+        self.incomplete_argument_within(arg, seen)
     }
 
     fn confirm_inner_type_is_acceptable_generic_payload(
@@ -1608,6 +1671,24 @@ impl<'a> TypeConverter<'a> {
                     reason,
                     ..
                 } => Some((api.name().clone(), reason.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What every alias in `apis` was written as pointing at, as bindgen wrote
+    /// it. See the field of the same name.
+    fn find_alias_targets<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashMap<QualifiedName, Type> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Typedef {
+                    item: TypedefKind::Type(ity),
+                    ..
+                } => Some((api.name().clone(), (*ity.ty).clone())),
+                Api::Typedef {
+                    item: TypedefKind::Use(ty),
+                    ..
+                } => Some((api.name().clone(), (**ty).clone().into())),
                 _ => None,
             })
             .collect()
