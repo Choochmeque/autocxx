@@ -372,8 +372,8 @@ fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
 /// appended (1.0.81 `src/rustflags.rs`) and by writing them into the fixture
 /// crate's `build.rustflags`, and taking the encoded channel makes cargo ignore
 /// both. Restating them keeps what rustc sees identical. The dependency is
-/// pinned to `=1.0.81` - see `Cargo.toml`, which pins it for a second reason -
-/// so that list cannot change underneath this.
+/// pinned to `=1.0.81` - see `Cargo.toml` - so that list cannot change
+/// underneath this.
 ///
 /// `RUSTFLAGS` is cleared from the child rather than left for cargo to ignore,
 /// so that only one answer to the question is present.
