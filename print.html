@@ -832,6 +832,47 @@ error naming the reason.</p>
 adding <code>const</code> or <code>volatile</code> qualifiers or extra arguments with defaults.
 <code>autocxx</code> avoids using any overloaded special members because choosing which
 one to call from Rust gets tricky.</p>
+<h2 id="inherited-member-functions"><a class="header" href="#inherited-member-functions">Inherited member functions</a></h2>
+<p>C++ calls an inherited member on the object which inherits it - <code>derived.foo()</code></p>
+<ul>
+<li>and <code>bindgen</code> reports nothing of the sort: a base class arrives as a field of
+the derived class, and the base's members as functions over the base's own
+type. So <code>autocxx</code> binds each public member of each public base a second time,
+against the classes which inherit it, and the Rust method is where C++ puts it.</li>
+</ul>
+<p>The call itself is made in C++, on the object cast to the base -
+<code>static_cast&lt;const Base&amp;&gt;(d).foo(args)</code>. That is what dispatches a virtual
+member on the object's own dynamic type, what adjusts <code>this</code> for a base which
+does not sit at the start of the derived class, and what makes the Rust method
+call the member whose signature it was generated from rather than whatever the
+deriving class might declare under the same name. Adding the base to your
+<code>generate!</code> list is not needed for any of it - if you do, you also get the
+base's own type and an <code>AsRef</code> upcast to it, and both routes work.</p>
+<p>A member is bound this way only where <code>autocxx</code> can say that
+<code>derived.foo(args)</code> would have named it, so several shapes are left alone: a
+name the deriving class declares itself, or one a class between it and the base
+declares, since either hides the inherited member; a name two bases both
+declare, which C++ calls ambiguous rather than choosing; a base reached over
+anything but public inheritance, which is not a conversion a caller may make;
+a base reached by more than one path, which is more than one base subobject -
+<code>autocxx</code> declines these even where C++ would allow the conversion, as it does
+for a virtual base, because <code>bindgen</code> says which bases are virtual only for the
+class declaring them; a base whose C++ name <code>bindgen</code> never reported, which the
+cast could not write; a name the base merges with a <code>using</code> declaration of its
+own; and a name the base overloads, since <code>bindgen</code> reports neither the default
+arguments nor enough of the parameter types to say which overload C++ would
+pick. Static members are not imported, a static call having no receiver to make
+it on, and neither are data members.</p>
+<p>Three kinds of declaration hide an inherited member in C++ which <code>bindgen</code> does
+not describe well enough for <code>autocxx</code> to notice: a member of an anonymous
+union, an unnamed <code>enum</code>'s enumerators, and a member function template. Where a
+class hides an inherited <code>foo</code> with one of those, <code>autocxx</code> binds <code>foo</code> anyway,
+and the binding calls the base's member - the name reads as C++'s would not,
+but it does what it says.</p>
+<p>A member a class re-exports with <code>using Base::foo;</code> is bound too, by a pass of
+its own. That is how C++ reaches a member of a <em>private</em> base and how it widens
+the access of a protected one, so its call is made on the object itself - there
+being no cast to a private base to make.</p>
 <h2 id="abstract-types"><a class="header" href="#abstract-types">Abstract types</a></h2>
 <p><code>autocxx</code> does not allow instantiation of abstract types<sup class="footnote-reference" id="fr-abstract-1"><a href="#footnote-abstract">5</a></sup> (aka types with pure virtual methods).</p>
 <p>An abstract type also needs a virtual destructor before <code>autocxx</code> offers Rust a
