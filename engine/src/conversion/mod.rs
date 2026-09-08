@@ -181,6 +181,7 @@ impl<'a> BridgeConverter<'a> {
                     analyzed_apis,
                     &unsafe_policy,
                     self.config,
+                    &parse_callback_results,
                     codegen_options.force_wrapper_gen,
                 );
                 // If any of those functions turned out to be pure virtual, don't attempt

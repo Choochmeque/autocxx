@@ -295,6 +295,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     alias_templates: HashMap<DiscoveredItemId, AliasTemplateParams>,
     explicitness: HashMap<DiscoveredItemId, Explicitness>,
     discards_template_param: HashSet<DiscoveredItemId>,
+    scoped_enums: HashSet<DiscoveredItemId>,
     names: HashMap<DiscoveredItemId, String>,
     mods_for_items: HashMap<DiscoveredItemId, DiscoveredItemId>,
     bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
@@ -533,6 +534,19 @@ impl ParseCallbackResults {
             .unwrap_or_default()
     }
 
+    /// Whether C++ declared this enumeration `enum class` or `enum struct`.
+    ///
+    /// A scoped enumeration and an unscoped one generate the same Rust, so
+    /// this is the only thing which tells them apart. `false` for an enum
+    /// bindgen never reported, which is the safe answer: it says the
+    /// enumerators may be members of the enclosing scope, which is what an
+    /// unscoped enum's are.
+    pub(crate) fn is_scoped_enum(&self, name: &QualifiedName) -> bool {
+        self.id_by_name(name)
+            .map(|id| self.results.scoped_enums.contains(&id))
+            .unwrap_or_default()
+    }
+
     /// Every base class bindgen reported for a type, including the ones it
     /// generates no field for: a base it finds zero-sized, and a virtual
     /// base, which the object reaches indirectly.
@@ -753,6 +767,10 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_discards_template_param(&self, id: DiscoveredItemId) {
         self.results.borrow_mut().discards_template_param.insert(id);
+    }
+
+    fn denote_scoped_enum(&self, id: DiscoveredItemId) {
+        self.results.borrow_mut().scoped_enums.insert(id);
     }
 
     fn denote_base_class(&self, derived: DiscoveredItemId, base: BaseClassInfo<'_>) {

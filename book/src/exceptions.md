@@ -96,6 +96,10 @@ functions are marked as throwing:
 | `throws!("MyClass::method")` | Method `method` on class `MyClass` |
 | `throws!("ns::do_something")` | Function `do_something` in namespace `ns` |
 | `throws!("ns::MyClass::method")` | Method on a namespaced class |
+| `throws!("Outer::Inner::method")` | Method on a nested class |
+
+A nested class may also be named by the flattened `Outer_Inner` spelling
+autocxx knows it by, exactly as in `generate!`.
 
 ### Partial matching
 

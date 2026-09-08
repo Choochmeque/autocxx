@@ -1624,11 +1624,12 @@ fn payload_was_written_verbatim(
 /// one, which the shim would fail to bind - costing the whole bridge instead
 /// of the one function.
 ///
-/// The character types cannot be caught up in this: bindgen gives `char32_t`,
-/// `wchar_t` and their siblings markers of their own, so none of them arrives
-/// as a bare atom and none is a key in the wrapper map. They are refused by
-/// the payload predicate instead, for want of container glue, which costs the
-/// one function - see `test_character_types_within_unique_ptr_are_refused`.
+/// The character types are not caught up in this and need not be: bindgen
+/// gives `char32_t`, `wchar_t` and their siblings markers of their own, so
+/// none of them arrives as a bare atom, and each is already a named type to
+/// cxx with container glue of its own. `char8_t` is the exception, refused by
+/// the payload predicate for want of that glue - see
+/// `test_char8_t_containers_are_refused`.
 fn rename_unique_ptr_payloads(
     args: &mut Punctuated<GenericArgument, Comma>,
     as_written: &[Option<QualifiedName>],

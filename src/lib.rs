@@ -813,7 +813,10 @@ impl From<c_char16_t> for u16 {
 /// The integration test `test_wchar_t_values` asks the C++ compiler for
 /// `sizeof(wchar_t)` and its signedness and asserts the choice here matches, so
 /// every platform the test suite runs on checks its own row: CI's Linux
-/// x86-64, macOS Arm and both Windows targets.
+/// x86-64, macOS Arm and both Windows targets. The width alone is checked
+/// again wherever this crate compiles C++ of its own, by a `static_assert` in
+/// `c_type_vectors.h` against a size `build.rs` derives from the same
+/// conditions as these arms.
 #[cfg(any(windows, target_os = "cygwin", target_os = "uefi"))]
 #[allow(non_camel_case_types)]
 pub type wchar_t = u16;

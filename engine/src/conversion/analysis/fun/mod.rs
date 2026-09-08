@@ -58,6 +58,7 @@ use crate::{
         ConvertErrorFromCpp,
     },
     types::{make_ident, validate_ident_ok_for_cxx, Namespace, QualifiedName},
+    ParseCallbackResults,
 };
 
 use self::{
@@ -410,6 +411,10 @@ pub(crate) struct FnAnalyzer<'a> {
     /// Every class's base classes, for the two passes which have to answer
     /// what a name means when it is looked up in a derived class.
     ancestry: HashMap<QualifiedName, Ancestry>,
+    /// The enumerations C++ declared `enum class` or `enum struct`, whose
+    /// enumerators are members of the enumeration rather than of the class it
+    /// is nested in.
+    scoped_enums: HashSet<QualifiedName>,
     force_wrapper_generation: bool,
 }
 
@@ -465,9 +470,19 @@ impl<'a> FnAnalyzer<'a> {
         apis: ApiVec<PodPhase>,
         unsafe_policy: &'a UnsafePolicy,
         config: &'a IncludeCppConfig,
+        parse_callback_results: &ParseCallbackResults,
         force_wrapper_generation: bool,
     ) -> ApiVec<FnPrePhase3> {
         let ancestry = Self::build_ancestry(&apis);
+        let scoped_enums = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Enum { name, .. } if parse_callback_results.is_scoped_enum(&name.name) => {
+                    Some(name.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
         let mut me = Self {
             unsafe_policy,
             extra_apis: ApiVec::new(),
@@ -487,6 +502,7 @@ impl<'a> FnAnalyzer<'a> {
             types_in_anonymous_namespace: Self::build_types_in_anonymous_namespace(&apis),
             using_declarations_by_base: Self::build_using_declarations_by_base(&apis, &ancestry),
             ancestry,
+            scoped_enums,
             force_wrapper_generation,
         };
         me.reserve_ideal_names(&apis);
@@ -1398,21 +1414,17 @@ impl<'a> FnAnalyzer<'a> {
                         merged_names.insert((name.name.clone(), using.name.clone()));
                     }
                 }
-                Api::Enum { name, item, .. } => {
+                Api::Enum { name, item, .. } if !self.scoped_enums.contains(&name.name) => {
                     // An unscoped enumerator is a member of the class the enum
                     // is nested in, and hides an inherited function of its
                     // name. bindgen reports the enum's own name qualified by
                     // that class, which is how the class is found.
                     //
                     // A *scoped* enum's enumerators are not members of the
-                    // enclosing class and hide nothing, and they are taken for
-                    // members here all the same: bindgen wraps no libclang
-                    // call which says which kind of enum this is
-                    // (`clang_EnumDecl_isScoped` has no counterpart in
-                    // `bindgen/clang.rs`). The cost is an inherited member
-                    // going unbound where a scoped enum happens to have a
-                    // variant of its name, which is what happened to every
-                    // inherited member before this pass existed.
+                    // enclosing class and hide nothing, so this arm passes one
+                    // by. Which kind of enum C++ declared is not in bindgen's
+                    // output - the two generate the same Rust - and reaches us
+                    // through `ParseCallbacks::denote_scoped_enum`.
                     let enclosing = name
                         .cpp_name_if_present()
                         .and_then(|cpp_name| cpp_name.enclosing_cpp_scope())
@@ -2318,17 +2330,22 @@ impl<'a> FnAnalyzer<'a> {
 
         // Check if this function is marked as potentially throwing C++ exceptions.
         // For methods, we also check with the class name prepended (e.g., "MyClass::method").
+        // Every spelling the class answers to, because a nested class has two:
+        // the `Outer_Inner` bindgen flattened it into and the `Outer::Inner`
+        // C++ itself uses, and the designation is written by whoever wrote the
+        // C++. See google/autocxx#1422 for the same two spellings in
+        // `generate!`.
         let designated_as_throwing = self
             .config
             .is_on_throws_list(&diagnostic_name.to_cpp_name())
             || match &kind {
                 FnKind::Method { impl_for, .. } | FnKind::TraitMethod { impl_for, .. } => {
-                    let method_qualified_name = format!(
-                        "{}::{}",
-                        impl_for.to_cpp_name(),
-                        diagnostic_name.get_final_item()
-                    );
-                    self.config.is_on_throws_list(&method_qualified_name)
+                    self.nested_cpp_names.spellings(impl_for).any(|spelling| {
+                        self.config.is_on_throws_list(&format!(
+                            "{spelling}::{}",
+                            diagnostic_name.get_final_item()
+                        ))
+                    })
                 }
                 FnKind::Function => false,
             }

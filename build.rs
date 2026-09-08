@@ -30,7 +30,36 @@ fn build_c_type_vector_glue() {
     cxx_build::bridge("src/c_type_vectors.rs")
         .include("src")
         .std("c++14")
+        .define("AUTOCXX_WCHAR_T_SIZE", expected_wchar_t_size())
         .compile("autocxx-c-type-vectors");
+}
+
+/// How many bytes `autocxx::wchar_t` - and so `autocxx::c_wchar_t`, and so a
+/// container of one - takes on the target, for `c_type_vectors.h` to hold the
+/// C++ compiler to.
+///
+/// Only the width matters to a layout, so this is the two-way split behind
+/// that alias's four arms rather than the arms themselves. It is written out
+/// here rather than read off the alias because a build script is compiled for
+/// the host: `#[cfg]` in this file would describe the wrong machine, and
+/// `CARGO_CFG_*` describes the right one.
+///
+/// A C++ compiler may be told to disagree - `-fshort-wchar` makes `wchar_t`
+/// two bytes where the platform says four - and nothing in cxx would catch it:
+/// a `wchar_t` read out of a vector would then be read as two bytes more than
+/// C++ put there.
+#[cfg(feature = "c-type-vectors")]
+fn expected_wchar_t_size() -> &'static str {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_some()
+        || matches!(target_os.as_str(), "cygwin" | "uefi")
+        || matches!(target_arch.as_str(), "avr" | "msp430")
+    {
+        "2"
+    } else {
+        "4"
+    }
 }
 
 /// Without the feature this crate compiles no C++ of its own, so a consumer

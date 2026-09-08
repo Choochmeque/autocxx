@@ -118,11 +118,14 @@ struct TypeDetails {
     ///
     /// For everything else in this database it does: cxx implements them for
     /// its own types, and `autocxx::c_type_vectors` writes the explicit shim
-    /// trait impls for the `autocxx::c_*` integers. `autocxx::c_i128` is the
-    /// exception - `c_type_vectors.h` is compiled on every target autocxx
-    /// supports and MSVC has no `__int128` - so a `unique_ptr` of one would
-    /// compile into a call to a `cxxbridge1$unique_ptr$...` symbol nobody
-    /// emits. Enforced by the three `permissible_within_*` predicates below.
+    /// trait impls for the `autocxx::c_*` integers and character types. Two
+    /// are the exception, both because `c_type_vectors.h` has to name the C++
+    /// type and is compiled on every target autocxx supports, at the C++14
+    /// floor: `autocxx::c_i128`, because MSVC has no `__int128`, and
+    /// `autocxx::c_char8_t`, because `char8_t` is a C++20 keyword and names
+    /// nothing before that. A container of either would compile into a call to
+    /// a `cxxbridge1$unique_ptr$...` symbol nobody emits. Enforced by the
+    /// three `permissible_within_*` predicates below.
     has_container_glue: bool,
 }
 
@@ -449,10 +452,11 @@ impl TypeDatabase {
     /// `CxxVector<ty>`.
     ///
     /// [`Behavior::CByValueVecSafe`] types are cxx's own built-in vector
-    /// elements. [`Behavior::CIntegerWrapper`] types - the
-    /// `autocxx::c_int` family - are not, but we ask cxx to make them so by
-    /// emitting `impl CxxVector<c_int> {}` into the generated bridge alongside
-    /// the `type c_int = autocxx::c_int;` alias. See google/autocxx#422.
+    /// elements. [`Behavior::CIntegerWrapper`] and [`Behavior::CCharacter`]
+    /// types - the `autocxx::c_int` and `autocxx::c_char16_t` families - are
+    /// not, but we ask cxx to make them so by emitting
+    /// `impl CxxVector<c_int> {}` into the generated bridge alongside the
+    /// `type c_int = autocxx::c_int;` alias. See google/autocxx#422.
     ///
     /// Mirrors `check_type_cxx_vector`, cxx-gen 0.7.200
     /// `src/syntax/check.rs:211`, which takes neither `bool` nor `c_char`.
@@ -462,7 +466,10 @@ impl TypeDatabase {
                 x.has_container_glue
                     && matches!(
                         x.behavior,
-                        Behavior::CxxString | Behavior::CByValueVecSafe | Behavior::CIntegerWrapper
+                        Behavior::CxxString
+                            | Behavior::CByValueVecSafe
+                            | Behavior::CIntegerWrapper
+                            | Behavior::CCharacter
                     )
             })
             .unwrap_or(true)
@@ -474,10 +481,11 @@ impl TypeDatabase {
     /// `CxxVector<T>` and the opaque C++ types a bridge declares - and it
     /// rejects, in its own macro, any `unique_ptr` whose target is one of its
     /// built-in atoms, so `UniquePtr<u32>` is out of reach from here.
-    /// [`Behavior::CIntegerWrapper`] types - the `autocxx::c_int`
-    /// family - are not atoms as far as cxx is concerned, so the explicit shim
-    /// trait impls this crate writes in `autocxx::c_type_vectors` make them
-    /// work like any other named type. See google/autocxx#422.
+    /// [`Behavior::CIntegerWrapper`] and [`Behavior::CCharacter`] types - the
+    /// `autocxx::c_int` and `autocxx::c_char16_t` families - are not atoms as
+    /// far as cxx is concerned, so the explicit shim trait impls this crate
+    /// writes in `autocxx::c_type_vectors` make them work like any other named
+    /// type. See google/autocxx#422.
     ///
     /// Mirrors `check_type_unique_ptr`, cxx-gen 0.7.200
     /// `src/syntax/check.rs:147`.
@@ -490,6 +498,7 @@ impl TypeDatabase {
                         Behavior::CxxString
                             | Behavior::CxxContainerVector
                             | Behavior::CIntegerWrapper
+                            | Behavior::CCharacter
                     )
             })
             .unwrap_or(true)
@@ -519,6 +528,7 @@ impl TypeDatabase {
                             | Behavior::CByValue
                             | Behavior::CByValueVecSafe
                             | Behavior::CIntegerWrapper
+                            | Behavior::CCharacter
                     )
             })
             .unwrap_or(true)
@@ -823,7 +833,7 @@ fn create_type_database() -> TypeDatabase {
         false,
     ));
     for (cpp_name, bindgen_name, rs_name) in CXX_CHARACTER_TYPES {
-        db.insert(TypeDetails::new(
+        let details = TypeDetails::new(
             *rs_name,
             *cpp_name,
             Behavior::CCharacter,
@@ -836,7 +846,20 @@ fn create_type_database() -> TypeDatabase {
             ),
             false,
             false,
-        ));
+        );
+        // `char8_t` gets no cxx container glue. Writing it would take a
+        // `typedef char8_t c_char8_t;` in `c_type_vectors.h`, which this crate
+        // compiles at the C++14 floor every consumer gets, and `char8_t` is a
+        // C++20 keyword: before C++20 the typedef names nothing and the file
+        // does not build for anybody. Raising that floor, or guessing the
+        // consumer's standard, is not something a container payload is worth -
+        // and a typedef to some other one-byte type would be a different C++
+        // type wearing the same shim names.
+        db.insert(if *cpp_name == "char8_t" {
+            details.without_container_glue()
+        } else {
+            details
+        });
         // None of these reaches us under any of the names above: bindgen emits
         // the fake name, which `engine/src/lib.rs` binds to the newtype with a
         // `use` injected into every module. Unless that name is known here

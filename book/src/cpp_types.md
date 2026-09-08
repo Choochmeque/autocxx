@@ -434,6 +434,10 @@ class hides an inherited `foo` with one of those, `autocxx` binds `foo` anyway,
 and the binding calls the base's member - the name reads as C++'s would not,
 but it does what it says.
 
+An `enum class`'s enumerators are members of the enumeration rather than of the
+class the enum is nested in, so one named after an inherited member hides
+nothing and the member is bound as usual.
+
 A member a class re-exports with `using Base::foo;` is bound too, by a pass of
 its own. That is how C++ reaches a member of a *private* base and how it widens
 the access of a protected one, so its call is made on the object itself - there
