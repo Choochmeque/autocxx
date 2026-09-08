@@ -15,9 +15,9 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            extract_pinned_mutable_reference_type, mentions_float128, mentions_long_double,
-            unwrap_bitfield, unwrap_const, unwrap_float128, unwrap_function_pointer,
-            unwrap_has_opaque, unwrap_long_double, unwrap_reference,
+            extract_pinned_mutable_reference_type, mentions_cpp_array, mentions_float128,
+            mentions_long_double, unwrap_bitfield, unwrap_const, unwrap_float128,
+            unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double, unwrap_reference,
         },
         ConvertErrorFromCpp,
     },
@@ -1442,6 +1442,25 @@ impl<'a> TypeConverter<'a> {
         &mut self,
         rs_definition: &Type,
     ) -> Result<(QualifiedName, Option<UnanalyzedApi>), ConvertErrorFromCpp> {
+        // An instantiation is named in C++ by writing its arguments out again,
+        // and `type_to_cpp` writes an array as `std::array<T, N>` - which is
+        // what one is everywhere a signature can hold it, since
+        // `check_signature_array` lets no other array through. A template
+        // argument is the one position C++ can put a real array in, and
+        // `Foo<uint8_t[2]>` would be named as `Foo<std::array<uint8_t, 2>>`, a
+        // specialization nobody instantiated. Neither spelling is worth
+        // telling apart: both were refused outright until now, because
+        // `type_to_cpp` had no array at all.
+        //
+        // Asked here rather than at either caller, because both reach C++
+        // through this: the branch below which invents a concrete type for a
+        // template cxx cannot spell, and `manufacture_holder`, whose
+        // `std::shared_ptr<const T>` payload may be an array too.
+        if mentions_cpp_array(rs_definition) {
+            return Err(ConvertErrorFromCpp::CppArrayInTemplateArgument(
+                rs_definition.to_token_stream().to_string(),
+            ));
+        }
         let count = self.concrete_templates.len();
         // We just use this as a hash key, essentially.
         let cpp_definition = self.original_name_map.type_to_cpp(rs_definition)?;

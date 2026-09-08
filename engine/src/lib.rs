@@ -462,6 +462,7 @@ impl IncludeCppEngine {
             .use_long_double_newtype_wrapper(true)
             .use_float128_newtype_wrapper(true)
             .represent_cxx_operators(true)
+            .represent_std_array(true)
             .use_distinct_char16_t(true)
             .use_distinct_wchar_t(true)
             .use_distinct_char32_t(true)

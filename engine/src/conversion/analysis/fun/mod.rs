@@ -31,7 +31,9 @@ use crate::{
         error_reporter::{convert_apis, report_any_error},
         parse::CppRefQualifier,
         type_helpers::extract_pinned_mutable_reference_type,
-        type_helpers::{denotes_cpp_array, type_is_reference, unwrap_has_opaque},
+        type_helpers::{
+            cpp_array_element, denotes_indirect_cpp_array, type_is_reference, unwrap_has_opaque,
+        },
         CppEffectiveName, CppOriginalName,
     },
     known_types::known_types,
@@ -3036,15 +3038,13 @@ impl<'a> FnAnalyzer<'a> {
         ) || is_self;
         let rust_conversion_forced = force_rust_conversion.is_some();
         let ty = &*annotated_type.ty;
-        // Nothing below decays an array, and cxx would not write the C++ this
-        // parameter was declared with; see `denotes_cpp_array`. Said here
-        // rather than left to the catch-all at the end of this match, which
-        // hands whatever it is to cxx unconverted.
-        if denotes_cpp_array(ty) {
-            return Err(ConvertErrorFromCpp::CppArrayInSignature(
-                ty.to_token_stream().to_string(),
-            ));
-        }
+        // Nothing below decays an array, and for the shapes
+        // `check_signature_array` turns down cxx would not write the C++ this
+        // parameter was declared with. Said here rather than left to the
+        // catch-all at the end of this match, which hands whatever it is to
+        // cxx unconverted - which is where a `std::array` parameter goes, cxx
+        // spelling it back as the `std::array` it came from.
+        check_signature_array(ty)?;
         if let Some(holder_id) = is_subclass_holder {
             let subclass = SubclassName::from_holder_name(holder_id);
             return Ok({
@@ -3232,13 +3232,8 @@ impl<'a> FnAnalyzer<'a> {
                 let was_const = annotated_type.is_const;
                 let boxed_type = annotated_type.ty;
                 let ty: &Type = boxed_type.as_ref();
-                // As for a parameter: cxx would write `std::array` where C++
-                // wrote an array. See `denotes_cpp_array`.
-                if denotes_cpp_array(ty) {
-                    return Err(ConvertErrorFromCpp::CppArrayInSignature(
-                        ty.to_token_stream().to_string(),
-                    ));
-                }
+                // As for a parameter.
+                check_signature_array(ty)?;
                 match ty {
                     Type::Path(p)
                         if !self
@@ -4019,6 +4014,32 @@ impl HasFieldsAndBases for Api<FnPrePhase3> {
             _ => Box::new(std::iter::empty()),
         }
     }
+}
+
+/// Turn down the arrays a signature cannot carry, and let a `std::array`
+/// through.
+///
+/// Two different refusals, neither of which is about the array standing on its
+/// own: [`denotes_indirect_cpp_array`] is the C++ type autocxx cannot tell
+/// apart from a `std::array` once it is behind a reference, and
+/// [`TypeDatabase::permissible_within_array`] is the element cxx will not hold
+/// in one.
+fn check_signature_array(ty: &Type) -> Result<(), ConvertErrorFromCpp> {
+    if denotes_indirect_cpp_array(ty) {
+        return Err(ConvertErrorFromCpp::CppArrayInSignature(
+            ty.to_token_stream().to_string(),
+        ));
+    }
+    if let Some(element) = cpp_array_element(ty) {
+        let permissible = matches!(element, Type::Path(path)
+            if known_types().permissible_within_array(&QualifiedName::from_type_path(path)));
+        if !permissible {
+            return Err(ConvertErrorFromCpp::CppArrayElementNotSupported(
+                ty.to_token_stream().to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Stringify a function argument for diagnostics

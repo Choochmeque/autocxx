@@ -293,8 +293,29 @@ impl CppNameMap {
                     self.type_to_cpp(typp.elem.as_ref())?
                 ))
             }
-            Type::Array(_)
-            | Type::BareFn(_)
+            // A `std::array<T, N>`, which is the only array that reaches
+            // here: `check_signature_array` turns down every other one, a C++
+            // function cannot take or return a C array by value, and a
+            // concrete instantiation naming an array is refused where it is
+            // made. cxx spells a Rust `[T; N]` this way too, so the wrapper
+            // this writes and the bridge cxx checks it against agree.
+            Type::Array(arr) => {
+                let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(len),
+                    ..
+                }) = &arr.len
+                else {
+                    return Err(ConvertErrorFromCpp::UnsupportedType(
+                        ty.to_token_stream().to_string(),
+                    ));
+                };
+                Ok(format!(
+                    "std::array<{}, {}>",
+                    self.type_to_cpp(&arr.elem)?,
+                    len.base10_digits()
+                ))
+            }
+            Type::BareFn(_)
             | Type::Group(_)
             | Type::ImplTrait(_)
             | Type::Infer(_)

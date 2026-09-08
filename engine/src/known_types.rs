@@ -548,6 +548,36 @@ impl TypeDatabase {
             .unwrap_or(true)
     }
 
+    /// Whether cxx can hold `ty` as the element of an array.
+    ///
+    /// cxx spells a Rust `[T; N]` as `std::array<T, N>` and moves one whole,
+    /// so `T` has to be something it holds by value with no indirection of its
+    /// own - which for cxx means one of its atoms.
+    ///
+    /// An extern type a bridge declares would qualify in principle, and cxx
+    /// says so: `is_unsized` counts an alias as sized once something requires
+    /// it to be trivially movable. What decides that is
+    /// `required_trivial_reasons`, cxx-gen 0.7.200
+    /// `src/syntax/trivial.rs:30`, which reads a function argument, a return,
+    /// a struct field, a `Box`, a `Vec` and a slice - and no array. So
+    /// `[autocxx::c_uint; 4]` is accepted exactly when some *other* signature
+    /// in the same bridge happens to take a `c_uint` by value, which is not a
+    /// rule anyone can be given. Turn every one of them down instead, and say
+    /// why.
+    ///
+    /// Unknown to this database means a type the header declared, which is the
+    /// same case: it reaches the bridge as an alias.
+    pub(crate) fn permissible_within_array(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|x| {
+                matches!(
+                    x.behavior,
+                    Behavior::CByValue | Behavior::CByValueVecSafe | Behavior::CChar
+                )
+            })
+            .unwrap_or(false)
+    }
+
     /// Whether cxx can accommodate `ty` inside a `std::unique_ptr`.
     ///
     /// cxx implements [`cxx::memory::UniquePtrTarget`] for `CxxString`,

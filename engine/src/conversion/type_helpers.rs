@@ -255,6 +255,74 @@ pub(crate) fn denotes_cpp_array(ty: &Type) -> bool {
     }
 }
 
+/// Whether `ty` has an array anywhere `type_to_cpp` would walk to, including
+/// as a template argument.
+///
+/// Written for the one position [`denotes_cpp_array`] does not reach: a
+/// concrete template instantiation, whose C++ name is built by writing the
+/// arguments out again. `type_to_cpp` writes an array as `std::array<T, N>`,
+/// which is what one is everywhere a signature can hold it, but a template
+/// argument may be a real C array, and the two cannot be told apart here.
+///
+/// A bare function type is not walked, because `type_to_cpp` turns one down
+/// outright, so nothing an array could hide inside a function pointer reaches
+/// a C++ name.
+pub(crate) fn mentions_cpp_array(ty: &Type) -> bool {
+    match ty {
+        Type::Array(_) => true,
+        Type::Path(typ) => typ.path.segments.iter().any(|seg| {
+            let PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return false;
+            };
+            args.args.iter().any(|arg| match arg {
+                GenericArgument::Type(inner) => mentions_cpp_array(inner),
+                _ => false,
+            })
+        }),
+        Type::Ptr(ptr) => mentions_cpp_array(&ptr.elem),
+        Type::Reference(r) => mentions_cpp_array(&r.elem),
+        Type::Paren(inner) => mentions_cpp_array(&inner.elem),
+        Type::Group(inner) => mentions_cpp_array(&inner.elem),
+        _ => false,
+    }
+}
+
+/// The element of an array standing on its own, looking through the nesting
+/// where an array holds arrays, or `None` where `ty` is not one.
+///
+/// What stands on its own in a signature is a `std::array`; see
+/// [`denotes_indirect_cpp_array`].
+pub(crate) fn cpp_array_element(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Array(arr) => Some(cpp_array_element(&arr.elem).unwrap_or(&arr.elem)),
+        _ => None,
+    }
+}
+
+/// Whether `ty` reaches a C++ array through a reference or a pointer.
+///
+/// The part of [`denotes_cpp_array`] a signature has to turn down. What is
+/// left out is the array standing alone, and what that means is not an array
+/// at all: no C++ function takes or returns one by value - a parameter decays
+/// and a return is ill-formed - so a signature which arrives holding one holds
+/// a class bindgen lowered to the array it is laid out as, which is
+/// `std::array<T, N>`. cxx spells that back as `std::array<T, N>`, so the
+/// bridge names the type the function was declared with.
+///
+/// Reaching one through an indirection is still refused, because there the two
+/// spellings do differ: `const T (&)[N]` and `const std::array<T, N>&` are
+/// different C++ types, and only the second is what cxx would write.
+pub(crate) fn denotes_indirect_cpp_array(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(TypeReference { elem, .. }) => denotes_cpp_array(elem),
+        Type::Ptr(TypePtr { elem, .. }) => denotes_cpp_array(elem),
+        Type::Path(typ) => {
+            matches!(extract_pinned_mutable_reference_type(typ), Some(inner) if denotes_cpp_array(inner))
+        }
+        _ => false,
+    }
+}
+
 /// If `ty` is `root::__BindgenBitfieldUnit<[u8; N]>` - the allocation unit
 /// bindgen puts a run of C++ bitfields into - return the `[u8; N]` storage it
 /// wraps.
