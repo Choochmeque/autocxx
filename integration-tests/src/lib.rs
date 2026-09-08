@@ -12,7 +12,7 @@ use std::{
     io::{Read, Write},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use autocxx_engine::{
@@ -206,9 +206,7 @@ pub fn build_from_folder(
         .include(folder.join("demo"));
     build_cpp(b, "autocxx-demo").map_err(TestError::CppBuild)?;
     // use the trybuild crate to build the Rust file.
-    get_builder()
-        .lock()
-        .unwrap()
+    lock_builder()
         .build(
             &target_dir,
             "autocxx-demo",
@@ -222,9 +220,24 @@ pub fn build_from_folder(
     Ok(())
 }
 
-fn get_builder() -> &'static Mutex<LinkableTryBuilder> {
+/// The shared builder, locked, recovering a poisoned guard rather than
+/// propagating it.
+///
+/// No Rust state is at stake: `LinkableTryBuilder` holds a `TempDir` and no
+/// method mutates it. The directory is: staging deletes an entry before writing
+/// its replacement, so a panic can leave one missing, or half-copied under
+/// `KEEP_TEMPDIRS`. What makes that recoverable is that every build re-stages
+/// the entries it needs by name before using them. An entry can still go stale
+/// when nothing produces that filename - but staging is silent about that
+/// whether the preceding test panicked or passed, so the poison is not what was
+/// guarding against it. Propagating it only replaces one real failure with a
+/// `PoisonError` from every test that follows.
+fn lock_builder() -> MutexGuard<'static, LinkableTryBuilder> {
     static INSTANCE: OnceCell<Mutex<LinkableTryBuilder>> = OnceCell::new();
-    INSTANCE.get_or_init(|| Mutex::new(LinkableTryBuilder::new()))
+    INSTANCE
+        .get_or_init(|| Mutex::new(LinkableTryBuilder::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// TryBuild which maintains a directory of libraries to link.
@@ -289,7 +302,16 @@ impl LinkableTryBuilder {
             );
         }
         let temp_path = self.temp_dir.path().to_str().unwrap();
-        let mut rustflags = format!("-L {temp_path}");
+        // This string REPLACES whatever RUSTFLAGS the run was started with, so a
+        // choice made there has to be restated here or the child falls back to
+        // the profile default - for debug info, the dev profile's 2. `=1` is
+        // what CI asks of workspace builds, for reasons that hold here too: the
+        // file and line in a panic backtrace, which is how a fixture that builds
+        // and then fails at runtime says what went wrong, and a PDB on
+        // windows-msvc, without which those backtraces are bare addresses. The
+        // asan job picks `=0` for its own workspace build; its fixtures get `=1`
+        // like everyone else's, which only lets a sanitizer report name a line.
+        let mut rustflags = format!("-L {temp_path} -Cdebuginfo=1");
         if std::env::var_os("AUTOCXX_ASAN").is_some() {
             rustflags.push_str(" -Z sanitizer=address -Clinker=clang++ -Clink-arg=-fuse-ld=lld");
         }
@@ -1184,7 +1206,7 @@ pub fn do_run_test_manual(
         println!("Generated .rs files: {generated_rs_files:?}");
     }
     // Step 8: use the trybuild crate to build the Rust file.
-    let r = get_builder().lock().unwrap().build(
+    let r = lock_builder().build(
         &target_dir,
         "autocxx-demo",
         &tdir.path(),
