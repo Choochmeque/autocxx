@@ -225,6 +225,11 @@ wrapping the Rust integer of the same width, so a value crosses with <code>.0</c
 AAPCS - so its payload is
 <a href="https://docs.rs/autocxx/latest/autocxx/type.wchar_t.html"><code>autocxx::wchar_t</code></a>,
 which is picked per target. <code>char8_t</code> only exists from C++20 onwards.</p>
+<p><code>char16_t</code>, <code>char32_t</code> and <code>wchar_t</code> go inside a <code>UniquePtr</code>, a <code>SharedPtr</code>, a
+<code>WeakPtr</code> and a <code>CxxVector</code> as their newtypes. <code>char8_t</code> does not: naming it
+takes a <code>typedef char8_t ...</code> in C++ which <code>autocxx</code> compiles at C++14, where
+the keyword does not exist, so a container of one is refused with the rest of
+that function left alone.</p>
 <p><code>long double</code> has no such newtype and is not supported, for a reason which
 differs by target: on MSVC and Apple Arm it is a <code>double</code> under another name, so
 a Rust <code>f64</code> has the right layout but is still the wrong C++ type and <code>cxx</code>'s

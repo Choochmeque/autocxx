@@ -250,8 +250,11 @@ functions are marked as throwing:</p>
 <tr><td><code>throws!("MyClass::method")</code></td><td>Method <code>method</code> on class <code>MyClass</code></td></tr>
 <tr><td><code>throws!("ns::do_something")</code></td><td>Function <code>do_something</code> in namespace <code>ns</code></td></tr>
 <tr><td><code>throws!("ns::MyClass::method")</code></td><td>Method on a namespaced class</td></tr>
+<tr><td><code>throws!("Outer::Inner::method")</code></td><td>Method on a nested class</td></tr>
 </tbody></table>
 </div>
+<p>A nested class may also be named by the flattened <code>Outer_Inner</code> spelling
+autocxx knows it by, exactly as in <code>generate!</code>.</p>
 <h3 id="partial-matching"><a class="header" href="#partial-matching">Partial matching</a></h3>
 <p>Partial matching is supported: a shorter pattern will match functions in any
 namespace. For example, <code>throws!("do_something")</code> will match both a top-level

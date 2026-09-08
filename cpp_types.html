@@ -537,6 +537,9 @@ union, an unnamed <code>enum</code>'s enumerators, and a member function templat
 class hides an inherited <code>foo</code> with one of those, <code>autocxx</code> binds <code>foo</code> anyway,
 and the binding calls the base's member - the name reads as C++'s would not,
 but it does what it says.</p>
+<p>An <code>enum class</code>'s enumerators are members of the enumeration rather than of the
+class the enum is nested in, so one named after an inherited member hides
+nothing and the member is bound as usual.</p>
 <p>A member a class re-exports with <code>using Base::foo;</code> is bound too, by a pass of
 its own. That is how C++ reaches a member of a <em>private</em> base and how it widens
 the access of a protected one, so its call is made on the object itself - there

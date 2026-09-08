@@ -873,6 +873,9 @@ union, an unnamed <code>enum</code>'s enumerators, and a member function templat
 class hides an inherited <code>foo</code> with one of those, <code>autocxx</code> binds <code>foo</code> anyway,
 and the binding calls the base's member - the name reads as C++'s would not,
 but it does what it says.</p>
+<p>An <code>enum class</code>'s enumerators are members of the enumeration rather than of the
+class the enum is nested in, so one named after an inherited member hides
+nothing and the member is bound as usual.</p>
 <p>A member a class re-exports with <code>using Base::foo;</code> is bound too, by a pass of
 its own. That is how C++ reaches a member of a <em>private</em> base and how it widens
 the access of a protected one, so its call is made on the object itself - there
@@ -1046,6 +1049,11 @@ wrapping the Rust integer of the same width, so a value crosses with <code>.0</c
 AAPCS - so its payload is
 <a href="https://docs.rs/autocxx/latest/autocxx/type.wchar_t.html"><code>autocxx::wchar_t</code></a>,
 which is picked per target. <code>char8_t</code> only exists from C++20 onwards.</p>
+<p><code>char16_t</code>, <code>char32_t</code> and <code>wchar_t</code> go inside a <code>UniquePtr</code>, a <code>SharedPtr</code>, a
+<code>WeakPtr</code> and a <code>CxxVector</code> as their newtypes. <code>char8_t</code> does not: naming it
+takes a <code>typedef char8_t ...</code> in C++ which <code>autocxx</code> compiles at C++14, where
+the keyword does not exist, so a container of one is refused with the rest of
+that function left alone.</p>
 <p><code>long double</code> has no such newtype and is not supported, for a reason which
 differs by target: on MSVC and Apple Arm it is a <code>double</code> under another name, so
 a Rust <code>f64</code> has the right layout but is still the wrong C++ type and <code>cxx</code>'s
@@ -1491,8 +1499,11 @@ functions are marked as throwing:</p>
 <tr><td><code>throws!("MyClass::method")</code></td><td>Method <code>method</code> on class <code>MyClass</code></td></tr>
 <tr><td><code>throws!("ns::do_something")</code></td><td>Function <code>do_something</code> in namespace <code>ns</code></td></tr>
 <tr><td><code>throws!("ns::MyClass::method")</code></td><td>Method on a namespaced class</td></tr>
+<tr><td><code>throws!("Outer::Inner::method")</code></td><td>Method on a nested class</td></tr>
 </tbody></table>
 </div>
+<p>A nested class may also be named by the flattened <code>Outer_Inner</code> spelling
+autocxx knows it by, exactly as in <code>generate!</code>.</p>
 <h3 id="partial-matching"><a class="header" href="#partial-matching">Partial matching</a></h3>
 <p>Partial matching is supported: a shorter pattern will match functions in any
 namespace. For example, <code>throws!("do_something")</code> will match both a top-level
