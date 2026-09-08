@@ -341,6 +341,35 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Check that the vendored bindgen patch series still applies as a series.
+  #
+  # Two patches can each apply to pristine bindgen and still break each other -
+  # both adding the same method, say - with nothing for git to conflict on:
+  # they are separate files, and a series is only a series once it is applied
+  # in order. What used to report that first was a build failure minutes into a
+  # long job, on a branch which had merged green. This runs the patch step on
+  # its own, out of engine/build.rs itself, and stops at the first hunk that
+  # does not apply.
+  #
+  # It says the patches apply and nothing more. A clash only the compiler can
+  # see still surfaces where bindgen is built, in the test jobs. Nor does green
+  # here outlive the run: a pull request whose base has moved since can still
+  # merge on it, which is a matter of requiring an up-to-date base rather than
+  # of any job.
+  patch-series:
+    name: Patch series applies
+    runs-on: ubuntu-latest
+    env:
+      # No test runs here - see the note on RUSTFLAGS at the top of the file.
+      RUSTFLAGS: -Cdebuginfo=0
+    steps:
+      - uses: actions/checkout@v6
+      # Only the submodule the patches are against. The other two are the
+      # examples' C++ dependencies, and are large.
+      - run: git submodule update --init engine/third_party/rust-bindgen
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run -p autocxx-patch-check
+
   # Detect cases where documentation links don't resolve and such.
   doc:
     name: Docs
