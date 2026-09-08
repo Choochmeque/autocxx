@@ -28155,6 +28155,92 @@ fn test_subclass_with_a_throwing_superclass_constructor() {
     );
 }
 
+/// The same, for a superclass whose single constructor takes no arguments -
+/// the shape autocxx writes the `CppPeerConstructor` impl for itself.
+///
+/// A `throws!`-designated peer constructor hands back a `Result` where
+/// `make_peer` promises a `UniquePtr`, so the impl autocxx would write cannot
+/// compile; and because it is written anyway, nor can the author's own, which
+/// collides with it. Declining to write it is what leaves this test anything
+/// to say.
+#[test]
+fn test_subclass_with_a_throwing_no_argument_superclass_constructor() {
+    let cxx = indoc! {"
+        static bool fx_na_armed = false;
+        void fx_na_arm() { fx_na_armed = true; }
+        void fx_na_disarm() { fx_na_armed = false; }
+        fx_NoArgRisky::fx_NoArgRisky() {
+            if (fx_na_armed) throw std::runtime_error(\"fx no-arg superclass objected\");
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <stdexcept>
+        void fx_na_arm();
+        void fx_na_disarm();
+        class fx_NoArgRisky {
+        public:
+            fx_NoArgRisky();
+            virtual uint32_t foo() const = 0;
+            virtual ~fx_NoArgRisky() {}
+        };
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            ffi::fx_na_disarm();
+            let rust_owned = MySub::try_new_rust_owned(MySub { cpp_peer: Default::default() })
+                .ok()
+                .expect("the superclass constructor was disarmed");
+            assert_eq!(rust_owned.borrow().foo(), 7);
+            ffi::fx_na_arm();
+            let err = MySub::try_new_rust_owned(MySub { cpp_peer: Default::default() })
+                .err()
+                .expect("the superclass constructor threw");
+            assert_eq!(err.what(), "fx no-arg superclass objected");
+            ffi::fx_na_disarm();
+        },
+        quote! {
+            subclass!("fx_NoArgRisky",MySub)
+            generate!("fx_na_arm")
+            generate!("fx_na_disarm")
+            throws!("MySubCpp::MySubCpp")
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::prelude::*;
+            use ffi::fx_NoArgRisky_methods;
+
+            #[subclass]
+            #[derive(Default)]
+            pub struct MySub;
+
+            impl fx_NoArgRisky_methods for MySub {
+                fn foo(&self) -> u32 { 7 }
+            }
+
+            impl CppPeerConstructor<ffi::MySubCpp> for MySub {
+                fn make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> cxx::UniquePtr<ffi::MySubCpp> {
+                    self.try_make_peer(peer_holder)
+                        .expect("the superclass constructor threw")
+                }
+
+                fn try_make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> Result<cxx::UniquePtr<ffi::MySubCpp>, cxx::Exception> {
+                    ffi::MySubCpp::new(peer_holder)
+                }
+            }
+        }),
+    );
+}
+
 /// A class with constructors it declares for itself which `moveit` turns into
 /// trait impls - a copy constructor and a move constructor - can still have a
 /// throwing value constructor. `throws!("fx_Copyable::fx_Copyable")` names all

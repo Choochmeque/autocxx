@@ -198,12 +198,16 @@ where
 /// or other of the `new` methods to be found on the peer type. If the C++
 /// superclass has a single trivial constructor, then this is implemented
 /// automatically for you. If there are multiple constructors, or a single
-/// constructor which takes parameters, you'll need to implement this trait for
-/// your subclass in order to call the correct constructor.
+/// constructor which takes parameters, or the peer's constructor is named by a
+/// `throws!` directive, you'll need to implement this trait for your subclass in
+/// order to call the correct constructor.
 pub trait CppPeerConstructor<CppPeer: CppSubclassCppPeer>: Sized {
     /// Create the C++ peer. This method will be automatically generated
     /// for you *except* in cases where the superclass has multiple constructors,
-    /// or its only constructor takes parameters. In such a case you'll need to
+    /// its only constructor takes parameters, or the peer's constructor is named
+    /// by a `throws!` directive - a fallible constructor hands back a `Result`,
+    /// which is not what this returns, so it is [`Self::try_make_peer`] which
+    /// calls it. In such a case you'll need to
     /// implement this by calling a `new` method on the `<my subclass name>Cpp`
     /// type, passing `peer_holder` as the first argument.
     ///
@@ -238,6 +242,10 @@ pub trait CppPeerConstructor<CppPeer: CppSubclassCppPeer>: Sized {
     /// followed by whatever this subclass should do about an exception, which
     /// is usually to panic. Callers who need the exception itself use
     /// [`CppSubclass::try_new_rust_owned`] and its siblings.
+    ///
+    /// A designation also withholds the implementation autocxx would otherwise
+    /// have written for a superclass with a single no-argument constructor, so
+    /// this pair is the implementation whatever the superclass looks like.
     ///
     /// The default implementation is for the overwhelming majority of
     /// subclasses, whose peer constructor cannot fail.

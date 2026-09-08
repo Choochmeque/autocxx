@@ -292,7 +292,10 @@ peer object `autocxx` generates for your subclass, and that peer constructor is
 the one to name: `throws!("MySubclassCpp::MySubclassCpp")`. Implement
 [`CppPeerConstructor::try_make_peer`](https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html)
 as well as `make_peer`, and construct the subclass with `try_new_rust_owned`,
-`try_new_cpp_owned` or `try_new_self_owned`:
+`try_new_cpp_owned` or `try_new_self_owned`. Designating the peer's constructor
+also withholds the implementation `autocxx` writes for itself where the
+superclass has a single no-argument constructor, so the implementation below is
+what a subclass of any superclass needs:
 
 ```rust,ignore
 impl CppPeerConstructor<ffi::MySubclassCpp> for MySubclass {

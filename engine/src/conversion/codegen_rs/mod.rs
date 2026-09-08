@@ -246,8 +246,7 @@ impl<'a> RsCodeGenerator<'a> {
         // First off, when we generate structs we may need to add some methods
         // if they're superclasses.
         let methods_by_superclass = self.accumulate_superclass_methods(&all_apis);
-        let subclasses_with_a_single_trivial_constructor =
-            find_trivially_constructed_subclasses(&all_apis);
+        let peer_constructors = decide_peer_constructors(&all_apis, self.unsafe_policy);
         let non_pod_types = find_non_pod_types(&all_apis);
         let concrete_typedefs = find_concrete_typedefs(&all_apis);
         let types_with_no_rust_storage = find_types_with_no_rust_storage(&all_apis);
@@ -260,7 +259,7 @@ impl<'a> RsCodeGenerator<'a> {
                 let gen = self.generate_rs_for_api(
                     api,
                     &methods_by_superclass,
-                    &subclasses_with_a_single_trivial_constructor,
+                    &peer_constructors,
                     &non_pod_types,
                     &concrete_typedefs,
                     &types_with_no_rust_storage,
@@ -523,7 +522,7 @@ impl<'a> RsCodeGenerator<'a> {
         &self,
         api: Api<FnPhase>,
         associated_methods: &HashMap<QualifiedName, SuperclassTraitContents>,
-        subclasses_with_a_single_trivial_constructor: &HashSet<QualifiedName>,
+        peer_constructors: &HashMap<QualifiedName, PeerConstructorImpl>,
         non_pod_types: &HashSet<QualifiedName>,
         concrete_typedefs: &HashMap<QualifiedName, QualifiedName>,
         types_with_no_rust_storage: &HashSet<QualifiedName>,
@@ -791,40 +790,20 @@ impl<'a> RsCodeGenerator<'a> {
                     },
             } => {
                 let methods = associated_methods.get(&superclass).map(|c| &c.methods);
-                let generate_peer_constructor = subclasses_with_a_single_trivial_constructor.contains(&name.0.name) &&
-                    // `CppPeerConstructor::make_peer` is a safe method, so it
-                    // can only call the generated constructor under a policy
-                    // which makes that constructor safe. Both of the policies
-                    // which do are named for it.
-                    //
-                    // What this withholds under `AllFunctionsUnsafe` is the
-                    // automatic impl, not the ability to have subclasses: the
-                    // user writes `make_peer` themselves with the unsafe call
-                    // inside it, which is what `test_subclass_no_safety`
-                    // exercises and what the book's "Callbacks into Rust"
-                    // chapter shows.
-                    // The alternative the old note wondered about, a parallel
-                    // unsafe trait, does not stop at one trait: `CppSubclass`
-                    // requires `CppPeerConstructor`, and
-                    // `CppSubclassSelfOwned`, `CppSubclassDefault` and
-                    // `CppSubclassSelfOwnedDefault` each build on
-                    // `CppSubclass`, so an unsafe peer constructor drags an
-                    // unsafe twin of the ownership constructors behind it.
-                    // Other shapes are available - making those ownership
-                    // constructors unsafe for everybody, say - but each of
-                    // them charges the whole subclass API for something the
-                    // user can write once, in one impl, when they need it.
-                    //
-                    // Decision: no unsafe trait; the manual impl is the
-                    // supported route.
-                    !matches!(self.unsafe_policy, UnsafePolicy::AllFunctionsUnsafe);
+                // A subclass with no synthesized constructor at all - nothing
+                // reached `decide_peer_constructors` for it - has no generated
+                // impl either.
+                let peer_constructor = peer_constructors
+                    .get(&name.0.name)
+                    .copied()
+                    .unwrap_or(PeerConstructorImpl::LeftToAuthor);
                 self.generate_subclass(
                     name,
                     &superclass,
                     superclass_destructor_visibility,
                     superclass_destructor_virtual,
                     methods,
-                    generate_peer_constructor,
+                    peer_constructor,
                 )
             }
             Api::ExternCppType {
@@ -847,7 +826,7 @@ impl<'a> RsCodeGenerator<'a> {
         superclass_destructor_visibility: Option<CppVisibility>,
         superclass_destructor_virtual: bool,
         methods: Option<&Vec<SuperclassMethod>>,
-        generate_peer_constructor: bool,
+        peer_constructor: PeerConstructorImpl,
     ) -> RsCodegenResult {
         let super_name = superclass.get_final_item();
         let super_path = superclass.to_type_path();
@@ -865,8 +844,24 @@ impl<'a> RsCodeGenerator<'a> {
         let cpp_id = full_cpp.get_final_ident();
         let mut global_items = Vec::new();
         let relinquish_ownership_call = sub.cpp_remove_ownership();
+        // Said about the peer type, because it is the peer's constructor which
+        // the impl would have had to call.
+        let peer_type_docs: Vec<Attribute> = match peer_constructor {
+            PeerConstructorImpl::LeftToAuthorBecauseFallible => {
+                let note = format!(
+                    "autocxx has not written a `CppPeerConstructor` implementation for this \
+                     subclass, because a `throws!` directive names `{cpp_id}`'s constructor: it \
+                     hands back a `Result`, which is not what `make_peer` returns. Write the \
+                     implementation, with `try_make_peer` calling `{cpp_id}::new` and `make_peer` \
+                     deciding what to do about an exception."
+                );
+                vec![parse_quote! { #[doc = #note] }]
+            }
+            PeerConstructorImpl::Generated | PeerConstructorImpl::LeftToAuthor => Vec::new(),
+        };
         let mut output_mod_items: Vec<Item> = vec![
             parse_quote! {
+                #(#peer_type_docs)*
                 pub use cxxbridge::#cpp_id;
             },
             parse_quote! {
@@ -951,25 +946,9 @@ impl<'a> RsCodeGenerator<'a> {
                 });
             }
         }
-        if generate_peer_constructor {
+        if matches!(peer_constructor, PeerConstructorImpl::Generated) {
             // The peer's `new` allocates in C++ and hands back the pointer, so
             // this is the whole body - see `find_types_with_no_rust_storage`.
-            //
-            // `find_trivially_constructed_subclasses` picks the subclasses
-            // which get this impl and does not ask whether the constructor is
-            // fallible, so a subclass of a class with one no-argument
-            // constructor, whose *peer* constructor is designated -
-            // `throws!("MyObserverCpp::MyObserverCpp")`; designating the
-            // superclass's own constructor marks a different function - gets
-            // an impl whose body hands back a `Result` where `make_peer`
-            // promises a `UniquePtr`: a type error in generated code.
-            // Pre-existing; before the constructor handed back a pointer, the
-            // same case failed as `impl TryNew: New` unsatisfied. Nor can the
-            // author work around it by writing the impl themselves, because
-            // this one is still generated and the two conflict. The fix is for
-            // autocxx to decline to write this impl when the peer constructor
-            // is fallible, and say so, leaving the author the `make_peer` and
-            // `try_make_peer` pair the book's exceptions chapter describes.
             output_mod_items.push(parse_quote! {
                 impl autocxx::subclass::CppPeerConstructor<#cpp_id> for super::#id {
                     fn make_peer(&mut self, peer_holder: autocxx::subclass::CppSubclassRustPeerHolder<Self>) -> cxx::UniquePtr<#cpp_path> {
@@ -2133,26 +2112,95 @@ impl<'a> RsCodeGenerator<'a> {
     }
 }
 
-fn find_trivially_constructed_subclasses(apis: &ApiVec<FnPhase>) -> HashSet<QualifiedName> {
-    let (simple_constructors, complex_constructors): (Vec<_>, Vec<_>) = apis
-        .iter()
-        .filter_map(|api| match api {
-            Api::Function { fun, .. } => match &fun.provenance {
-                Provenance::SynthesizedSubclassConstructor(details) => {
-                    Some((&details.subclass.0.name, details.is_trivial))
-                }
-                _ => None,
-            },
+/// Whether autocxx writes a subclass's `CppPeerConstructor` implementation.
+#[derive(Clone, Copy)]
+enum PeerConstructorImpl {
+    /// autocxx writes it.
+    Generated,
+    /// The author writes it, for a reason `CppPeerConstructor`'s own
+    /// documentation covers: the superclass has several constructors, or one
+    /// which takes arguments, or the unsafety policy makes the peer's
+    /// constructor an unsafe call.
+    LeftToAuthor,
+    /// The author writes it, and the generated code says why, because nothing
+    /// else would: the peer's constructor is designated by `throws!`, so it
+    /// hands back a `Result` and no `make_peer` body could be written by
+    /// calling it.
+    LeftToAuthorBecauseFallible,
+}
+
+/// Whether autocxx writes each subclass's `CppPeerConstructor` implementation.
+///
+/// autocxx writes one only for a subclass whose superclass offers a single
+/// constructor taking no arguments, because that is the only case in which
+/// there is no choice to make about which constructor to call and what to pass
+/// it. The peer constructor being fallible takes even that case away: a
+/// designated constructor hands back a `Result` where the trait promises a
+/// `UniquePtr`, so the generated body would not compile - and, being generated
+/// anyway, would also collide with the one the author wrote to do the job
+/// properly, leaving them no way to have such a subclass at all.
+///
+/// Designating the *superclass's* constructor marks a different function; a
+/// designation which reaches the peer's constructor names the peer.
+fn decide_peer_constructors(
+    apis: &ApiVec<FnPhase>,
+    unsafe_policy: &UnsafePolicy,
+) -> HashMap<QualifiedName, PeerConstructorImpl> {
+    // Per subclass: whether every constructor synthesized for it takes no
+    // arguments, and whether any of them is designated as throwing.
+    let mut constructors: HashMap<QualifiedName, (bool, bool)> = HashMap::new();
+    for (subclass, is_trivial, may_throw) in apis.iter().filter_map(|api| match api {
+        Api::Function { fun, analysis, .. } => match &fun.provenance {
+            Provenance::SynthesizedSubclassConstructor(details) => Some((
+                details.subclass.0.name.clone(),
+                details.is_trivial,
+                analysis.may_throw,
+            )),
             _ => None,
-        })
-        .partition(|(_, trivial)| *trivial);
-    let simple_constructors: HashSet<_> =
-        simple_constructors.into_iter().map(|(qn, _)| qn).collect();
-    let complex_constructors: HashSet<_> =
-        complex_constructors.into_iter().map(|(qn, _)| qn).collect();
-    (&simple_constructors - &complex_constructors)
+        },
+        _ => None,
+    }) {
+        let entry = constructors.entry(subclass).or_insert((true, false));
+        entry.0 &= is_trivial;
+        entry.1 |= may_throw;
+    }
+    constructors
         .into_iter()
-        .cloned()
+        .map(|(subclass, (all_trivial, any_fallible))| {
+            let decision = if !all_trivial {
+                PeerConstructorImpl::LeftToAuthor
+            } else if any_fallible {
+                PeerConstructorImpl::LeftToAuthorBecauseFallible
+            } else if matches!(unsafe_policy, UnsafePolicy::AllFunctionsUnsafe) {
+                // `CppPeerConstructor::make_peer` is a safe method, so it can
+                // only call the generated constructor under a policy which
+                // makes that constructor safe. Both of the policies which do
+                // are named for it.
+                //
+                // What this withholds under `AllFunctionsUnsafe` is the
+                // automatic impl, not the ability to have subclasses: the user
+                // writes `make_peer` themselves with the unsafe call inside it,
+                // which is what `test_subclass_no_safety` exercises and what the
+                // book's "Callbacks into Rust" chapter shows.
+                // The alternative the old note wondered about, a parallel
+                // unsafe trait, does not stop at one trait: `CppSubclass`
+                // requires `CppPeerConstructor`, and `CppSubclassSelfOwned`,
+                // `CppSubclassDefault` and `CppSubclassSelfOwnedDefault` each
+                // build on `CppSubclass`, so an unsafe peer constructor drags an
+                // unsafe twin of the ownership constructors behind it. Other
+                // shapes are available - making those ownership constructors
+                // unsafe for everybody, say - but each of them charges the whole
+                // subclass API for something the user can write once, in one
+                // impl, when they need it.
+                //
+                // Decision: no unsafe trait; the manual impl is the supported
+                // route.
+                PeerConstructorImpl::LeftToAuthor
+            } else {
+                PeerConstructorImpl::Generated
+            };
+            (subclass, decision)
+        })
         .collect()
 }
 
