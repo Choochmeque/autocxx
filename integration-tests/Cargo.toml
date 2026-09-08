@@ -39,6 +39,13 @@ proc-macro2 = "1.0.11"
 # dtolnay/trybuild#283 is fixed, or until a workaround from that thread is in
 # place
 # here and the canaries have been shown to still trip.
+#
+# A second thing the exact version holds still: `encoded_rustflags` passes the
+# harness's flags through `$CARGO_ENCODED_RUSTFLAGS`, which cargo prefers over
+# both `$RUSTFLAGS` and `build.rustflags` and never merges with them - so the
+# `--cfg trybuild -A dead_code` this release adds through those two channels
+# (`src/rustflags.rs`) is restated in `fixture_rustflags` instead. A bump that
+# changes that list would silently change what every fixture compiles with.
 trybuild = "=1.0.81"
 # The suite installs its own logger - see `init_logging` - rather than letting
 # `test-log` put one on each test, because the filter it wants is an argument
