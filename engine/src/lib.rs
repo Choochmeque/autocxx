@@ -479,6 +479,7 @@ impl IncludeCppEngine {
             .raw_line(raw_line)
             .every_module_raw_line(all_module_raw_line)
             .generate_private_functions(true)
+            .dependent_qualified_types(true)
             // Off, and staying off. Turning them on was tried in fork PR #72
             // (CI run 34049300179), where every test and examples leg failed,
             // for two reasons.

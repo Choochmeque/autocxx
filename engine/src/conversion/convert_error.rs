@@ -170,6 +170,12 @@ pub enum ConvertErrorFromCpp {
         held: String,
         argument: QualifiedName,
     },
+    #[error("Found an attempt at using {}, which names `typename {}::{}` through its template parameter. autocxx does not hand bindgen the real {} - bindgen cannot describe it - but a stand-in of its own, and that stand-in does not declare {}, so the member has no type. Only some of a substituted type's inner types can be declared on its stand-in, and this is not one of them. Instantiating {} over a type this header declares, which bindgen describes in full, is the position which is supported.", .instantiation.to_cpp_name(), .argument.to_cpp_name(), .inner_type, .argument.to_cpp_name(), .inner_type, .instantiation.to_cpp_name())]
+    DependentQualifiedTypeOnSubstitute {
+        instantiation: QualifiedName,
+        argument: QualifiedName,
+        inner_type: String,
+    },
     #[error("Found an attempt at using a type marked as blocked! ({})", .0.to_cpp_name())]
     Blocked(QualifiedName),
     #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]
