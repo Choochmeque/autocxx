@@ -520,11 +520,16 @@ impl ByValueChecker {
                         // replaced by a blob of bytes of the right size and
                         // alignment. Arrays were invisible to this walk
                         // altogether until it learned to follow them, so an
-                        // array of a blob has always been accepted here, and
+                        // array of a blob has always been accepted here; a blob
+                        // written as a plain field has always been refused,
+                        // because the marker's name is one this knows nothing
+                        // about. `test_array_of_blob_is_pod` and
+                        // `test_plain_blob_field_is_not_pod` pin the two
+                        // answers, and the integration fixture
                         // `test_array_of_hidden_type_is_still_allowed_in_a_struct_field`
-                        // pins that. A blob written as a plain field has always
-                        // been refused, because the marker's name is one this
-                        // knows nothing about.
+                        // is a real header which arrives here: without this arm
+                        // it is refused for depending on
+                        // `__bindgen_marker_Opaque`.
                         //
                         // Those two answers disagree, and reconciling them is
                         // not a question about arrays. A small blob is unwrapped
@@ -911,6 +916,44 @@ mod tests {
         assert!(
             err.contains("isn't safe to be POD"),
             "should be refused for being unsafe, not for being unknown, was: {err}"
+        );
+    }
+
+    /// An array of a type bindgen could not name, and so replaced with a blob
+    /// of bytes, leaves the struct holding it POD. See `get_field_types`, where
+    /// this and the next test are the two halves of the asymmetry it describes.
+    #[test]
+    fn test_array_of_blob_is_pod() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                arr: [__bindgen_marker_Opaque<u32>; 4usize],
+                tail: u32,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        bvc.satisfy_requests(vec![t_id.clone()]).unwrap();
+        assert!(bvc.is_pod(&t_id));
+    }
+
+    /// The same blob written as a plain field is refused, because the marker
+    /// names a type this knows nothing about.
+    #[test]
+    fn test_plain_blob_field_is_not_pod() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                one: __bindgen_marker_Opaque<u32>,
+                tail: u32,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("__bindgen_marker_Opaque"),
+            "should be refused for naming a type we don't know, was: {err}"
         );
     }
 

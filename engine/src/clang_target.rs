@@ -6,8 +6,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Telling clang which target we are generating bindings for, in the case
-//! where it cannot work that out for itself.
+//! Which target we are generating bindings for: telling clang about it in the
+//! case where it cannot work that out for itself, and answering the one
+//! question about it that the generated C++ has to be told the answer to (see
+//! [`expected_wchar_t_size`]).
 //!
 //! # The problem
 //!
@@ -194,9 +196,131 @@ pub(crate) fn extra_clang_target_arg(extra_args: &[&str]) -> Option<String> {
     )
 }
 
+/// How many bytes `wchar_t` is on the target, for the generated C++ to hold its
+/// compiler to.
+///
+/// `autocxx::c_wchar_t` wraps `autocxx::wchar_t`, which is a `cfg` over the
+/// target, and a C++ compiler can be told to disagree with the target:
+/// `-fshort-wchar` makes `wchar_t` two bytes where the platform says four.
+/// cxx checks that an extern type is trivial but never that it is the size Rust
+/// thinks, so a disagreement is not caught anywhere - every `c_wchar_t` would
+/// simply be read from the wrong bytes. A `static_assert` in the generated
+/// header turns that into a compile error.
+///
+/// Only the width matters to a layout, so this is the two-way split behind
+/// `autocxx::wchar_t`'s four arms rather than the arms themselves, and it is
+/// derived from a target name rather than from `#[cfg]`, which here would
+/// describe the machine autocxx was compiled for. The predicates were checked
+/// against every triple `rustc --print target-list` names: all twenty Windows
+/// targets contain `-windows-`, Cygwin and UEFI are the two other 16-bit ABIs,
+/// and `avr` and `msp430` are 16-bit because their `int` is. A name is the
+/// weaker of the two sources - see [`wchar_t_size_from_cargo_cfg`], which is
+/// asked first.
+///
+/// The name may also be one a caller gave clang rather than one rustc knows,
+/// and clang spells the mingw-w64 environment `x86_64-w64-mingw32` as well as
+/// `x86_64-pc-windows-gnu`. Same target, same two-byte `wchar_t`, no `windows`
+/// in the name.
+fn wchar_t_size_for_target(rust_target: &str) -> u32 {
+    let arch = rust_target.split('-').next().unwrap_or_default();
+    if rust_target.contains("-windows-")
+        || rust_target.contains("mingw")
+        || rust_target.contains("-cygwin")
+        || rust_target.contains("-uefi")
+        || matches!(arch, "avr" | "msp430")
+    {
+        2
+    } else {
+        4
+    }
+}
+
+/// The same, read off cargo's own description of the target rather than its
+/// name, or `None` where cargo is not the one asking.
+///
+/// This is what the crate's `build.rs` does for the C++ it compiles itself, and
+/// it outranks the triple because it is the only source which is right for a
+/// [custom target specification], whose name is a file and says nothing about
+/// the machine. `CARGO_CFG_*` describes the target being built for, not the host
+/// the build script runs on, so it is also the right answer while
+/// cross-compiling.
+///
+/// [custom target specification]: https://doc.rust-lang.org/rustc/targets/custom.html
+fn wchar_t_size_from_cargo_cfg() -> Option<u32> {
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").ok()?;
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    Some(
+        if std::env::var_os("CARGO_CFG_WINDOWS").is_some()
+            || matches!(target_os.as_str(), "cygwin" | "uefi")
+            || matches!(target_arch.as_str(), "avr" | "msp430")
+        {
+            2
+        } else {
+            4
+        },
+    )
+}
+
+/// Which target to answer questions about the generated C++ with, where nothing
+/// cargo said is available.
+///
+/// A `--target` given to clang, by us or through bindgen's environment
+/// variable, is the target whose headers are being parsed, and so the target the
+/// generated C++ belongs to. Otherwise cargo's `TARGET`, which is set for the
+/// build scripts autocxx is almost always run from, and last the triple autocxx
+/// itself was compiled for. A build which gets as far as that last one while
+/// cross-compiling has told nothing in the chain which target it is for -
+/// bindgen parses for its own host too - so it is already generating bindings
+/// for the wrong machine, and an assertion which fires is the first thing to say
+/// so rather than a false alarm.
+fn target_to_describe<'a>(
+    env_target: Option<&'a str>,
+    compiled_target: &'a str,
+    caller_args: &[&'a str],
+    bindgen_env_args: &'a [String],
+) -> &'a str {
+    let args = caller_args
+        .iter()
+        .copied()
+        .chain(bindgen_env_args.iter().map(String::as_str));
+    // The last one, which is the one clang obeys; bindgen appends the
+    // environment's arguments after ours. Both spellings, because both are
+    // accepted - and `-target` takes the triple as the argument after it.
+    let mut explicit = None;
+    let mut take_next = false;
+    for arg in args {
+        if std::mem::take(&mut take_next) {
+            explicit = Some(arg);
+        } else if arg == "-target" {
+            take_next = true;
+        } else if let Some(target) = arg.strip_prefix("--target=") {
+            explicit = Some(target);
+        }
+    }
+    explicit.or(env_target).unwrap_or(compiled_target)
+}
+
+/// How many bytes the generated C++ is to assert that `wchar_t` is, given the
+/// extra clang arguments the caller supplied. See [`wchar_t_size_for_target`].
+pub(crate) fn expected_wchar_t_size(extra_clang_args: &[&str]) -> u32 {
+    if let Some(size) = wchar_t_size_from_cargo_cfg() {
+        return size;
+    }
+    let env_target = std::env::var("TARGET").ok();
+    wchar_t_size_for_target(target_to_describe(
+        env_target.as_deref(),
+        COMPILED_TARGET,
+        extra_clang_args,
+        &bindgen_extra_clang_args(env_target.as_deref()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{args_specify_target, choose_clang_target_arg, clang_target_arg_for};
+    use super::{
+        args_specify_target, choose_clang_target_arg, clang_target_arg_for, target_to_describe,
+        wchar_t_size_for_target,
+    };
 
     const GNU: &str = "x86_64-pc-windows-gnu";
     const MSVC: &str = "x86_64-pc-windows-msvc";
@@ -399,6 +523,110 @@ mod tests {
             args.iter()
                 .any(|arg| arg.starts_with("--target=") && arg.contains("-windows-")),
             "{args:?} should name the Windows target to parse for"
+        );
+    }
+
+    /// The targets whose `wchar_t` is two bytes, as clang's `__WCHAR_TYPE__`
+    /// reports them, and a sample of the four-byte majority. Asserted against
+    /// triples rather than `cfg`s so that a cross build's answer is tested too.
+    #[test]
+    fn wchar_t_is_two_bytes_where_the_abi_says_so() {
+        for target in [
+            GNU,
+            MSVC,
+            "i686-pc-windows-gnullvm",
+            "aarch64-uwp-windows-msvc",
+            "x86_64-win7-windows-gnu",
+            "x86_64-pc-cygwin",
+            "x86_64-unknown-uefi",
+            "aarch64-unknown-uefi",
+            "avr-none",
+            "avr-unknown-gnu-atmega328",
+            "msp430-none-elf",
+            // Spellings rustc does not use but clang does, which reach here
+            // when a caller names a target in the clang arguments.
+            "x86_64-w64-mingw32",
+            "i686-pc-mingw32",
+        ] {
+            assert_eq!(
+                wchar_t_size_for_target(target),
+                2,
+                "{target} has a 16-bit wchar_t"
+            );
+        }
+        for target in [
+            LINUX,
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "powerpc64-ibm-aix",
+            "wasm32-unknown-unknown",
+            "riscv64gc-unknown-linux-gnu",
+        ] {
+            assert_eq!(
+                wchar_t_size_for_target(target),
+                4,
+                "{target} has a 32-bit wchar_t"
+            );
+        }
+    }
+
+    /// A `--target` the caller gave clang is the target the generated C++
+    /// belongs to, whatever the environment says, because it is what the headers
+    /// were parsed as. Both spellings clang accepts, and the last one wins, as
+    /// clang itself does.
+    #[test]
+    fn an_explicit_clang_target_outranks_the_environment() {
+        let no_env_args: Vec<String> = Vec::new();
+        let windows_env_args = vec![format!("--target={MSVC}")];
+        for (caller_args, env_args, expected) in [
+            (vec![format!("--target={GNU}")], &no_env_args, GNU),
+            (
+                vec!["-target".to_string(), GNU.to_string()],
+                &no_env_args,
+                GNU,
+            ),
+            (
+                vec![format!("--target={LINUX}"), format!("--target={GNU}")],
+                &no_env_args,
+                GNU,
+            ),
+            // bindgen appends the environment's arguments after ours.
+            (vec![format!("--target={LINUX}")], &windows_env_args, MSVC),
+            (Vec::new(), &windows_env_args, MSVC),
+            // Nobody said: cargo's `TARGET`, then what autocxx was built for.
+            (Vec::new(), &no_env_args, LINUX),
+        ] {
+            let caller_args: Vec<&str> = caller_args.iter().map(String::as_str).collect();
+            assert_eq!(
+                target_to_describe(Some(LINUX), "aarch64-apple-darwin", &caller_args, env_args),
+                expected,
+                "{caller_args:?} with environment {env_args:?}"
+            );
+        }
+        assert_eq!(
+            target_to_describe(None, MSVC, &[], &no_env_args),
+            MSVC,
+            "with nothing else to go on, the triple autocxx was compiled for"
+        );
+    }
+
+    /// A `cfg`-built answer for the machine the tests are running on, which is
+    /// the machine whose C++ compiler the suite's generated headers are checked
+    /// against. Belt and braces for the triple-matching above.
+    #[test]
+    fn the_host_wchar_t_size_agrees_with_this_targets_cfgs() {
+        let expected = if cfg!(any(windows, target_os = "cygwin", target_os = "uefi"))
+            || cfg!(any(target_arch = "avr", target_arch = "msp430"))
+        {
+            2
+        } else {
+            4
+        };
+        assert_eq!(
+            wchar_t_size_for_target(super::COMPILED_TARGET),
+            expected,
+            "{} disagrees with this build's cfgs",
+            super::COMPILED_TARGET
         );
     }
 }

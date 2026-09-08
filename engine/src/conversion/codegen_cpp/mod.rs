@@ -48,6 +48,11 @@ use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 static GENERATED_FILE_HEADER: &str =
     "// Generated using autocxx - do not edit directly.\n// @generated.\n\n";
 
+/// The one C++ built-in whose width is the target's to choose, and so the one
+/// the generated C++ has to be held to. See
+/// [`CppCodeGenerator::assert_wchar_t_width`].
+static WCHAR_T: &str = "wchar_t";
+
 /// Bracket generated C++ which names a declaration C++ marked `[[deprecated]]`
 /// with a pragma silencing `-Wdeprecated-declarations` for it, and nothing
 /// else.
@@ -151,6 +156,8 @@ pub(crate) struct CppCodeGenerator<'a> {
     config: &'a IncludeCppConfig,
     cpp_codegen_options: &'a CppCodegenOptions<'a>,
     cxxgen_header_name: &'a str,
+    /// See [`Self::assert_wchar_t_width`].
+    wchar_t_size: u32,
 }
 
 struct SubclassFunction<'a> {
@@ -167,6 +174,7 @@ impl<'a> CppCodeGenerator<'a> {
         cpp_codegen_options: &CppCodegenOptions,
         cxxgen_header_name: &str,
         shadowed_types: &HashSet<QualifiedName>,
+        wchar_t_size: u32,
     ) -> Result<Option<CppFilePair>, ConvertErrorFromCpp> {
         let mut gen = CppCodeGenerator {
             additional_functions: Vec::new(),
@@ -175,6 +183,7 @@ impl<'a> CppCodeGenerator<'a> {
             config,
             cpp_codegen_options,
             cxxgen_header_name,
+            wchar_t_size,
         };
         // These have to come first: everything else may refer to them, and the
         // type definitions are emitted in the order they're pushed.
@@ -912,7 +921,31 @@ impl<'a> CppCodeGenerator<'a> {
 
     fn generate_ctype_typedef(&mut self, tn: &QualifiedName) {
         let cpp_name = tn.to_cpp_name();
-        self.generate_typedef(tn, &cpp_name)
+        self.generate_typedef(tn, &cpp_name);
+        if cpp_name == WCHAR_T {
+            self.assert_wchar_t_width();
+        }
+    }
+
+    /// Hold this compiler to the `wchar_t` width autocxx generated for.
+    ///
+    /// `autocxx::c_wchar_t` is a newtype over an integer chosen by `cfg` for the
+    /// target, and a C++ compiler can be told to disagree with the target:
+    /// `-fshort-wchar` makes `wchar_t` two bytes where the platform says four.
+    /// cxx checks that this extern type is trivial but not that it is the size
+    /// Rust thinks, so nothing else would notice - every value would be read
+    /// from the wrong bytes. Emitted beside the typedef, so a header which
+    /// never mentions `wchar_t` is not asked the question.
+    fn assert_wchar_t_width(&mut self) {
+        let size = self.wchar_t_size;
+        self.additional_functions.push(ExtraCpp {
+            type_definition: Some(format!(
+                "static_assert(sizeof({WCHAR_T}) == {size}, \"autocxx generated these bindings \
+                 for a target whose {WCHAR_T} is {size} bytes wide; this C++ compiler disagrees - \
+                 check for -fshort-wchar\");"
+            )),
+            ..Default::default()
+        })
     }
 
     /// The three C++ helpers which are the whole of what Rust can do with the

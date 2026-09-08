@@ -20119,6 +20119,58 @@ fn test_global_type_named_like_known_type_is_rejected() {
     );
 }
 
+/// The other side of that rule: a global type whose name matches an entry in
+/// autocxx's type database which bindgen substitutes nothing for is the user's
+/// own type and binds like any other.
+///
+/// The database holds a name for every C++ type autocxx can spell - the
+/// `autocxx::c_*` wrappers among them - and only the handful with a prelude
+/// entry are ones bindgen puts a stand-in for into the bindings. Asking about
+/// the whole database took nine `c_*` spellings out of users' hands, plus
+/// every Rust primitive's.
+#[test]
+fn test_global_type_named_like_a_ctype_wrapper_is_generated() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct c_u32 { uint32_t v; };
+        inline uint32_t fx_read_c_u32(const c_u32& c) { return c.v; }
+    "};
+    let rs = quote! {
+        let c = ffi::c_u32 { v: 42 };
+        assert_eq!(ffi::fx_read_c_u32(&c), 42);
+    };
+    run_test("", hdr, rs, &["fx_read_c_u32"], &["c_u32"]);
+}
+
+/// The combination the rule above still refuses: the same type, in a header
+/// which also uses the C type that wrapper stands for.
+///
+/// `std::unique_ptr<uint32_t>` makes autocxx declare `c_u32` in the bridge and
+/// write `typedef std::uint32_t c_u32;` into the generated C++, and neither the
+/// bridge's flat namespace nor C++'s global one has room for that beside the
+/// user's own `c_u32`. Refused, as it was before a user's `c_u32` could be
+/// bound at all; what is new is that a header which does not use the C type
+/// works, which the test above is.
+#[test]
+fn test_ctype_wrapper_name_collision_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        struct c_u32 { uint32_t v; };
+        inline uint32_t fx_read_colliding(const c_u32& c) { return c.v; }
+        inline std::unique_ptr<uint32_t> fx_make_u32() {
+            return std::unique_ptr<uint32_t>(new uint32_t(7));
+        }
+    "};
+    run_test_expect_fail(
+        "",
+        hdr,
+        quote! {},
+        &["fx_read_colliding", "fx_make_u32"],
+        &["c_u32"],
+    );
+}
+
 #[test]
 fn test_issue_1098a() {
     let hdr = indoc! {"
@@ -20463,6 +20515,63 @@ fn test_wchar_t_values() {
         rs,
         &["next_wchar", "bump", "wchar_width", "wchar_is_signed"],
         &[],
+    );
+}
+
+/// The same two questions asked of the C++ compiler at its own compile time,
+/// where an answer it disagrees with is an error rather than a wrong value.
+///
+/// `test_wchar_t_values` can only speak for a platform the test suite runs on.
+/// A user's C++ compiler may be told `-fshort-wchar`, which makes `wchar_t` two
+/// bytes where the platform says four; nothing in cxx checks the width of a
+/// trivial extern type, so a `c_wchar_t` would simply be read from the wrong
+/// bytes. The generated header says what width autocxx built for, so that the
+/// compiler which disagrees says so.
+#[test]
+fn test_wchar_t_width_is_asserted_in_generated_cpp() {
+    let hdr = indoc! {"
+        inline wchar_t next_wchar(wchar_t c) { return c + 1; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_wchar(autocxx::c_wchar_t(65)), autocxx::c_wchar_t(66));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["next_wchar"], &[], None),
+        None,
+        // The build which follows is the other half of the check: the assertion
+        // holds on whatever platform this is running on, or nothing compiles.
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &["static_assert(sizeof(wchar_t) =="],
+            &[],
+        ))])),
+        None,
+    );
+}
+
+/// A header which never mentions `wchar_t` gets no assertion about it: the
+/// typedef it belongs to is emitted only where the type is used.
+#[test]
+fn test_no_wchar_t_assertion_without_wchar_t() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t fx_plain(uint32_t c) { return c + 1; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_plain(65), 66);
+        },
+        directives_from_lists(&["fx_plain"], &[], None),
+        None,
+        Some(make_checks(vec![Box::new(CppMatcher::new(
+            &[],
+            &["static_assert(sizeof(wchar_t)"],
+        ))])),
+        None,
     );
 }
 
@@ -25395,6 +25504,13 @@ fn test_empty_base_named_through_a_typedef() {
 /// four-byte type that blob is plain `u32`, which autocxx used to unwrap and
 /// hand to cxx: `void fx_take_bu(fx_BU)`, taking a struct by value, became
 /// `fn fx_take_bu(b: u32)`. Nothing in either language then complains.
+///
+/// The refusal also has to describe the way out, and there is no `generate!`
+/// directive which is one: the name in the signature is the one the using
+/// declaration introduced, and nothing which reaches autocxx connects it to the
+/// type it aliases. `generate!("fx_outer::fx_BU")` generates that type and
+/// changes nothing here; only the header naming the type through `fx_outer`
+/// does.
 #[test]
 fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
     let hdr = indoc! {"
@@ -25406,14 +25522,32 @@ fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
         using fx_outer::fx_BU;
         inline void fx_take_bu(fx_BU b) { (void)b; }
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {},
         &["fx_take_bu"],
         &[],
-        "replaced it with an opaque blob of bytes",
+        &[
+            "replaced it with an opaque blob of bytes",
+            "no `generate!` directive names what the declaration introduced",
+        ],
     );
+}
+
+/// And the advice that refusal gives, followed: the same header with the type
+/// spelt through the namespace which declares it binds.
+#[test]
+fn test_type_named_through_its_own_namespace_is_not_hidden() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        inline uint32_t fx_take_bu_ns(fx_outer::fx_BU b) { return b.contents; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_take_bu_ns"], &[]);
 }
 
 /// As above, but the blob is what the function returns. The old bindings said
@@ -28149,6 +28283,92 @@ fn test_subclass_with_a_throwing_superclass_constructor() {
                     peer_holder: CppSubclassRustPeerHolder<Self>,
                 ) -> Result<cxx::UniquePtr<ffi::MySubCpp>, cxx::Exception> {
                     ffi::MySubCpp::new(peer_holder, self.arg)
+                }
+            }
+        }),
+    );
+}
+
+/// The same, for a superclass whose single constructor takes no arguments -
+/// the shape autocxx writes the `CppPeerConstructor` impl for itself.
+///
+/// A `throws!`-designated peer constructor hands back a `Result` where
+/// `make_peer` promises a `UniquePtr`, so the impl autocxx would write cannot
+/// compile; and because it is written anyway, nor can the author's own, which
+/// collides with it. Declining to write it is what leaves this test anything
+/// to say.
+#[test]
+fn test_subclass_with_a_throwing_no_argument_superclass_constructor() {
+    let cxx = indoc! {"
+        static bool fx_na_armed = false;
+        void fx_na_arm() { fx_na_armed = true; }
+        void fx_na_disarm() { fx_na_armed = false; }
+        fx_NoArgRisky::fx_NoArgRisky() {
+            if (fx_na_armed) throw std::runtime_error(\"fx no-arg superclass objected\");
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <stdexcept>
+        void fx_na_arm();
+        void fx_na_disarm();
+        class fx_NoArgRisky {
+        public:
+            fx_NoArgRisky();
+            virtual uint32_t foo() const = 0;
+            virtual ~fx_NoArgRisky() {}
+        };
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            ffi::fx_na_disarm();
+            let rust_owned = MySub::try_new_rust_owned(MySub { cpp_peer: Default::default() })
+                .ok()
+                .expect("the superclass constructor was disarmed");
+            assert_eq!(rust_owned.borrow().foo(), 7);
+            ffi::fx_na_arm();
+            let err = MySub::try_new_rust_owned(MySub { cpp_peer: Default::default() })
+                .err()
+                .expect("the superclass constructor threw");
+            assert_eq!(err.what(), "fx no-arg superclass objected");
+            ffi::fx_na_disarm();
+        },
+        quote! {
+            subclass!("fx_NoArgRisky",MySub)
+            generate!("fx_na_arm")
+            generate!("fx_na_disarm")
+            throws!("MySubCpp::MySubCpp")
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::prelude::*;
+            use ffi::fx_NoArgRisky_methods;
+
+            #[subclass]
+            #[derive(Default)]
+            pub struct MySub;
+
+            impl fx_NoArgRisky_methods for MySub {
+                fn foo(&self) -> u32 { 7 }
+            }
+
+            impl CppPeerConstructor<ffi::MySubCpp> for MySub {
+                fn make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> cxx::UniquePtr<ffi::MySubCpp> {
+                    self.try_make_peer(peer_holder)
+                        .expect("the superclass constructor threw")
+                }
+
+                fn try_make_peer(
+                    &mut self,
+                    peer_holder: CppSubclassRustPeerHolder<Self>,
+                ) -> Result<cxx::UniquePtr<ffi::MySubCpp>, cxx::Exception> {
+                    ffi::MySubCpp::new(peer_holder)
                 }
             }
         }),

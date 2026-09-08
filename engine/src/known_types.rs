@@ -90,6 +90,32 @@ impl Behavior {
             | Behavior::RustContainerByValueSafe => false,
         }
     }
+
+    /// Whether a class standing in for this type goes into the prelude handed
+    /// to bindgen, so that bindgen replaces the real C++ type with it.
+    ///
+    /// These are the types bindgen cannot describe at all - the STL containers
+    /// and `std::string`, and cxx's own Rust vocabulary types as C++ sees them.
+    /// Everything else in the database is a type bindgen emits for itself and
+    /// autocxx merely recognises the name of.
+    fn has_prelude_entry(&self) -> bool {
+        match self {
+            Behavior::RustString
+            | Behavior::RustStr
+            | Behavior::CxxString
+            | Behavior::CxxContainerUniquePtr
+            | Behavior::CxxContainerSharedPtr
+            | Behavior::CxxContainerVector
+            | Behavior::RustContainerByValueSafe => true,
+            Behavior::CByValue
+            | Behavior::CChar
+            | Behavior::CByValueVecSafe
+            | Behavior::CIntegerWrapper
+            | Behavior::CCharacter
+            | Behavior::CVoid
+            | Behavior::RustByValue => false,
+        }
+    }
 }
 
 /// Details about known special types, mostly primitives.
@@ -166,37 +192,46 @@ impl TypeDetails {
 
     /// Whether and how to include this in the prelude given to bindgen.
     fn get_prelude_entry(&self) -> Option<String> {
-        match self.behavior {
-            Behavior::RustString
-            | Behavior::RustStr
-            | Behavior::CxxString
-            | Behavior::CxxContainerUniquePtr
+        if !self.behavior.has_prelude_entry() {
+            return None;
+        }
+        let tn = QualifiedName::new_from_cpp_name(&self.rs_name);
+        let cxx_name = tn.get_final_item();
+        let (templating, payload) = match self.behavior {
+            Behavior::CxxContainerUniquePtr
             | Behavior::CxxContainerSharedPtr
             | Behavior::CxxContainerVector
-            | Behavior::RustContainerByValueSafe => {
-                let tn = QualifiedName::new_from_cpp_name(&self.rs_name);
-                let cxx_name = tn.get_final_item();
-                let (templating, payload) = match self.behavior {
-                    Behavior::CxxContainerUniquePtr
-                    | Behavior::CxxContainerSharedPtr
-                    | Behavior::CxxContainerVector
-                    | Behavior::RustContainerByValueSafe => ("template<typename T> ", "T* ptr"),
-                    _ => ("", "char* ptr"),
-                };
-                Some(format!(
-                    indoc! {"
-                    /**
-                    * <div rustbindgen=\"true\" replaces=\"{}\"></div>
-                    */
-                    {}class {} {{
-                        {};
-                    }};
-                    "},
-                    self.cpp_name, templating, cxx_name, payload
-                ))
-            }
-            _ => None,
-        }
+            | Behavior::RustContainerByValueSafe => ("template<typename T> ", "T* ptr"),
+            _ => ("", "char* ptr"),
+        };
+        Some(format!(
+            indoc! {"
+            /**
+            * <div rustbindgen=\"true\" replaces=\"{}\"></div>
+            */
+            {}class {} {{
+                {};
+            }};
+            "},
+            self.cpp_name, templating, cxx_name, payload
+        ))
+    }
+
+    /// The name bindgen gives the stand-in it puts in the bindings in place of
+    /// this type, or `None` if it substitutes nothing for it.
+    ///
+    /// bindgen renames a prelude class to the final segment of the C++ name the
+    /// class says it replaces, so the stand-in for `rust::Str` is `Str` and the
+    /// one for `std::string` is `string`. Those eight names are all a bindings
+    /// dump contains for this database - checked, because it is the substitute's
+    /// name and not the prelude class's.
+    fn substitute_name(&self) -> Option<&str> {
+        self.behavior.has_prelude_entry().then(|| {
+            self.cpp_name
+                .rsplit("::")
+                .next()
+                .expect("a name has a final segment")
+        })
     }
 
     fn to_type_path(&self) -> TypePath {
@@ -391,10 +426,9 @@ impl TypeDatabase {
     /// Whether this is the substitute type we made for some known type.
     ///
     /// This matches on the final name alone, because `bindgen` puts the
-    /// substitute in the root mod under the name of the type it replaces
-    /// (`std::string` becomes `root::string`) and nothing else about it says
-    /// where it came from. A type of the user's own in the global namespace
-    /// with such a name therefore collides with the substitute and is
+    /// substitute under the name of the type it replaces and nothing else about
+    /// it says where it came from. A type of the user's own in the global
+    /// namespace with such a name therefore collides with the substitute and is
     /// discarded along with it: `generate!` then reports that it generated
     /// nothing, which is at least honest, but the type can't be bound. Only
     /// the doc comment `bindgen` copies across (`<div rustbindgen="true"
@@ -402,13 +436,52 @@ impl TypeDatabase {
     /// comment surviving would be a good deal more fragile than this.
     /// Namespaced types are unaffected - `mine::string` is nobody's
     /// substitute. See `test_global_type_named_like_known_type_is_rejected`.
+    ///
+    /// The price is paid only by the names `bindgen` actually substitutes
+    /// something for, which is the eight with a prelude entry - and not by the
+    /// rest of the database, which is every C++ type autocxx can spell. Asking
+    /// about all of them made the user's own `c_u32`, `c_int`, `c_wchar_t` and
+    /// the rest of the `autocxx::c_*` family unbindable, none of which
+    /// `bindgen` replaces anything with. See
+    /// `test_global_type_named_like_a_ctype_wrapper_is_generated`.
+    ///
+    /// The names in this database which have no namespace of their own -
+    /// `usize`, `bool`, `str`, `uint32_t` - are a separate matter and are
+    /// declined still, a few lines later in
+    /// [`crate::conversion::parse::parse_bindgen`], by [`Self::is_known_type`]:
+    /// they *are* the names bindgen writes for those types, so a struct
+    /// arriving under one has to be examined rather than assumed to be the
+    /// user's. A C++ class named `u32` does not even arrive under that name -
+    /// bindgen escapes it to `u32_`, which is the name a `generate!` directive
+    /// then has to use.
+    ///
+    /// Measured: of those eight substitutes, `bindgen` puts `Str`, `String` and
+    /// `Box` in the root mod and the five `std` ones in `root::std`, so the
+    /// namespace test below leaves the latter to
+    /// [`Self::is_known_type`], which recognises them by their own names. A
+    /// global `struct string` is therefore nobody's substitute either, and is
+    /// declined here all the same; untangling that is a behaviour change which
+    /// the test named above pins as it stands.
+    ///
+    /// One combination is refused rather than bound, and was refused before
+    /// this narrowed too: a header with a global type named after one of the
+    /// `autocxx::c_*` wrappers *and* a use of that same C type, which makes
+    /// [`crate::conversion::analysis::ctypes`] declare a bridge type of the
+    /// wrapper's name. The two are one name in a flat bridge, and the
+    /// generated C++ would likewise declare `typedef unsigned int c_u32;`
+    /// beside the user's `struct c_u32`, which C++ has no room for either.
+    /// They annihilate in `ApiVec`, cxx rejects the bindings which still
+    /// mention the name, and the build stops - loudly, but saying less than it
+    /// should. Serving both would take the generated typedefs out of the
+    /// user's global namespace, which is a change to every generated header.
+    /// `test_ctype_wrapper_name_collision_is_refused` pins the refusal.
     pub(crate) fn is_known_substitute_type(&self, ty: &QualifiedName) -> bool {
-        if ty.get_namespace().is_empty() {
-            self.all_names()
-                .any(|n| n.get_final_item() == ty.get_final_item())
-        } else {
-            false
-        }
+        ty.get_namespace().is_empty()
+            && self
+                .by_rs_name
+                .values()
+                .filter_map(|td| td.substitute_name())
+                .any(|substitute| substitute == ty.get_final_item())
     }
 
     pub(crate) fn known_type_type_path(&self, ty: &QualifiedName) -> Option<TypePath> {
