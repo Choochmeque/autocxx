@@ -16,7 +16,8 @@ use std::{
 };
 
 use autocxx_engine::{
-    Builder, BuilderBuild, BuilderContext, BuilderError, RebuildDependencyRecorder, HEADER,
+    add_sanitizer_flags, Builder, BuilderBuild, BuilderContext, BuilderError,
+    RebuildDependencyRecorder, HEADER,
 };
 use log::info;
 use once_cell::sync::OnceCell;
@@ -204,6 +205,10 @@ pub fn build_from_folder(
     let target_dir = folder.join("target");
     std::fs::create_dir(&target_dir).unwrap();
     let mut b = BuilderBuild::new();
+    // This builder is made here rather than by the engine, so it is also this
+    // function's job to ask for what the engine's would have added. The Rust
+    // half below is sanitized by `fixture_rustflags` either way.
+    add_sanitizer_flags(&mut b);
     for cpp_file in cpp_files.iter() {
         b.file(folder.join(cpp_file));
     }

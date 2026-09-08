@@ -45,6 +45,20 @@ pub enum BuilderError {
 #[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
 pub type BuilderBuild = cc::Build;
 
+/// Adds to `builder` the C++ flags the `AUTOCXX_ASAN` build mode asks for, and
+/// nothing when it is unset.
+///
+/// Shared rather than restated because autocxx's C++ is compiled through two
+/// builders - this crate's, and the one the integration harness makes for
+/// already-generated files - and instrumenting the Rust half alone leaves every
+/// access the C++ makes itself unchecked.
+#[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
+pub fn add_sanitizer_flags(builder: &mut BuilderBuild) {
+    if std::env::var_os("AUTOCXX_ASAN").is_some() {
+        builder.flag_if_supported("-fsanitize=address");
+    }
+}
+
 /// For test purposes only, a [`cc::Build`] and lists of Rust and C++
 /// files generated.
 #[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
@@ -289,9 +303,7 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         // try/catch. cc adds no /EH flag itself. A user-supplied /EHa in
         // CXXFLAGS still wins per MSVC's own override rules.
         builder.flag_if_supported("/EHsc");
-        if std::env::var_os("AUTOCXX_ASAN").is_some() {
-            builder.flag_if_supported("-fsanitize=address");
-        }
+        add_sanitizer_flags(&mut builder);
         let mut generated_rs = Vec::new();
         let mut generated_cpp = Vec::new();
         builder.includes(parsed_file.include_dirs());
