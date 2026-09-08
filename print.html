@@ -977,6 +977,30 @@ fn main() {
     assert_eq!(ffi::do_math(c_int(12), c_int(13)), c_int(25));
 }
 </code></pre>
+<h2 id="character-types"><a class="header" href="#character-types">Character types</a></h2>
+<p>C++'s <code>char16_t</code>, <code>char32_t</code>, <code>char8_t</code> and <code>wchar_t</code> are distinct types - a
+<code>char32_t</code> is not a <code>uint32_t</code>, and a C++ compiler asked for the exact type of a
+function says so - and Rust has no equivalent of any of them. <code>autocxx</code> gives
+each one a transparent newtype:
+<a href="https://docs.rs/autocxx/latest/autocxx/struct.c_char16_t.html"><code>c_char16_t</code></a>,
+<a href="https://docs.rs/autocxx/latest/autocxx/struct.c_char32_t.html"><code>c_char32_t</code></a>,
+<a href="https://docs.rs/autocxx/latest/autocxx/struct.c_char8_t.html"><code>c_char8_t</code></a> and
+<a href="https://docs.rs/autocxx/latest/autocxx/struct.c_wchar_t.html"><code>c_wchar_t</code></a>, each
+wrapping the Rust integer of the same width, so a value crosses with <code>.0</code> or
+<code>From</code>.</p>
+<p><code>wchar_t</code> is the one whose width and signedness are the target's to choose -
+<code>unsigned short</code> on Windows, <code>int</code> on Linux and macOS, <code>unsigned int</code> under
+AAPCS - so its payload is
+<a href="https://docs.rs/autocxx/latest/autocxx/type.wchar_t.html"><code>autocxx::wchar_t</code></a>,
+which is picked per target. <code>char8_t</code> only exists from C++20 onwards.</p>
+<p><code>long double</code> has no such newtype and is not supported, for a reason which
+differs by target: on MSVC and Apple Arm it is a <code>double</code> under another name, so
+a Rust <code>f64</code> has the right layout but is still the wrong C++ type and <code>cxx</code>'s
+signature check says so; on x86-64 Linux it is an 80-bit x87 float in 16 bytes,
+and on AArch64 Linux an IEEE binary128, and Rust has no type for either. A
+function whose signature mentions one is refused with an error saying that. A
+<code>long double</code> <em>field</em> is fine - those bytes are carried around, not passed
+between the languages - though a struct with one cannot be <code>generate_pod!</code>.</p>
 <h2 id="strings"><a class="header" href="#strings">Strings</a></h2>
 <p><code>autocxx</code> uses <a href="https://docs.rs/cxx/latest/cxx/struct.CxxString.html"><code>cxx::CxxString</code></a>. However, as noted above, we can't
 just pass a C++ string by value, so we'll box and unbox it automatically
