@@ -69,7 +69,7 @@ moveit = { version = "0.6", features = [ "cxx" ] }
 cxx-build = { version = "1.0.136", optional = true }
 
 [workspace]
-members = ["parser", "engine", "gen/cmd", "gen/build", "macro", "demo", "tools/reduce", "tools/mdbook-preprocessor", "integration-tests"]
+members = ["parser", "engine", "gen/cmd", "gen/build", "macro", "demo", "tools/reduce", "tools/mdbook-preprocessor", "tools/patch-check", "integration-tests"]
 exclude = ["examples/s2", "examples/steam-mini", "examples/subclass", "examples/chromium-fake-render-frame-host", "examples/pod", "examples/non-trivial-type-on-stack", "examples/llvm", "examples/reference-wrappers", "examples/cpp_calling_rust", "tools/stress-test"]
 
 #[patch.crates-io]

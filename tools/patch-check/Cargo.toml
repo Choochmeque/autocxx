@@ -1,0 +1,21 @@
+# Copyright 2026 Vladimir Pankratov
+#
+# Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+# https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+# <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+# option. This file may not be copied, modified, or distributed
+# except according to those terms.
+
+[package]
+name = "autocxx-patch-check"
+version = "0.30.0"
+authors = ["Vladimir Pankratov <sollex.uz@gmail.com>"]
+edition = "2021"
+# CI plumbing for this repository, not something to release.
+publish = false
+
+[dependencies]
+# What `engine/build.rs` applies the series with. Kept at the version the
+# engine's build-dependency asks for: a different applier would match hunks by
+# different rules and this check would answer a different question.
+diffy = "0.5"

@@ -19,6 +19,11 @@
 //! `third_party/patches` where it can be read as a patch series and rebased
 //! with `git`. This script applies that series into `OUT_DIR` and rewrites the
 //! result into something which compiles as a module rather than a crate.
+//!
+//! `tools/patch-check` mounts this file as a module to run `apply_series` on
+//! its own, which is what the `pub` on a handful of items below is for. It has
+//! to be this file rather than a copy of it: a checker which matched hunks by
+//! its own rules would answer a different question than the build does.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,7 +47,7 @@ const VENDORED_LIB: &str = "third_party/bindgen-src";
 /// the directory as a package of its own.
 const RENAMED_MANIFEST: &str = "Cargo.toml.upstream";
 
-const PATCH_DIR: &str = "third_party/patches";
+pub const PATCH_DIR: &str = "third_party/patches";
 
 /// Set to copy `SUBMODULE_LIB` to `VENDORED_LIB` before building. Run before
 /// `cargo publish`; see `book/src/contributing.md`.
@@ -186,11 +191,7 @@ fn vendor_bindgen(manifest: &Path, out: &Path, target: &str) {
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", patches.display());
 
-    let mut files = BTreeMap::new();
-    collect(&source, &source, &mut files);
-    for patch in patch_series(&patches) {
-        apply_patch(&patch, &mut files);
-    }
+    let files = apply_series(&source, &patches);
 
     if dest.exists() {
         fs::remove_dir_all(&dest).expect("cannot clear the vendored bindgen directory");
@@ -231,7 +232,7 @@ fn vendor_bindgen(manifest: &Path, out: &Path, target: &str) {
 /// behind, so preferring it would mean that everyone who had once prepared a
 /// release silently kept building that copy, and a submodule bumped to a new
 /// tag would compile as if nothing had changed.
-fn bindgen_sources(manifest: &Path) -> PathBuf {
+pub fn bindgen_sources(manifest: &Path) -> PathBuf {
     let submodule = manifest.join(SUBMODULE_LIB);
     if submodule.join("lib.rs").is_file() {
         return submodule;
@@ -340,7 +341,7 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) {
 }
 
 /// The patch files, in the order their names put them in.
-fn patch_series(dir: &Path) -> Vec<PathBuf> {
+pub fn patch_series(dir: &Path) -> Vec<PathBuf> {
     let mut patches: Vec<_> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .map(|entry| entry.expect("cannot read a patch entry").path())
@@ -353,6 +354,21 @@ fn patch_series(dir: &Path) -> Vec<PathBuf> {
         dir.display()
     );
     patches
+}
+
+/// Read the bindgen sources and apply the whole series to them, in order.
+///
+/// Split out because `tools/patch-check` runs this much and no more: a patch
+/// which stops applying because an earlier patch in the series already made its
+/// edit conflicts with nothing git can see - the two are separate files - and
+/// waiting for a build to report it costs minutes.
+pub fn apply_series(source: &Path, patches: &Path) -> BTreeMap<String, String> {
+    let mut files = BTreeMap::new();
+    collect(source, source, &mut files);
+    for patch in patch_series(patches) {
+        apply_patch(&patch, &mut files);
+    }
+    files
 }
 
 /// Apply one patch file, which may touch several sources.
