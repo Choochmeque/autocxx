@@ -282,6 +282,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "autocxx-patch-check"
+version = "0.30.0"
+dependencies = [
+ "diffy",
+]
+
+[[package]]
 name = "autocxx-reduce"
 version = "0.30.0"
 dependencies = [
