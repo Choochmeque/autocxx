@@ -1,0 +1,436 @@
+Subject: Report a class's member function templates through `ParseCallbacks`
+
+bindgen does not parse a member function template as a member of its class at
+all. libclang reports one as a `CXCursor_FunctionTemplate` rather than as a
+`CXCursor_CXXMethod`, and the visitor in `CompInfo::from_ty` lists that cursor
+among the ones it passes over, so such a member reaches no IR, no callback and
+no output. Nothing bindgen generates distinguishes a class which declares one
+from a class which declares none.
+
+Generating nothing for one is right - a template has no monomorphization to
+emit - and this is a step in front of where that decision is usually made.
+`--report-template-member-functions` does not reach these either: it keeps the
+*ordinary* members of a class template, which are discarded later and for a
+different reason, and a member function template of an ordinary class was never
+in front of that check to begin with.
+
+`--report-member-function-templates` keeps what C++ said about each of them and
+reports it through `denote_member_function_template`: the name, which kind of
+member function the template declares, the constness, the access, and how many
+template parameters the member declares of its own. A consumer which writes its
+own C++ can call one, choosing the arguments itself - that is what its own C++
+is for - and a consumer which cannot still has to be able to say the member is
+there, rather than pass over it as silently as bindgen did.
+
+`clang_getTemplateCursorKind` is what makes the cursor readable. It answers with
+the kind the declaration would have had had it not been a template, and among a
+class's children it answers one of three: `CXCursor_CXXMethod` for a member
+function template, `CXCursor_Constructor` for a member template constructor, and
+`CXCursor_ConversionFunction` for a conversion function template. The last is
+passed over, where a conversion function of any other kind already is, and could
+not be reported as it stands in any case: libclang spells one `operator
+type-parameter-0-0` rather than `operator T`.
+
+Those three are all C++ allows here - [temp.mem]/2 rules out a destructor
+template and [temp.mem]/3 a virtual member function template - so the two taken
+are every kind reported, and the one left out is left out deliberately rather
+than overlooked. Neither can another kind of template be mistaken for one,
+libclang giving a member class template `CXCursor_ClassTemplate`, a member alias
+template `CXCursor_TypeAliasTemplateDecl` and a member variable template
+`CXCursor_UnexposedDecl`; and a friend function template is not a child of the
+class at all, hanging under a `CXCursor_FriendDecl` with the translation unit
+for its semantic parent. `clang_CXXMethod_isStatic` and
+`clang_CXXMethod_isConst` answer for these cursors exactly as they do for a
+`CXCursor_CXXMethod`.
+
+No signature is reported, and the sibling option's reason is not this one. That
+one withholds a signature where it would name a parameter of the *class*, which
+an instantiation supplies; here the parameters are the member's own, and no
+instantiation of the class supplies those. Not every such signature names one -
+`template<class T = int> int f(int)` names none - so reporting the ones which do
+not would be possible and is simply a feature of its own; what this reports is
+that the member is there and what C++ declared it as.
+
+The parameters are counted instead. The count is of what C++ declared rather than
+of what a caller must write - deduction and default template arguments may supply
+them - and a parameter pack counts as the one parameter C++ declared it as,
+libclang exposing no test for a pack.
+
+The report is made from `CompInfo::codegen`, beside the reports every class
+makes, rather than from the point codegen gives up on a class template's
+members. A member function template belongs to an ordinary class as readily as
+to a class template and is generated for neither, so the place which speaks only
+for the class codegen gave up on would report half of them. A member whose kind
+`--generate` leaves out is not reported, as for any other function; there is no
+per-member blocklist to consult, a member function template never becoming an
+item for a blocklist to match, and a blocklisted class does not reach codegen at
+all.
+
+Opt-in because keeping these is not free - a header which uses the standard
+library declares a great many - and because a report made unconditionally would
+be a new one for every consumer which already implements `ParseCallbacks`. With
+the option off nothing changes at all.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -427,6 +427,40 @@
+         &self,
+         _parent: DiscoveredItemId,
+         _member: TemplateMemberFunctionInfo<'_>,
++    ) {
++    }
++
++    /// Report one member function template of a class, which bindgen does not
++    /// parse as a member of that class at all.
++    ///
++    /// libclang reports a member function template as a
++    /// `CXCursor_FunctionTemplate` rather than as a `CXCursor_CXXMethod`, and
++    /// `CompInfo::from_ty` lists that cursor among the ones it passes over. So
++    /// such a member reaches no IR and no other callback - not
++    /// [`ParseCallbacks::denote_template_member_function`] either, which
++    /// reports the ordinary members of a class template - and nothing in the
++    /// output distinguishes a class which declares one from a class which
++    /// declares none.
++    ///
++    /// Called for each member function template of every compound type which
++    /// reaches codegen, an ordinary class and a class template alike, in
++    /// declaration order; a blocklisted class does not reach it. `parent` is
++    /// that class, never an instantiation of it: bindgen announces no item for
++    /// an instantiation. Subject to the same `--generate` kind filtering as any
++    /// other function, and a conversion function template is not reported,
++    /// where a conversion function of any other kind is not either.
++    ///
++    /// No signature is reported. This says that the member exists and what C++
++    /// declared it as. A member function template's signature may name the
++    /// member's *own* template parameters, which nothing outside the member can
++    /// write and which no instantiation of the class supplies; reporting the
++    /// signatures of the members which name none of them would be a feature of
++    /// its own, and a different one from the [`TemplateMemberFunctionSignature`]
++    /// beside it, where the parameters are the class's.
++    fn denote_member_function_template(
++        &self,
++        _parent: DiscoveredItemId,
++        _member: MemberFunctionTemplateInfo<'_>,
+     ) {
+     }
+ 
+@@ -783,6 +817,40 @@
+     pub is_variadic: bool,
+ }
+ 
++/// What [`ParseCallbacks::denote_member_function_template`] reports about one
++/// member function template.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct MemberFunctionTemplateInfo<'a> {
++    /// The member's name as C++ spells it.
++    ///
++    /// The C++ name rather than a generated one, unlike the name
++    /// [`TemplateMemberFunctionInfo`] carries: bindgen makes no item for a
++    /// member function template, so [`ParseCallbacks::generated_name_override`]
++    /// is never asked about one and there is no rename to undo.
++    pub name: &'a str,
++
++    /// Which kind of member function the template declares:
++    /// [`MethodKind::Normal`], [`MethodKind::Static`] or
++    /// [`MethodKind::Constructor`]. No other kind is reported: [temp.mem]/2
++    /// rules out a destructor template and [temp.mem]/3 a virtual member
++    /// function template, and a conversion function template is passed over.
++    pub kind: MethodKind,
++
++    /// Whether C++ declared the member `const`, which says how a caller must
++    /// take the receiver.
++    pub is_const: bool,
++
++    /// The access C++ gave the member.
++    pub visibility: Visibility,
++
++    /// How many template parameters the member declares of its own. Not how
++    /// many a caller must write: deduction and default template arguments may
++    /// supply them. A parameter pack counts as the one parameter C++ declared
++    /// it as, whatever number of arguments it goes on to take.
++    pub template_parameters: usize,
++}
++
+ /// Whether a method is virtual or pure virtual.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Virtualness {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2497,6 +2497,7 @@
+ 
+         utils::report_data_members(ctx, id, self);
+         utils::report_using_declarations(ctx, id, self);
++        utils::report_member_function_templates(ctx, id, self);
+ 
+         // Don't output classes with template parameters that aren't types, and
+         // also don't output template specializations, neither total or partial.
+@@ -6014,8 +6015,8 @@
+     use super::serialize::CSerialize;
+     use super::{error, CodegenError, CodegenResult, ToRustTyOrOpaque};
+     use crate::callbacks::{
+-        DataMemberInfo, DiscoveredItemId, Explicitness, UsingDeclarationInfo,
+-        Visibility,
++        DataMemberInfo, DiscoveredItemId, Explicitness,
++        MemberFunctionTemplateInfo, UsingDeclarationInfo, Visibility,
+     };
+     use crate::ir::comp::{CompInfo, Field, FieldMethods, Method, MethodKind};
+     use crate::ir::context::BindgenContext;
+@@ -6819,6 +6820,50 @@
+         }
+     }
+ 
++    /// Report the member function templates of a struct or class through
++    /// [`crate::callbacks::ParseCallbacks::denote_member_function_template`].
++    ///
++    /// Reported for a class which has template parameters in scope as well as
++    /// for one which has none, because a member function template is a member
++    /// of either and is generated for neither. That is also why this sits here,
++    /// beside the other reports made for every class, rather than beside
++    /// `report_template_member_functions`, which speaks only for the class
++    /// whose members codegen gave up on.
++    ///
++    /// A member whose kind `--generate` leaves out is not reported: a caller
++    /// which excluded a kind of function from codegen did not ask to hear about
++    /// it. There is no per-member blocklist check to make, a member function
++    /// template never becoming an item for a blocklist to match.
++    pub(super) fn report_member_function_templates(
++        ctx: &BindgenContext,
++        parent: DiscoveredItemId,
++        comp: &CompInfo,
++    ) {
++        for member in comp.member_function_templates() {
++            let wanted = match member.kind() {
++                MethodKind::Constructor => {
++                    ctx.options().codegen_config.constructors()
++                }
++                _ => ctx.options().codegen_config.methods(),
++            };
++            if !wanted {
++                continue;
++            }
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_member_function_template(
++                    parent,
++                    MemberFunctionTemplateInfo {
++                        name: member.name(),
++                        kind: member.kind(),
++                        is_const: member.is_const(),
++                        visibility: member.visibility(),
++                        template_parameters: member.template_parameters(),
++                    },
++                );
++            });
++        }
++    }
++
+     pub(super) fn callback_with_cpp_name(
+         ctx: &BindgenContext,
+         item: &Item,
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -144,6 +144,91 @@
+     }
+ }
+ 
++/// One member function template of a class.
++///
++/// bindgen generates nothing for one - a template has no monomorphization to
++/// name - and does not parse one as a member of its class either, libclang
++/// reporting it as a `CXCursor_FunctionTemplate`. So this is the only thing
++/// which says such a member exists.
++///
++/// There is no signature here: this records that the member exists and what C++
++/// declared it as. A member function template's signature may name the member's
++/// own template parameters, which nothing outside the member can write.
++#[derive(Debug, Clone)]
++pub(crate) struct MemberFunctionTemplate {
++    name: String,
++    kind: MethodKind,
++    is_const: bool,
++    visibility: Visibility,
++    template_parameters: usize,
++}
++
++impl MemberFunctionTemplate {
++    /// Read one off a `CXCursor_FunctionTemplate` found among a class's
++    /// children.
++    ///
++    /// `clang_getTemplateCursorKind` answers with the kind the declaration
++    /// would have had had it not been a template, and among a class's children
++    /// it answers one of three: a member function, a constructor, and a
++    /// conversion function. The last is passed over, as a conversion function
++    /// of any other kind already is here, and could not be reported as it
++    /// stands in any case - libclang spells one `operator type-parameter-0-0`
++    /// rather than `operator T`.
++    ///
++    /// Those three are all C++ allows here - [temp.mem]/2 rules out a
++    /// destructor template and [temp.mem]/3 a virtual member function
++    /// template - so the two taken are every kind reported.
++    fn from_cursor(cursor: &clang::Cursor) -> Option<Self> {
++        let kind = match cursor.template_kind() {
++            clang_sys::CXCursor_CXXMethod if cursor.method_is_static() => {
++                MethodKind::Static
++            }
++            clang_sys::CXCursor_CXXMethod => MethodKind::Normal,
++            clang_sys::CXCursor_Constructor => MethodKind::Constructor,
++            _ => return None,
++        };
++        Some(Self {
++            name: cursor.spelling(),
++            kind,
++            is_const: cursor.method_is_const(),
++            visibility: Visibility::from(cursor.access_specifier()),
++            // The parameters the member declares, a pack counting as the one
++            // parameter it is: libclang exposes no test for a pack, and the
++            // count is of what C++ declared rather than of what a call supplies.
++            template_parameters: cursor
++                .collect_children()
++                .iter()
++                .filter(|child| child.is_template_parameter())
++                .count(),
++        })
++    }
++
++    /// The member's name, as C++ spells it.
++    pub(crate) fn name(&self) -> &str {
++        &self.name
++    }
++
++    /// Which kind of member function the template declares.
++    pub(crate) fn kind(&self) -> MethodKind {
++        self.kind
++    }
++
++    /// Whether C++ declared the member `const`.
++    pub(crate) fn is_const(&self) -> bool {
++        self.is_const
++    }
++
++    /// The access C++ gave the member.
++    pub(crate) fn visibility(&self) -> Visibility {
++        self.visibility
++    }
++
++    /// How many template parameters the member declares of its own.
++    pub(crate) fn template_parameters(&self) -> usize {
++        self.template_parameters
++    }
++}
++
+ /// A struct representing a C++ method, either static, normal, or virtual.
+ #[derive(Debug)]
+ pub(crate) struct Method {
+@@ -1231,6 +1316,11 @@
+     /// The `using Base::foo;` declarations written in this class.
+     using_declarations: Vec<UsingDeclaration>,
+ 
++    /// The member function templates this class declares, which are members of
++    /// it in C++ and are in no other field here: nothing else in this type is
++    /// parsed from a `CXCursor_FunctionTemplate`.
++    member_function_templates: Vec<MemberFunctionTemplate>,
++
+     /// Whether this type should generate an vtable (TODO: Should be able to
+     /// look at the virtual methods and ditch this field).
+     has_own_virtual_method: bool,
+@@ -1284,6 +1374,7 @@
+             inner_types: vec![],
+             inner_vars: vec![],
+             using_declarations: vec![],
++            member_function_templates: vec![],
+             has_own_virtual_method: false,
+             has_destructor: false,
+             has_nonempty_base: false,
+@@ -1466,6 +1557,13 @@
+     /// The `using Base::foo;` declarations written in this class.
+     pub(crate) fn using_declarations(&self) -> &[UsingDeclaration] {
+         &self.using_declarations
++    }
++
++    /// The member function templates this class declares, in declaration order.
++    pub(crate) fn member_function_templates(
++        &self,
++    ) -> &[MemberFunctionTemplate] {
++        &self.member_function_templates
+     }
+ 
+     /// Construct a new compound type from a Clang type.
+@@ -1803,11 +1901,24 @@
+                 CXCursor_UsingDeclaration => {
+                     ci.using_declarations
+                         .push(UsingDeclaration::from_cursor(&cur));
++                }
++                CXCursor_FunctionTemplate => {
++                    // A member function template, which has no
++                    // monomorphization to generate and so was passed over
++                    // entirely. `--report-member-function-templates` keeps
++                    // what C++ said about it, for a consumer which has to
++                    // account for a member it cannot call.
++                    if ctx.options().report_member_function_templates {
++                        if let Some(member) =
++                            MemberFunctionTemplate::from_cursor(&cur)
++                        {
++                            ci.member_function_templates.push(member);
++                        }
++                    }
+                 }
+                 // Intentionally not handled
+                 CXCursor_CXXAccessSpecifier |
+                 CXCursor_CXXFinalAttr |
+-                CXCursor_FunctionTemplate |
+                 CXCursor_ConversionFunction => {}
+                 _ => {
+                     warn!(
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -706,6 +706,7 @@
+         c_naming,
+         explicit_padding,
+         report_template_member_functions,
++        report_member_function_templates,
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
+         use_distinct_wchar_t,
+@@ -1022,6 +1023,7 @@
+             c_naming,
+             explicit_padding,
+             report_template_member_functions,
++            report_member_function_templates,
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
+             use_distinct_wchar_t,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -227,6 +227,32 @@
+             }
+         },
+         as_args: "--report-template-member-functions",
++    },
++
++    /// Report the member function templates of a class through
++    /// [`ParseCallbacks::denote_member_function_template`], which bindgen
++    /// otherwise passes over: libclang reports one as a
++    /// `CXCursor_FunctionTemplate`, which is not parsed as a member of the
++    /// class at all, so nothing in the output says such a member exists.
++    ///
++    /// Nothing is generated for them with the option on either - a template has
++    /// no monomorphization to generate - and no signature is reported, a member
++    /// function template's signature being free to name the member's own
++    /// template parameters. What a consumer gets is that the member is there,
++    /// and what C++ declared it as.
++    ///
++    /// [`ParseCallbacks::denote_member_function_template`]:
++    ///     callbacks::ParseCallbacks::denote_member_function_template
++    report_member_function_templates: bool {
++        methods: {
++            /// If this is true, report the member function templates of a class
++            /// through `ParseCallbacks` rather than passing over them.
++            pub fn report_member_function_templates(mut self, doit: bool) -> Builder {
++                self.options.report_member_function_templates = doit;
++                self
++            }
++        },
++        as_args: "--report-member-function-templates",
+     },
+ 
+     /// Use a newtype wrapper to denote types which are `const` in their own
