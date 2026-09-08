@@ -540,7 +540,11 @@ a memcpy. Such self-referential pointers are common - even some implementations 
 <p>Non-POD types are awkward:</p>
 <ul>
 <li>You can't just <em>have</em> one as a Rust variable. Normally you hold them in a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>, though there are other options.</li>
-<li>There is no access to fields (yet).</li>
+<li>Fields are read through generated accessors rather than directly. <code>autocxx</code> gives every public
+data member a method of the same name: a <code>b</code> field is read with <code>obj.b()</code>. A field Rust could
+hold by value comes back by value, anything else comes back as a reference borrowed from the
+object, and an array or reference member gets a documented refusal instead of an accessor.
+There are no setters yet.</li>
 <li>You can't even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
 </ul>
 <p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don't worry: you can't mess this up. If the C++ type doesn't in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you're <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they're trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
@@ -1938,14 +1942,23 @@ compiler emits nothing at all. There is no single symbol for Rust to link
 against, so <code>autocxx</code> reports the problem instead of generating code which
 fails to link. (On MSVC, where the decorated name is the same either way,
 <code>autocxx</code> can't tell, and you get the link error.)</p>
-<p>Its type must also be POD, or one which <code>bindgen</code> writes directly in Rust such
-as <code>int</code>. <code>autocxx</code> exposes a non-POD type as an opaque object which is only
-usable behind a pointer, so there is nothing useful it could hand you for a
-variable of such a type.</p>
+<p>A variable of non-POD type is reached differently, because there is no
+non-POD value <code>autocxx</code> can hand Rust at all. Such a variable appears as a
+<em>function</em> of its own name - <code>ffi::BOB()</code> - which returns an opaque holder
+standing for a <code>const</code> reference to it. The holder's <code>get()</code> gives you the
+address of the variable itself; nothing is copied, so the type need not be
+copy-constructible and what you read is whatever C++ has most recently written
+there.</p>
+<pre><code class="language-rust ignore">let bob = ffi::BOB();
+let bob = unsafe { &amp;*bob.as_ref().unwrap().get() };
+assert_eq!(bob.get().as_ref().unwrap().to_str().unwrap(), "hello");</code></pre>
 <p>A static data member of a class works too, and needs no <code>extern</code> because
 defining it gives it external linkage anyway. Its name is flattened into the
 enclosing namespace, so <code>struct Anna { static Point ORIGIN; };</code> asks for
-<code>generate!("Anna_ORIGIN")</code> and appears as <code>ffi::Anna_ORIGIN</code>.</p>
+<code>generate!("Anna_ORIGIN")</code> and appears as <code>ffi::Anna_ORIGIN</code>. It must be POD:
+the flattened name is not one C++ has, so there is nothing for the getter a
+non-POD variable needs to call it by, and <code>autocxx</code> says so rather than
+generating C++ which does not compile.</p>
 <p>One assumption comes with the <code>unsafe</code>. Rust requires that an object does not
 change while Rust holds a reference to it, and <code>autocxx</code> has no way to enforce
 that on the C++ side. Reading a variable which C++ mutates concurrently is
