@@ -97,6 +97,35 @@ Walking a comp's members resolves through type refs and aliases while that
 comp is on loan from the context, hence `ItemResolver::resolve_fallible`,
 which answers `None` rather than panicking for the item that is out.
 
+A class names such a type in either of two places, and both are collected. A
+field is one. An inner type of the class itself is the other - `using
+difference_type = typename Params::difference_type;` - and there the class
+may hold nothing of that type at all. Collecting only the fields left a class
+of the second shape with no bound on its parameter, while the impl saying it
+has that inner type assigned a projection through that same parameter: an
+impl which cannot compile, on a class which is otherwise fine.
+
+Two things keep that from bounding a parameter for a projection which is not
+there to need it. An opaque inner type is not walked through: it is rendered
+as a blob of the right size, the name it looks up is not generated with it,
+and a bound would only narrow what the class can be instantiated over. And a
+bound is put on a parameter only where the trait it names is declared, which
+is for the names of the dependent qualified types which are generated, so
+that nothing is left naming a trait nobody declared.
+
+Whether an inner type is opaque is worked out before any class is on loan
+from the context: `Item::is_opaque` resolves an item's ancestors, and one of
+those is the class being recorded, which is out of the context while it is
+recorded.
+
+Where nothing else uses the parameter it is still not rendered - `template
+<class C, class T> struct iterator { typedef T value_type; };` has no fields
+at all - and an impl assigning `iterator_value_type<T>` would then name a `T`
+which is not in scope. So an impl is emitted only where its associated type
+can be named under the parameters its class was rendered with. Saying nothing
+leaves the class not implementing the trait, which is where it stood before
+this option existed.
+
 The trait is declared in the root module, because that is where the
 dependent qualified types which need it are parented, so every reference
 to one names it through that module: under `--enable-cxx-namespaces` a
@@ -111,20 +140,29 @@ derives, on the assumption that every inner type reached through the trait
 derives the same set; an inner type which derives less does not satisfy
 them.
 
-A parameter only gets the bound where a member of the class names the
-dependent qualified type, so a class holding an instantiation which needs
-it - `Outer<T>` holding a `Container<T>` - does not acquire it, and
-neither does one which has such a class as a base. That wants the bounds
-put where the trait is used rather than on the trait, which is a bigger
-change than this.
+A class holding an instantiation which needs the bound - `Outer<T>` holding
+a `Container<T>` - does not acquire it, and neither does one which has such
+a class as a base: the walk stops at another comp, whose parameters are its
+own business, so what that comp requires of them is not read back out. The
+parameter is used, and the class is rendered with it; only the bound is
+missing, so the bindings do not compile.
+
+Reading it out means inferring a requirement which nothing in this class
+spells, by mapping an instantiation's arguments onto its definition's
+parameters and substituting through them, to a fixed point, since what holds
+one may itself be held. It does not need the associated-type bounds moved
+off the trait, and it does not need a projection in the IR to point at - a
+table of parameter and inner name apiece would carry it. What it does need
+is an answer for an argument which is not simply a parameter, `Base<Wrap<T>>`
+wanting a predicate on the substituted type rather than on a parameter, and
+for parameter packs and partial specializations.
 
 A class implements the trait for each inner type it declares, and an
 inherited one is not among them, so a template instantiated over a derived
 class whose base holds the inner type has no impl to reach.
-
 --- a/clang.rs
 +++ b/clang.rs
-@@ -1740,8 +1740,15 @@
+@@ -1880,8 +1880,15 @@
              static ASSOC_TYPE_RE: OnceLock<regex::Regex> = OnceLock::new();
              ASSOC_TYPE_RE
                  .get_or_init(|| {
@@ -142,11 +180,10 @@ class whose base holds the inner type has no impl to reach.
                  })
                  .is_match(spelling.as_ref())
          }
-@@ -1751,6 +1758,40 @@
-                 hacky_parse_associated_type(
+@@ -1892,6 +1899,40 @@
                      self.canonical_type().spelling(),
                  ))
-+    }
+     }
 +
 +    /// The single inner type name an associated template type looks up, where
 +    /// that is what it looks up: `Associated` for `T::Associated`.
@@ -180,9 +217,10 @@ class whose base holds the inner type has no impl to reach.
 +        hacky_parse_associated_type_name(self.spelling()).or_else(|| {
 +            hacky_parse_associated_type_name(self.canonical_type().spelling())
 +        })
-     }
++    }
  }
  
+ /// The `CanonicalTypeDeclaration` type exists as proof-by-construction that its
 --- a/codegen/impl_debug.rs
 +++ b/codegen/impl_debug.rs
 @@ -154,6 +154,7 @@
@@ -296,7 +334,7 @@ class whose base holds the inner type has no impl to reach.
              TypeKind::TemplateInstantiation(ref inst) => {
                  inst.codegen(ctx, result, item);
              }
-@@ -2477,12 +2533,46 @@
+@@ -2477,12 +2533,54 @@
  
          let mut generic_param_names = vec![];
  
@@ -310,6 +348,14 @@ class whose base holds the inner type has no impl to reach.
 +                    tp_id,
 +                    associated_type_name,
 +                ) => {
++                    // Only where the trait exists. It is declared for the
++                    // names of the dependent qualified types which are
++                    // generated, so a member reached through something which
++                    // is not - an opaque inner type, say - would otherwise
++                    // leave a bound naming a trait nobody declared.
++                    if !ctx.inner_type_used(associated_type_name) {
++                        continue;
++                    }
 +                    // Two members can name the same inner type of the same
 +                    // parameter; the bound is one bound either way.
 +                    let names = bounds_by_param.entry(*tp_id).or_default();
@@ -343,7 +389,7 @@ class whose base holds the inner type has no impl to reach.
              generic_param_names.push(ident.clone());
  
              let prefix = ctx.trait_prefix();
-@@ -2877,6 +2967,16 @@
+@@ -2877,6 +2975,16 @@
                  (quote! {}, quote! {}, quote! {})
              };
  
@@ -360,7 +406,7 @@ class whose base holds the inner type has no impl to reach.
          let mut attributes = vec![];
          let mut needs_clone_impl = false;
          let mut needs_default_impl = false;
-@@ -3051,7 +3151,7 @@
+@@ -3051,7 +3159,7 @@
          };
  
          tokens.append_all(quote! {
@@ -369,7 +415,7 @@ class whose base holds the inner type has no impl to reach.
                  #( #fields )*
              }
          });
-@@ -3065,6 +3165,36 @@
+@@ -3065,6 +3173,51 @@
              let child_item = ctx.resolve_item(*ty);
              // assert_eq!(child_item.parent_id(), item.id());
              child_item.codegen(ctx, result, &());
@@ -386,6 +432,21 @@ class whose base holds the inner type has no impl to reach.
 +                !ctx.codegen_items().contains(&child_item.id()) ||
 +                child_item.is_blocklisted(ctx) ||
 +                !child_item.is_enabled_for_codegen(ctx)
++            {
++                continue;
++            }
++            // The inner type is named with the template parameters it uses,
++            // and this impl can only name the ones its own class was rendered
++            // with. A class whose parameter no field uses is rendered without
++            // it - `template <class C, class T> struct iterator { typedef T
++            // value_type; };` has no fields at all - and an impl assigning
++            // `iterator_value_type<T>` would then name a `T` which is not in
++            // scope. Saying nothing leaves the class not implementing the
++            // trait, which is what it was before this option existed.
++            let (child_params, _) = child_item.used_template_params(ctx);
++            if !child_params
++                .iter()
++                .all(|param| used_template_params.contains(param))
 +            {
 +                continue;
 +            }
@@ -406,7 +467,7 @@ class whose base holds the inner type has no impl to reach.
          }
  
          // NOTE: Some unexposed attributes (like alignment attributes) may
-@@ -3248,7 +3378,7 @@
+@@ -3261,7 +3414,7 @@
  
          if needs_clone_impl {
              result.push(quote! {
@@ -415,7 +476,7 @@ class whose base holds the inner type has no impl to reach.
                      fn clone(&self) -> Self { *self }
                  }
              });
-@@ -3261,6 +3391,7 @@
+@@ -3274,6 +3427,7 @@
                  flex_inner_ty.as_ref(),
                  &generic_param_names,
                  &impl_generics_labels,
@@ -423,7 +484,7 @@ class whose base holds the inner type has no impl to reach.
              ));
          }
  
-@@ -3278,7 +3409,7 @@
+@@ -3291,7 +3445,7 @@
              // non-zero padding bytes, especially when forwards/backwards compatibility is
              // involved.
              result.push(quote! {
@@ -432,7 +493,7 @@ class whose base holds the inner type has no impl to reach.
                      fn default() -> Self {
                          #body
                      }
-@@ -3297,7 +3428,7 @@
+@@ -3310,7 +3464,7 @@
              let prefix = ctx.trait_prefix();
  
              result.push(quote! {
@@ -441,7 +502,7 @@ class whose base holds the inner type has no impl to reach.
                      #impl_
                  }
              });
-@@ -3311,13 +3442,18 @@
+@@ -3324,13 +3478,18 @@
                  &ty_for_impl,
                  opaque_bases.is_some(),
              ) {
@@ -467,7 +528,7 @@ class whose base holds the inner type has no impl to reach.
                  };
  
                  let prefix = ctx.trait_prefix();
-@@ -3331,7 +3467,7 @@
+@@ -3344,7 +3503,7 @@
  
          if !methods.is_empty() {
              result.push(quote! {
@@ -476,7 +537,7 @@ class whose base holds the inner type has no impl to reach.
                      #( #methods )*
                  }
              });
-@@ -3347,6 +3483,7 @@
+@@ -3360,6 +3519,7 @@
          flex_inner_ty: Option<&proc_macro2::TokenStream>,
          generic_param_names: &[Ident],
          impl_generics_labels: &proc_macro2::TokenStream,
@@ -484,7 +545,7 @@ class whose base holds the inner type has no impl to reach.
      ) -> proc_macro2::TokenStream {
          let prefix = ctx.trait_prefix();
  
-@@ -3463,12 +3600,12 @@
+@@ -3476,12 +3636,12 @@
          };
  
          quote! {
@@ -499,11 +560,10 @@ class whose base holds the inner type has no impl to reach.
                  #from_ptr_sized
              }
          }
-@@ -4969,6 +5106,15 @@
-                 let name = item.canonical_name(ctx);
+@@ -4983,6 +5143,15 @@
                  let ident = ctx.rust_ident(name);
                  Ok(syn::parse_quote! { #ident })
-+            }
+             }
 +            TypeKind::DependentQualifiedType(_, ref associated_type_name) => {
 +                let ident = ctx.rust_ident(item.canonical_name(ctx));
 +                let associated_type = ctx.rust_ident(associated_type_name);
@@ -512,9 +572,10 @@ class whose base holds the inner type has no impl to reach.
 +                Ok(syn::parse_quote! {
 +                    < #ident as #trait_name > :: #associated_type
 +                })
-             }
++            }
              TypeKind::ObjCSel => Ok(syn::parse_quote! { objc::runtime::Sel }),
              TypeKind::ObjCId => Ok(syn::parse_quote! { id }),
+             TypeKind::ObjCInterface(ref interface) => {
 --- a/ir/analysis/derive.rs
 +++ b/ir/analysis/derive.rs
 @@ -91,6 +91,8 @@
@@ -586,18 +647,18 @@ class whose base holds the inner type has no impl to reach.
                       instantiated as"
 --- a/ir/analysis/template_params.rs
 +++ b/ir/analysis/template_params.rs
-@@ -194,6 +194,11 @@
-             // that every template parameter always used.
+@@ -195,6 +195,11 @@
              EdgeKind::TemplateDeclaration |
              EdgeKind::TemplateParameterDefinition => false,
-+
+ 
 +            // A dependent qualified name is the one way a template parameter
 +            // can be used without any field naming it directly.
 +            EdgeKind::DependentQualifiedTypeParam |
 +            EdgeKind::ContainedDependentQualifiedType => true,
- 
++
              // Since we have to be careful about which edges we consider for
              // this analysis to be correct, we ignore generic edges. We also
+             // avoid a `_` wild card to force authors of new edge kinds to
 @@ -531,6 +536,13 @@
                  trace!("    named type, trivially uses itself");
                  used_by_this_id.insert(id);
@@ -614,7 +675,15 @@ class whose base holds the inner type has no impl to reach.
              Some(TypeKind::TemplateInstantiation(inst)) => {
 --- a/ir/comp.rs
 +++ b/ir/comp.rs
-@@ -296,6 +296,12 @@
+@@ -16,6 +16,7 @@
+ use crate::ir::derive::CanDeriveCopy;
+ use crate::parse::ParseError;
+ use crate::HashMap;
++use crate::HashSet;
+ use crate::NonCopyUnionStyle;
+ use std::cmp;
+ use std::io;
+@@ -296,6 +297,12 @@
          match *self {
              Field::DataMember(ref data) => {
                  tracer.visit_kind(data.ty.into(), EdgeKind::Field);
@@ -627,7 +696,7 @@ class whose base holds the inner type has no impl to reach.
              }
              Field::Bitfields(BitfieldUnit { ref bitfields, .. }) => {
                  for bf in bitfields {
-@@ -521,6 +527,7 @@
+@@ -521,6 +528,7 @@
              public,
              offset,
              has_default_member_initializer,
@@ -635,7 +704,7 @@ class whose base holds the inner type has no impl to reach.
          })
      }
  }
-@@ -794,13 +801,8 @@
+@@ -794,13 +802,8 @@
          canonical_type_name: &str,
          methods: &[Method],
      ) {
@@ -651,7 +720,7 @@ class whose base holds the inner type has no impl to reach.
          };
  
          for field in fields.iter_mut() {
-@@ -955,6 +957,55 @@
+@@ -955,6 +958,55 @@
      }
  }
  
@@ -707,7 +776,7 @@ class whose base holds the inner type has no impl to reach.
  impl Trace for CompFields {
      type Extra = ();
  
-@@ -1005,6 +1056,9 @@
+@@ -1005,6 +1057,9 @@
      /// Whether the field has a default member initializer, `None` where clang
      /// could not be asked.
      has_default_member_initializer: Option<bool>,
@@ -717,7 +786,7 @@ class whose base holds the inner type has no impl to reach.
  }
  
  impl FieldMethods for FieldData {
-@@ -1140,6 +1194,10 @@
+@@ -1140,6 +1195,10 @@
      /// `TypeKind::TemplateInstantiation`.
      template_params: Vec<TypeId>,
  
@@ -728,7 +797,7 @@ class whose base holds the inner type has no impl to reach.
      /// The method declarations inside this class, if in C++ mode.
      methods: Vec<Method>,
  
-@@ -1218,6 +1276,7 @@
+@@ -1218,6 +1277,7 @@
              visibility: Visibility::Public,
              fields: CompFields::default(),
              template_params: vec![],
@@ -736,7 +805,7 @@ class whose base holds the inner type has no impl to reach.
              methods: vec![],
              constructors: vec![],
              destructor: None,
-@@ -1608,7 +1667,8 @@
+@@ -1608,7 +1668,8 @@
                      ci.packed_attr = true;
                  }
                  CXCursor_TemplateTypeParameter => {
@@ -746,23 +815,53 @@ class whose base holds the inner type has no impl to reach.
                          "Item::type_param shouldn't fail when pointing \
                           at a TemplateTypeParameter",
                      );
-@@ -1876,6 +1936,15 @@
+@@ -1884,6 +1945,45 @@
              .assign_field_names(ctx, canonical_type_name, &self.methods);
      }
  
 +    /// Record which members depend on an inner type of a template parameter.
++    ///
++    /// A field is one way to name one. An inner type of this class is the
++    /// other, and it is the one which cannot be skipped: `using difference_type
++    /// = typename Params::difference_type;` puts the projection in the alias,
++    /// and the class may hold nothing of that type at all. The alias is
++    /// rendered whether or not a field names it, and the impl saying this class
++    /// has that inner type is emitted with the bounds collected here - so
++    /// missing it emits an impl whose associated type is a projection through a
++    /// parameter that was never bounded, which does not compile.
 +    pub(crate) fn record_dependent_qualified_types(
 +        &mut self,
 +        ctx: &BindgenContext,
++        opaque_inner_types: &HashSet<TypeId>,
 +    ) {
 +        self.dependent_qualified_type_params
 +            .append(&mut self.fields.record_dependent_qualified_types(ctx));
++        let from_inner_types: Vec<TypeId> = self
++            .inner_types
++            .iter()
++            // Not through an opaque inner type: it is rendered as a blob of
++            // the right size, the name it looks up is not generated with it,
++            // and bounding the parameter would only narrow what this class can
++            // be instantiated over.
++            .filter(|tid| !opaque_inner_types.contains(tid))
++            .filter_map(|tid| {
++                tid.into_resolver()
++                    .through_type_refs()
++                    .through_type_aliases()
++                    .resolve_fallible(ctx)
++            })
++            .flat_map(|item| {
++                let tid = item.id().expect_type_id(ctx);
++                item.expect_type().dependent_qualified_types(ctx, tid)
++            })
++            .collect();
++        self.dependent_qualified_type_params.extend(from_inner_types);
 +    }
 +
      /// Returns whether the current union can be represented as a Rust `union`
      ///
      /// Requirements:
-@@ -2031,6 +2100,13 @@
+@@ -2039,6 +2139,13 @@
      fn self_template_params(&self, _ctx: &BindgenContext) -> Vec<TypeId> {
          self.template_params.clone()
      }
@@ -778,7 +877,7 @@ class whose base holds the inner type has no impl to reach.
  impl Trace for CompInfo {
 --- a/ir/context.rs
 +++ b/ir/context.rs
-@@ -316,9 +316,11 @@
+@@ -345,9 +345,11 @@
      /// item ids during parsing.
      types: HashMap<TypeKey, TypeId>,
  
@@ -793,7 +892,7 @@ class whose base holds the inner type has no impl to reach.
  
      /// A cursor to module map. Similar reason than above.
      modules: HashMap<Cursor, ModuleId>,
-@@ -495,6 +497,13 @@
+@@ -531,6 +533,13 @@
      /// Populated when we enter codegen by `compute_has_float`; always `None`
      /// before that and `Some` after.
      has_float: Option<HashSet<ItemId>>,
@@ -807,7 +906,7 @@ class whose base holds the inner type has no impl to reach.
  }
  
  /// A traversal of allowlisted items.
-@@ -614,6 +623,7 @@
+@@ -651,6 +660,7 @@
              have_destructor: None,
              has_type_param_in_array: None,
              has_float: None,
@@ -815,7 +914,7 @@ class whose base holds the inner type has no impl to reach.
          }
      }
  
-@@ -813,11 +823,17 @@
+@@ -850,11 +860,17 @@
      }
  
      /// Add a new named template type parameter to this context's item set.
@@ -835,7 +934,7 @@ class whose base holds the inner type has no impl to reach.
              "Should directly be a named type, not a resolved reference or anything"
          );
          assert_eq!(
-@@ -836,7 +852,9 @@
+@@ -873,7 +889,9 @@
  
          let old_named_ty = self
              .type_params
@@ -846,7 +945,7 @@ class whose base holds the inner type has no impl to reach.
          assert!(
              old_named_ty.is_none(),
              "should not have already associated a named type with this id"
-@@ -844,13 +862,21 @@
+@@ -881,13 +899,21 @@
      }
  
      /// Get the named type defined at the given cursor location, if we've
@@ -871,7 +970,7 @@ class whose base holds the inner type has no impl to reach.
      }
  
      // TODO: Move all this syntax crap to other part of the code.
-@@ -887,6 +913,31 @@
+@@ -924,6 +950,31 @@
          Cow::Borrowed(name)
      }
  
@@ -903,7 +1002,7 @@ class whose base holds the inner type has no impl to reach.
      /// Returns a mangled name as a rust identifier.
      pub(crate) fn rust_ident<S>(&self, name: S) -> Ident
      where
-@@ -1014,21 +1065,23 @@
+@@ -1051,21 +1102,23 @@
          }
      }
  
@@ -923,20 +1022,19 @@ class whose base holds the inner type has no impl to reach.
                  None
              })
 -            .collect();
--
--        for id in comp_item_ids {
 +            .collect()
 +    }
 +
 +    /// Assign a new generated name for each anonymous field.
 +    fn assign_field_names(&mut self) {
 +        let _t = self.timer("assign_field_names");
-+
+ 
+-        for id in comp_item_ids {
 +        for id in self.comp_item_ids() {
              let canonical_type_name =
                  self.resolve_item(id).canonical_name(self);
              self.with_loaned_item(id, |ctx, item| {
-@@ -1189,6 +1242,9 @@
+@@ -1226,6 +1279,9 @@
  
          self.assign_field_names();
  
@@ -946,7 +1044,7 @@ class whose base holds the inner type has no impl to reach.
          self.assert_no_dangling_references();
  
          // Compute the allowlisted set after processing replacements and
-@@ -1213,9 +1269,76 @@
+@@ -1250,11 +1306,104 @@
          self.compute_has_float();
          self.compute_cannot_derive_hash();
          self.compute_cannot_derive_partialord_partialeq_or_eq();
@@ -954,8 +1052,8 @@ class whose base holds the inner type has no impl to reach.
  
          let ret = cb(&self)?;
          Ok((ret, self.options))
-+    }
-+
+     }
+ 
 +    /// Record, against each comp, which of its members depend on an inner type
 +    /// of a template parameter.
 +    ///
@@ -968,14 +1066,40 @@ class whose base holds the inner type has no impl to reach.
 +        }
 +        let _t = self.timer("record_dependent_qualified_types");
 +
-+        for id in self.comp_item_ids() {
++        // Which inner types are opaque, worked out before any class is on
++        // loan: `Item::is_opaque` resolves an item's ancestors, and one of
++        // those is the class being recorded, which is out of the context while
++        // it is recorded.
++        let comp_ids = self.comp_item_ids();
++        let mut opaque_inner_types: HashSet<TypeId> = HashSet::default();
++        for id in &comp_ids {
++            let inner_types = match self
++                .resolve_item(*id)
++                .kind()
++                .as_type()
++                .map(|ty| ty.kind())
++            {
++                Some(TypeKind::Comp(comp)) => comp.inner_types().to_vec(),
++                _ => vec![],
++            };
++            for inner in inner_types {
++                if self
++                    .resolve_item_fallible(inner)
++                    .is_some_and(|item| item.is_opaque(self, &()))
++                {
++                    opaque_inner_types.insert(inner);
++                }
++            }
++        }
++
++        for id in comp_ids {
 +            self.with_loaned_item(id, |ctx, item| {
 +                item.kind_mut()
 +                    .as_type_mut()
 +                    .unwrap()
 +                    .as_comp_mut()
 +                    .unwrap()
-+                    .record_dependent_qualified_types(ctx);
++                    .record_dependent_qualified_types(ctx, &opaque_inner_types);
 +            });
 +        }
 +    }
@@ -1020,10 +1144,12 @@ class whose base holds the inner type has no impl to reach.
 +    /// name. Only those get a trait generated for them.
 +    pub(crate) fn inner_type_used(&self, name: &str) -> bool {
 +        self.used_inner_type_names.contains(name)
-     }
- 
++    }
++
      /// When the `__testing_only_extra_assertions` feature is enabled, this
-@@ -2572,7 +2695,10 @@
+     /// function walks the IR graph and asserts that we do not have any edges
+     /// referencing an `ItemId` for which we do not have an associated IR item.
+@@ -2760,7 +2909,10 @@
                                      TypeKind::Function(..) |
                                      TypeKind::ResolvedTypeRef(..) |
                                      TypeKind::Opaque |
@@ -1035,7 +1161,7 @@ class whose base holds the inner type has no impl to reach.
                                      _ => {}
                                  }
                                  if self.is_stdint_type(&name) {
-@@ -3094,17 +3220,28 @@
+@@ -3282,17 +3434,28 @@
  
      /// Finish configuring and perform the actual item resolution.
      pub(crate) fn resolve(self, ctx: &BindgenContext) -> &Item {
@@ -1066,7 +1192,7 @@ class whose base holds the inner type has no impl to reach.
              }
  
              let ty_kind = item.as_type().map(|t| t.kind());
-@@ -3122,7 +3259,7 @@
+@@ -3310,7 +3473,7 @@
                  {
                      id = next_id.into();
                  }
@@ -1075,7 +1201,7 @@ class whose base holds the inner type has no impl to reach.
              }
          }
      }
-@@ -3157,6 +3294,13 @@
+@@ -3345,6 +3508,13 @@
  }
  
  impl TemplateParameters for PartialType {
@@ -1091,7 +1217,7 @@ class whose base holds the inner type has no impl to reach.
          // don't and this information is unavailable.
 --- a/ir/item.rs
 +++ b/ir/item.rs
-@@ -1294,11 +1294,26 @@
+@@ -1294,12 +1294,27 @@
          ctx.resolve_item_fallible(*self)
              .map_or(vec![], |item| item.self_template_params(ctx))
      }
@@ -1108,25 +1234,21 @@ class whose base holds the inner type has no impl to reach.
  impl TemplateParameters for Item {
      fn self_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId> {
          self.kind.self_template_params(ctx)
-+    }
+     }
 +
 +    fn used_dependent_qualified_types(
 +        &self,
 +        ctx: &BindgenContext,
 +    ) -> Vec<TypeId> {
 +        self.kind.used_dependent_qualified_types(ctx)
-     }
++    }
  }
  
-@@ -1309,6 +1324,18 @@
-             // If we start emitting bindings to explicitly instantiated
-             // functions, then we'll need to check ItemKind::Function for
-             // template params.
-+            ItemKind::Function(_) | ItemKind::Module(_) | ItemKind::Var(_) => {
-+                vec![]
-+            }
-+        }
-+    }
+ impl TemplateParameters for ItemKind {
+@@ -1314,6 +1329,18 @@
+             }
+         }
+     }
 +
 +    fn used_dependent_qualified_types(
 +        &self,
@@ -1134,10 +1256,15 @@ class whose base holds the inner type has no impl to reach.
 +    ) -> Vec<TypeId> {
 +        match *self {
 +            ItemKind::Type(ref ty) => ty.used_dependent_qualified_types(ctx),
-             ItemKind::Function(_) | ItemKind::Module(_) | ItemKind::Var(_) => {
-                 vec![]
-             }
-@@ -1628,13 +1655,31 @@
++            ItemKind::Function(_) | ItemKind::Module(_) | ItemKind::Var(_) => {
++                vec![]
++            }
++        }
++    }
+ }
+ 
+ // An utility function to handle recursing inside nested types.
+@@ -1638,13 +1665,31 @@
          if ty.kind() == CXType_Unexposed ||
              location.cur_type().kind() == CXType_Unexposed
          {
@@ -1172,7 +1299,7 @@ class whose base holds the inner type has no impl to reach.
                  return Ok(ctx.build_ty_wrapper(id, param_id, None, ty));
              }
          }
-@@ -1759,7 +1804,7 @@
+@@ -1769,7 +1814,7 @@
                           id = {id:?}; spelling = {}",
                          ty.spelling()
                      );
@@ -1181,7 +1308,7 @@ class whose base holds the inner type has no impl to reach.
                          .ok_or(ParseError::Recurse)
                  } else {
                      result
-@@ -1781,6 +1826,7 @@
+@@ -1791,6 +1836,7 @@
          with_id: Option<ItemId>,
          location: clang::Cursor,
          ctx: &mut BindgenContext,
@@ -1189,7 +1316,7 @@ class whose base holds the inner type has no impl to reach.
      ) -> Option<TypeId> {
          let ty = location.cur_type();
  
-@@ -1788,6 +1834,7 @@
+@@ -1798,6 +1844,7 @@
              "Item::type_param:\n\
               \twith_id = {with_id:?},\n\
               \tty = {} {ty:?},\n\
@@ -1197,7 +1324,7 @@ class whose base holds the inner type has no impl to reach.
               \tlocation: {location:?}",
              ty.spelling(),
          );
-@@ -1915,7 +1962,8 @@
+@@ -1925,7 +1972,8 @@
          // something we know will always exist.
          let parent = ctx.root_module().into();
  
@@ -1207,7 +1334,7 @@ class whose base holds the inner type has no impl to reach.
              return Some(if let Some(with_id) = with_id {
                  ctx.build_ty_wrapper(with_id, id, Some(parent), &ty)
              } else {
-@@ -1927,17 +1975,56 @@
+@@ -1937,17 +1985,56 @@
          // tests/headers/variadic_tname.hpp.
          let name = ty_spelling.replace("const ", "").replace('.', "");
  
@@ -1277,11 +1404,10 @@ class whose base holds the inner type has no impl to reach.
  
 --- a/ir/template.rs
 +++ b/ir/template.rs
-@@ -104,6 +104,14 @@
-     /// anything but types, so we must treat them as opaque, and avoid
+@@ -105,6 +105,14 @@
      /// instantiating them.
      fn self_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId>;
-+
+ 
 +    /// Get the `TypeId`s of the dependent qualified types this declaration
 +    /// contains: the types of any fields which depend on a template parameter
 +    /// without being a `TypeParam` themselves, such as `typename T::Inner`.
@@ -1289,9 +1415,10 @@ class whose base holds the inner type has no impl to reach.
 +        &self,
 +        _ctx: &BindgenContext,
 +    ) -> Vec<TypeId>;
- 
++
      /// Get the number of free template parameters this template declaration
      /// has.
+     fn num_self_template_params(&self, ctx: &BindgenContext) -> usize {
 --- a/ir/traversal.rs
 +++ b/ir/traversal.rs
 @@ -175,6 +175,18 @@
@@ -1426,12 +1553,10 @@ class whose base holds the inner type has no impl to reach.
          )
      }
  
-@@ -161,6 +240,22 @@
-     pub(crate) fn named(name: String) -> Self {
-         let name = if name.is_empty() { None } else { Some(name) };
+@@ -163,6 +242,22 @@
          Self::new(name, None, TypeKind::TypeParam, false)
-+    }
-+
+     }
+ 
 +    /// Creates a new type naming an inner type of a template parameter, as
 +    /// `typename T::Inner` does.
 +    pub(crate) fn dependent_qualified_type(
@@ -1446,9 +1571,11 @@ class whose base holds the inner type has no impl to reach.
 +            TypeKind::DependentQualifiedType(type_param, associated_type_name),
 +            false,
 +        )
-     }
- 
++    }
++
      /// Is this a floating point type?
+     pub(crate) fn is_float(&self) -> bool {
+         matches!(self.kind, TypeKind::Float(..))
 @@ -327,6 +422,7 @@
      ) -> Option<&'tr Type> {
          match self.kind {
@@ -1476,21 +1603,21 @@ class whose base holds the inner type has no impl to reach.
              TypeKind::ObjCInterface(..) => "ObjCInterface",
              TypeKind::ObjCId => "ObjCId",
              TypeKind::ObjCSel => "ObjCSel",
-@@ -551,6 +650,13 @@
- impl TemplateParameters for Type {
+@@ -552,6 +651,13 @@
      fn self_template_params(&self, ctx: &BindgenContext) -> Vec<TypeId> {
          self.kind.self_template_params(ctx)
-+    }
+     }
 +
 +    fn used_dependent_qualified_types(
 +        &self,
 +        ctx: &BindgenContext,
 +    ) -> Vec<TypeId> {
 +        self.kind.used_dependent_qualified_types(ctx)
-     }
++    }
  }
  
-@@ -579,10 +685,26 @@
+ impl TemplateParameters for TypeKind {
+@@ -579,12 +685,28 @@
              TypeKind::Reference(..) |
              TypeKind::UnresolvedTypeRef(..) |
              TypeKind::TypeParam |
@@ -1499,8 +1626,8 @@ class whose base holds the inner type has no impl to reach.
              TypeKind::ObjCId |
              TypeKind::ObjCSel |
              TypeKind::ObjCInterface(_) => vec![],
-+        }
-+    }
+         }
+     }
 +
 +    fn used_dependent_qualified_types(
 +        &self,
@@ -1514,20 +1641,22 @@ class whose base holds the inner type has no impl to reach.
 +                comp.used_dependent_qualified_types(ctx)
 +            }
 +            _ => vec![],
-         }
-     }
++        }
++    }
  }
-@@ -683,6 +805,10 @@
  
+ /// The kind of float this type represents.
+@@ -684,6 +806,10 @@
      /// A named type, that is, a template parameter.
      TypeParam,
-+
+ 
 +    /// An inner type of a template parameter, named as `typename T::Inner`
 +    /// names one: the `TypeParam` it qualifies, and the name it looks up.
 +    DependentQualifiedType(TypeId, String),
- 
++
      /// Objective C interface. Always referenced through a pointer
      ObjCInterface(ObjCInterface),
+ 
 @@ -942,7 +1068,7 @@
                                          CXCursor_TemplateTypeParameter => {
                                              declared_params += 1;
@@ -1553,7 +1682,7 @@ class whose base holds the inner type has no impl to reach.
              TypeKind::UnresolvedTypeRef(_, _, None) |
 --- a/options/mod.rs
 +++ b/options/mod.rs
-@@ -2299,6 +2299,37 @@
+@@ -2323,6 +2323,37 @@
          },
          as_args: "--wrap-unsafe-ops",
      },
