@@ -241,6 +241,41 @@ fn test_return_reference_cpprefs() {
     run_cpprefs_test(cxx, hdr, rs, &["give_bob"], &["Bob"]);
 }
 
+/// As [`test_return_reference_cpprefs`], for a class which says what `&`
+/// means for its own objects. What it says need have nothing to do with where
+/// the object is, so the wrapper turning the returned reference into the
+/// pointer the bridge carries must not ask the class.
+#[test]
+fn test_return_reference_to_type_overloading_address_of_cpprefs() {
+    let cxx = indoc! {"
+        Bob3 DECOY { 99, 99 };
+        const Bob3* Bob3::operator&() const { return ::std::addressof(DECOY); }
+        Bob3* Bob3::operator&() { return ::std::addressof(DECOY); }
+        const Bob3& give_bob3(const Bob3& input_bob) {
+            return input_bob;
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        struct Bob3 {
+            uint32_t a;
+            uint32_t b;
+            const Bob3* operator&() const;
+            Bob3* operator&();
+        };
+        extern Bob3 DECOY;
+        const Bob3& give_bob3(const Bob3& input_bob);
+    "};
+    let rs = quote! {
+        let b = CppPin::new(ffi::Bob3 { a: 3, b: 4 });
+        let bob = ffi::give_bob3(b.as_cpp_ref());
+        let val = unsafe { bob.as_ref() };
+        assert_eq!(val.b, 4);
+    };
+    run_cpprefs_test(cxx, hdr, rs, &["give_bob3"], &["Bob3"]);
+}
+
 /// The mutable twin of [`test_return_reference_cpprefs`]. A returned mutable
 /// reference has always come back as a `CppMutLtRef`; now the parameter which
 /// it borrows from is a wrapper too, so the whole signature is C++ references

@@ -175,10 +175,15 @@ impl TypeConversionPolicy {
                 cpp: PointerCppConversion::IgnoredPlacementPtrParameter,
                 ..
             } => None,
+            // `addressof` rather than `&`, because a class may overload
+            // `operator&` and one which does hands back whatever it likes -
+            // the address of the referent is then not what `&` produces. The
+            // `<memory>` this needs is among the headers every function
+            // wrapper already gets.
             Self::Pointer {
                 cpp: PointerCppConversion::FromReferenceToPointer,
                 ..
-            } => Some(format!("&{var_name}")),
+            } => Some(format!("::std::addressof({var_name})")),
             // The rvalue counterpart of `FromPointerToReference`'s `(*var)`.
             // `static_cast` rather than `std::move` because that is precisely
             // what this is - the two are the same operation, and the cast
