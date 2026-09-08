@@ -25395,6 +25395,13 @@ fn test_empty_base_named_through_a_typedef() {
 /// four-byte type that blob is plain `u32`, which autocxx used to unwrap and
 /// hand to cxx: `void fx_take_bu(fx_BU)`, taking a struct by value, became
 /// `fn fx_take_bu(b: u32)`. Nothing in either language then complains.
+///
+/// The refusal also has to describe the way out, and there is no `generate!`
+/// directive which is one: the name in the signature is the one the using
+/// declaration introduced, and nothing which reaches autocxx connects it to the
+/// type it aliases. `generate!("fx_outer::fx_BU")` generates that type and
+/// changes nothing here; only the header naming the type through `fx_outer`
+/// does.
 #[test]
 fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
     let hdr = indoc! {"
@@ -25406,14 +25413,32 @@ fn test_type_hidden_by_using_declaration_is_refused_not_flattened() {
         using fx_outer::fx_BU;
         inline void fx_take_bu(fx_BU b) { (void)b; }
     "};
-    run_test_expect_fail_with_error(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {},
         &["fx_take_bu"],
         &[],
-        "replaced it with an opaque blob of bytes",
+        &[
+            "replaced it with an opaque blob of bytes",
+            "no `generate!` directive names what the declaration introduced",
+        ],
     );
+}
+
+/// And the advice that refusal gives, followed: the same header with the type
+/// spelt through the namespace which declares it binds.
+#[test]
+fn test_type_named_through_its_own_namespace_is_not_hidden() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_outer {
+            template<typename T> struct fx_Box { T contents; };
+            typedef fx_Box<uint32_t> fx_BU;
+        }
+        inline uint32_t fx_take_bu_ns(fx_outer::fx_BU b) { return b.contents; }
+    "};
+    run_test("", hdr, quote! {}, &["fx_take_bu_ns"], &[]);
 }
 
 /// As above, but the blob is what the function returns. The old bindings said
