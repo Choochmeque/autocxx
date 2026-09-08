@@ -9793,7 +9793,7 @@ fn test_std_array_of_size_t() {
     #include <cstddef>
     #include <cstdint>
     inline std::array<size_t, 2> get_sizes() { return {3, 4}; }
-    inline uint32_t sum_sizes(std::array<size_t, 2> a) { return a[0] + a[1]; }
+    inline uint32_t sum_sizes(std::array<size_t, 2> a) { return static_cast<uint32_t>(a[0] + a[1]); }
     "};
     let rs = quote! {
         let sizes = ffi::get_sizes();
