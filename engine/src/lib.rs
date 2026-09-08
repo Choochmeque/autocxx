@@ -1027,3 +1027,90 @@ fn proc_macro_span_to_miette_span(span: &proc_macro2::Span) -> SourceSpan {
     let (start, end) = r.unwrap_or((0, 0));
     SourceSpan::new(SourceOffset::from(start), SourceOffset::from(end))
 }
+
+#[cfg(test)]
+mod dependent_qualified_type_tests {
+    //! The vendored bindgen can give a member whose type is named through a
+    //! template parameter - `typename T::Inner` - that type, as an associated
+    //! type of a generated trait, instead of an opaque blob. autocxx does not
+    //! ask for it yet (see `dependent_qualified_types` for what still stands in
+    //! the way), so these are what exercise it.
+
+    use super::bindgen;
+
+    const HDR: &str = "
+        namespace ns {
+        struct Inner { typedef int related_type; };
+        template <typename T> class Container {
+        public:
+            typename T::related_type contents_;
+            const typename T::related_type* ptr_;
+        };
+        typedef Container<Inner> Concrete;
+        template <typename T> class ByCallback {
+        public:
+            void (*cb)(typename T::related_type);
+        };
+        }
+    ";
+
+    fn generate(dependent_qualified_types: bool) -> String {
+        bindgen::builder()
+            .header_contents("test.hpp", HDR)
+            .clang_args(["-x", "c++", "-std=c++14"])
+            .enable_cxx_namespaces()
+            .formatter(bindgen::Formatter::None)
+            .dependent_qualified_types(dependent_qualified_types)
+            .generate()
+            .expect("bindgen cannot parse the test header")
+            .to_string()
+    }
+
+    #[test]
+    fn dependent_qualified_type_becomes_an_associated_type() {
+        let rs = generate(true);
+        // The trait is declared in the root module, which is where the
+        // dependent qualified types needing it are parented, and named from
+        // `ns` through that module.
+        assert!(
+            rs.contains("pub trait __bindgen_has_inner_type_related_type"),
+            "{rs}"
+        );
+        assert!(
+            rs.contains("impl root :: __bindgen_has_inner_type_related_type for Inner"),
+            "{rs}"
+        );
+        assert!(
+            rs.contains("where T : root :: __bindgen_has_inner_type_related_type"),
+            "{rs}"
+        );
+        assert!(
+            rs.contains("< T as root :: __bindgen_has_inner_type_related_type > :: related_type"),
+            "{rs}"
+        );
+        // Through a pointer, and through the `const` which the spelling
+        // libclang gives such a type carries.
+        assert!(
+            rs.contains("pub ptr_ : * const < T as root :: __bindgen"),
+            "{rs}"
+        );
+        // And through a function signature, which is the other way a member
+        // can name one without naming it directly.
+        assert!(
+            rs.contains("pub struct ByCallback < T , > where T : root :: __bindgen"),
+            "{rs}"
+        );
+        // The parameter is used, so it is not discarded and the instantiation
+        // is of the template rather than of a blob.
+        assert!(
+            rs.contains("pub type Concrete = root :: ns :: Container <"),
+            "{rs}"
+        );
+    }
+
+    #[test]
+    fn off_by_default_leaves_the_blob() {
+        let rs = generate(false);
+        assert!(!rs.contains("__bindgen_has_inner_type"), "{rs}");
+    }
+}
