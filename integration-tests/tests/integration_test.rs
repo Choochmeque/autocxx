@@ -27501,6 +27501,53 @@ fn test_throws_matches_a_ctor_by_bare_class_name() {
     );
 }
 
+/// A nested class's throwing constructor, designated the way C++ spells the
+/// class. bindgen flattens the nesting into `fx_NestOuter_fx_NestInner`, a
+/// name nobody wrote and nobody has to know: `generate!` accepts either
+/// spelling and so does `throws!`.
+#[test]
+fn test_throwing_ctor_of_nested_class() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        struct fx_NestOuter {
+            struct fx_NestInner {
+                fx_NestInner(uint32_t x) {
+                    if (x == 0) throw std::runtime_error(\"fx nested refuses\");
+                    a = x;
+                }
+                uint32_t get() const { return a; }
+            private:
+                uint32_t a = 0;
+            };
+        };
+    "};
+    let rs = quote! {
+        let err = ffi::fx_NestOuter_fx_NestInner::new(0)
+            .try_within_unique_ptr()
+            .err()
+            .expect("this constructor throws for 0");
+        assert_eq!(err.what(), "fx nested refuses");
+        let obj = ffi::fx_NestOuter_fx_NestInner::new(5)
+            .try_within_unique_ptr()
+            .ok()
+            .unwrap();
+        assert_eq!(obj.get(), 5);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_NestOuter::fx_NestInner")
+            throws!("fx_NestOuter::fx_NestInner::fx_NestInner")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
 /// One designation covers every overload of a constructor, because all of them
 /// share the C++ name `fx_Many::fx_Many`. There is no spelling which picks out
 /// a single overload; if only one of them throws, the others become fallible

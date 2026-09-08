@@ -2318,17 +2318,22 @@ impl<'a> FnAnalyzer<'a> {
 
         // Check if this function is marked as potentially throwing C++ exceptions.
         // For methods, we also check with the class name prepended (e.g., "MyClass::method").
+        // Every spelling the class answers to, because a nested class has two:
+        // the `Outer_Inner` bindgen flattened it into and the `Outer::Inner`
+        // C++ itself uses, and the designation is written by whoever wrote the
+        // C++. See google/autocxx#1422 for the same two spellings in
+        // `generate!`.
         let designated_as_throwing = self
             .config
             .is_on_throws_list(&diagnostic_name.to_cpp_name())
             || match &kind {
                 FnKind::Method { impl_for, .. } | FnKind::TraitMethod { impl_for, .. } => {
-                    let method_qualified_name = format!(
-                        "{}::{}",
-                        impl_for.to_cpp_name(),
-                        diagnostic_name.get_final_item()
-                    );
-                    self.config.is_on_throws_list(&method_qualified_name)
+                    self.nested_cpp_names.spellings(impl_for).any(|spelling| {
+                        self.config.is_on_throws_list(&format!(
+                            "{spelling}::{}",
+                            diagnostic_name.get_final_item()
+                        ))
+                    })
                 }
                 FnKind::Function => false,
             }
