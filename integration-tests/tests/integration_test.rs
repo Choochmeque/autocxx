@@ -6224,7 +6224,6 @@ fn test_up_in_struct() {
 }
 
 #[test]
-#[ignore] // https://github.com/rust-lang/rust-bindgen/issues/3158
 fn test_typedef_to_std_in_struct() {
     let hdr = indoc! {"
         #include <string>
