@@ -266,17 +266,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      # Need nightly rust.
-      - uses: hecrj/setup-rust-action@v1
+      # Nightly for `-Z build-std`, which rebuilds std from rust-src with
+      # the sanitizer enabled. rustfmt because the integration harness logs
+      # at info, and the engine formats bindgen's output whenever it does
+      # (engine/src/lib.rs); without rustfmt on PATH every generated binding
+      # prints "Failed to run rustfmt ... (non-fatal, continuing)".
+      - uses: dtolnay/rust-toolchain@master
         with:
-          rust-version: nightly
-          components: rust-src
-      # rustfmt: not used by the tests themselves, but bindgen's
-      # which-rustfmt probe prints hundreds of spurious "rustfmt is not
-      # installed" errors into this job's log without it. Added as a
-      # separate step because the setup action cannot install two
-      # components at once.
-      - run: rustup component add rustfmt
+          toolchain: nightly
+          components: rust-src,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Tests with asan
         env:
@@ -315,7 +313,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - uses: hecrj/setup-rust-action@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -338,7 +336,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: hecrj/setup-rust-action@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -351,7 +349,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - uses: hecrj/setup-rust-action@v1
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { shared-key: fullBuild }
       - run: |
