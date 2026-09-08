@@ -35,16 +35,72 @@ use super::fun::FnPhase;
 /// by, including dependency edges and `type_id!` strings - never changes.
 pub(crate) struct BridgeTypeNames(HashMap<QualifiedName, Ident>);
 
+/// The names `cxx` keeps for its own vocabulary.
+///
+/// The first group is `check_reserved_name`'s own list; the rest are the
+/// `Atom`s it also consults, which `cxx` recognises by spelling wherever they
+/// appear. `cxx` refuses a struct, enum or extern type under any of them
+/// outright, and reads a mention of one anywhere else as its own - so a type
+/// of the user's called `String` in a `std::unique_ptr` becomes
+/// `UniquePtr<String>`, which is Rust's `String` and not allowed there.
+///
+/// Only the second of those bites a type of ours today: almost everything we
+/// declare is a bridge alias (`type String = super::a::String;`), which
+/// `check_reserved_name` does not visit, and a name off the first group is
+/// read as cxx's own only where it carries generic arguments. The whole
+/// vocabulary is reserved anyway rather than the atoms alone - the exceptions
+/// are cxx's to change, a subclass peer is declared as a bare extern type
+/// which `check_reserved_name` does visit, and the cost is a longer bridge
+/// name in a case which is already unusual.
+///
+/// Reserving renames such a type exactly as a collision between two
+/// namespaces does, and the `#[cxx_name]` we already emit keeps C++ seeing
+/// the real name. Addresses the bug reported upstream as google/autocxx#1371.
+///
+/// Source of truth is the `cxx-gen` this crate generates C++ with, currently
+/// 0.7.200: `src/syntax/check.rs`'s `check_reserved_name` (line 689), and
+/// `src/syntax/atom.rs`'s `Atom::from_str` (line 30). Re-read both when
+/// bumping `cxx`.
+const CXX_RESERVED_NAMES: &[&str] = &[
+    "Box",
+    "UniquePtr",
+    "SharedPtr",
+    "WeakPtr",
+    "Vec",
+    "CxxVector",
+    "str",
+    "bool",
+    "c_char",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "isize",
+    "f32",
+    "f64",
+    "CxxString",
+    "String",
+];
+
 impl BridgeTypeNames {
     /// Allocate a bridge name for every type which will be declared in the
-    /// bridge, avoiding the names already spoken for by functions and by the
-    /// declarations we are not free to rename.
+    /// bridge, avoiding the names already spoken for by `cxx` itself, by
+    /// functions, and by the declarations we are not free to rename.
     ///
     /// Also answers the types we could not find a legal bridge name for, so
     /// that they can be rejected with the same diagnostic a badly-named type
     /// gets rather than reaching `cxx`.
     pub(crate) fn new(apis: &ApiVec<FnPhase>) -> (Self, HashMap<QualifiedName, InvalidIdentError>) {
-        let mut taken: HashSet<String> = apis.iter().flat_map(fixed_bridge_names).collect();
+        let mut taken: HashSet<String> = CXX_RESERVED_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .chain(apis.iter().flat_map(fixed_bridge_names))
+            .collect();
         let mut names = HashMap::new();
         let mut unnameable = HashMap::new();
         for api in apis.iter().filter(|api| declares_bridge_type(api)) {

@@ -14311,6 +14311,53 @@ fn test_pv_subclass_namespaced_superclass() {
     );
 }
 
+/// A subclass whose superclass had to be renamed for the bridge - here
+/// because `String` is one of the names cxx keeps for itself. The `As_String`
+/// accessors autocxx generates name the superclass as a type, so they have to
+/// spell it the way the bridge declares it rather than the way C++ does.
+#[test]
+fn test_pv_subclass_superclass_renamed_in_the_bridge() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    namespace a {
+    class String {
+    public:
+        String() {}
+        virtual uint32_t foo() const = 0;
+        virtual ~String() {}
+    };
+    }
+    inline uint32_t call_foo(const a::String& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyString::new_rust_owned(MyString { a: 3, cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("a::String",MyString)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            #[autocxx::subclass::subclass]
+            pub struct MyString {
+                a: u32
+            }
+            impl ffi::a::String_methods for MyString {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
 #[test]
 fn test_no_constructor_make_unique() {
     let hdr = indoc! {"
@@ -19025,7 +19072,8 @@ fn test_double_template_w_default() {
     run_test("", hdr, quote! {}, &["Problem"], &[]);
 }
 
-#[ignore] // https://github.com/google/autocxx/issues/1371
+/// A type of the user's whose name is one cxx keeps for itself. Addresses the
+/// bug reported upstream as google/autocxx#1371.
 #[test]
 fn test_class_named_string() {
     let hdr = indoc! {"
@@ -19034,6 +19082,77 @@ fn test_class_named_string() {
         } // namespace a
     "};
     run_test("", hdr, quote! {}, &["a::String"], &[]);
+}
+
+/// The same property for the rest of cxx's vocabulary. `CxxString` is the
+/// load-bearing case: it is one of cxx's atoms, which cxx recognises by
+/// spelling wherever the identifier appears, so the `impl UniquePtr<CxxString>
+/// {}` autocxx emits for the type is turned down as "unsupported Self type of
+/// explicit impl". `Vec` and `Box` bite nothing today - autocxx declares this
+/// type as a bridge alias (`type Vec = super::a::Vec;`), which
+/// `check_reserved_name` does not visit, and cxx reads either name as its own
+/// only where it carries generic arguments - and are here so that the whole
+/// vocabulary stays covered if either of those changes.
+///
+/// A class called `u32` would be a fourth, and does not get this far:
+/// `bindgen` renames it `u32_` to keep clear of the Rust primitive, so
+/// `generate!("a::u32")` finds nothing under the name the header wrote. That
+/// is a directive-matching bug rather than a cxx-vocabulary one, and is left
+/// where it is - the property under test here is settled by the three below.
+#[test]
+fn test_class_named_after_other_cxx_vocabulary() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace a {
+            class Vec { public: uint32_t len() const { return 3; } };
+            class Box { public: uint32_t len() const { return 4; } };
+            class CxxString { public: uint32_t len() const { return 5; } };
+        } // namespace a
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::a::Vec::new().within_unique_ptr().len(), 3);
+        assert_eq!(ffi::a::Box::new().within_unique_ptr().len(), 4);
+        assert_eq!(ffi::a::CxxString::new().within_unique_ptr().len(), 5);
+    };
+    run_test("", hdr, rs, &["a::Vec", "a::Box", "a::CxxString"], &[]);
+}
+
+/// google/autocxx#1371 in anger: two types called `String`, in a
+/// `unique_ptr`, as a parameter and as a return. A name cxx has taken cannot
+/// be told apart from a name another namespace has taken, so the fix is the
+/// one the latter already gets - but only if the reserved names are known to
+/// be taken before any type asks for one.
+#[test]
+fn test_class_named_string_in_anger() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        namespace a {
+            struct String { uint32_t len; };
+        } // namespace a
+        namespace b {
+            struct String { uint32_t len; };
+        } // namespace b
+        class Indirect {
+        public:
+            Indirect() { data.len = 7; }
+            std::unique_ptr<a::String> datum() const {
+                return std::make_unique<a::String>(data);
+            }
+            uint32_t take(const a::String& s) const { return s.len; }
+            b::String other() const { b::String s; s.len = 9; return s; }
+        private:
+            a::String data;
+        };
+    "};
+    let rs = quote! {
+        let i = ffi::Indirect::new().within_unique_ptr();
+        let s = ffi::a::String { len: 4 };
+        assert_eq!(i.take(&s), 4);
+        assert_eq!(i.datum().as_ref().unwrap().len, 7);
+        assert_eq!(i.other().len, 9);
+    };
+    run_test("", hdr, rs, &["Indirect"], &["a::String", "b::String"]);
 }
 
 #[test]

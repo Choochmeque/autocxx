@@ -829,7 +829,13 @@ impl<'a> RsCodeGenerator<'a> {
     ) -> RsCodegenResult {
         let super_name = superclass.get_final_item();
         let super_path = superclass.to_type_path();
-        let super_cxxxbridge_id = superclass.get_final_ident();
+        // The superclass is declared in the bridge under whatever name it was
+        // allocated there, which is not its own if something else - another
+        // namespace's class of the same name, or cxx's own vocabulary - got
+        // there first. Everything below refers to the type, so it has to use
+        // that name; the accessors named after it are function names and keep
+        // the C++ spelling, which is what the C++ side generates.
+        let super_cxxxbridge_id = self.bridge_type_names.get(superclass);
         let id = sub.id();
         let holder = sub.holder();
         let full_cpp = sub.cpp();
