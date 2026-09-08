@@ -20119,6 +20119,58 @@ fn test_global_type_named_like_known_type_is_rejected() {
     );
 }
 
+/// The other side of that rule: a global type whose name matches an entry in
+/// autocxx's type database which bindgen substitutes nothing for is the user's
+/// own type and binds like any other.
+///
+/// The database holds a name for every C++ type autocxx can spell - the
+/// `autocxx::c_*` wrappers among them - and only the handful with a prelude
+/// entry are ones bindgen puts a stand-in for into the bindings. Asking about
+/// the whole database took nine `c_*` spellings out of users' hands, plus
+/// every Rust primitive's.
+#[test]
+fn test_global_type_named_like_a_ctype_wrapper_is_generated() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct c_u32 { uint32_t v; };
+        inline uint32_t fx_read_c_u32(const c_u32& c) { return c.v; }
+    "};
+    let rs = quote! {
+        let c = ffi::c_u32 { v: 42 };
+        assert_eq!(ffi::fx_read_c_u32(&c), 42);
+    };
+    run_test("", hdr, rs, &["fx_read_c_u32"], &["c_u32"]);
+}
+
+/// The combination the rule above still refuses: the same type, in a header
+/// which also uses the C type that wrapper stands for.
+///
+/// `std::unique_ptr<uint32_t>` makes autocxx declare `c_u32` in the bridge and
+/// write `typedef std::uint32_t c_u32;` into the generated C++, and neither the
+/// bridge's flat namespace nor C++'s global one has room for that beside the
+/// user's own `c_u32`. Refused, as it was before a user's `c_u32` could be
+/// bound at all; what is new is that a header which does not use the C type
+/// works, which the test above is.
+#[test]
+fn test_ctype_wrapper_name_collision_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        struct c_u32 { uint32_t v; };
+        inline uint32_t fx_read_colliding(const c_u32& c) { return c.v; }
+        inline std::unique_ptr<uint32_t> fx_make_u32() {
+            return std::unique_ptr<uint32_t>(new uint32_t(7));
+        }
+    "};
+    run_test_expect_fail(
+        "",
+        hdr,
+        quote! {},
+        &["fx_read_colliding", "fx_make_u32"],
+        &["c_u32"],
+    );
+}
+
 #[test]
 fn test_issue_1098a() {
     let hdr = indoc! {"
