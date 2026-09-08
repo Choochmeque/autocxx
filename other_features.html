@@ -251,6 +251,68 @@ that on the C++ side. Reading a variable which C++ mutates concurrently is
 undefined behaviour, and so is reading one whose value C++ changes through a
 <code>mutable</code> member of an otherwise <code>const</code> object - legal C++, but not something
 you can expose this way. Use a getter function for anything C++ writes to.</p>
+<h2 id="volatile"><a class="header" href="#volatile"><code>volatile</code></a></h2>
+<p>Rust has no <code>volatile</code> type. It has volatile <em>accesses</em> -
+<a href="https://doc.rust-lang.org/std/ptr/fn.read_volatile.html"><code>read_volatile</code></a> and
+<a href="https://doc.rust-lang.org/std/ptr/fn.write_volatile.html"><code>write_volatile</code></a> -
+and nothing in a type or a signature carries the promise that a read may not be
+cached, reordered or elided. So a C++ declaration mapped straight onto a Rust
+type loses it: <code>autocxx</code> would have to generate a volatile <em>access</em>, and where
+it cannot, the binding does not keep what the qualifier says.</p>
+<p>The dividing line is <em>where the read happens</em>. C++ performing the access keeps
+the promise; an ordinary Rust load of a plainly mapped type does not.</p>
+<p><strong>Refused, by name.</strong> A <code>volatile</code> variable, a field of a <code>generate_pod!</code>
+struct, and a template argument. In each of these Rust would end up doing the
+access itself - a re-exported <code>static</code> is read by ordinary Rust loads, a POD
+struct's fields are ordinary Rust fields - or, for a template argument, the
+qualifier would simply be dropped from the C++ <code>autocxx</code> writes, naming a
+different specialization. Each refusal says what to do instead, and it is
+usually the same thing: write a C++ function which performs the volatile access,
+and bind that.</p>
+<p>The variable case is the one worth knowing about, because binding it looks
+harmless and is not. <code>extern const volatile int status;</code> is how a read-only
+hardware register is declared, and the <code>const</code> alone would make it an immutable
+Rust <code>static</code> - which the compiler may constant-fold reads of, the exact
+opposite of what <code>volatile</code> asked for.</p>
+<p><strong>Bound, and honestly - where the value is a scalar.</strong> A <code>volatile</code> data member
+of built-in, enumeration or pointer type keeps its getter. The C++ <code>autocxx</code>
+generates for it is <code>obj.member</code>, and reading a <code>volatile</code> glvalue <em>is</em> a
+volatile access - so the read happens in C++, once per call, and what crosses to
+Rust is the copy it produced.</p>
+<p>A member of class type is refused instead, whichever shape its getter would
+take. C++ copies a class by calling a constructor, and an implicitly declared
+copy constructor takes <code>const T&amp;</code> or <code>T&amp;</code> - neither of which a <code>volatile T</code>
+binds to - so <code>obj.member</code> does not compile for one however copyable it
+otherwise is. A borrowed getter is no better: it hands Rust a reference and lets
+Rust do the reading.</p>
+<p>A <code>volatile</code> <strong>return</strong> of scalar type is bound through a wrapper. A
+cv-qualified return type is part of a function's type and <code>cxx</code> declares a
+function by taking its address, so <code>int (*f$)() = ::f;</code> does not compile for a
+<code>volatile int f()</code>. <code>autocxx</code> already meets this for a <code>const</code> return and
+answers it the same way: its own wrapper returns the unqualified type and calls
+through.</p>
+<p>A class-type <code>volatile</code> return is refused. The wrapper would have to
+copy-initialize a <code>T</code> from a <code>volatile T</code>, which needs a constructor C++ does
+not implicitly declare, and so does not compile at C++14 - the standard
+<code>autocxx</code> generates its C++ against. C++17 initializes the result directly and
+would accept it, but the refusal is pinned to that floor rather than to whichever
+standard you happen to compile with.</p>
+<p>A <strong>by-value parameter</strong> binds as if the qualifier were not there, because as
+far as C++ is concerned it is not: a top-level cv-qualifier on a parameter is
+no part of a function's type, so <code>void f(volatile int)</code> and <code>void f(int)</code> are
+one function.</p>
+<p>A struct with a <code>volatile</code> member is still usable, whichever of these applies;
+it simply cannot be <code>generate_pod!</code>.</p>
+<p><strong>Not yet handled.</strong> A pointer or reference <em>to</em> something <code>volatile</code> -
+<code>volatile int*</code>, <code>volatile int&amp;</code> - which is the position <code>volatile</code> is most
+often used in real headers. A refusal is not the right answer for it; what it
+needs is a generated wrapper performing the access through
+<code>read_volatile</code>/<code>write_volatile</code>, and that does not exist yet. Until it does,
+such a signature fails to build inside generated C++ rather than being reported
+against the function you asked for. A volatile-qualified <em>method</em>
+(<code>void f() volatile</code>) is likewise unhandled, and worse: <code>libclang</code> exposes no
+way to ask, so where a class has both a plain and a volatile-qualified overload
+of one name, both bind to the plain one.</p>
 <h2 id="string-constants"><a class="header" href="#string-constants">String constants</a></h2>
 <p>Whether from a preprocessor symbol or from a C++ <code>char*</code> constant,
 strings appear as <code>[u8]</code> with a null terminator. To get a Rust string,
