@@ -1276,16 +1276,7 @@ impl<'a> TypeConverter<'a> {
         match e {
             Some(tn) => Ok((tn.clone(), None)),
             None => {
-                let synthetic_ident = format!(
-                    "{}_AutocxxConcrete",
-                    cpp_definition.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '_'), "_")
-                );
-                // Remove runs of multiple _s. Trying to avoid a dependency on
-                // regex.
-                let synthetic_ident = synthetic_ident
-                    .split('_')
-                    .filter(|s| !s.is_empty())
-                    .join("_");
+                let synthetic_ident = concrete_type_ident(&cpp_definition);
                 // Ensure we're not duplicating some existing concrete template name.
                 // If so, we'll invent a name which is guaranteed to be unique.
                 let synthetic_ident = match self
@@ -1683,4 +1674,16 @@ fn refuse_aliased_atom_payload(
         }
     }
     Ok(())
+}
+
+/// The identifier autocxx gives a concrete type it manufactures for a C++ type
+/// cxx cannot spell, derived from that type's C++ definition so that the same
+/// definition always earns the same name.
+pub(crate) fn concrete_type_ident(cpp_definition: &str) -> String {
+    let ident = format!(
+        "{}_AutocxxConcrete",
+        cpp_definition.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '_'), "_")
+    );
+    // Remove runs of multiple _s. Trying to avoid a dependency on regex.
+    ident.split('_').filter(|s| !s.is_empty()).join("_")
 }

@@ -64,15 +64,27 @@ against, so `autocxx` reports the problem instead of generating code which
 fails to link. (On MSVC, where the decorated name is the same either way,
 `autocxx` can't tell, and you get the link error.)
 
-Its type must also be POD, or one which `bindgen` writes directly in Rust such
-as `int`. `autocxx` exposes a non-POD type as an opaque object which is only
-usable behind a pointer, so there is nothing useful it could hand you for a
-variable of such a type.
+A variable of non-POD type is reached differently, because there is no
+non-POD value `autocxx` can hand Rust at all. Such a variable appears as a
+*function* of its own name - `ffi::BOB()` - which returns an opaque holder
+standing for a `const` reference to it. The holder's `get()` gives you the
+address of the variable itself; nothing is copied, so the type need not be
+copy-constructible and what you read is whatever C++ has most recently written
+there.
+
+```rust,ignore
+let bob = ffi::BOB();
+let bob = unsafe { &*bob.as_ref().unwrap().get() };
+assert_eq!(bob.get().as_ref().unwrap().to_str().unwrap(), "hello");
+```
 
 A static data member of a class works too, and needs no `extern` because
 defining it gives it external linkage anyway. Its name is flattened into the
 enclosing namespace, so `struct Anna { static Point ORIGIN; };` asks for
-`generate!("Anna_ORIGIN")` and appears as `ffi::Anna_ORIGIN`.
+`generate!("Anna_ORIGIN")` and appears as `ffi::Anna_ORIGIN`. It must be POD:
+the flattened name is not one C++ has, so there is nothing for the getter a
+non-POD variable needs to call it by, and `autocxx` says so rather than
+generating C++ which does not compile.
 
 One assumption comes with the `unsafe`. Rust requires that an object does not
 change while Rust holds a reference to it, and `autocxx` has no way to enforce

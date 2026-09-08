@@ -49,15 +49,16 @@ use cxx::{memory::UniquePtrTarget, UniquePtr};
 ///
 /// # Field access
 ///
-/// Field access would be achieved by adding C++ `get` and/or `set` methods.
-/// It's possible that a future version of `autocxx` could generate such
-/// getters and setters automatically, but they would need to be `unsafe`
-/// because there is no guarantee that the referent of a `CppRef` is actually
-/// what it's supposed to be, or alive. `CppRef`s may flow from C++ to Rust
-/// via arbitrary means, and with sufficient uses of `get` and `set` it would
-/// even be possible to create a use-after-free in pure Rust code (for instance,
+/// Field access is achieved by generated C++ `get` methods, which `autocxx`
+/// writes for every public data member of a non-POD type: a field `b` is read
+/// by calling `b()`. Calling one on a `CppRef` is neither more nor less safe
+/// than calling any other method on one - the referent may not be what it is
+/// supposed to be, or alive, and that is what this whole type costs.
+///
+/// Setters are a different matter, and are not generated. With both `get` and
+/// `set` it would be possible to create a use-after-free in pure Rust code:
 /// store a [`CppPin`] in a struct field, get a `CppRef` to its referent, then
-/// use a setter to reset that field of the struct.)
+/// use a setter to reset that field of the struct.
 ///
 /// # Nullness
 ///

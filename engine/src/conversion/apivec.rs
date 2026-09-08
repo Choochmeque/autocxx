@@ -344,6 +344,7 @@ mod tests {
         Api::Static {
             name: name(id),
             cpp_ty: None,
+            name_is_cpp_name: true,
         }
     }
 

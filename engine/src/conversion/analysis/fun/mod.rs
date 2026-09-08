@@ -79,7 +79,7 @@ use self::{
 use super::{
     depth_first::HasFieldsAndBases,
     doc_label::make_doc_attrs,
-    pod::{PodAnalysis, PodPhase},
+    pod::{pod_safe_types, PodAnalysis, PodPhase},
     tdef::{instantiable_concrete_types, TypedefAnalysis},
     type_converter::Annotated,
 };
@@ -475,7 +475,7 @@ impl<'a> FnAnalyzer<'a> {
             bridge_name_tracker: BridgeNameTracker::new(),
             config,
             overload_trackers_by_mod: HashMap::new(),
-            pod_safe_types: Self::build_pod_safe_type_set(&apis),
+            pod_safe_types: pod_safe_types(&apis),
             moveit_safe_types: Self::build_correctly_sized_type_set(&apis),
             subclasses_by_superclass: subclass::subclasses_by_superclass(&apis),
             nested_type_name_map: Self::build_nested_type_map(&apis),
@@ -527,37 +527,6 @@ impl<'a> FnAnalyzer<'a> {
                 }
                 _ => None,
             })
-            .collect()
-    }
-
-    fn build_pod_safe_type_set(apis: &ApiVec<PodPhase>) -> HashSet<QualifiedName> {
-        apis.iter()
-            .filter_map(|api| match api {
-                Api::Struct {
-                    analysis:
-                        PodAnalysis {
-                            kind: TypeKind::Pod,
-                            ..
-                        },
-                    ..
-                } => Some(api.name().clone()),
-                Api::Enum { .. } => Some(api.name().clone()),
-                Api::ExternCppType { pod: true, .. } => Some(api.name().clone()),
-                _ => None,
-            })
-            .chain(
-                known_types()
-                    .get_pod_safe_types()
-                    .filter_map(
-                        |(tn, is_pod_safe)| {
-                            if is_pod_safe {
-                                Some(tn)
-                            } else {
-                                None
-                            }
-                        },
-                    ),
-            )
             .collect()
     }
 
@@ -1515,6 +1484,17 @@ impl<'a> FnAnalyzer<'a> {
                 continue;
             };
             if !matches!(fun.cpp_vis, CppVisibility::Public) {
+                continue;
+            }
+            // Only a member C++ declared. The shim calls the member by name on
+            // the base, and a method autocxx synthesized has no member of that
+            // name for it to call: a field accessor is named after a *data*
+            // member, and `static_cast<const Base&>(self).b(...)` on one is
+            // "called object type is not a function". An inherited field is
+            // therefore read through the base rather than through the derived
+            // class - the accessor exists on the base, and the upcast is how
+            // to reach it.
+            if !matches!(fun.provenance, Provenance::Bindgen) {
                 continue;
             }
             // The receiver the base declared the member with, which is the
@@ -3797,10 +3777,13 @@ fn import_member_into(
 /// one too, but this is reached only once a receiver type has been found.)
 /// That fallback is a guess - a method C++ calls `Widget3` on class `Widget`
 /// reads exactly like `Widget`'s fourth constructor - and google/autocxx#995
-/// is that guess being wrong. Nothing autocxx synthesizes has a name it can be
-/// wrong about: a synthesized constructor is named for its type on purpose
-/// (see [`CppOriginalName::from_type_name_for_constructor`]), and every other
-/// synthesized function is a wrapper whose name autocxx also chose.
+/// is that guess being wrong. A synthesized function reaches it only where its
+/// name is one autocxx chose: a synthesized constructor is named for its type
+/// on purpose (see [`CppOriginalName::from_type_name_for_constructor`]), and
+/// every other such function is a wrapper autocxx also named. A field accessor
+/// takes its name from C++, where a data member may share its class's name, so
+/// `analysis::field_accessors` states the kind rather than leaving it to be
+/// guessed at.
 fn constructor_with_suffix<'a>(
     rust_name: &'a str,
     nested_type_ident: &str,

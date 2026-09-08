@@ -47,12 +47,13 @@ use self::{
         check_names,
         constructor_deps::decorate_types_with_constructor_deps,
         destructibility::remove_ownership_of_non_destructible_types,
+        field_accessors::add_field_accessors,
         fun::FnPhase,
         gc::filter_apis_by_following_edges_from_allowlist,
         pod::analyze_pod_apis,
         remove_ignored::filter_apis_by_ignored_dependents,
         replace_hopeless_typedef_targets,
-        statics::discard_statics_of_non_pod_type,
+        statics::expose_statics,
         tdef::convert_typedef_targets,
     },
     api::{AnalysisPhase, Api, NestedCppNames, NullPhase},
@@ -159,13 +160,16 @@ impl<'a> BridgeConverter<'a> {
                 let analyzed_apis = analyze_pod_apis(apis, self.config, &parse_callback_results)
                     .map_err(ConvertError::Cpp)?;
                 Self::dump_apis("pod analysis", &analyzed_apis);
-                // Static data can only be re-exported if its type is one which
+                // A variable can only be re-exported if its type is one which
                 // we expose exactly as bindgen declared it, which we only know
-                // once POD analysis is complete.
-                let analyzed_apis = discard_statics_of_non_pod_type(analyzed_apis);
+                // once POD analysis is complete; anything else gets a getter
+                // instead, and the holder its getter hands back.
+                let analyzed_apis = expose_statics(analyzed_apis);
                 Self::dump_apis("static data", &analyzed_apis);
                 let analyzed_apis = replace_hopeless_typedef_targets(self.config, analyzed_apis);
                 let analyzed_apis = add_casts(analyzed_apis);
+                let analyzed_apis =
+                    add_field_accessors(analyzed_apis, self.config, &parse_callback_results);
                 let analyzed_apis = create_alloc_and_frees(analyzed_apis, self.config);
                 // Next, figure out how we materialize different functions.
                 // Some will be simple entries in the cxx::bridge module; others will

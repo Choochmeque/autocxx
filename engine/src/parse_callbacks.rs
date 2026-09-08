@@ -112,6 +112,16 @@ impl CppOriginalName {
         Self(name)
     }
 
+    /// The C++ name of a data member, which is what autocxx names the accessor
+    /// it synthesizes for that member after. bindgen reports the member's own
+    /// spelling through `denote_data_member`, so this is a C++ name in the
+    /// same sense every other one here is; what makes it worth its own
+    /// constructor is that it names a member rather than the function which
+    /// arrives under it.
+    pub(crate) fn from_data_member_name(name: &str) -> Self {
+        Self(name.to_string())
+    }
+
     /// Work out what to call a Rust-side API given a C++-side name.
     pub(crate) fn to_string_for_rust_name(&self) -> String {
         self.0.clone()
@@ -190,6 +200,13 @@ pub(crate) struct DataMember {
     /// The name of the Rust field bindgen generates for the member, or of the
     /// accessors where it is a bitfield. `None` for an unnamed bitfield.
     pub(crate) name: Option<String>,
+    /// The member's name as C++ spells it. Differs from `name` where the C++
+    /// name is not a Rust identifier, so this is the one to write into
+    /// generated C++. `None` for an unnamed bitfield.
+    pub(crate) cpp_name: Option<String>,
+    /// Whether C++ declared the member `public`, which is what decides whether
+    /// generated code outside the class may name it.
+    pub(crate) is_public: bool,
     /// Whether C++ declared the member's own type `const`.
     pub(crate) is_const: bool,
     /// Whether the member is a bitfield, and so has no field of its own in the
@@ -759,6 +776,8 @@ impl ParseCallbacks for AutocxxParseCallbacks {
             .or_default()
             .push(DataMember {
                 name: member.name.map(str::to_string),
+                cpp_name: member.cpp_name.map(str::to_string),
+                is_public: member.is_public,
                 is_const: member.is_const,
                 is_bitfield: member.bitfield_width.is_some(),
                 // bindgen answers `None` where it could not ask clang - a

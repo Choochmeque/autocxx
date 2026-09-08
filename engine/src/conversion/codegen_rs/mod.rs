@@ -52,8 +52,8 @@ use super::{
         tdef::{resolve_typedefs, typedef_targets},
     },
     api::{
-        AnalysisPhase, Api, HolderSurface, SharedPtrShim, SubclassName, TypeKind, UniquePtrShim,
-        VectorShim, WeakPtrShim, SUPER_FN_SUFFIX,
+        AnalysisPhase, Api, ConstRefShim, HolderSurface, SharedPtrShim, SubclassName, TypeKind,
+        UniquePtrShim, VectorShim, WeakPtrShim, SUPER_FN_SUFFIX,
     },
     convert_error::ErrorContextType,
     derives::DeriveRequests,
@@ -717,6 +717,9 @@ impl<'a> RsCodeGenerator<'a> {
                     Some(HolderSurface::VectorOfPointers { element, .. }) => {
                         self.generate_vector_surface(&name, &bridge_id, &element, &mut result)
                     }
+                    Some(HolderSurface::ConstRef { payload, .. }) => {
+                        self.generate_const_ref_surface(&name, &bridge_id, &payload, &mut result)
+                    }
                     None => {}
                 }
                 result
@@ -1292,6 +1295,77 @@ impl<'a> RsCodeGenerator<'a> {
             });
         }
         let doc = unique_ptr_holder_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #doc]
+            impl #holder {
+                #(#methods)*
+            }
+        });
+    }
+
+    /// Declare the one C++ helper of a `const`-reference holder in the bridge,
+    /// and put a method for it on the holder itself.
+    ///
+    /// Written here rather than as a synthesized `Api::Function` for the reason
+    /// [`Self::generate_shared_ptr_surface`] gives, and `get` is that
+    /// surface's `get` in every respect, `unsafe` under the wrapped-references
+    /// policy included. Not being null is not the whole of what a `CppRef`
+    /// promises: the referent has to be alive, and a variable of static
+    /// storage duration is not alive before its dynamic initialization or
+    /// after static destruction - both of which C++ can call into Rust from.
+    /// The holder is a `std::reference_wrapper` like any other, at that, so a
+    /// header which returns one of its own shares this type and can refer to
+    /// whatever it likes. See google/autocxx#94.
+    fn generate_const_ref_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        payload: &Type,
+        result: &mut RsCodegenResult,
+    ) {
+        // As in `generate_shared_ptr_surface`: the bridge mod has a flat
+        // namespace, and the output mod, where the methods go, uses the
+        // qualified spellings.
+        let holder = name.get_final_ident();
+        let bridge_payload = unqualify_type(payload.clone(), self.bridge_type_names);
+        let wrapped = matches!(
+            self.unsafe_policy,
+            UnsafePolicy::ReferencesWrappedAllFunctionsSafe
+        );
+        let mut methods: Vec<ImplItem> = Vec::new();
+        for shim in ConstRefShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name));
+            let method_id = make_ident(shim.rust_name());
+            // `std::shared_ptr::get`'s reasoning, less the nullness half:
+            // under this policy a `CppRef` is what safe code may go on to
+            // dereference, and this one promises a live referent rather than a
+            // non-null pointer.
+            let unsafety: Option<syn::token::Unsafe> =
+                matches!(shim, ConstRefShim::Get if wrapped).then(|| parse_quote! { unsafe });
+            let (bridge_ret, method_ret, body): (Type, Type, Expr) = match shim {
+                ConstRefShim::Get if wrapped => (
+                    parse_quote! { *const #bridge_payload },
+                    parse_quote! { autocxx::CppRef<#payload> },
+                    parse_quote! { autocxx::CppRef::from_ptr(cxxbridge::#shim_id(self)) },
+                ),
+                ConstRefShim::Get => (
+                    parse_quote! { *const #bridge_payload },
+                    parse_quote! { *const #payload },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+            };
+            result.extern_c_mod_items.push(parse_quote! {
+                fn #shim_id(self_: &#bridge_id) -> #bridge_ret;
+            });
+            let doc = const_ref_method_doc(shim, wrapped);
+            methods.push(parse_quote! {
+                #[doc = #doc]
+                pub #unsafety fn #method_id(&self) -> #method_ret {
+                    #body
+                }
+            });
+        }
+        let doc = const_ref_holder_doc();
         result.output_mod_items.push(parse_quote! {
             #[doc = #doc]
             impl #holder {
@@ -2245,6 +2319,62 @@ fn shared_ptr_method_doc(shim: SharedPtrShim, wrapped: bool) -> String {
 
 /// What the generated docs say about a `std::unique_ptr<const T>` holder, on
 /// the impl block carrying its two methods. See google/autocxx#799.
+/// What the generated docs say about the holder standing for a `const`
+/// reference to a C++ variable.
+fn const_ref_holder_doc() -> String {
+    "This type stands for a `const` reference to a C++ variable, held \
+     opaquely.\n\n\
+     A C++ variable whose type is one Rust may hold by value is re-exported \
+     as itself. This one is not: its type reaches Rust as an opaque wrapper \
+     rather than as the layout C++ gave it, so there is nothing for Rust to \
+     hold. autocxx generates a getter instead, and what it hands back is \
+     this - a `std::reference_wrapper<const T>` declared to cxx as an opaque \
+     extern type, with the method below.\n\n\
+     Nothing is copied. The holder is a pointer's worth of C++ vocabulary \
+     type referring to the variable itself, so reading through it sees \
+     whatever C++ has most recently written there, and the variable's type \
+     need not be copy-constructible.\n\n\
+     The `const` is C++'s, and describes the access path this type gives you \
+     rather than the variable; C++ may write to it. Nothing here makes the \
+     holder `Send` or `Sync`."
+        .to_string()
+}
+
+/// What the generated docs say about that holder's one method.
+fn const_ref_method_doc(shim: ConstRefShim, wrapped: bool) -> String {
+    let lifetime = "It is never null - a `std::reference_wrapper` always \
+         refers to something - but that is not the same as alive. A variable \
+         of static storage duration is alive from its initialization until \
+         static destruction runs, and C++ can call into Rust from either side \
+         of that window. Nothing here checks, and a holder which came from \
+         somewhere other than a variable's getter need not refer to a variable \
+         at all.";
+    match shim {
+        ConstRefShim::Get if wrapped => format!(
+            "The variable this refers to, as a `CppRef` - \
+             `std::reference_wrapper::get`.\n\n\
+             {lifetime}\n\n\
+             # Safety\n\n\
+             Under this policy a `CppRef` is what a C++ `const T&` parameter \
+             takes, and the generated C++ dereferences it without any further \
+             `unsafe` on your part - so producing one is where the promise has \
+             to be made. The caller must establish that the referent is alive \
+             for as long as the `CppRef` is used.\n\n\
+             The referent's C++ type is `const`, so this yields nothing \
+             mutable - though `CppRef::const_cast` will hand you a \
+             `CppMutRef` if you ask, exactly as C++'s `const_cast` would."
+        ),
+        ConstRefShim::Get => format!(
+            "The address of the variable this refers to - \
+             `std::reference_wrapper::get`.\n\n\
+             {lifetime} That is why dereferencing it is `unsafe`.\n\n\
+             The referent's C++ type is `const`, so this is a `*const` - \
+             though Rust will let you cast one, exactly as C++'s \
+             `const_cast` would."
+        ),
+    }
+}
+
 fn unique_ptr_holder_doc() -> String {
     "This type is a C++ `std::unique_ptr<const T>`, held opaquely.\n\n\
      `cxx::UniquePtr<T>` cannot stand for it. cxx spells that specialization \

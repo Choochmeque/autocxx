@@ -16,6 +16,7 @@ pub(crate) mod deps;
 mod depth_first;
 pub(crate) mod destructibility;
 pub(crate) mod doc_label;
+pub(crate) mod field_accessors;
 pub(crate) mod fun;
 pub(crate) mod gc;
 mod name_check;

@@ -94,6 +94,17 @@ pub(crate) enum HolderSurface {
         element: Box<Type>,
         deps: HashSet<QualifiedName>,
     },
+    /// A `const` reference to an object autocxx did not create and does not
+    /// own - the C++ variable an `Api::Static` of non-POD type stands for. It
+    /// is spelled in C++ as a `std::reference_wrapper<const T>`, which is a
+    /// pointer's worth of trivially copyable vocabulary type, so the holder
+    /// costs no copy of the referent and asks nothing of its copy constructor.
+    /// Carries the referent as the `cxx::bridge` spells it. See
+    /// google/autocxx#94.
+    ConstRef {
+        payload: Box<Type>,
+        deps: HashSet<QualifiedName>,
+    },
 }
 
 impl HolderSurface {
@@ -113,7 +124,8 @@ impl HolderSurface {
             Self::SharedPtr { deps, .. }
             | Self::UniquePtr { deps, .. }
             | Self::WeakPtr { deps, .. }
-            | Self::VectorOfPointers { deps, .. } => deps.iter(),
+            | Self::VectorOfPointers { deps, .. }
+            | Self::ConstRef { deps, .. } => deps.iter(),
         }
     }
 }
@@ -213,6 +225,40 @@ impl UniquePtrShim {
         match self {
             Self::Get => "get",
             Self::PayloadIsNull => "payload_is_null",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
+        shim_cpp_name(holder, self.rust_name())
+    }
+}
+
+/// The one C++ helper function autocxx generates beside the opaque holder it
+/// lowers a `const` reference to a C++ variable to.
+///
+/// The holder is a `std::reference_wrapper<const T>`, which always refers to
+/// something - it has no empty state - so unlike the smart-pointer holders
+/// there is no null to ask about and nothing to own. Reading the referent is
+/// the whole surface. See google/autocxx#94.
+#[derive(Copy, Clone)]
+pub(crate) enum ConstRefShim {
+    /// `std::reference_wrapper::get`, as a pointer. A pointer rather than a
+    /// reference because that is how every other holder hands its payload
+    /// over, and because Rust's own reference would need a lifetime nothing
+    /// here can supply: the referent is a C++ object of static storage
+    /// duration, whose life begins and ends outside anything Rust can see.
+    Get,
+}
+
+impl ConstRefShim {
+    pub(crate) const ALL: [Self; 1] = [Self::Get];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
         }
     }
 
@@ -853,6 +899,14 @@ pub(crate) enum Api<T: AnalysisPhase> {
         /// it so that the garbage collector keeps that type alive, and so
         /// that we can insist it is POD before re-exporting the variable.
         cpp_ty: Option<QualifiedName>,
+        /// Whether the identifier `bindgen` gave the variable is also the name
+        /// C++ knows it by. It is not for a static data member, whose name
+        /// `bindgen` flattens into the enclosing namespace: `Anna::HELD`
+        /// arrives as `Anna_HELD`, which names nothing in C++. Nothing needs
+        /// the C++ name to re-export the variable - `bindgen`'s declaration
+        /// carries the mangled symbol - but the getter we generate for a
+        /// variable of non-POD type has to write the name out.
+        name_is_cpp_name: bool,
     },
     /// A typedef found in the bindgen output which we wish
     /// to pass on in our output

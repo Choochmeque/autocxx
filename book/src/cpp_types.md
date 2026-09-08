@@ -28,7 +28,11 @@ POD types are nicer:
 Non-POD types are awkward:
 
 * You can't just _have_ one as a Rust variable. Normally you hold them in a [`cxx::UniquePtr`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html), though there are other options.
-* There is no access to fields (yet).
+* Fields are read through generated accessors rather than directly. `autocxx` gives every public
+  data member a method of the same name: a `b` field is read with `obj.b()`. A field Rust could
+  hold by value comes back by value, anything else comes back as a reference borrowed from the
+  object, and an array or reference member gets a documented refusal instead of an accessor.
+  There are no setters yet.
 * You can't even have a `&mut` reference to one, because then you might be able to use [`std::mem::swap`](https://doc.rust-lang.org/stable/std/mem/fn.swap.html) or similar. You can have a `Pin<&mut>` reference, which is more fiddly.
 
 By default, `autocxx` generates non-POD types. You can request a POD type using [`generate_pod!`](https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html). Don't worry: you can't mess this up. If the C++ type doesn't in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you're _really_ sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they're trivial, you can override these assertions using the C++ trait `IsRelocatable` per the instructions in [cxx.h](https://github.com/dtolnay/cxx/blob/master/include/cxx.h)).
