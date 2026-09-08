@@ -216,6 +216,9 @@ fn holder_for(
         // Filled in by `decorate_types_with_constructor_deps`, as for every
         // other concrete type.
         constructor_and_allocator_deps: Vec::new(),
+        // The payload of a `const T&` holder is a type which was itself
+        // converted, so an incomplete one was turned down before we got here.
+        incomplete_argument: None,
     });
     Ok(name)
 }

@@ -14,7 +14,7 @@ use crate::conversion::{
     api::{FuncToConvert, UnanalyzedApi},
     convert_error::ConvertErrorWithContext,
     convert_error::ErrorContext,
-    type_helpers::{mentions_long_double, strip_const_markers},
+    type_helpers::{mentions_float128, mentions_long_double, strip_const_markers},
 };
 use crate::minisyn::{minisynize_punctuated, minisynize_vec};
 use crate::types::strip_bindgen_original_suffix_from_ident;
@@ -197,11 +197,12 @@ impl<'a> ParseForeignMod<'a> {
 /// pointer - is rejected, because re-exporting it would expose `bindgen`'s raw
 /// view of the world rather than the types `autocxx` generates.
 ///
-/// A `long double` is rejected here rather than left to the conversion which
-/// rejects one in a signature, because nothing converts a variable's type: the
-/// re-export hands over what bindgen wrote, and what bindgen writes for a
-/// `long double` is a marker aliasing a type of the right width on some
-/// targets and half of it on others. See [`ConvertErrorFromCpp::LongDouble`].
+/// A `long double` or a `__float128` is rejected here rather than left to the
+/// conversion which rejects one in a signature, because nothing converts a
+/// variable's type: the re-export hands over what bindgen wrote, and what
+/// bindgen writes for either is a marker aliasing a type of the right width
+/// and the wrong kind. See [`ConvertErrorFromCpp::LongDouble`] and
+/// [`ConvertErrorFromCpp::Float128`].
 fn analyze_static(
     attrs: &[Attribute],
     ty: &Type,
@@ -209,6 +210,9 @@ fn analyze_static(
 ) -> Result<Option<QualifiedName>, ConvertErrorFromCpp> {
     if mentions_long_double(ty) {
         return Err(ConvertErrorFromCpp::LongDouble);
+    }
+    if mentions_float128(ty) {
+        return Err(ConvertErrorFromCpp::Float128);
     }
     if linkage_from_link_name(link_name_from_attrs(attrs).as_deref()) == CppLinkage::Internal {
         return Err(ConvertErrorFromCpp::StaticDataWithInternalLinkage(

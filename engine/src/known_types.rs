@@ -144,14 +144,14 @@ struct TypeDetails {
     ///
     /// For everything else in this database it does: cxx implements them for
     /// its own types, and `autocxx::c_type_vectors` writes the explicit shim
-    /// trait impls for the `autocxx::c_*` integers and character types. Two
-    /// are the exception, both because `c_type_vectors.h` has to name the C++
+    /// trait impls for the `autocxx::c_*` integers and character types. Three
+    /// are the exception, all because `c_type_vectors.h` has to name the C++
     /// type and is compiled on every target autocxx supports, at the C++14
-    /// floor: `autocxx::c_i128`, because MSVC has no `__int128`, and
-    /// `autocxx::c_char8_t`, because `char8_t` is a C++20 keyword and names
-    /// nothing before that. A container of either would compile into a call to
-    /// a `cxxbridge1$unique_ptr$...` symbol nobody emits. Enforced by the
-    /// three `permissible_within_*` predicates below.
+    /// floor: `autocxx::c_i128` and `autocxx::c_u128`, because MSVC has no
+    /// `__int128`, and `autocxx::c_char8_t`, because `char8_t` is a C++20
+    /// keyword and names nothing before that. A container of any of them would
+    /// compile into a call to a `cxxbridge1$unique_ptr$...` symbol nobody
+    /// emits. Enforced by the three `permissible_within_*` predicates below.
     has_container_glue: bool,
 }
 
@@ -845,25 +845,31 @@ fn create_type_database() -> TypeDatabase {
     insert_ctype("short");
     insert_ctype("long long");
 
-    // `__int128`, which reaches us as a bare `i128` and means nothing else.
-    // cxx has no atom that wide, so it travels as a named type exactly like
+    // The two 128-bit C++ integers, which reach us as bare `i128` and `u128`.
+    // cxx has no atom that wide, so each travels as a named type exactly like
     // `autocxx::c_int` - but without the container glue, because
     // `autocxx::c_type_vectors` compiles on every target autocxx supports and
-    // MSVC has no `__int128`.
+    // MSVC has neither type.
     //
-    // There is deliberately no `unsigned __int128` beside it; see the note at
-    // the end of this function.
-    db.insert(
-        TypeDetails::new(
-            "autocxx::c_i128",
-            "__int128",
-            Behavior::CIntegerWrapper,
-            Some("i128".into()),
-            true,
-            true,
-        )
-        .without_container_glue(),
-    );
+    // A bare `u128` means `unsigned __int128` and nothing else only because
+    // `34-float128-newtype-marker.patch` marks the other claimant on that
+    // token; see the note at the end of this function.
+    for (rs_name, cpp_name, bindgen_name) in [
+        ("autocxx::c_i128", "__int128", "i128"),
+        ("autocxx::c_u128", "unsigned __int128", "u128"),
+    ] {
+        db.insert(
+            TypeDetails::new(
+                rs_name,
+                cpp_name,
+                Behavior::CIntegerWrapper,
+                Some(bindgen_name.into()),
+                true,
+                true,
+            )
+            .without_container_glue(),
+        );
+    }
 
     db.insert(TypeDetails::new(
         "f32",
@@ -952,19 +958,19 @@ fn create_type_database() -> TypeDatabase {
     // turning down instead of seeing bindgen's same-sized substitute. See
     // `ConvertErrorFromCpp::LongDouble`.
     //
-    // DECIDED: `u128` is not registered here, and is not to be. Two C++ types
-    // still arrive as that one token - `unsigned __int128`, and `__float128`,
-    // which `FloatKind::Float128` renders as a literal `u128` - and nothing
-    // which survives to this side tells them apart. An entry would have to
-    // name one of the two in the C++ it generates, which is a miscompile
-    // wherever the header meant the other: they are a different size class, a
-    // different register class and a different value.
-    // `remove_ignored.rs` refuses the token by name and says so, which is the
-    // most that can honestly be done from here. `long double`, which used to
-    // be a third claimant on 16-byte targets, is now marked and refused by
-    // name above.
+    // `u128` used to be no more bindable than `long double`, for the same
+    // reason: three C++ types arrived as that one token - `unsigned __int128`,
+    // a 16-byte `long double`, and `__float128`, which `FloatKind::Float128`
+    // renders as a literal `u128` - and nothing which survived to this side
+    // told them apart. An entry would have had to name one of the three in the
+    // C++ it generates, which is a miscompile wherever the header meant
+    // another: they are a different register class and a different value.
     //
-    // `__int128` has no such problem: `i128` is that and nothing else, and it
-    // is registered above.
+    // Both of the other two are marked now -
+    // `25-long-double-newtype-marker.patch` and
+    // `34-float128-newtype-marker.patch` - and refused by name of their own,
+    // which leaves the bare token meaning `unsigned __int128` and nothing
+    // else. So it is registered above, beside `__int128`, which never had the
+    // problem.
     db
 }

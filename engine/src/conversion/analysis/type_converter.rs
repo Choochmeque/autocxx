@@ -15,9 +15,9 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            extract_pinned_mutable_reference_type, mentions_long_double, unwrap_bitfield,
-            unwrap_const, unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double,
-            unwrap_reference,
+            extract_pinned_mutable_reference_type, mentions_float128, mentions_long_double,
+            unwrap_bitfield, unwrap_const, unwrap_float128, unwrap_function_pointer,
+            unwrap_has_opaque, unwrap_long_double, unwrap_reference,
         },
         ConvertErrorFromCpp,
     },
@@ -221,6 +221,18 @@ pub(crate) struct TypeConverter<'a> {
     /// Types we have only a stand-in for, mapped to why - which is known for
     /// a typedef whose target failed, and not for a plain forward declaration.
     forward_declarations: HashMap<QualifiedName, Option<OpaqueTypedefReason>>,
+    /// Concrete template instantiations one of whose arguments is a type we
+    /// have only a stand-in for, mapped to that argument. See
+    /// [`ConvertErrorFromCpp::InstantiationOnIncompleteType`].
+    instantiations_on_incomplete_types: HashMap<QualifiedName, QualifiedName>,
+    /// Every alias, mapped to the target bindgen wrote for it.
+    ///
+    /// Not `typedefs`, which is the *analysed* target and so is empty in the
+    /// phase which manufactures template instantiations: that analysis is what
+    /// is being run. This is bindgen's own text, available in every phase, and
+    /// is read only by [`Self::incompleteness_of_argument`], which has to see
+    /// through an alias in a template argument before anything converts it.
+    alias_targets: HashMap<QualifiedName, Type>,
     ignored_types: HashSet<QualifiedName>,
     config: &'a IncludeCppConfig,
     original_name_map: CppNameMap,
@@ -246,6 +258,8 @@ impl<'a> TypeConverter<'a> {
             typedefs: Self::find_typedefs(apis),
             concrete_templates: Self::find_concrete_templates(apis),
             forward_declarations: Self::find_incomplete_types(apis),
+            instantiations_on_incomplete_types: Self::find_instantiations_on_incomplete_types(apis),
+            alias_targets: Self::find_alias_targets(apis),
             ignored_types: Self::find_ignored_types(apis),
             config,
             original_name_map: CppNameMap::new_for_analysis(apis),
@@ -338,6 +352,22 @@ impl<'a> TypeConverter<'a> {
             // sees the marker rather than what it wraps.
             if !ctx.within_struct_field() {
                 return Err(ConvertErrorFromCpp::LongDouble);
+            }
+            self.convert_type(ty.clone(), ns, ctx)
+        } else if let Some(ty) = unwrap_float128(&typ) {
+            // C++ `__float128`. bindgen substituted `u128`, which is the right
+            // size and an integer; Rust has no 128-bit float to offer instead.
+            // A signature naming the substitute would compile and would be
+            // read as a different kind of number on both sides, so turn it
+            // down. `unsigned __int128`, which arrives as the same bare `u128`
+            // when this marker is absent, really is that integer and is
+            // supported.
+            //
+            // As field data the substitute is fine, for the reason it is fine
+            // for a `long double`, and `ByValueChecker` refuses such a struct
+            // by value for the same ABI reason.
+            if !ctx.within_struct_field() {
+                return Err(ConvertErrorFromCpp::Float128);
             }
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ty) = unwrap_bitfield(&typ) {
@@ -657,10 +687,22 @@ impl<'a> TypeConverter<'a> {
         let newp = self.convert_type_path_which_is_not_a_reference(typ, ns, ctx)?;
         if let Type::Path(newpp) = &newp.ty {
             let qn = QualifiedName::from_type_path(newpp);
-            if !ctx.allow_instantiation_of_forward_declaration()
-                && self.forward_declarations.contains_key(&qn)
-            {
-                return Err(self.incomplete_type_error(qn));
+            if !ctx.allow_instantiation_of_forward_declaration() {
+                if self.forward_declarations.contains_key(&qn) {
+                    return Err(self.incomplete_type_error(qn));
+                }
+                // Not in a struct field, unlike the forward declaration
+                // above: an instantiation built on one is a complete type,
+                // and a class may have a member of it. Whether *that*
+                // class can then be destroyed is C++'s business and its
+                // author's, and refusing the member would only hide the
+                // member's type from the analysis which decides what
+                // constructors the class has.
+                if !ctx.within_struct_field() {
+                    if let Some(err) = self.instantiation_on_incomplete_type_error(&qn) {
+                        return Err(err);
+                    }
+                }
             }
             // Special handling because rust_Str (as emitted by bindgen)
             // doesn't simply get renamed to a different type _identifier_.
@@ -963,6 +1005,9 @@ impl<'a> TypeConverter<'a> {
                 // than being turned down like one anywhere else.
                 if mentions_long_double(&Type::Path(typ.clone())) {
                     return Err(ConvertErrorFromCpp::LongDouble);
+                }
+                if mentions_float128(&Type::Path(typ.clone())) {
+                    return Err(ConvertErrorFromCpp::Float128);
                 }
                 let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
                 extra_apis.extend(api.into_iter());
@@ -1377,6 +1422,7 @@ impl<'a> TypeConverter<'a> {
             name,
             rs_definition,
             cpp_definition,
+            incomplete_argument,
             ..
         }) = api
         {
@@ -1386,6 +1432,7 @@ impl<'a> TypeConverter<'a> {
                 cpp_definition,
                 holder_surface: surface,
                 constructor_and_allocator_deps: Vec::new(),
+                incomplete_argument,
             });
         }
         Ok(new_tn)
@@ -1414,18 +1461,124 @@ impl<'a> TypeConverter<'a> {
                     None => synthetic_ident,
                     Some(_) => format!("AutocxxConcrete{count}"),
                 };
+                // The arguments are read here, before anything converts them,
+                // because this is the only place they are looked at at all: a
+                // later phase finds this instantiation by name in
+                // `concrete_templates` and never sees what it was built from.
+                let incomplete_argument = self.incomplete_argument_of(rs_definition);
                 let api = UnanalyzedApi::ConcreteType {
                     name: ApiName::new_in_root_namespace(make_ident(synthetic_ident)),
                     cpp_definition: cpp_definition.clone(),
                     rs_definition: Some(Box::new(rs_definition.clone().into())),
                     holder_surface: None,
                     constructor_and_allocator_deps: Vec::new(),
+                    incomplete_argument: incomplete_argument.clone(),
                 };
+                if let Some(argument) = incomplete_argument {
+                    self.instantiations_on_incomplete_types
+                        .insert(api.name().clone(), argument);
+                }
                 self.concrete_templates
                     .insert(cpp_definition, api.name().clone());
                 Ok((api.name().clone(), Some(api)))
             }
         }
+    }
+
+    /// The first template argument of `rs_definition` which names a type we
+    /// have only a stand-in for, if any.
+    ///
+    /// Only arguments named by value count. A pointer or a reference to an
+    /// incomplete type is a complete type itself, and a template which keeps
+    /// one - `holder<at> { at* p; }` - destroys perfectly well; it is the
+    /// `std::unique_ptr<at>` kind of member which does not.
+    ///
+    /// This is a conservative rule rather than a theorem: a template which
+    /// holds its argument by value may still be destructible where the
+    /// argument is not, and one which does not may still be undestructible for
+    /// reasons of its own. It is the shape which matters in practice and the
+    /// most that can be decided from a template's arguments alone.
+    ///
+    /// What it does *not* decide is whether some other type may hold one of
+    /// these by value: a class with such a member is generated as it always
+    /// was, and asking cxx to own one of *those* reaches the same C++.
+    /// Deciding that needs to know whether the enclosing class's destructor is
+    /// defined in this translation unit, which nothing here records - a class
+    /// whose destructor is defined out of line is fine - and turning the
+    /// member down instead would only hide it from the analysis which works
+    /// out what constructors the enclosing class has.
+    fn incomplete_argument_of(&self, rs_definition: &Type) -> Option<QualifiedName> {
+        self.incomplete_argument_within(rs_definition, &mut HashSet::new())
+    }
+
+    /// [`Self::incomplete_argument_of`], carrying the names already looked at
+    /// so that a chain of aliases cannot walk in a circle.
+    fn incomplete_argument_within(
+        &self,
+        ty: &Type,
+        seen: &mut HashSet<QualifiedName>,
+    ) -> Option<QualifiedName> {
+        let Type::Path(typ) = ty else {
+            return None;
+        };
+        typ.path
+            .segments
+            .iter()
+            .filter_map(|seg| match &seg.arguments {
+                PathArguments::AngleBracketed(ab) => Some(ab.args.iter()),
+                _ => None,
+            })
+            .flatten()
+            .find_map(|arg| match arg {
+                GenericArgument::Type(inner) => self.incompleteness_of_argument(inner, seen),
+                _ => None,
+            })
+    }
+
+    /// Whether one template argument reaches a type nothing defines - as
+    /// itself, through the aliases it may be written as, or inside its own
+    /// arguments.
+    ///
+    /// The aliases matter because this runs before anything converts these
+    /// arguments, so they are here under whatever name the header wrote:
+    /// `au<Alias>`, where `using Alias = bb`, is the same instantiation as
+    /// `au<bb>` and used to be classified as if it were not. An alias for an
+    /// instantiation which was itself classified this way - `using Inner =
+    /// au<bb>` - is caught through the same lookup, because a typedef's
+    /// recorded target is what its own conversion made of it.
+    fn incompleteness_of_argument(
+        &self,
+        arg: &Type,
+        seen: &mut HashSet<QualifiedName>,
+    ) -> Option<QualifiedName> {
+        let Type::Path(typ) = arg else {
+            return None;
+        };
+        let qn = QualifiedName::from_type_path(typ);
+        if self.forward_declarations.contains_key(&qn) {
+            return Some(qn);
+        }
+        if let Some(argument) = self.instantiations_on_incomplete_types.get(&qn) {
+            return Some(argument.clone());
+        }
+        // `seen` gates only this, the one step which leaves the type in hand
+        // for another. Walking the arguments below is walking a finite piece
+        // of syntax, and a name repeating in it - `Pair<au<int>, au<bb>>`, or
+        // `au<au<bb>>` - is not a circle. `QualifiedName` drops the arguments,
+        // so barring a name here would bar the second `au` in each of those
+        // and lose the `bb` inside it. Barring the second expansion of one
+        // alias loses nothing: the map is fixed and nothing substitutes into
+        // what it holds, so the expansion already under way is walking the
+        // same target, and whatever it finds comes back through the caller
+        // which started it.
+        if let Some(target) = self.alias_targets.get(&qn) {
+            if seen.insert(qn.clone()) {
+                if let Some(found) = self.incompleteness_of_argument(target, seen) {
+                    return Some(found);
+                }
+            }
+        }
+        self.incomplete_argument_within(arg, seen)
     }
 
     fn confirm_inner_type_is_acceptable_generic_payload(
@@ -1439,9 +1592,13 @@ impl<'a> TypeConverter<'a> {
             match inner {
                 GenericArgument::Type(Type::Path(typ)) => {
                     let inner_qn = QualifiedName::from_type_path(typ);
-                    if !forward_declarations_ok && self.forward_declarations.contains_key(&inner_qn)
-                    {
-                        return Err(self.incomplete_type_error(inner_qn));
+                    if !forward_declarations_ok {
+                        if self.forward_declarations.contains_key(&inner_qn) {
+                            return Err(self.incomplete_type_error(inner_qn));
+                        }
+                        if let Some(err) = self.instantiation_on_incomplete_type_error(&inner_qn) {
+                            return Err(err);
+                        }
                     }
                     match generic_behavior {
                         CxxGenericType::Rust => {
@@ -1544,6 +1701,59 @@ impl<'a> TypeConverter<'a> {
             .collect()
     }
 
+    /// What every alias in `apis` was written as pointing at, as bindgen wrote
+    /// it. See the field of the same name.
+    fn find_alias_targets<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashMap<QualifiedName, Type> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Typedef {
+                    item: TypedefKind::Type(ity),
+                    ..
+                } => Some((api.name().clone(), (*ity.ty).clone())),
+                Api::Typedef {
+                    item: TypedefKind::Use(ty),
+                    ..
+                } => Some((api.name().clone(), (**ty).clone().into())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The concrete template instantiations which were built on a type nothing
+    /// defines, recovered from the `Api`s a previous phase left behind.
+    ///
+    /// [`Self::get_templated_typename`] works this out once, when it
+    /// manufactures the instantiation; every later phase reads it back from
+    /// here, because the instantiation is found in `concrete_templates` by
+    /// then and its arguments are never looked at again.
+    fn find_instantiations_on_incomplete_types<A: AnalysisPhase>(
+        apis: &ApiVec<A>,
+    ) -> HashMap<QualifiedName, QualifiedName> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::ConcreteType {
+                    incomplete_argument: Some(argument),
+                    ..
+                } => Some((api.name().clone(), argument.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Why `qn` may not be destroyed here, if it may not be: it is a template
+    /// instantiation built on a type nothing defines.
+    fn instantiation_on_incomplete_type_error(
+        &self,
+        qn: &QualifiedName,
+    ) -> Option<ConvertErrorFromCpp> {
+        self.instantiations_on_incomplete_types.get(qn).map(|arg| {
+            ConvertErrorFromCpp::InstantiationOnIncompleteType {
+                instantiation: qn.clone(),
+                argument: arg.clone(),
+            }
+        })
+    }
+
     /// What to tell whoever tried to use `qn`, which we have only a stand-in
     /// for. Where we know what was wrong with the thing it stands in for, that
     /// is the useful answer; otherwise all we can say is that it's incomplete.
@@ -1638,12 +1848,14 @@ pub(crate) fn add_analysis<A: AnalysisPhase>(api: UnanalyzedApi) -> Api<A> {
             cpp_definition,
             holder_surface,
             constructor_and_allocator_deps,
+            incomplete_argument,
         } => Api::ConcreteType {
             name,
             rs_definition,
             cpp_definition,
             holder_surface,
             constructor_and_allocator_deps,
+            incomplete_argument,
         },
         Api::IgnoredItem { name, err, ctx } => Api::IgnoredItem { name, err, ctx },
         _ => panic!("Function analysis created an unexpected type of extra API"),

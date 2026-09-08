@@ -146,6 +146,14 @@ impl<'a> ParseBindgen<'a> {
                         rs_definition: None,
                         holder_surface: None,
                         constructor_and_allocator_deps: Vec::new(),
+                        // A `concrete!` directive names the C++ type itself,
+                        // as a string, so its arguments are whatever the user
+                        // wrote and autocxx never parses them. Naming an
+                        // instantiation this way is therefore also how to
+                        // assert that it may be owned, whatever its arguments
+                        // are - which is the same thing `instantiable!` says
+                        // about a typedef whose target autocxx could not see.
+                        incomplete_argument: None,
                     }
                 }),
         );

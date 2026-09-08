@@ -8,8 +8,9 @@
 
 use crate::{
     builder_modifiers::{
-        combine_modifiers, make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder,
-        make_cpp20_adder, make_unsigned_char_adder, EnableAutodiscover, ForceWrapperGeneration,
+        combine_modifiers, make_bindgen_only_clang_arg_adder, make_clang_arg_adder,
+        make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
+        make_unsigned_char_adder, EnableAutodiscover, ForceWrapperGeneration,
         SetSuppressSystemHeaders,
     },
     code_checkers::{
@@ -27,7 +28,7 @@ use autocxx_integration_tests::{
 use indoc::indoc;
 use itertools::Itertools;
 use proc_macro2::{Span, TokenStream};
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn::{parse_quote, Token};
 
 #[test]
@@ -213,50 +214,151 @@ fn test_return_int128() {
     run_test("", hdr, rs, &["give_i128", "round_trip_i128"], &[]);
 }
 
-/// `unsigned __int128` is not one type by the time it reaches us: bindgen
-/// renders it and a `__float128` as the same bare `u128` token, and nothing
-/// that survives to this side says which was written. (A 16-byte `long
-/// double` used to be a third claimant; it is now marked and refused by name
-/// of its own.) Binding it would mean picking one of the three and emitting C++
-/// that says so, which is a miscompile for the other two - so the token is
-/// refused with that as the reason instead. See the note beside the ctypes in
+/// `unsigned __int128`, the other half of `test_return_int128`. It travels as
+/// `autocxx::c_u128`, and can only do so because it is now the one C++ type
+/// which arrives as a bare `u128`: a 16-byte `long double` and a `__float128`
+/// used to reach us as that same token, and each is marked and refused by name
+/// of its own now. See the note beside the ctypes in
 /// `engine/src/known_types.rs`.
 ///
-/// `__int128` has no such problem: `i128` means that and nothing else, which
-/// is why `test_return_int128` above works.
+/// Not compiled for MSVC, which has no `__int128` at all.
 #[test]
-#[ignore] // Two C++ types share this token; see the doc comment.
 #[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
 fn test_return_uint128() {
     let hdr = indoc! {"
         inline unsigned __int128 give_u128() {
             return 5;
         }
+        inline unsigned __int128 round_trip_u128(unsigned __int128 x) {
+            return x;
+        }
     "};
     let rs = quote! {
-        assert_eq!(ffi::give_u128(), 5);
+        assert_eq!(ffi::give_u128(), autocxx::c_u128(5));
+        assert_eq!(ffi::round_trip_u128(autocxx::c_u128(u128::MAX - 7)).0, u128::MAX - 7);
     };
-    run_test("", hdr, rs, &["give_u128"], &[]);
+    run_test("", hdr, rs, &["give_u128", "round_trip_u128"], &[]);
 }
 
-/// What that refusal looks like today, so that it stays a refusal which says
-/// why rather than reverting to a bare "unknown type".
+/// The type which used to share that token. bindgen renders a `__float128` as
+/// `u128` because that is the right size and Rust has no 128-bit float, so
+/// without the marker `34-float128-newtype-marker.patch` puts round it the
+/// signature would be bound as the integer beside it and read as a different
+/// kind of number on both sides. Refused by name instead.
+///
+/// `__float128` exists on x86 Linux and nowhere else clang will admit to - not
+/// even x86 macOS - so bindgen is told to parse as that target and the build is
+/// skipped, which is what lets this run everywhere rather than on one CI leg.
 #[test]
-#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
-fn test_uint128_is_refused_by_name() {
+fn test_float128_is_refused_by_name() {
     let hdr = indoc! {"
-        inline unsigned __int128 give_u128() {
+        inline __float128 give_f128() {
             return 5;
         }
     "};
-    run_test_expect_fail_with_error("", hdr, quote! {}, &["give_u128"], &[], "unsigned __int128");
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["give_f128"], &[], None),
+        float128_target(),
+        // Not just the name: this used to be refused as "either an
+        // `unsigned __int128` or a `__float128`", which mentions it too.
+        "`__float128`, a 128-bit floating-point type",
+    );
 }
 
-/// A container of a `__int128` is refused: `autocxx::c_type_vectors` is
-/// compiled on every target autocxx supports and MSVC has no `__int128`, so
-/// there is no `UniquePtrTarget` for `c_i128` to be had and letting the
-/// signature through would buy a missing `cxxbridge1$unique_ptr$...` symbol at
-/// link time.
+/// A `__float128` *field* is bytes the struct carries, which is fine - but the
+/// struct cannot then cross by value, because a 16-byte float and the 16-byte
+/// integer standing in for it are not passed the same way. So the type stays
+/// opaque, and its accessor is refused by name rather than handing back the
+/// integer.
+#[test]
+fn test_float128_field_makes_a_type_non_pod() {
+    let hdr = indoc! {"
+        struct HasF128 { __float128 f; };
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&[], &["HasF128"], None),
+        float128_target(),
+        "could not be POD because it has a `__float128` member",
+    );
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["HasF128"], &[], None),
+        float128_target(),
+        Some(make_checks_without_building(vec![make_string_finder(
+            [
+                // The type survives - an error stub for the whole of it would
+                // satisfy the message on its own.
+                "impl UniquePtr < HasF128 >",
+                "`__float128`",
+            ]
+            .map(|s| s.to_string())
+            .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// A `__float128` *variable* is turned down by name too. It reaches us by a
+/// route of its own - a variable is re-exported as bindgen declared it rather
+/// than converted, so nothing on the conversion path sees it - and a silent
+/// re-export would hand Rust the bytes of a float to do integer arithmetic on.
+#[test]
+fn test_float128_static() {
+    let cxx = indoc! {"
+        const __float128 F = 1.0;
+    "};
+    let hdr = indoc! {"
+        extern const __float128 F;
+    "};
+    run_test_expect_fail_with_error_modified(
+        cxx,
+        hdr,
+        quote! {},
+        directives_from_lists(&["F"], &[], None),
+        float128_target(),
+        "`__float128`, a 128-bit floating-point type",
+    );
+}
+
+/// A `__float128` as a template argument, which reaches the C++ by a route of
+/// its own: a concrete instantiation is named by writing its arguments out
+/// again, without converting them, so nothing else would catch the marker and
+/// it would land in the generated header verbatim.
+#[test]
+fn test_float128_template_argument() {
+    let hdr = indoc! {"
+        template <typename T> struct Wrapper { T x; };
+        inline int unbox(const Wrapper<__float128>& b) { return 1; }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["unbox"], &[], None),
+        float128_target(),
+        "`__float128`, a 128-bit floating-point type",
+    );
+}
+
+/// The target the `__float128` tests ask bindgen to parse as. See
+/// `make_bindgen_only_clang_arg_adder`.
+fn float128_target() -> Option<BuilderModifier> {
+    make_bindgen_only_clang_arg_adder(&["--target=x86_64-unknown-linux-gnu"])
+}
+
+/// A container of either 128-bit integer is refused: `autocxx::c_type_vectors`
+/// is compiled on every target autocxx supports and MSVC has no `__int128`, so
+/// there is no `UniquePtrTarget` for `c_i128` or `c_u128` to be had and letting
+/// the signature through would buy a missing `cxxbridge1$unique_ptr$...` symbol
+/// at link time.
 #[test]
 #[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
 fn test_int128_containers_are_refused() {
@@ -268,11 +370,16 @@ fn test_int128_containers_are_refused() {
             Thing() {}
             std::unique_ptr<__int128> up() const { return nullptr; }
             const std::vector<__int128>& vec() const;
+            std::unique_ptr<unsigned __int128> uup() const { return nullptr; }
+            const std::vector<unsigned __int128>& uvec() const;
             __int128 plain() const { return 3; }
+            unsigned __int128 uplain() const { return 4; }
         };
     "};
     let rs = quote! {
-        assert_eq!(ffi::Thing::new().within_unique_ptr().plain(), autocxx::c_i128(3));
+        let thing = ffi::Thing::new().within_unique_ptr();
+        assert_eq!(thing.plain(), autocxx::c_i128(3));
+        assert_eq!(thing.uplain(), autocxx::c_u128(4));
     };
     run_test("", hdr, rs, &["Thing"], &[]);
 }
@@ -20339,13 +20446,15 @@ fn test_template_argument_left_to_its_default() {
     );
 }
 
+/// `au<bb>` is a complete type built on one which is only declared, and
+/// destroying it destroys the `std::unique_ptr<bb>` inside - which C++ rejects
+/// while `bb` is incomplete. So `std::vector<au<bb>>` is refused: cxx's vector
+/// glue destroys its elements, whether or not Rust ever asks it to.
+///
+/// The bindgen half of this - `au<bb>` keeping its template argument at all -
+/// is what rust-lang/rust-bindgen#3161 was about and what the two tests above
+/// cover.
 #[test]
-// The bindgen half of this is fixed: `au<bb>` keeps its template argument now,
-// which is what rust-lang/rust-bindgen#3161 was about and what the two tests
-// above cover. What is left is autocxx's: it emits `impl UniquePtr<T>` for the
-// concrete instantiation, and cxx's deleter for that instantiates
-// `~std::unique_ptr<bb>`, which C++ rejects while `bb` is only declared.
-#[ignore]
 fn test_issue_1065a() {
     let hdr = indoc! {"
         #include <memory>
@@ -20363,7 +20472,211 @@ fn test_issue_1065a() {
         };
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["RenderFrameHost"], &[]);
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        // Not just that it compiles: the refusal has to name what was wrong,
+        // because a `bd` which quietly vanished would compile too. One
+        // contiguous phrase, so that finding `bb` somewhere else in the
+        // bindgen module cannot stand in for it.
+        Some(make_string_finder(vec![
+            "au_bb_AutocxxConcrete, a template instantiation whose argument bb is a type this \
+             header only declares"
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The other half of the rule the test above pins: such an instantiation is
+/// still a type, so a C++ function which hands out a reference to one is bound
+/// as it always was. What goes is autocxx's own `UniquePtr`/`SharedPtr`/
+/// `WeakPtr` support for it, since each of those is C++ which destroys one.
+#[test]
+fn test_instantiation_on_incomplete_type_is_still_reachable_by_reference() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        class RenderFrameHost {
+        public:
+        virtual bc &bd() = 0;
+        virtual ~RenderFrameHost() {}
+        };
+    "};
+    let rs = quote! {};
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        Some(Box::new(SmartPointerImplsWithheld)),
+        None,
+    );
+}
+
+/// An argument written as an alias is the same argument. `au<Alias>` is one
+/// specialization with `au<bb>`, and an alias for the specialization itself is
+/// another way to write the same thing - and the arguments are read before
+/// anything converts them, so neither resolves itself.
+#[test]
+fn test_instantiation_on_incomplete_type_named_through_an_alias() {
+    for hdr in [
+        indoc! {"
+            #include <memory>
+            #include <vector>
+            template <typename at> class au { std::unique_ptr<at> aw; };
+            class bb;
+            using Alias = bb;
+            using bc = au<Alias>;
+            class RenderFrameHost {
+            public:
+            virtual std::vector<bc> &bd() = 0;
+            virtual ~RenderFrameHost() {}
+            };
+        "},
+        indoc! {"
+            #include <memory>
+            #include <vector>
+            template <typename at> class au { std::unique_ptr<at> aw; };
+            class bb;
+            using Inner = au<bb>;
+            template <typename T> struct Outer { T value; };
+            class RenderFrameHost {
+            public:
+            virtual std::vector<Outer<Inner>> &bd() = 0;
+            virtual ~RenderFrameHost() {}
+            };
+        "},
+    ] {
+        run_test_ex(
+            "",
+            hdr,
+            quote! {},
+            directives_from_lists(&["RenderFrameHost"], &[], None),
+            None,
+            // `bb` rather than the alias: the refusal names the type nothing
+            // defines, however the header spelt it.
+            Some(make_string_finder(vec![
+                "whose argument bb is a type this header only declares".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// A template name repeating in the arguments is not a circle. `au<int>`
+/// beside `au<bb>` is two instantiations, and `au<au<au<bb>>>` is three, and
+/// the walk has to reach the `bb` at the end of each rather than stop at the
+/// second `au`.
+#[test]
+fn test_instantiation_on_incomplete_type_beside_and_within_its_own_template() {
+    let hdr = indoc! {"
+        #include <memory>
+        #include <vector>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        template <typename A, typename B> class Pair { A a; B b; };
+        class bb;
+        class RenderFrameHost {
+        public:
+        virtual std::vector<Pair<au<int>, au<bb>>> &bd() = 0;
+        virtual std::vector<au<au<au<bb>>>> &be() = 0;
+        virtual ~RenderFrameHost() {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "Pair_au_int_au_bb_AutocxxConcrete, a template instantiation whose argument bb is a \
+             type this header only declares"
+                .to_string(),
+            "au_au_au_bb_AutocxxConcrete, a template instantiation whose argument bb is a type \
+             this header only declares"
+                .to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A class *with a member* of such an instantiation is generated as any other
+/// class is: the member is read, an accessor which borrows it is written, and
+/// the constructors autocxx cannot work out are withheld with the note which
+/// says so. Whether the class can be destroyed is C++'s business - its
+/// destructor may be defined where `bb` is complete.
+///
+/// Refusing the member instead would lose that: a field whose conversion fails
+/// is dropped rather than kept with its error, so the constructor analysis
+/// would see a class it understood completely and offer a copy constructor
+/// C++ had deleted.
+#[test]
+fn test_member_of_instantiation_on_incomplete_type_is_still_a_member() {
+    let hdr = indoc! {"
+        class bb;
+        template <class T> struct au { T* p; au() = default; au(const au&) = delete; };
+        struct Owner { au<bb> value; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![
+            make_string_finder(
+                [
+                    // The accessor borrows the member rather than copying it.
+                    "-> & output :: au_bb_AutocxxConcrete",
+                    "has not given this type a copy constructor",
+                ]
+                .map(|s| s.to_string())
+                .to_vec(),
+            ),
+            make_string_absence_finder(vec!["synthetic_const_copy_ctor".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// Checks that `bd` came back with the concrete type in it, that the type
+/// carries the note saying what it did not get, and that it indeed did not get
+/// it.
+struct SmartPointerImplsWithheld;
+
+impl CodeCheckerFns for SmartPointerImplsWithheld {
+    fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        let toks = rs.to_token_stream().to_string();
+        for expected in [
+            "-> Pin < & 'a mut au_bb_AutocxxConcrete >",
+            "has not added its usual `UniquePtr`",
+        ] {
+            if !toks.contains(expected) {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "Couldn't find {expected}"
+                )));
+            }
+        }
+        for unexpected in [
+            "impl UniquePtr < au_bb_AutocxxConcrete >",
+            "impl SharedPtr < au_bb_AutocxxConcrete >",
+            "impl WeakPtr < au_bb_AutocxxConcrete >",
+        ] {
+            if toks.contains(unexpected) {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "Unexpectedly found {unexpected}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[test]

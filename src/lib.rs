@@ -725,16 +725,18 @@ ctype_newtype!(c_i32, "c_i32", i32, "Newtype wrapper for an int32_t");
 ctype_newtype!(c_u64, "c_u64", u64, "Newtype wrapper for a uint64_t");
 ctype_newtype!(c_i64, "c_i64", i64, "Newtype wrapper for an int64_t");
 
-// `__int128`, which cxx has no atom for at all - so unlike the eight above,
-// this wrapper is how the type crosses in every position, not only inside a
-// `unique_ptr`. There is deliberately no `c_u128`: bindgen renders `unsigned
-// __int128` and `__float128` as one `u128` token, so a wrapper for it would be
-// the right type for one of the two and a miscompile for the other. (A 16-byte
-// `long double` used to share that token; it is refused by name of its own
-// now.) `autocxx::c_type_vectors` has no entry for this
-// one either, because MSVC has no `__int128` and that file compiles
-// everywhere; the engine refuses a container of it and says so.
+// The two 128-bit C++ integers, which cxx has no atom for at all - so unlike
+// the eight above, these wrappers are how the types cross in every position,
+// not only inside a `unique_ptr`. `autocxx::c_type_vectors` has no entry for
+// either, because MSVC has neither type and that file compiles everywhere; the
+// engine refuses a container of one and says so.
 ctype_newtype!(c_i128, "c_i128", i128, "Newtype wrapper for a C++ __int128");
+ctype_newtype!(
+    c_u128,
+    "c_u128",
+    u128,
+    "Newtype wrapper for a C++ unsigned __int128"
+);
 
 /// Newtype wrapper for a C void. Only useful as a `*c_void`
 #[allow(non_camel_case_types)]
@@ -1155,6 +1157,7 @@ pub mod prelude {
     pub use crate::c_long;
     pub use crate::c_longlong;
     pub use crate::c_short;
+    pub use crate::c_u128;
     pub use crate::c_u16;
     pub use crate::c_u32;
     pub use crate::c_u64;

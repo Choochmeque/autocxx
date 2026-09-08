@@ -306,14 +306,26 @@ impl ByValueChecker {
                     ));
                     break;
                 }
-                // A `long double` member. Its Rust stand-in has the right size
-                // and the wrong calling convention, so a struct holding one
-                // cannot cross by value either - which the arm below would
-                // conclude anyway, naming the marker rather than the type.
-                None if ty_id.get_final_item() == "__bindgen_marker_LongDouble" => {
+                // A `long double` or `__float128` member. The Rust stand-in
+                // for either has the right size and the wrong calling
+                // convention - a struct of one 16-byte float is passed in an
+                // SSE register where a struct of one 16-byte integer is not -
+                // so a struct holding one cannot cross by value either. The
+                // arm below would conclude the same thing anyway, naming the
+                // marker rather than the type.
+                None if matches!(
+                    ty_id.get_final_item(),
+                    "__bindgen_marker_LongDouble" | "__bindgen_marker_Float128"
+                ) =>
+                {
+                    let cpp = if ty_id.get_final_item() == "__bindgen_marker_LongDouble" {
+                        "long double"
+                    } else {
+                        "__float128"
+                    };
                     field_safety_problem = PodState::UnsafeToBePod(format!(
-                        "Type {tyname} could not be POD because it has a `long double` member, \
-                         which Rust has no type for - see the error for a `long double` in a \
+                        "Type {tyname} could not be POD because it has a `{cpp}` member, \
+                         which Rust has no type for - see the error for a `{cpp}` in a \
                          signature"
                     ));
                     break;
