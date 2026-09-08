@@ -6,12 +6,22 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use syn::{parse_quote, Attribute, Item};
+use syn::{
+    parse_quote, Attribute, GenericParam, Generics, Ident, Item, Path, TraitBound,
+    TraitBoundModifier, TypeParamBound,
+};
 
-use crate::types::{make_ident, QualifiedName};
+use crate::types::{make_ident, Namespace, QualifiedName};
 
 use super::find_output_mod_root;
 use quote::quote;
+
+/// The prefix bindgen gives the traits through which it renders a dependent
+/// qualified name - `typename T::Inner` becomes
+/// `<T as __bindgen_has_inner_type_Inner>::Inner`, and the parameter carries a
+/// bound naming that trait. Such a trait is declared in bindgen's root module,
+/// so a bound copied out of that module has to be requalified to reach it.
+const INNER_TYPE_TRAIT_PREFIX: &str = "__bindgen_has_inner_type_";
 
 /// Make an opaque wrapper around a bindgen type.
 // Constraints here (thanks to dtolnay@ for this explanation of why the
@@ -78,30 +88,282 @@ use quote::quote;
 // and thus we need to tell Rust their real size and alignment.
 pub(super) fn generate_opaque_type(
     name: &QualifiedName,
-    num_generics: usize,
+    bindgen_generics: &Generics,
     doc_attrs: &[Attribute],
 ) -> Item {
     let segs = find_output_mod_root(name.get_namespace()).chain(name.get_bindgen_path_idents());
     let final_name = name.get_final_ident().0;
 
-    let generics = (0usize..usize::MAX)
-        .take(num_generics)
-        .map(|num| make_ident(format!("T{num}")).0);
-    let generics = if num_generics == 0 {
+    // The parameters are bindgen's own, not fresh ones, because a parameter may
+    // carry a bound - that is how bindgen renders a member whose type is named
+    // through the parameter - and a bound naming an arbitrary trait cannot be
+    // reinvented here. Only the declaration takes the bounds; the type being
+    // wrapped is named with the parameters alone.
+    let declaration = rewrite_for_the_output_mod(bindgen_generics, name.get_namespace());
+    let params = &declaration.params;
+    let where_clause = &declaration.where_clause;
+    let params = if params.is_empty() {
         quote! {}
     } else {
-        quote! {
-            < #(#generics),* >
-        }
+        quote! { < #params > }
     };
+    let arguments = bindgen_generics.params.iter().map(|param| match param {
+        GenericParam::Type(tp) => {
+            let ident = &tp.ident;
+            quote! { #ident }
+        }
+        GenericParam::Lifetime(lp) => {
+            let lifetime = &lp.lifetime;
+            quote! { #lifetime }
+        }
+        GenericParam::Const(cp) => {
+            let ident = &cp.ident;
+            quote! { #ident }
+        }
+    });
+    let arguments = if bindgen_generics.params.is_empty() {
+        quote! {}
+    } else {
+        quote! { < #(#arguments),* > }
+    };
+    let declaration = quote! { #params #where_clause };
     Item::Struct(parse_quote! {
         #[repr(transparent)]
         #(#doc_attrs)*
-        pub struct #final_name #generics {
-            _hidden_contents: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<#(#segs)::* #generics>>,
+        pub struct #final_name #declaration {
+            _hidden_contents: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<#(#segs)::* #arguments>>,
             // Zero-sized, so `repr(transparent)` still applies to the field
             // above; its only job is to make this type !Unpin. See note (2).
             _pinned: ::core::marker::PhantomData<::core::marker::PhantomPinned>,
         }
     })
+}
+
+/// As `generics`, but as the output module can say it.
+///
+/// Two things differ there. A bound naming an inner-type trait has to reach
+/// bindgen's root module, which is where bindgen declares such a trait and which
+/// is the only place bindgen's own spelling of it resolves from. And `?Sized` is
+/// not a relaxation this wrapper can keep, whatever bindgen declared it for: the
+/// wrapped type goes inside a `MaybeUninit`, which wants a size.
+///
+/// Only the bounds are rewritten. The only predicates bindgen writes have a
+/// parameter as their subject, so there is nothing else here to requalify; a
+/// predicate about some other bindgen type would need its subject doing too.
+fn rewrite_for_the_output_mod(generics: &Generics, ns: &Namespace) -> Generics {
+    let mut generics = generics.clone();
+    for param in &mut generics.params {
+        if let GenericParam::Type(tp) = param {
+            tp.bounds = tp
+                .bounds
+                .iter()
+                .filter(|bound| !is_relaxation(bound))
+                .cloned()
+                .map(|bound| requalified(bound, ns))
+                .collect();
+        }
+    }
+    if let Some(where_clause) = &mut generics.where_clause {
+        for predicate in &mut where_clause.predicates {
+            if let syn::WherePredicate::Type(pt) = predicate {
+                pt.bounds = pt
+                    .bounds
+                    .iter()
+                    .filter(|bound| !is_relaxation(bound))
+                    .cloned()
+                    .map(|bound| requalified(bound, ns))
+                    .collect();
+            }
+        }
+    }
+    generics
+}
+
+fn is_relaxation(bound: &TypeParamBound) -> bool {
+    matches!(
+        bound,
+        TypeParamBound::Trait(TraitBound {
+            modifier: TraitBoundModifier::Maybe(_),
+            ..
+        })
+    )
+}
+
+fn requalified(mut bound: TypeParamBound, ns: &Namespace) -> TypeParamBound {
+    let TypeParamBound::Trait(tb) = &mut bound else {
+        return bound;
+    };
+    let Some(trait_name) = inner_type_trait_named(&tb.path) else {
+        return bound;
+    };
+    let prefix = find_output_mod_root(ns).map(|ident| ident.0).chain(
+        ["bindgen", "root"]
+            .iter()
+            .map(make_ident)
+            .map(|ident| ident.0),
+    );
+    tb.path = parse_quote! { #(#prefix ::)* #trait_name };
+    bound
+}
+
+/// The inner-type trait a path names, however bindgen spelled the path: bare
+/// from inside its root module, or through that module from anywhere else.
+fn inner_type_trait_named(path: &Path) -> Option<Ident> {
+    if path.leading_colon.is_some() {
+        return None;
+    }
+    let mut segments = path.segments.iter();
+    let last = match path.segments.len() {
+        1 => segments.next()?,
+        2 => {
+            let first = segments.next()?;
+            if first.ident != "root" || !first.arguments.is_none() {
+                return None;
+            }
+            segments.next()?
+        }
+        _ => return None,
+    };
+    (last.arguments.is_none() && last.ident.to_string().starts_with(INNER_TYPE_TRAIT_PREFIX))
+        .then(|| last.ident.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::{Generics, ItemStruct};
+
+    /// syn parses a `where` clause as part of the item rather than of its
+    /// `Generics`, which is also how one reaches this code: off a bindgen
+    /// struct.
+    fn generics_of(item: ItemStruct) -> Generics {
+        item.generics
+    }
+
+    fn where_clause_of(item: ItemStruct, ns: &Namespace) -> String {
+        let rewritten = rewrite_for_the_output_mod(&generics_of(item), ns);
+        let where_clause = rewritten
+            .where_clause
+            .expect("the input has a where clause");
+        quote! { #where_clause }.to_string()
+    }
+
+    /// bindgen names the trait through its own root module, which nothing in the
+    /// output module imports under that name.
+    #[test]
+    fn an_inner_type_trait_bound_reaches_bindgens_root_module() {
+        assert_eq!(
+            where_clause_of(
+                parse_quote! {
+                    struct S<T> where T: root::__bindgen_has_inner_type_Inner {}
+                },
+                &Namespace::new(),
+            ),
+            quote! { where T: bindgen::root::__bindgen_has_inner_type_Inner }.to_string()
+        );
+    }
+
+    /// Bare is how it reads inside that module, which is where bindgen writes it
+    /// when there are no namespaces to write it from.
+    #[test]
+    fn a_bare_inner_type_trait_bound_is_reached_the_same_way() {
+        assert_eq!(
+            where_clause_of(
+                parse_quote! {
+                    struct S<T> where T: __bindgen_has_inner_type_Inner {}
+                },
+                &Namespace::new(),
+            ),
+            quote! { where T: bindgen::root::__bindgen_has_inner_type_Inner }.to_string()
+        );
+    }
+
+    /// A wrapper in a namespace is that many modules down from the one which
+    /// holds `bindgen`.
+    #[test]
+    fn a_wrapper_in_a_namespace_climbs_out_to_reach_it() {
+        assert_eq!(
+            where_clause_of(
+                parse_quote! {
+                    struct S<T> where T: root::__bindgen_has_inner_type_Inner {}
+                },
+                &Namespace::from_user_input("a::b"),
+            ),
+            quote! { where T: super::super::bindgen::root::__bindgen_has_inner_type_Inner }
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn any_other_bound_is_left_as_bindgen_wrote_it() {
+        assert_eq!(
+            where_clause_of(
+                parse_quote! {
+                    struct S<T> where T: Copy + root::SomeOtherTrait {}
+                },
+                &Namespace::new(),
+            ),
+            quote! { where T: Copy + root::SomeOtherTrait }.to_string()
+        );
+    }
+
+    fn wrapper(item: ItemStruct, ns: &Namespace) -> String {
+        let name = QualifiedName::new(ns, make_ident("Thing"));
+        let wrapper = generate_opaque_type(&name, &generics_of(item), &[]);
+        quote! { #wrapper }.to_string()
+    }
+
+    /// What the whole wrapper looks like: bindgen's parameter, the bound put
+    /// where the output module can resolve it, and the wrapped type named with
+    /// the parameter alone.
+    #[test]
+    fn the_wrapper_declares_bindgens_parameters_and_wraps_its_type() {
+        let rendered = wrapper(
+            parse_quote! {
+                struct S<T> where T: root::__bindgen_has_inner_type_Inner {}
+            },
+            &Namespace::new(),
+        );
+        assert!(
+            rendered.contains(
+                &quote! {
+                    pub struct Thing < T >
+                    where T: bindgen::root::__bindgen_has_inner_type_Inner
+                }
+                .to_string()
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&quote! { MaybeUninit < bindgen::root::Thing < T > > }.to_string()),
+            "{rendered}"
+        );
+    }
+
+    /// A predicate can stand without a parameter of its own to hang off, so it
+    /// is emitted whatever the parameter count.
+    #[test]
+    fn a_where_clause_survives_having_no_parameters() {
+        let rendered = wrapper(
+            parse_quote! { struct S where u8: Copy {} },
+            &Namespace::new(),
+        );
+        assert!(
+            rendered.contains(&quote! { pub struct Thing where u8: Copy }.to_string()),
+            "{rendered}"
+        );
+    }
+
+    /// The wrapped type goes inside a `MaybeUninit`, so the wrapper cannot keep
+    /// a relaxation of `Sized` - but it keeps the parameter and its default.
+    #[test]
+    fn a_sized_relaxation_is_dropped_and_the_default_kept() {
+        let generics = generics_of(parse_quote! { struct S<FAM: ?Sized = [u8; 0]> {} });
+        let rewritten = rewrite_for_the_output_mod(&generics, &Namespace::new());
+        let params = &rewritten.params;
+        assert_eq!(
+            quote! { #params }.to_string(),
+            quote! { FAM = [u8; 0] }.to_string()
+        );
+    }
 }
