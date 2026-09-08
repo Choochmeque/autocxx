@@ -56,6 +56,12 @@ AAPCS - so its payload is
 [`autocxx::wchar_t`](https://docs.rs/autocxx/latest/autocxx/type.wchar_t.html),
 which is picked per target. `char8_t` only exists from C++20 onwards.
 
+`char16_t`, `char32_t` and `wchar_t` go inside a `UniquePtr`, a `SharedPtr`, a
+`WeakPtr` and a `CxxVector` as their newtypes. `char8_t` does not: naming it
+takes a `typedef char8_t ...` in C++ which `autocxx` compiles at C++14, where
+the keyword does not exist, so a container of one is refused with the rest of
+that function left alone.
+
 `long double` has no such newtype and is not supported, for a reason which
 differs by target: on MSVC and Apple Arm it is a `double` under another name, so
 a Rust `f64` has the right layout but is still the wrong C++ type and `cxx`'s

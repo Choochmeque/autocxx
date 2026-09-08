@@ -306,26 +306,80 @@ fn test_give_up_int() {
     run_test(cxx, hdr, rs, &["give_up"], &[]);
 }
 
-/// A `char32_t` or a `wchar_t` inside a `unique_ptr` is not caught up in the
-/// fixed-width substitution: bindgen gives each character type a marker of its
-/// own, so neither arrives as the bare `u32` a `uint32_t` does and neither is
-/// a key in the wrapper map. They are refused instead - autocxx ships no cxx
-/// container glue for the character newtypes, so a `UniquePtr<c_char32_t>`
-/// would want a `UniquePtrTarget` nobody wrote - and the refusal costs those
-/// two methods rather than the bridge.
+/// A character type inside a container is a named type to cxx exactly as
+/// `c_int` is, so the same explicit shim trait impls in
+/// `autocxx::c_type_vectors` make it a payload. It escapes the fixed-width
+/// substitution on the way there: bindgen gives each character type a marker
+/// of its own, so none arrives as the bare `u32` a `uint32_t` does, and each
+/// travels as its own newtype throughout.
 #[test]
-fn test_character_types_within_unique_ptr_are_refused() {
+fn test_give_up_char32_t() {
+    let cxx = indoc! {"
+        std::unique_ptr<char32_t> give_up() {
+            return std::make_unique<char32_t>(U'x');
+        }
+    "};
+    let hdr = indoc! {"
+        #include <memory>
+        std::unique_ptr<char32_t> give_up();
+    "};
+    let rs = quote! {
+        assert_eq!(
+            *ffi::give_up().as_ref().unwrap(),
+            autocxx::c_char32_t('x' as u32)
+        );
+    };
+    run_test(cxx, hdr, rs, &["give_up"], &[]);
+}
+
+/// The other three containers, over the other two character types autocxx
+/// ships glue for. `wchar_t`'s width is the target's, which is why its
+/// newtype's payload is a `cfg`-selected alias and why nothing here writes a
+/// literal of that type.
+#[test]
+fn test_character_types_in_containers() {
+    let hdr = indoc! {"
+        #include <memory>
+        #include <vector>
+        inline std::unique_ptr<std::vector<char16_t>> chars() {
+            return std::make_unique<std::vector<char16_t>>(
+                std::vector<char16_t>{ u'a', u'b' });
+        }
+        inline std::shared_ptr<wchar_t> share_wide() {
+            return std::make_shared<wchar_t>(L'z');
+        }
+        inline std::weak_ptr<wchar_t> weaken(std::shared_ptr<wchar_t> a) {
+            return std::weak_ptr<wchar_t>(a);
+        }
+    "};
+    let rs = quote! {
+        let v = ffi::chars();
+        assert_eq!(v.len(), 2);
+        assert_eq!(*v.get(1).unwrap(), autocxx::c_char16_t('b' as u16));
+        let w = ffi::share_wide();
+        assert_eq!(
+            *ffi::weaken(w.clone()).upgrade().as_ref().unwrap(),
+            autocxx::c_wchar_t('z' as autocxx::wchar_t)
+        );
+    };
+    run_test("", hdr, rs, &["chars", "share_wide", "weaken"], &[]);
+}
+
+/// `char8_t` is the one character type with no container glue. The typedef
+/// naming it has to compile in `c_type_vectors.h`, which this crate builds at
+/// the C++14 floor every autocxx consumer gets, and `char8_t` is a C++20
+/// keyword: before C++20 the typedef names nothing. So the payload is refused,
+/// and the refusal costs the one method rather than the bridge.
+#[test]
+fn test_char8_t_containers_are_refused() {
     let hdr = indoc! {"
         #include <cstdint>
         #include <memory>
         class Thing {
         public:
             Thing() {}
-            std::unique_ptr<char32_t> up() const {
-                return std::make_unique<char32_t>(U'x');
-            }
-            std::unique_ptr<wchar_t> wp() const {
-                return std::make_unique<wchar_t>(L'y');
+            std::unique_ptr<char8_t> up() const {
+                return std::make_unique<char8_t>(u8'x');
             }
             uint32_t unrelated() const { return 7; }
         };
@@ -333,7 +387,15 @@ fn test_character_types_within_unique_ptr_are_refused() {
     let rs = quote! {
         assert_eq!(ffi::Thing::new().within_unique_ptr().unrelated(), 7);
     };
-    run_test("", hdr, rs, &["Thing"], &[]);
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Thing"], &[], None),
+        make_cpp20_adder(),
+        None,
+        None,
+    );
 }
 
 /// A payload reached through an alias keeps its atom, and the refusal that

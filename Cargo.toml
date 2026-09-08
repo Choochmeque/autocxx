@@ -31,11 +31,11 @@ arbitrary_self_types = []
 # Declares `std::vector`, `std::unique_ptr`, `std::shared_ptr` and
 # `std::weak_ptr` glue for the `autocxx::c_*` newtypes, so that a
 # `std::vector<int>` or `std::unique_ptr<int>` (or `long`, `short`,
-# `long long`, signed or unsigned) can cross a bridge - see google/autocxx#422.
-# cxx implements `VectorElement` and `UniquePtrTarget` only for the widths it
-# knows natively, and the orphan rule stops a generated bridge implementing
-# them for our types, so this crate has to. The name predates the smart
-# pointers and is kept for compatibility.
+# `long long`, signed or unsigned, or `char16_t`, `char32_t` or `wchar_t`)
+# can cross a bridge - see google/autocxx#422. cxx implements `VectorElement`
+# and `UniquePtrTarget` only for the types it knows natively, and the orphan
+# rule stops a generated bridge implementing them for our types, so this crate
+# has to. The name predates the smart pointers and is kept for compatibility.
 #
 # It is what makes this crate compile C++ of its own, which is why it can be
 # turned off: without it nothing here needs `cxx-build`, which suits a

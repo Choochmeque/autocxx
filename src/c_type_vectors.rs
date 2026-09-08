@@ -33,6 +33,14 @@
 //! `uint32_t` in any other position keeps its `u32` atom, which cxx supports
 //! natively - and the other three are written anyway so that nothing which
 //! passes `known_types`'s container checks can reach a missing impl.
+//!
+//! The character types are here for the first reason rather than the second:
+//! `char16_t`, `char32_t` and `wchar_t` are C++ types of their own, each
+//! reaching Rust as its own newtype rather than as the integer of its width,
+//! so a container of one is a container of a named type and needs the same
+//! shims. `c_char8_t` is deliberately absent: naming its C++ type takes a
+//! `typedef char8_t ...`, and this file is compiled at the C++14 floor, where
+//! `char8_t` is not a keyword. See `c_type_vectors.h`.
 #[cxx::bridge]
 mod ffi {
     unsafe extern "C++" {
@@ -55,6 +63,10 @@ mod ffi {
         type c_i32 = crate::c_i32;
         type c_u64 = crate::c_u64;
         type c_i64 = crate::c_i64;
+
+        type c_char16_t = crate::c_char16_t;
+        type c_char32_t = crate::c_char32_t;
+        type c_wchar_t = crate::c_wchar_t;
     }
 
     impl CxxVector<c_int> {}
@@ -73,6 +85,9 @@ mod ffi {
     impl CxxVector<c_i32> {}
     impl CxxVector<c_u64> {}
     impl CxxVector<c_i64> {}
+    impl CxxVector<c_char16_t> {}
+    impl CxxVector<c_char32_t> {}
+    impl CxxVector<c_wchar_t> {}
 
     impl UniquePtr<c_int> {}
     impl UniquePtr<c_uint> {}
@@ -90,6 +105,9 @@ mod ffi {
     impl UniquePtr<c_i32> {}
     impl UniquePtr<c_u64> {}
     impl UniquePtr<c_i64> {}
+    impl UniquePtr<c_char16_t> {}
+    impl UniquePtr<c_char32_t> {}
+    impl UniquePtr<c_wchar_t> {}
 
     impl SharedPtr<c_int> {}
     impl SharedPtr<c_uint> {}
@@ -107,6 +125,9 @@ mod ffi {
     impl SharedPtr<c_i32> {}
     impl SharedPtr<c_u64> {}
     impl SharedPtr<c_i64> {}
+    impl SharedPtr<c_char16_t> {}
+    impl SharedPtr<c_char32_t> {}
+    impl SharedPtr<c_wchar_t> {}
 
     impl WeakPtr<c_int> {}
     impl WeakPtr<c_uint> {}
@@ -124,4 +145,7 @@ mod ffi {
     impl WeakPtr<c_i32> {}
     impl WeakPtr<c_u64> {}
     impl WeakPtr<c_i64> {}
+    impl WeakPtr<c_char16_t> {}
+    impl WeakPtr<c_char32_t> {}
+    impl WeakPtr<c_wchar_t> {}
 }
