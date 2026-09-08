@@ -1,0 +1,56 @@
+Subject: Report a data member's C++ name and access specifier
+
+`denote_data_member` says what a member is, but not what a generator has to
+know before it may write code which names it.
+
+The name it reports is the field's, put through `rust_mangle`: a member C++
+calls `type` is reported as `type_`, which is the field bindgen generates and
+is not the member. Anything emitting C++ against the member - an accessor, an
+initializer - has to spell it as C++ does, and nothing else in the callback
+surface says what that was.
+
+The access specifier is not reported at all. It is recoverable from the
+generated field only where `--respect-cxx-access-specs` is on, which is off by
+default and which a `field_visibility` callback or a `private` annotation may
+override in either direction - so reading it back off the field answers a
+question about the Rust rendering, not about C++. A member which is private
+is one a consumer must not emit an accessor for.
+
+Both are already on `FieldMethods` for every member, bitfields included, so
+this reports them beside the facts that callback already carries. Purely
+additive: no generated code changes.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -584,6 +584,20 @@
+     /// from this one but may carry a suffix to avoid colliding with a method.
+     /// `None` for an unnamed bitfield, which gets neither.
+     pub name: Option<&'a str>,
++
++    /// The member's name as C++ spells it, before the mangling `name` carries.
++    /// The two differ where the C++ name is not a Rust identifier - a member
++    /// called `type` becomes a field called `type_` - so this is the only one
++    /// of the pair which can be written back into C++ source. `None` for an
++    /// unnamed bitfield, as `name` is.
++    pub cpp_name: Option<&'a str>,
++
++    /// Whether C++ declared the member `public`. A generator which emits code
++    /// naming the member needs to know, and the generated Rust does not always
++    /// say: field visibility is what `--respect-cxx-access-specs` decides,
++    /// which is off by default and which a `field_visibility` callback or an
++    /// annotation may override either way.
++    pub is_public: bool,
+ 
+     /// Whether C++ qualified the member's own type `const`, as opposed to it
+     /// pointing at something `const`. Rust has no spelling for the former, so
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -6550,6 +6550,8 @@
+                     parent,
+                     DataMemberInfo {
+                         name: name.as_deref(),
++                        cpp_name: member.name(),
++                        is_public: member.is_public(),
+                         is_const,
+                         bitfield_width: member.bitfield_width(),
+                         has_default_member_initializer: member
