@@ -109,6 +109,71 @@ impl Behavior {
         }
     }
 
+    /// The inner types the prelude class declares, so that a member spelled
+    /// `typename T::value_type` through one of these names the type C++ names
+    /// for it.
+    ///
+    /// Every entry is an identity, not a layout guess, and only where the
+    /// identity holds whatever the standard library and the target are.
+    /// `std::string` fixes its own allocator and `std::string_view` has none at
+    /// all, so for both the `value_type` is `char` and the `size_type` and
+    /// `difference_type` are `size_t` and `ptrdiff_t`. Those
+    /// two have to be spelled as such - `unsigned long` is a distinct type from
+    /// `unsigned int` on a 32-bit target even at equal width, and 64-bit MSVC's
+    /// `long` is 32 bits - and the prelude is prepended ahead of any `#include`,
+    /// where neither name is declared, so each is spelled as the clang builtin
+    /// which is that type: bindgen always parses with libclang, whatever it
+    /// targets.
+    ///
+    /// Two kinds of inner type are deliberately absent.
+    ///
+    /// One is where no single type is the answer. `std::vector`'s `size_type`
+    /// and `difference_type` are implementation-defined, not `size_t` and
+    /// `ptrdiff_t` by fiat: an allocator declaring its own moves them, which
+    /// libc++ honours and libstdc++ does not.
+    ///
+    /// The other is where the type is known but bindgen cannot render the
+    /// declaration into an impl that compiles. The condition is that the type
+    /// the impl assigns has to satisfy every bound the trait puts on its
+    /// associated type, under that impl's own predicates, and bindgen emits the
+    /// impl with the bounds it collected from the class's *fields*. So
+    /// `std::vector<T>::value_type`, which is `T` by [vector.overview] and an
+    /// identity, becomes `impl<T> HasValueType for vector<T> { type value_type =
+    /// T; }` with nothing requiring `T: Default`, and does not compile - and
+    /// because the prelude is in front of every header, that would stop any
+    /// program projecting that name, not only one using the container.
+    /// `std::string::traits_type` is likewise `std::char_traits<char>` exactly,
+    /// with no Rust type standing for it that meets those bounds. Both are
+    /// recorded as fork queue items against bindgen.
+    fn inner_types(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            // `std::string` fixes its own allocator and `std::string_view`
+            // has none, so all three are the same types for both.
+            Behavior::CxxString | Behavior::CxxStringView => &[
+                ("value_type", "char"),
+                ("size_type", "__SIZE_TYPE__"),
+                ("difference_type", "__PTRDIFF_TYPE__"),
+            ],
+            // `size_type` and `difference_type` follow the allocator, and
+            // `value_type` is the parameter.
+            Behavior::CxxContainerVector => &[],
+            // `element_type` apiece, each of them the parameter.
+            Behavior::CxxContainerUniquePtr
+            | Behavior::CxxContainerSharedPtr
+            | Behavior::RustContainerByValueSafe => &[],
+            // `rust::Str` and `rust::String` declare iterators and nothing else.
+            Behavior::RustStr | Behavior::RustString => &[],
+            // No prelude class, so nowhere to put one.
+            Behavior::RustByValue
+            | Behavior::CByValue
+            | Behavior::CChar
+            | Behavior::CByValueVecSafe
+            | Behavior::CIntegerWrapper
+            | Behavior::CVoid
+            | Behavior::CCharacter => &[],
+        }
+    }
+
     /// Whether a class standing in for this type goes into the prelude handed
     /// to bindgen, so that bindgen replaces the real C++ type with it.
     ///
@@ -223,16 +288,30 @@ impl TypeDetails {
             | Behavior::RustContainerByValueSafe => ("template<typename T> ", "T* ptr"),
             _ => ("", "char* ptr"),
         };
+        // A `class`, so the payload stays private; the inner types have to be
+        // public for a member naming one through a template parameter to reach
+        // it.
+        let inner_types = match self.behavior.inner_types() {
+            [] => String::new(),
+            types => format!(
+                "public:\n    {}\nprivate:\n",
+                types
+                    .iter()
+                    .map(|(name, definition)| format!("typedef {definition} {name};"))
+                    .collect::<Vec<_>>()
+                    .join("\n    ")
+            ),
+        };
         Some(format!(
             indoc! {"
             /**
             * <div rustbindgen=\"true\" replaces=\"{}\"></div>
             */
             {}class {} {{
-                {};
+            {}    {};
             }};
             "},
-            self.cpp_name, templating, cxx_name, payload
+            self.cpp_name, templating, cxx_name, inner_types, payload
         ))
     }
 
@@ -530,6 +609,28 @@ impl TypeDatabase {
                 .values()
                 .filter_map(|td| td.substitute_name())
                 .any(|substitute| substitute == ty.get_final_item())
+    }
+
+    /// Whether the prelude class standing in for this type declares the named
+    /// inner type, or `None` where autocxx hands bindgen no stand-in for it and
+    /// bindgen therefore reports the type's own.
+    ///
+    /// A member spelled `typename T::something` through a template parameter
+    /// can only be given a type where `T`'s stand-in declares `something`; see
+    /// [`Behavior::inner_types`] for why that list is as short as it is.
+    pub(crate) fn substitute_declares_inner_type(
+        &self,
+        ty: &QualifiedName,
+        inner_type: &str,
+    ) -> Option<bool> {
+        let details = self.get(ty)?;
+        details.behavior.has_prelude_entry().then(|| {
+            details
+                .behavior
+                .inner_types()
+                .iter()
+                .any(|(name, _)| *name == inner_type)
+        })
     }
 
     pub(crate) fn known_type_type_path(&self, ty: &QualifiedName) -> Option<TypePath> {
