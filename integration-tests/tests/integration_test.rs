@@ -2000,10 +2000,11 @@ fn test_constructors_for_concrete_directive_types_named_in_cpp() {
     );
 }
 
-/// `block_constructors!` beats `instantiable!` where the two name the same
-/// alias. The instantiation's own name is autocxx's invention, so the
-/// directive the user writes for either is the alias, and the constructor
-/// suppression has to follow it the same way the permission does.
+/// `block_constructors!` beats `instantiable!`, and does so across aliases.
+/// The instantiation's own name is autocxx's invention, so the directive the
+/// user writes for either is an alias - and two aliases of one instantiation
+/// are now one Rust type, so a block written against either has to beat a
+/// permission written against the other.
 #[test]
 fn test_blocked_constructors_beat_instantiable() {
     let hdr = indoc! {"
@@ -2016,7 +2017,8 @@ fn test_blocked_constructors_beat_instantiable() {
             T a[2];
         };
 
-        typedef A<uint32_t> C;
+        typedef A<uint32_t> B;
+        typedef B C;
         inline uint32_t take_a(const C&) { return 3; }
     "};
     run_test_ex(
@@ -2024,16 +2026,66 @@ fn test_blocked_constructors_beat_instantiable() {
         hdr,
         quote! {},
         quote! {
+            generate!("B")
             generate!("C")
             generate!("take_a")
             instantiable!("C")
-            block_constructors!("C")
+            block_constructors!("B")
         },
         None,
         Some(make_string_absence_finder(vec![
             "AutocxxConcrete_autocxx_alloc".into(),
             "new_autocxx".into(),
         ])),
+        None,
+    );
+}
+
+/// C++ destroys one of these however Rust lets go of it. `UniquePtr` would
+/// manage that without any help from Rust, but `moveit`'s `AsMove` for a
+/// `UniquePtr` asks only for the allocators, and the `MoveRef` it hands out
+/// drops by running Rust's `Drop` and then freeing the C++ storage - so
+/// without a `Drop` impl that safe path frees the object without destroying
+/// it.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_destructor_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& fx_dtors() { static uint32_t c = 0; return c; }
+        template<typename T>
+        class A {
+        public:
+            ~A() { fx_dtors()++; }
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+        inline uint32_t fx_read_dtors() { return fx_dtors(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            use autocxx::moveit::AsMove;
+            {
+                let _owned = ffi::C::new();
+            }
+            assert_eq!(ffi::fx_read_dtors(), 1);
+            let moved = ffi::C::new();
+            autocxx::moveit::slot!(#[dropping] storage);
+            drop(moved.as_move(storage));
+            assert_eq!(ffi::fx_read_dtors(), 2);
+        },
+        quote! {
+            generate!("C")
+            generate!("fx_read_dtors")
+            instantiable!("C")
+        },
+        None,
+        None,
         None,
     );
 }
