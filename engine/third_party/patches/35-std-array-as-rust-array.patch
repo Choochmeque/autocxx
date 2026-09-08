@@ -112,18 +112,6 @@ the blob and the array occupy the same bytes but are not the same Rust type.
  }
  
  /// A struct that owns the tokenizer result from a given cursor.
-@@ -1438,6 +1498,11 @@
-         unsafe { clang_isConstQualifiedType(self.x) != 0 }
-     }
- 
-+    /// Is this type `volatile`-qualified?
-+    pub(crate) fn is_volatile(&self) -> bool {
-+        unsafe { clang_isVolatileQualifiedType(self.x) != 0 }
-+    }
-+
-     /// Is this C++20's `char8_t`?
-     ///
-     /// There is no `CXType_Char8` to compare against: libclang's kinds go
 --- a/codegen/mod.rs
 +++ b/codegen/mod.rs
 @@ -6392,8 +6392,15 @@
