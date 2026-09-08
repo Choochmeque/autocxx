@@ -1180,3 +1180,39 @@ fn test_copy_constructor_cpprefs() {
     };
     run_cpprefs_test("", hdr, rs, &["fx_Copyable"], &[]);
 }
+
+/// The holder standing for a `const` reference to a C++ variable, under
+/// `unsafe_references_wrapped`.
+///
+/// `get` hands back a `CppRef` here, as the smart-pointer holders' do, and is
+/// `unsafe` for the same kind of reason: a `std::reference_wrapper` is never
+/// empty, but a variable of static storage duration is not alive before its
+/// initialization or after static destruction, and this holder's C++ type is
+/// one a header can hand back referring to anything at all.
+///
+/// Addresses the bug reported upstream as google/autocxx#94.
+#[test]
+fn test_non_pod_constant_cpprefs() {
+    let cxx = indoc! {"
+        const fx_Held FX_HELD(3);
+    "};
+    let hdr = indoc! {"
+        struct fx_Held {
+            int v;
+            explicit fx_Held(int v) : v(v) {}
+            fx_Held(const fx_Held&) = delete;
+            int peek() const { return v; }
+        };
+        extern const fx_Held FX_HELD;
+    "};
+    let rs = quote! {
+        let held = ffi::FX_HELD();
+        // Safe: `FX_HELD` is a constant, and this runs between its
+        // initialization and static destruction.
+        let held: autocxx::CppRef<ffi::fx_Held> = unsafe { held.as_ref().unwrap().get() };
+        // A `CppRef` is a receiver in this mode, which is the whole point of
+        // handing one back rather than a raw pointer.
+        assert_eq!(held.peek(), autocxx::c_int(3));
+    };
+    run_cpprefs_test(cxx, hdr, rs, &["FX_HELD", "fx_Held"], &[]);
+}

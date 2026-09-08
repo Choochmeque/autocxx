@@ -1435,25 +1435,14 @@ fn test_make_up_with_args() {
     run_test(cxx, hdr, rs, &["take_bob", "Bob"], &[]);
 }
 
-/// google/autocxx#53: we generate no field accessors for a non-POD type, so
-/// this fails to compile with E0609 "no field `b` on type `&ffi::Bob`". `Bob`
-/// is only `generate!`d, and our output mod gives such a type one private
-/// `_hidden_contents` field, deliberately - Rust must not be told the offsets.
-/// The book puts it plainly: "There is no access to fields (yet)". The
-/// established workaround is to write the getter in C++ by hand.
-///
-/// Closing that gap is a feature rather than a fix. google/autocxx#53
-/// sketches generated accessors - getters, then setters, then sugar to hide
-/// the call - and google/autocxx#21 sketches a rival design computing offsets
-/// with `offsetof`. Neither is settled, and the choice is user-visible API.
-///
-/// This test's own intent, that a constructor argument reaches the object, is
-/// already covered by `test_make_up_with_args` directly above, which reads the
-/// field back through C++. `test_make_up` was converted to that idiom in
-/// September 2020 after hitting exactly this wall; `test_make_up_int` was left
-/// behind, and survives as the standing request to read the field from Rust.
+/// google/autocxx#53: reading a field of a non-POD type. `Bob` is only
+/// `generate!`d, so our output mod shows it as an opaque struct with private
+/// contents - Rust must not be told the offsets - and this used to fail to
+/// compile with E0609 "no field `b` on type `&ffi::Bob`". The documented
+/// workaround was to write the getter in C++ by hand; autocxx now synthesizes
+/// exactly that, one per public data member, so the field is read by calling
+/// a method named after it.
 #[test]
-#[ignore]
 fn test_make_up_int() {
     let cxx = indoc! {"
         Bob::Bob(uint32_t a) : b(a) {
@@ -1469,9 +1458,254 @@ fn test_make_up_int() {
     "};
     let rs = quote! {
         let a = ffi::Bob::new(3).within_unique_ptr();
-        assert_eq!(a.as_ref().unwrap().b, 3);
+        assert_eq!(a.as_ref().unwrap().b(), 3);
     };
     run_test(cxx, hdr, rs, &["Bob"], &[]);
+}
+
+/// A member autocxx cannot hand over by value is borrowed instead of copied.
+/// `self.a` by value would demand a copy constructor and would quietly hand
+/// back a copy of the thing the caller asked to read; the accessor borrows the
+/// receiver, which needs neither. See google/autocxx#53.
+#[test]
+fn test_field_accessor_borrows_non_pod_member() {
+    let hdr = indoc! {"
+        #include <string>
+        struct Bob {
+            Bob() : a(\"hello\") {}
+            std::string a;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob::new().within_unique_ptr();
+        assert_eq!(b.as_ref().unwrap().a().to_str().unwrap(), "hello");
+    };
+    run_test("", hdr, rs, &["Bob"], &[]);
+}
+
+/// A member of a type which is copyable however it was declared comes back by
+/// value: a built-in, a pointer, an enumeration. A `&u32` accessor would be
+/// worse in every way. Everything else is borrowed, a POD struct included -
+/// see `test_field_accessor_borrows_an_uncopyable_pod_member` for why.
+#[test]
+fn test_field_accessor_pod_members_by_value() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        enum Colour { RED, GREEN };
+        struct Inner { uint32_t a; uint32_t b; };
+        struct Outer {
+            Outer() : inner{1, 2}, count(3), colour(GREEN), self_ptr(this), name(\"x\") {}
+            Inner inner;
+            uint32_t count;
+            Colour colour;
+            Outer* self_ptr;
+            std::string name;
+        };
+    "};
+    let rs = quote! {
+        let o = ffi::Outer::new().within_unique_ptr();
+        let o = o.as_ref().unwrap();
+        let borrowed: &ffi::Inner = o.inner();
+        assert_eq!(borrowed.b, 2);
+        let by_value: u32 = o.count();
+        assert_eq!(by_value, 3);
+        assert!(o.colour() == ffi::Colour::GREEN);
+        assert!(!o.self_ptr().is_null());
+        assert_eq!(o.name().to_str().unwrap(), "x");
+    };
+    run_test("", hdr, rs, &["Outer", "Colour"], &["Inner"]);
+}
+
+/// Rust holding a type by value is not the same question as C++ copying one
+/// out of a `const` object. A class which declares its own move constructor
+/// has no implicit copy constructor, and stays trivially relocatable - so it
+/// is POD to autocxx and uncopyable to C++ at once, and a by-value accessor
+/// for a member of that type would generate C++ which does not compile.
+#[test]
+fn test_field_accessor_borrows_an_uncopyable_pod_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Movable {
+            uint32_t a;
+            Movable(uint32_t a) : a(a) {}
+            Movable(Movable&&) = default;
+        };
+        struct Outer {
+            Outer() : m(7) {}
+            Movable m;
+        };
+    "};
+    let rs = quote! {
+        let o = ffi::Outer::new().within_unique_ptr();
+        assert_eq!(o.as_ref().unwrap().m().a, 7);
+    };
+    run_test("", hdr, rs, &["Outer"], &["Movable"]);
+}
+
+/// Access control is C++'s, not Rust's: a private member gets no accessor.
+/// bindgen's own mod still declares the field, privately, as it declares every
+/// field - what must not exist is a method reading it.
+#[test]
+fn test_field_accessor_only_for_public_members() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Bob {
+        public:
+            Bob() : visible(1), secret(2) {}
+            uint32_t visible;
+            uint32_t peek() const { return secret; }
+        private:
+            uint32_t secret;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob::new().within_unique_ptr();
+        assert_eq!(b.as_ref().unwrap().visible(), 1);
+        assert_eq!(b.as_ref().unwrap().peek(), 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Bob"], &[], None),
+        None,
+        Some(make_string_absence_finder(vec!["fn secret".to_string()])),
+        None,
+    );
+}
+
+/// A field whose C++ name is a Rust keyword keeps the name bindgen would have
+/// given it, and the C++ shim reads the member by the name C++ spells it -
+/// which is the whole reason the accessor needs the unmangled name reported.
+#[test]
+fn test_field_accessor_for_keyword_named_field() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            Bob() : type(7) {}
+            uint32_t type;
+        };
+    "};
+    let rs = quote! {
+        let b = ffi::Bob::new().within_unique_ptr();
+        assert_eq!(b.as_ref().unwrap().type_(), 7);
+    };
+    run_test("", hdr, rs, &["Bob"], &[]);
+}
+
+/// bindgen names a method of `Bob` called `b` as `Bob_b`, and so may name a
+/// free function - so that is not a name the accessor for `Bob::b` can be
+/// filed under. Both survive here; had they shared a name, they would have
+/// destroyed each other and left an ignored item where both had been.
+#[test]
+fn test_field_accessor_does_not_displace_a_similarly_named_function() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Bob {
+            Bob() : b(1) {}
+            uint32_t b;
+        };
+        inline uint32_t Bob_b() { return 42; }
+    "};
+    let rs = quote! {
+        let bob = ffi::Bob::new().within_unique_ptr();
+        assert_eq!(bob.as_ref().unwrap().b(), 1);
+        assert_eq!(ffi::Bob_b(), 42);
+    };
+    run_test("", hdr, rs, &["Bob", "Bob_b"], &[]);
+}
+
+/// A member of a type C++ nests inside another, in a namespace, read through
+/// an accessor whose C++ shim has to name the class the way C++ spells it
+/// rather than the way bindgen flattens it.
+#[test]
+fn test_field_accessor_on_nested_type_in_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        namespace outer {
+            struct Holder {
+                struct Inner {
+                    Inner() : name(\"nested\") {}
+                    const std::string name;
+                };
+            };
+        }
+    "};
+    let rs = quote! {
+        let inner = ffi::outer::Holder_Inner::new().within_unique_ptr();
+        assert_eq!(inner.as_ref().unwrap().name().to_str().unwrap(), "nested");
+    };
+    run_test("", hdr, rs, &["outer::Holder::Inner"], &[]);
+}
+
+/// An accessor is not what brings a type into the bindings. autocxx generates
+/// no methods for a type it was not asked for, and a reference to one handed
+/// out here would be the only thing keeping it in the output - so a member of
+/// such a type gets a refusal naming the directive which would change that.
+#[test]
+fn test_field_accessor_refuses_member_of_non_allowlisted_type() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner { uint32_t a; };
+        struct Outer { Inner inner; uint32_t b; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Outer"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["Outer::inner", "not on the allowlist"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// Two kinds of member get a documented refusal rather than an accessor,
+/// because what a getter for one would have to be is not a thing C++ has: an
+/// array cannot be returned at all, and a reference member read through the
+/// accessor's own reference is an indirection the bridge does not spell.
+#[test]
+fn test_field_accessor_refuses_arrays_and_references() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        using Arr = uint32_t[3];
+        using Ref = uint32_t&;
+        struct Bob {
+            Bob(uint32_t& r) : arr{1, 2, 3}, ref(r), aliased_arr{4, 5, 6}, aliased_ref(r), ok(7) {}
+            uint32_t arr[3];
+            uint32_t& ref;
+            Arr aliased_arr;
+            Ref aliased_ref;
+            uint32_t ok;
+        };
+    "};
+    let rs = quote! {};
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Bob"], &[], None),
+        None,
+        Some(make_string_finder(
+            [
+                "Bob::arr",
+                "Bob::aliased_arr",
+                "an array",
+                "Bob::ref",
+                "Bob::aliased_ref",
+                "a reference",
+            ]
+            .map(|s| s.to_string())
+            .to_vec(),
+        )),
+        None,
+    );
 }
 
 #[test]
@@ -4943,24 +5177,35 @@ fn test_constexpr_double_constant() {
     run_test("", hdr, rs, &["kPi"], &[]);
 }
 
-/// We re-export a variable by re-exporting `bindgen`'s declaration of it, so
-/// the type must be one which our output mod exposes exactly as `bindgen`
-/// wrote it. A non-POD type is instead exposed as an opaque wrapper, so we
-/// must decline rather than hand out `bindgen`'s raw view of it.
+/// The holder a non-POD variable's getter hands back refers to the variable
+/// rather than copying it, so a write C++ makes afterwards is visible through
+/// a holder taken before it. google/autocxx#94's own suggestion was a
+/// `UniquePtr` to a copy, which would show `"hello"` on both reads and would
+/// need the type to be copy-constructible; this needs neither.
 #[test]
 fn test_non_pod_typed_static() {
     let cxx = indoc! {"
-        const Fred FRED = Fred { \"hello\" };
+        Fred FRED(\"hello\");
     "};
     let hdr = indoc! {"
         #include <string>
         struct Fred {
             std::string a;
+            explicit Fred(const char* s) : a(s) {}
+            Fred(const Fred&) = delete;
+            const std::string& get() const { return a; }
         };
-        extern const Fred FRED;
+        extern Fred FRED;
+        inline void change_fred() { FRED.a = \"goodbye\"; }
     "};
-    let rs = quote! {};
-    run_test_expect_fail(cxx, hdr, rs, &["FRED"], &[]);
+    let rs = quote! {
+        let fred = ffi::FRED();
+        let fred = unsafe { &*fred.as_ref().unwrap().get() };
+        assert_eq!(fred.get().to_str().unwrap(), "hello");
+        ffi::change_fred();
+        assert_eq!(fred.get().to_str().unwrap(), "goodbye");
+    };
+    run_test(cxx, hdr, rs, &["FRED", "Fred", "change_fred"], &[]);
 }
 
 /// A variable of a type which `bindgen` writes directly in Rust needs no help
@@ -4998,34 +5243,20 @@ fn test_class_static_const_int() {
     run_test("", hdr, rs, &["Anna_SIZE"], &["Anna"]);
 }
 
-/// google/autocxx#94, the "much harder" follow-up to google/autocxx#93, which
-/// names this very test. `test_pod_constant` covers the POD case; a variable
-/// of non-POD
-/// type still fails the type gate with `StaticDataOfNonPodType`, because we
-/// expose a variable by re-exporting `bindgen`'s declaration of it, and our
-/// output mod shows a non-POD type as an opaque wrapper rather than as
-/// `bindgen` wrote it. (`test_non_pod_typed_static` pins that error.)
+/// google/autocxx#94, the "much harder" follow-up to google/autocxx#93.
+/// `test_pod_constant` covers the POD case; a variable of non-POD type used to
+/// fail the type gate with `StaticDataOfNonPodType`, because we exposed a
+/// variable by re-exporting `bindgen`'s declaration of it and our output mod
+/// shows a non-POD type as an opaque wrapper rather than as `bindgen` wrote it.
 ///
-/// Lifting the gate means synthesising a C++ getter, and each shape it could
-/// return is blocked on a decision we should not take by accident:
-///
-/// * `&'static Bob` is not expressible. `cxx` rejects the lifetime outright -
-///   "'static is a reserved lifetime name" - and, separately, we refuse to
-///   return a reference from a function with no reference argument for it to
-///   borrow from (`ConvertErrorFromCpp::NoInputReference`).
-/// * `CppRef<Bob>` sidesteps lifetimes, but it exists only under
-///   `unsafe_references_wrapped`. Emitting it regardless would make a crate's
-///   API shape depend on something its author never opted into.
-/// * `UniquePtr<Bob>`, which is what google/autocxx#94 proposes, we could emit
-///   today - but it hands back a *copy*, so it demands the type be
-///   copy-constructible and it quietly stops being the constant that was asked
-///   for.
+/// It now gets a getter instead, which hands back an opaque holder standing
+/// for a `const` reference to the variable. Nothing is copied - see
+/// `test_non_pod_typed_static`, which pins that.
 ///
 /// The header spells the variable `extern` so that linkage is not what stops
-/// us (see `test_pod_constant_internal_linkage`): the question here is the
-/// type. `get()` is `const` so that it could be called on `BOB` at all.
+/// us (see `test_pod_constant_internal_linkage`). `get()` is `const` so that it
+/// can be called on `BOB` at all.
 #[test]
-#[ignore]
 fn test_non_pod_constant() {
     let cxx = indoc! {"
         const Bob BOB = Bob { \"hello\" };
@@ -5040,11 +5271,126 @@ fn test_non_pod_constant() {
         extern const Bob BOB;
     "};
     let rs = quote! {
-        // Assumes `BOB` arrives as something we can call `get()` on; which of
-        // the shapes above wins decides what this line really looks like.
-        assert_eq!(ffi::BOB.get().as_ref().unwrap().to_str().unwrap(), "hello");
+        let bob = ffi::BOB();
+        let bob = unsafe { &*bob.as_ref().unwrap().get() };
+        assert_eq!(bob.get().as_ref().unwrap().to_str().unwrap(), "hello");
     };
-    run_test(cxx, hdr, rs, &["BOB"], &[]);
+    run_test(cxx, hdr, rs, &["BOB", "Bob"], &[]);
+}
+
+/// A non-POD variable inside a namespace. The C++ name has to be checked
+/// against the mangled symbol before the getter may write it out, and this is
+/// the case where the symbol is a qualified one and the two agree.
+#[test]
+fn test_non_pod_constant_in_namespace() {
+    let cxx = indoc! {"
+        namespace ns { const Bob BOB(\"hello\"); }
+    "};
+    let hdr = indoc! {"
+        #include <string>
+        namespace ns {
+            struct Bob {
+                std::string a;
+                explicit Bob(const char* s) : a(s) {}
+                const std::string& get() const { return a; }
+            };
+            extern const Bob BOB;
+        }
+    "};
+    let rs = quote! {
+        let bob = ffi::ns::BOB();
+        let bob = unsafe { &*bob.as_ref().unwrap().get() };
+        assert_eq!(bob.get().to_str().unwrap(), "hello");
+    };
+    run_test(cxx, hdr, rs, &["ns::BOB", "ns::Bob"], &[]);
+}
+
+/// A variable of a template instantiation is turned down. bindgen records a
+/// variable's type as a bare name, so the arguments which say which
+/// specialization it is are gone by the time anything could act on them, and a
+/// holder built from the name alone would name the template rather than the
+/// type.
+#[test]
+fn test_non_pod_constant_of_templated_type_is_refused() {
+    let cxx = indoc! {"
+        const std::vector<int> VALUES;
+    "};
+    let hdr = indoc! {"
+        #include <vector>
+        extern const std::vector<int> VALUES;
+    "};
+    run_test_expect_fail_with_error(cxx, hdr, quote! {}, &["VALUES"], &[], "template arguments");
+}
+
+/// The internal-linkage story for a variable of non-POD type, which is the POD
+/// one unchanged: autocxx says so where the ABI tells it, and on MSVC - where
+/// internal and external linkage decorate alike - it cannot, so the getter is
+/// generated and reads the generated C++ TU's own copy of the variable. That
+/// copy is a distinct object from any other TU's, which is the same
+/// address-identity caveat `test_pod_constant_internal_linkage` records; with
+/// everything in one TU here, it simply works.
+#[test]
+fn test_non_pod_constant_internal_linkage() {
+    let hdr = indoc! {"
+        #include <string>
+        struct Bob {
+            std::string a;
+            explicit Bob(const char* s) : a(s) {}
+            const std::string& get() const { return a; }
+        };
+        const Bob BOB(\"hello\");
+    "};
+    if cfg!(target_env = "msvc") {
+        let rs = quote! {
+            let bob = ffi::BOB();
+            let bob = unsafe { &*bob.as_ref().unwrap().get() };
+            assert_eq!(bob.get().to_str().unwrap(), "hello");
+        };
+        run_test("", hdr, rs, &["BOB", "Bob"], &[]);
+    } else {
+        run_test_expect_fail_with_error(
+            "",
+            hdr,
+            quote! {},
+            &["BOB", "Bob"],
+            &[],
+            "StaticDataWithInternalLinkage",
+        );
+    }
+}
+
+/// A static data member of non-POD type is turned down. Its getter would have
+/// to name the variable in C++, and the only name we have is bindgen's, which
+/// flattens `Anna::HELD` to `Anna_HELD` - a name C++ does not have. bindgen
+/// reports the C++ spelling of a type and of a function and never of a
+/// variable, so the refusal reads the flattened name rather than checking it.
+/// A member of POD type is unaffected, as `test_class_static_const_int` shows:
+/// it is re-exported through bindgen's own declaration, which carries the
+/// mangled symbol and needs no C++ name.
+#[test]
+fn test_non_pod_class_static_is_refused() {
+    let cxx = indoc! {"
+        const Anna::Held Anna::HELD(4);
+    "};
+    let hdr = indoc! {"
+        struct Anna {
+            struct Held {
+                int v;
+                explicit Held(int v) : v(v) {}
+                Held(const Held&) = delete;
+                int peek() const { return v; }
+            };
+            static const Held HELD;
+        };
+    "};
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        quote! {},
+        &["Anna_HELD", "Anna::Held"],
+        &[],
+        "static data member",
+    );
 }
 
 #[test]
@@ -7125,6 +7471,11 @@ fn test_inherited_method_defers_to_a_member_which_hides_it() {
 
 #[test]
 fn test_inherited_method_hidden_by_a_data_member() {
+    // `inh_Derived::foo` exists here, but it is the accessor for the hiding
+    // data member rather than the base's method - which is the point, and
+    // which is why this one reads a value rather than asking for the absence
+    // of a method by that name: the base's `foo()` answers 1 and the field
+    // holds 5.
     let hdr = indoc! {"
         #include <cstdint>
         class inh_Base {
@@ -7136,19 +7487,15 @@ fn test_inherited_method_hidden_by_a_data_member() {
             uint32_t foo = 5;
         };
     "};
-    run_test_ex(
+    run_test(
         "",
         hdr,
         quote! {
-            let _d = ffi::inh_Derived::new().within_unique_ptr();
+            let d = ffi::inh_Derived::new().within_unique_ptr();
+            assert_eq!(d.as_ref().unwrap().foo(), 5);
         },
-        directives_from_lists(&["inh_Derived"], &[], None),
-        None,
-        Some(Box::new(NoMethodNamed {
-            ty: "inh_Derived",
-            method: "foo",
-        })),
-        None,
+        &["inh_Derived"],
+        &[],
     );
 }
 
@@ -9595,6 +9942,17 @@ fn test_private_inheritance() {
     run_test("", hdr, rs, &["A", "B"], &[]);
 }
 
+// The two tests below are about where an error for an ungeneratable item goes
+// - a documented placeholder under blanket generation, a hard failure under an
+// explicit `generate!` (google/autocxx#1269) - and use a variable as a
+// convenient ungeneratable item. The variable is an array, which no target can
+// re-export and no getter can be written for, so the reason is the same
+// everywhere. An internal-linkage variable would not do: MSVC decorates
+// internal and external linkage alike, so autocxx cannot tell there, and the
+// generated C++ TU's own copy of such a variable satisfies the build - see
+// `test_pod_constant_internal_linkage` and
+// `test_non_pod_constant_internal_linkage`.
+
 #[test]
 fn test_error_generated_for_static_data() {
     // Blanket generation is tolerant of items we can't handle, and documents
@@ -9603,11 +9961,7 @@ fn test_error_generated_for_static_data() {
     // test_error_fatal_for_explicitly_generated_static_data.)
     let hdr = indoc! {"
         #include <cstdint>
-        struct A {
-            A() {}
-            uint32_t a;
-        };
-        static A FOO = A();
+        extern const uint32_t FOO[3];
     "};
     let rs = quote! {};
     run_test_ex(
@@ -9627,11 +9981,7 @@ fn test_error_generated_for_static_data() {
 fn test_error_fatal_for_explicitly_generated_static_data() {
     let hdr = indoc! {"
         #include <cstdint>
-        struct A {
-            A() {}
-            uint32_t a;
-        };
-        static A FOO = A();
+        extern const uint32_t FOO[3];
     "};
     let rs = quote! {};
     run_test_expect_fail("", hdr, rs, &["FOO"], &[]);
@@ -19795,6 +20145,23 @@ fn test_long_double() {
         inline long double ld_double_it(long double x) { return x * 2; }
     "};
     run_test_expect_fail_with_error("", hdr, quote! {}, &["ld_double_it"], &[], "long double");
+}
+
+/// A `long double` *variable* is turned down by name too. It reaches us by a
+/// route of its own - a variable is re-exported as bindgen declared it rather
+/// than converted, so nothing on the conversion path sees it - and bindgen's
+/// marker is an alias for a type which is the right width on some targets and
+/// half of it on others, so a silent re-export would read eight of the sixteen
+/// bytes on x86-64 Linux.
+#[test]
+fn test_long_double_static() {
+    let cxx = indoc! {"
+        const long double LD = 1.0;
+    "};
+    let hdr = indoc! {"
+        extern const long double LD;
+    "};
+    run_test_expect_fail_with_error(cxx, hdr, quote! {}, &["LD"], &[], "long double");
 }
 
 /// A `long double` as a template argument, which reaches the C++ by a route
