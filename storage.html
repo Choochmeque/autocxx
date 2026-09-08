@@ -194,6 +194,20 @@ advantage that there's no possibility that the object can be NULL.</li>
 <p>See <a href="cpp_types.html#construction-sounds-complicated-do-you-have-a-code-example">C++ types</a> for a code example showing a type existing on both the stack and the heap.</p>
 <h2 id="whose-heap-is-it-anyway"><a class="header" href="#whose-heap-is-it-anyway">Whose heap is it anyway?</a></h2>
 <p>Specifically <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a> is a binding to <code>std::unique_ptr&lt;T,std::default_delete&lt;T&gt;&gt;</code> which means the object will be deleted using the C++ <code>delete</code> operator. This will respect any overridden <code>operator delete</code> on the type, and similarly, the functions which <code>autocxx</code> provides to <em>construct</em> types should respect overridden <code>operator new</code>. This means: if your C++ type has code to create itself in some special or unusual heap partition, that should work fine.</p>
+<p>The class's own allocator is found by asking for the two signatures a class
+declaring nothing else gets, <code>operator new(std::size_t)</code> and
+<code>operator delete(void*)</code>; a class which declares only the sized, aligned or
+destroying overloads is not seen, and its objects are allocated and freed
+globally.</p>
+<p>A type which asks for more alignment than <code>operator new</code> promises -
+<code>alignas(32)</code> where the default is 16 - reaches the <code>std::align_val_t</code>
+overloads C++17 added for exactly that, so it is not handed storage it may not
+live in. Where <code>autocxx</code> cannot pair an allocation with a deallocation it says
+so at compile time rather than guess: an over-aligned type before C++17, which
+has no aligned <code>operator new</code> in the language at all, and an over-aligned type
+whose class declares only one half of the pair. Giving the class an
+<code>operator new(std::size_t)</code> and an <code>operator delete(void*)</code> of its own settles
+every one of those cases.</p>
 
                     </main>
 
