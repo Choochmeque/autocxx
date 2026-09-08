@@ -140,6 +140,13 @@ pub(crate) fn unwrap_long_double(ty: &TypePath) -> Option<&syn::Type> {
     unwrap_bindgen_marker(ty, "__bindgen_marker_LongDouble")
 }
 
+/// If `ty` is a C++ `__float128`, return the Rust type bindgen substituted for
+/// it - `u128`, which is the right size and the wrong kind of number. See
+/// [`crate::conversion::ConvertErrorFromCpp::Float128`].
+pub(crate) fn unwrap_float128(ty: &TypePath) -> Option<&syn::Type> {
+    unwrap_bindgen_marker(ty, "__bindgen_marker_Float128")
+}
+
 /// Whether `ty` mentions a C++ `long double` anywhere inside it, including as
 /// a template argument.
 ///
@@ -148,9 +155,18 @@ pub(crate) fn unwrap_long_double(ty: &TypePath) -> Option<&syn::Type> {
 /// name in C++ verbatim. Without this the marker reaches the generated header
 /// as a literal `Wrapper<__bindgen_marker_LongDouble<double>>`.
 pub(crate) fn mentions_long_double(ty: &Type) -> bool {
+    mentions_marker(ty, "__bindgen_marker_LongDouble")
+}
+
+/// [`mentions_long_double`], for the other float autocxx turns down by name.
+pub(crate) fn mentions_float128(ty: &Type) -> bool {
+    mentions_marker(ty, "__bindgen_marker_Float128")
+}
+
+fn mentions_marker(ty: &Type, marker: &str) -> bool {
     match ty {
         Type::Path(typ) => {
-            if unwrap_long_double(typ).is_some() {
+            if unwrap_bindgen_marker(typ, marker).is_some() {
                 return true;
             }
             typ.path.segments.iter().any(|seg| {
@@ -158,25 +174,25 @@ pub(crate) fn mentions_long_double(ty: &Type) -> bool {
                     return false;
                 };
                 args.args.iter().any(|arg| match arg {
-                    GenericArgument::Type(inner) => mentions_long_double(inner),
+                    GenericArgument::Type(inner) => mentions_marker(inner, marker),
                     _ => false,
                 })
             })
         }
-        Type::Array(arr) => mentions_long_double(&arr.elem),
-        Type::Ptr(ptr) => mentions_long_double(&ptr.elem),
-        Type::Reference(r) => mentions_long_double(&r.elem),
+        Type::Array(arr) => mentions_marker(&arr.elem, marker),
+        Type::Ptr(ptr) => mentions_marker(&ptr.elem, marker),
+        Type::Reference(r) => mentions_marker(&r.elem, marker),
         // bindgen writes a C function pointer as `Option<unsafe extern "C"
         // fn(..)>`, so this is reached through the `Option`'s argument above.
         Type::BareFn(f) => {
-            f.inputs.iter().any(|arg| mentions_long_double(&arg.ty))
+            f.inputs.iter().any(|arg| mentions_marker(&arg.ty, marker))
                 || match &f.output {
-                    syn::ReturnType::Type(_, ty) => mentions_long_double(ty),
+                    syn::ReturnType::Type(_, ty) => mentions_marker(ty, marker),
                     syn::ReturnType::Default => false,
                 }
         }
-        Type::Paren(inner) => mentions_long_double(&inner.elem),
-        Type::Group(inner) => mentions_long_double(&inner.elem),
+        Type::Paren(inner) => mentions_marker(&inner.elem, marker),
+        Type::Group(inner) => mentions_marker(&inner.elem, marker),
         _ => false,
     }
 }

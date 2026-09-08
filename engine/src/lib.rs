@@ -383,7 +383,13 @@ impl IncludeCppEngine {
         // (`self.x() as u32`). A newtype makes both of those `error[E0605]:
         // non-primitive cast`. An alias is invisible to all of it and just as
         // visible to us, since we match on the type bindgen printed.
-        let bindgen_marker_newtypes = ["Opaque", "Reference", "RValueReference", "LongDouble"];
+        let bindgen_marker_newtypes = [
+            "Opaque",
+            "Reference",
+            "RValueReference",
+            "LongDouble",
+            "Float128",
+        ];
         let bindgen_marker_aliases = ["Const"];
         let raw_line = bindgen_marker_newtypes
             .iter()
@@ -454,6 +460,7 @@ impl IncludeCppEngine {
             .use_reference_newtype_wrapper(true)
             .use_const_newtype_wrapper(true)
             .use_long_double_newtype_wrapper(true)
+            .use_float128_newtype_wrapper(true)
             .represent_cxx_operators(true)
             .use_distinct_char16_t(true)
             .use_distinct_wchar_t(true)

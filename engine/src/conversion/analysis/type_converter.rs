@@ -15,9 +15,9 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            extract_pinned_mutable_reference_type, mentions_long_double, unwrap_bitfield,
-            unwrap_const, unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double,
-            unwrap_reference,
+            extract_pinned_mutable_reference_type, mentions_float128, mentions_long_double,
+            unwrap_bitfield, unwrap_const, unwrap_float128, unwrap_function_pointer,
+            unwrap_has_opaque, unwrap_long_double, unwrap_reference,
         },
         ConvertErrorFromCpp,
     },
@@ -343,6 +343,22 @@ impl<'a> TypeConverter<'a> {
             // sees the marker rather than what it wraps.
             if !ctx.within_struct_field() {
                 return Err(ConvertErrorFromCpp::LongDouble);
+            }
+            self.convert_type(ty.clone(), ns, ctx)
+        } else if let Some(ty) = unwrap_float128(&typ) {
+            // C++ `__float128`. bindgen substituted `u128`, which is the right
+            // size and an integer; Rust has no 128-bit float to offer instead.
+            // A signature naming the substitute would compile and would be
+            // read as a different kind of number on both sides, so turn it
+            // down. `unsigned __int128`, which arrives as the same bare `u128`
+            // when this marker is absent, really is that integer and is
+            // supported.
+            //
+            // As field data the substitute is fine, for the reason it is fine
+            // for a `long double`, and `ByValueChecker` refuses such a struct
+            // by value for the same ABI reason.
+            if !ctx.within_struct_field() {
+                return Err(ConvertErrorFromCpp::Float128);
             }
             self.convert_type(ty.clone(), ns, ctx)
         } else if let Some(ty) = unwrap_bitfield(&typ) {
@@ -968,6 +984,9 @@ impl<'a> TypeConverter<'a> {
                 // than being turned down like one anywhere else.
                 if mentions_long_double(&Type::Path(typ.clone())) {
                     return Err(ConvertErrorFromCpp::LongDouble);
+                }
+                if mentions_float128(&Type::Path(typ.clone())) {
+                    return Err(ConvertErrorFromCpp::Float128);
                 }
                 let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
                 extra_apis.extend(api.into_iter());

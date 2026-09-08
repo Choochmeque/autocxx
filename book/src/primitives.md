@@ -73,12 +73,18 @@ between the languages - though a struct with one cannot be `generate_pod!`.
 
 ### 128-bit integers
 
-A C++ `__int128` is [`c_i128`](https://docs.rs/autocxx/latest/autocxx/struct.c_i128.html),
-another transparent newtype. There is no `c_u128`: `bindgen` cannot tell an
-`unsigned __int128` from a 16-byte `long double` or a `__float128`, so
-`autocxx` refuses any function which mentions one rather than guess. Neither
-128-bit type may go inside a `UniquePtr` or a `CxxVector`, because MSVC has no
-`__int128` and the glue which would make that work is compiled everywhere.
+A C++ `__int128` is [`c_i128`](https://docs.rs/autocxx/latest/autocxx/struct.c_i128.html)
+and an `unsigned __int128` is
+[`c_u128`](https://docs.rs/autocxx/latest/autocxx/struct.c_u128.html), both
+transparent newtypes. Neither may go inside a `UniquePtr` or a `CxxVector`,
+because MSVC has neither type and the glue which would make that work is
+compiled everywhere.
+
+`__float128` is not supported. `bindgen` renders it as a `u128` because that is
+the right size and Rust has no 128-bit float, which is also how an
+`unsigned __int128` arrives - so `autocxx` has `bindgen` mark the `__float128`
+and refuses a function which mentions one by name, rather than binding it as the
+integer beside it.
 
 ## Strings
 
