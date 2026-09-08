@@ -18,6 +18,7 @@ mod convert_error;
 mod derives;
 mod doc_attr;
 mod error_reporter;
+mod inner_type_traits;
 mod parse;
 mod type_helpers;
 mod utilities;
