@@ -34,14 +34,15 @@ are needed: from clang 22 its pointee would otherwise look for a name nothing
 was recorded under.
 
 Since the name which leaves that is not always qualified, it is the type behind
-it that settles a candidate, and the comparison is structural rather than a
-second comparison of printed names. Two canonical types can print alike - two
-classes local to different functions both print as `X` - so where the canonical
-type has a declaration, the declarations are compared, which also ignores the
-qualifiers a parameter may add; where it has none, being a builtin or a pointer,
-the types themselves are compared. A name which two candidates answer to with
-one type resolves to neither: they are two names for the same thing and nothing
-here says which was written, so choosing would be a guess.
+it that settles a candidate, and by its declaration rather than by a second
+comparison of printed names: two canonical types can print alike, as two classes
+local to different functions both print as `X`, and a declaration also carries
+none of the qualifiers a parameter may add. Only a name standing for a type C++
+declared is resolved at all. One whose canonical type has no declaration - a
+builtin, a pointer - is left alone, which buys nothing anyway, since bindgen
+already generates what it stands for. A name which two candidates answer to with
+one declaration resolves to neither: they are two names for the same thing and
+nothing here says which was written, so choosing would be a guess.
 
 Two details of what libclang exposes. `clang_getNumOverloadedDecls` answers zero
 asked on the using-declaration cursor; the declarations it introduces hang off
@@ -92,7 +93,7 @@ to start.
      }
  
      /// Assuming that this cursor's referent is a template declaration, get the
-@@ -1395,6 +1411,16 @@
+@@ -1403,6 +1419,16 @@
              }
          }
  
@@ -109,7 +110,7 @@ to start.
          let canonical = declaration.canonical();
          if canonical.is_valid() && canonical.kind() != CXCursor_NoDeclFound {
              Some(CanonicalTypeDeclaration(*self, canonical))
-@@ -1430,6 +1456,11 @@
+@@ -1438,6 +1464,11 @@
          unsafe { clang_isConstQualifiedType(self.x) != 0 }
      }
  
@@ -123,10 +124,12 @@ to start.
      /// There is no `CXType_Char8` to compare against: libclang's kinds go
 --- a/ir/context.rs
 +++ b/ir/context.rs
-@@ -306,6 +306,35 @@
+@@ -304,6 +304,35 @@
+ enum TypeKey {
+     Usr(String),
      Declaration(Cursor),
- }
- 
++}
++
 +/// A type's name as clang prints it, without its own qualifiers, so that
 +/// `const fx_BU` and `fx_BU` are the one name.
 +///
@@ -154,12 +157,10 @@ to start.
 +        }
 +    }
 +    name
-+}
-+
+ }
+ 
  /// A context used during parsing and generation of structs.
- #[derive(Debug)]
- pub(crate) struct BindgenContext {
-@@ -336,6 +365,13 @@
+@@ -338,6 +367,13 @@
      /// parents of the cursor differ, like when a nested class is defined
      /// outside of the parent class.
      semantic_parents: HashMap<Cursor, ItemId>,
@@ -173,7 +174,7 @@ to start.
  
      /// A stack with the current type declarations and types we're parsing. This
      /// is needed to avoid infinite recursion when parsing a type like:
-@@ -586,6 +622,7 @@
+@@ -595,6 +631,7 @@
              root_module: root_module_id,
              current_module: root_module_id,
              semantic_parents: Default::default(),
@@ -181,7 +182,7 @@ to start.
              currently_parsed_types: vec![],
              parsed_macros: Default::default(),
              replacements: Default::default(),
-@@ -1886,8 +1923,143 @@
+@@ -2009,8 +2046,147 @@
                      .and_then(|usr| self.types.get(&TypeKey::Usr(usr)))
              })
              .copied()
@@ -281,21 +282,25 @@ to start.
 +            .using_declared_types
 +            .get(&unqualified_spelling(&named))?;
 +
-+        // A declaration identifies a type without its qualifiers, which is
-+        // what a parameter written `const T` needs: what a using-declaration
-+        // names is never itself qualified. It also tells two types apart which
-+        // print the same, as two local classes of one name do. Where the
-+        // canonical type has no declaration - a builtin, a pointer - the types
-+        // are compared instead, qualifiers and all.
++        // Only a name which stands for a declared type is resolved, and the
++        // declaration is what says so. That is what a parameter written
++        // `const T` needs, since a declaration carries no qualifiers of its
++        // own, and it tells two types apart which print the same, as two local
++        // classes of one name do.
++        //
++        // A name whose canonical type has no declaration - a builtin, a
++        // pointer, or anything else which is not a type C++ declared - is left
++        // alone. Resolving one buys nothing, since bindgen already generates
++        // the type it stands for, and it is how this fallback can name
++        // something whose own definition is not yet a type at all, which is a
++        // graph that comes back round rather than a resolution.
 +        let canonical = named.canonical_type();
 +        let declaration = canonical.declaration();
++        if !declaration.is_valid() {
++            return None;
++        }
 +        let mut matches = candidates.iter().filter(|candidate| {
-+            let theirs = candidate.cur_type().canonical_type();
-+            if declaration.is_valid() {
-+                theirs.declaration() == declaration
-+            } else {
-+                theirs == canonical
-+            }
++            candidate.cur_type().canonical_type().declaration() == declaration
 +        });
 +
 +        // Two declarations of one name and one type are two names for the same
@@ -325,7 +330,7 @@ to start.
      /// Looks up for an already resolved type, either because it's builtin, or
      /// because we already have it in the map.
      pub(crate) fn builtin_or_resolved_ty(
-@@ -1903,7 +2075,14 @@
+@@ -2026,7 +2202,14 @@
          };
          debug!("builtin_or_resolved_ty: {ty:?}, {location:?}, {with_id:?}, {parent_id:?}");
  
@@ -343,7 +348,7 @@ to start.
                      "Already resolved ty {id:?}, {decl:?}, {ty:?} {location:?}"
 --- a/ir/item.rs
 +++ b/ir/item.rs
-@@ -1380,6 +1380,16 @@
+@@ -1407,6 +1407,16 @@
  
          if !cursor.is_valid() {
              return Err(ParseError::Continue);
