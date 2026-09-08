@@ -1,0 +1,121 @@
+Subject: Report whether an enum is scoped
+
+`enum class E { foo };` and `enum E { foo };` produce the same generated
+Rust - a type and a constant per enumerator - so nothing in the output
+says which of the two C++ declared. The difference is not cosmetic: an
+unscoped enumerator is a member of the scope enclosing the enum, and
+hides anything of that name inherited into it, while a scoped one is
+reachable only as `E::foo` and hides nothing. A generator emitting C++ of
+its own has to know which, and has no way to find out: libclang answers
+with `clang_EnumDecl_isScoped`, which `clang.rs` does not wrap.
+
+Wrap it, carry the answer on `Enum` beside the representation and the
+variants, and report it through a callback for the enums codegen writes
+out. Off by default like every other `denote_*`, and the generated
+bindings are unchanged.
+
+--- a/clang.rs
++++ b/clang.rs
+@@ -1031,7 +1031,15 @@
+     pub(crate) fn is_move_constructor(&self) -> bool {
+         unsafe { clang_CXXConstructor_isMoveConstructor(self.x) != 0 }
+     }
+ 
++    /// Is this cursor's referent a scoped enumeration - an `enum class` or an
++    /// `enum struct`?
++    ///
++    /// Only an enum declaration answers usefully; anything else says no.
++    pub(crate) fn is_scoped_enum(&self) -> bool {
++        unsafe { clang_EnumDecl_isScoped(self.x) != 0 }
++    }
++
+     /// The deprecation C++ marked this cursor's referent with, if it marked it
+     /// at all.
+     ///
+--- a/ir/enum_ty.rs
++++ b/ir/enum_ty.rs
+@@ -32,6 +32,11 @@
+     /// The different variants, with explicit values.
+     variants: Vec<EnumVariant>,
+ 
++    /// Whether C++ declared this an `enum class` or `enum struct`, whose
++    /// enumerators are members of the enumeration rather than of the scope
++    /// enclosing it.
++    is_scoped: bool,
++
+     /// The visibility of this enum if it was declared inside of
+     /// another type. Top-level types always have public visibility.
+     pub(crate) visibility: Visibility,
+@@ -42,11 +48,13 @@
+     pub(crate) fn new(
+         repr: Option<TypeId>,
+         variants: Vec<EnumVariant>,
++        is_scoped: bool,
+         visibility: Visibility,
+     ) -> Self {
+         Enum {
+             repr,
+             variants,
++            is_scoped,
+             visibility,
+         }
+     }
+@@ -61,7 +69,12 @@
+     pub(crate) fn variants(&self) -> &[EnumVariant] {
+         &self.variants
+     }
+ 
++    /// Whether this enumeration is scoped - `enum class` or `enum struct`.
++    pub(crate) fn is_scoped(&self) -> bool {
++        self.is_scoped
++    }
++
+     /// Construct an enumeration from the given Clang type.
+     pub(crate) fn from_ty(
+         ty: &clang::Type,
+@@ -164,7 +177,7 @@
+             }
+             CXChildVisit_Continue
+         });
+-        Ok(Enum::new(repr, variants, visibility))
++        Ok(Enum::new(repr, variants, declaration.is_scoped_enum(), visibility))
+     }
+ 
+     fn is_matching_enum(
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -263,5 +263,17 @@
+     fn denote_discards_template_param(&self, _id: DiscoveredItemId) {}
+ 
++    /// Note that C++ declared this enumeration `enum class` or `enum struct`.
++    ///
++    /// A scoped enumeration and an unscoped one generate the same Rust, so
++    /// nothing in the output tells them apart - and the difference decides
++    /// where the enumerators live. An unscoped enumerator is a member of the
++    /// scope enclosing the enum, and hides an inherited member of that name;
++    /// a scoped one is reachable only through the enumeration and hides
++    /// nothing. A consumer emitting C++ of its own has to know which.
++    ///
++    /// Called only for the enums codegen writes out.
++    fn denote_scoped_enum(&self, _id: DiscoveredItemId) {}
++
+     /// Report one direct base class of a struct or class.
+     ///
+     /// Called for every base of every compound type codegen writes out,
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -4293,9 +4293,14 @@
+         ctx.options().for_each_callback(|cb| {
+             cb.denote_visibility(
+                 DiscoveredItemId::new(item.id().as_usize()),
+                 self.visibility,
+             );
+         });
++        if self.is_scoped() {
++            let id = DiscoveredItemId::new(item.id().as_usize());
++            ctx.options()
++                .for_each_callback(|cb| cb.denote_scoped_enum(id));
++        }
+ 
+         let mut builder = EnumBuilder::new(
+             &name,
