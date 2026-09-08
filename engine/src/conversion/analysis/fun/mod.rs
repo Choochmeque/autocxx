@@ -407,7 +407,46 @@ pub(crate) struct FnAnalyzer<'a> {
     /// that is where the member's signature is, and a member is only visible
     /// here when it is analyzed.
     using_declarations_by_base: HashMap<QualifiedName, Vec<ImportedMember>>,
+    /// Every class's base classes, for the two passes which have to answer
+    /// what a name means when it is looked up in a derived class.
+    ancestry: HashMap<QualifiedName, Ancestry>,
     force_wrapper_generation: bool,
+}
+
+/// What one class's declaration says about where its members come from.
+struct Ancestry {
+    /// Every base bindgen named, whatever the access. This is what C++ member
+    /// name lookup walks: it finds a name first and applies access control to
+    /// what it found afterwards, so a private base still hides and still makes
+    /// a name ambiguous.
+    bases: HashSet<QualifiedName>,
+    /// The subset C++ inherits publicly, which is the only ancestry a member
+    /// can actually be *called* through from outside the class.
+    public_bases: HashSet<QualifiedName>,
+    /// Whether bindgen reported a base it could not name - a template
+    /// instantiation, which it announces through no callback. Such a base may
+    /// declare anything and lead anywhere, so nothing here can be counted.
+    has_unnamed_base: bool,
+}
+
+impl Ancestry {
+    fn bases(&self, inheritance: Inheritance) -> &HashSet<QualifiedName> {
+        match inheritance {
+            Inheritance::Any => &self.bases,
+            Inheritance::Public => &self.public_bases,
+        }
+    }
+}
+
+/// Which bases a walk up an ancestry may pass through.
+#[derive(Clone, Copy)]
+enum Inheritance {
+    /// Any base. A `using Base::foo;` may name a private one - re-exporting a
+    /// private base's member is what the declaration is for.
+    Any,
+    /// Only bases C++ inherits publicly, which is what an outside caller can
+    /// reach a member through without the class saying so.
+    Public,
 }
 
 /// One `using Base::foo;`: the class which wrote it and the name it imported.
@@ -428,6 +467,7 @@ impl<'a> FnAnalyzer<'a> {
         config: &'a IncludeCppConfig,
         force_wrapper_generation: bool,
     ) -> ApiVec<FnPrePhase3> {
+        let ancestry = Self::build_ancestry(&apis);
         let mut me = Self {
             unsafe_policy,
             extra_apis: ApiVec::new(),
@@ -445,7 +485,8 @@ impl<'a> FnAnalyzer<'a> {
             existing_superclass_trait_api_names: HashSet::new(),
             cpp_names_taken_on_peer_classes: Self::build_virtual_method_cpp_names(&apis),
             types_in_anonymous_namespace: Self::build_types_in_anonymous_namespace(&apis),
-            using_declarations_by_base: Self::build_using_declarations_by_base(&apis),
+            using_declarations_by_base: Self::build_using_declarations_by_base(&apis, &ancestry),
+            ancestry,
             force_wrapper_generation,
         };
         me.reserve_ideal_names(&apis);
@@ -460,6 +501,7 @@ impl<'a> FnAnalyzer<'a> {
             Api::subclass_unchanged,
         );
         let results = me.add_using_declaration_imports(results);
+        let results = me.add_inherited_member_imports(results);
         let results = me.add_constructors_present(results);
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
@@ -582,6 +624,33 @@ impl<'a> FnAnalyzer<'a> {
             .collect()
     }
 
+    /// Every class's bases, as the two import passes need them.
+    fn build_ancestry(apis: &ApiVec<PodPhase>) -> HashMap<QualifiedName, Ancestry> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Struct {
+                    name,
+                    analysis:
+                        PodAnalysis {
+                            bases,
+                            public_bases,
+                            has_unnamed_base,
+                            ..
+                        },
+                    ..
+                } => Some((
+                    name.name.clone(),
+                    Ancestry {
+                        bases: bases.clone(),
+                        public_bases: public_bases.clone(),
+                        has_unnamed_base: *has_unnamed_base,
+                    },
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Index every `using Base::foo;` by the base class it names, for the
     /// declarations whose effect autocxx can be sure of.
     ///
@@ -612,23 +681,8 @@ impl<'a> FnAnalyzer<'a> {
     /// waits for.
     fn build_using_declarations_by_base(
         apis: &ApiVec<PodPhase>,
+        ancestry: &HashMap<QualifiedName, Ancestry>,
     ) -> HashMap<QualifiedName, Vec<ImportedMember>> {
-        let ancestry: HashMap<&QualifiedName, (&HashSet<QualifiedName>, bool)> = apis
-            .iter()
-            .filter_map(|api| match api {
-                Api::Struct {
-                    name,
-                    analysis:
-                        PodAnalysis {
-                            bases,
-                            has_unnamed_base,
-                            ..
-                        },
-                    ..
-                } => Some((&name.name, (bases, *has_unnamed_base))),
-                _ => None,
-            })
-            .collect();
         // Grouped by the name each introduces, and by the class which wrote
         // it, before any is judged: a declaration this cannot use still puts
         // its base's members in the derived class's lookup, so it has to be
@@ -667,7 +721,7 @@ impl<'a> FnAnalyzer<'a> {
             let Some(base) = using
                 .source_scope
                 .as_ref()
-                .filter(|base| reached_exactly_once(&ancestry, importer, base))
+                .filter(|base| reached_exactly_once(ancestry, importer, base, Inheritance::Any))
                 .filter(|base| !declarations.contains_key(&(*base, *name)))
             else {
                 continue;
@@ -1151,13 +1205,380 @@ impl<'a> FnAnalyzer<'a> {
                 }
                 imports.push((
                     imported.importer.clone(),
-                    import_member_into(&imported.importer, imported.visibility, name, fun),
+                    import_member_into(&imported.importer, imported.visibility, name, fun, None),
                 ));
             }
         }
 
         let mut results = apis;
         for (_, (name, fun)) in imports {
+            self.analyze_and_add(
+                name,
+                fun,
+                &mut results,
+                TypeConversionSophistication::Regular,
+                None,
+            );
+        }
+        results
+    }
+
+    /// Bind each public member of each public base class a second time,
+    /// against the classes which inherit it.
+    ///
+    /// C++ calls an inherited member on the derived object - `d.foo()` - and
+    /// bindgen reports nothing of the sort: a base arrives as a field and its
+    /// members as functions over the base's own type. Where the base is on the
+    /// allowlist autocxx generates an upcast and the member can be called on
+    /// the result; where it is not, the member is discarded outright as a
+    /// `MethodOfNonAllowlistedType` and there is nothing to call at all. That
+    /// second case is google/autocxx#197: a virtual function declared on a base
+    /// nobody asked autocxx to generate is unreachable from Rust, and the base
+    /// cannot be allowlisted into existence by every user who meets one.
+    ///
+    /// So each member is imported into the deriving class much as a
+    /// `using Base::foo;` re-exports one, sharing that pass's
+    /// [`import_member_into`]. The shim makes its call on the receiver cast to
+    /// the base - `static_cast<const Base&>(d).foo(args)`, see
+    /// [`CppFunctionBody::BaseClassMethodCall`] - so the name is looked up in
+    /// the class which declared it rather than in the class it is being
+    /// reached through. It has to be: several kinds of declaration hide an
+    /// inherited member and bindgen reports none of them well enough to be
+    /// sure of, a member function template not at all, and a shim written
+    /// `d.foo(args)` would then call something other than the member whose
+    /// signature became the Rust binding.
+    ///
+    /// What is left for the rules below is which members are worth binding,
+    /// which is C++'s question all the same: bind one only where `d.foo(args)`
+    /// would have reached it, so that Rust says what C++ says. That means
+    ///
+    /// - the base is *one* subobject of the deriving class, reached over
+    ///   public inheritance. Those are two questions, and both are asked: a
+    ///   second path is a second subobject, which C++ rejects the conversion
+    ///   to however that path is inherited, and a path which is not public is
+    ///   not a conversion an outside caller may make at all. Two paths through
+    ///   a *virtual* base do share one subobject and would convert; they are
+    ///   declined all the same, because bindgen reports which bases are
+    ///   virtual only for the class which declares them. So is a path through
+    ///   a base bindgen could not name, which may lead to the same class again
+    ///   and would make the count an undercount rather than an answer.
+    /// - the name resolves, by C++'s own member lookup, to this base and
+    ///   nothing else. A member the deriving class declares hides the
+    ///   inherited one; so does one an intermediate class declares; and a name
+    ///   two unrelated bases both declare makes the call ambiguous rather than
+    ///   choosing. Lookup runs over *every* base, public or not, because C++
+    ///   looks a name up before it asks whether the caller may have it.
+    ///   bindgen does not report every kind of declaration well enough for
+    ///   this to be exhaustive - an anonymous union's members, an unnamed
+    ///   enum's enumerators and a member function template are each invisible
+    ///   here - so a hidden member is sometimes bound anyway. It is bound
+    ///   correctly, the shim's cast settling what it calls, and it is bound
+    ///   under a name C++ would have read as the hiding declaration's: more
+    ///   than the C++ author exposed, never something other than what it says.
+    /// - the base is a class bindgen reported a C++ name for, since that name
+    ///   is what the cast has to write. A class it named nothing for is one
+    ///   C++ hid - a private nested class, say - whose public members remain
+    ///   callable on a derived object which nothing outside may cast.
+    /// - the base writes no `using Other::foo;` of its own. Such a declaration
+    ///   merges another class's members of that name into the base's, and the
+    ///   merged set is not something the shim can select from either. One
+    ///   written further down the ancestry needs no rule of its own: where the
+    ///   preceding pass could bind it, it is a member function of the class
+    ///   which wrote it and the lookup above stops there.
+    /// - the base declares that name once. An overload set is not something
+    ///   the shim can select from either: bindgen reports neither default
+    ///   arguments nor enough of the types to say which member `d.foo(args)`
+    ///   would pick.
+    ///
+    /// Only public members are imported, and only member functions: a static
+    /// member's call needs no receiver and so needs a shim of a different
+    /// shape, and a data member is not a function. A member autocxx discarded
+    /// for a reason of its own - a parameter it could not convert, say - is
+    /// left discarded, since importing it would only fail the same way against
+    /// the deriving class. Being a method of a class off the allowlist is the
+    /// one such reason this overrides, that being the whole point.
+    ///
+    /// Running after [`Self::add_using_declaration_imports`] is what keeps the
+    /// two from binding one member twice: a name that pass imported is a name
+    /// the importing class now declares, so lookup stops there.
+    ///
+    /// A Rust subclass of the deriving class still cannot override a virtual
+    /// member imported this way. Subclass items are made during the analysis
+    /// pass, from the class the member was declared on, and that class is the
+    /// base rather than the superclass the subclass named.
+    fn add_inherited_member_imports(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase1> {
+        // The classes which might import something, in API order.
+        let importers: Vec<QualifiedName> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct { name, .. } => Some(&name.name),
+                _ => None,
+            })
+            .filter(|name| {
+                self.ancestry
+                    .get(*name)
+                    .is_some_and(|ancestry| !ancestry.public_bases.is_empty())
+            })
+            // A class off the allowlist has its own members discarded, so an
+            // imported one would be discarded too; and a generic class, a
+            // class in an anonymous namespace and a class standing in for one
+            // of cxx's own types each refuse every method they are given.
+            .filter(|name| {
+                self.is_on_allowlist(name)
+                    && !self.is_generic_type(name)
+                    && !self.types_in_anonymous_namespace.contains(*name)
+                    && known_types().is_cxx_acceptable_receiver(name)
+            })
+            .cloned()
+            .collect();
+        if importers.is_empty() {
+            return apis;
+        }
+
+        // Every member name each class declares, which is what hides an
+        // inherited one; how many member *functions* it declares of each name,
+        // which is what says an overload set cannot be imported; and the names
+        // it merges with a using-declaration, which is what says the members
+        // of that name cannot be enumerated at all.
+        let mut declared_names: HashMap<QualifiedName, HashSet<String>> = HashMap::new();
+        let mut member_functions: HashMap<(QualifiedName, String), usize> = HashMap::new();
+        let mut merged_names: HashSet<(QualifiedName, String)> = HashSet::new();
+        // Each class by the C++ scope its nested items are reported under.
+        // Keyed by namespace too: a C++ name reported for an item carries the
+        // enclosing types but not the enclosing namespaces, so `n::D` and
+        // `m::D` are both reported as `D`.
+        let classes_by_cpp_scope: HashMap<(&Namespace, String), &QualifiedName> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct { name, .. } => Some((
+                    (
+                        name.name.get_namespace(),
+                        name.cpp_name().to_string_for_cpp_generation().to_string(),
+                    ),
+                    &name.name,
+                )),
+                _ => None,
+            })
+            .collect();
+        for api in apis.iter() {
+            match api {
+                Api::Function {
+                    name,
+                    analysis:
+                        FnAnalysis {
+                            kind: FnKind::Method { impl_for, .. },
+                            ..
+                        },
+                    ..
+                } => {
+                    let cpp_name = name.cpp_name().to_string_for_cpp_generation().to_string();
+                    declared_names
+                        .entry(impl_for.clone())
+                        .or_default()
+                        .insert(cpp_name.clone());
+                    *member_functions
+                        .entry((impl_for.clone(), cpp_name))
+                        .or_default() += 1;
+                }
+                Api::Struct {
+                    name,
+                    analysis:
+                        PodAnalysis {
+                            field_info,
+                            bitfields,
+                            using_declarations,
+                            ..
+                        },
+                    ..
+                } => {
+                    let names = declared_names.entry(name.name.clone()).or_default();
+                    for member in field_info
+                        .iter()
+                        .filter_map(|field| field.name.as_deref())
+                        .chain(bitfields.iter().filter_map(|member| member.name.as_deref()))
+                    {
+                        // Under bindgen's spelling, plus the same without a
+                        // trailing underscore, which is how bindgen spells a
+                        // member C++ named after a Rust keyword. Guessing
+                        // wrong here only ever declines an import.
+                        names.insert(member.to_string());
+                        if let Some(unmangled) = member.strip_suffix('_') {
+                            names.insert(unmangled.to_string());
+                        }
+                    }
+                    // A using-declaration declares the name in the class which
+                    // wrote it, whatever the preceding pass was able to make of
+                    // it, and its members of that name are then not all its
+                    // own. So the name is a declaration for lookup, and the
+                    // class is one no member of that name may be imported
+                    // from: which of a merged set a call selects is no more
+                    // answerable than which of an overload set.
+                    for using in using_declarations {
+                        names.insert(using.name.clone());
+                        merged_names.insert((name.name.clone(), using.name.clone()));
+                    }
+                }
+                Api::Enum { name, item, .. } => {
+                    // An unscoped enumerator is a member of the class the enum
+                    // is nested in, and hides an inherited function of its
+                    // name. bindgen reports the enum's own name qualified by
+                    // that class, which is how the class is found.
+                    //
+                    // A *scoped* enum's enumerators are not members of the
+                    // enclosing class and hide nothing, and they are taken for
+                    // members here all the same: bindgen wraps no libclang
+                    // call which says which kind of enum this is
+                    // (`clang_EnumDecl_isScoped` has no counterpart in
+                    // `bindgen/clang.rs`). The cost is an inherited member
+                    // going unbound where a scoped enum happens to have a
+                    // variant of its name, which is what happened to every
+                    // inherited member before this pass existed.
+                    let enclosing = name
+                        .cpp_name_if_present()
+                        .and_then(|cpp_name| cpp_name.enclosing_cpp_scope())
+                        .and_then(|scope| {
+                            classes_by_cpp_scope
+                                .get(&(name.name.get_namespace(), scope.to_string()))
+                        });
+                    if let Some(class) = enclosing {
+                        declared_names
+                            .entry((*class).clone())
+                            .or_default()
+                            .extend(item.variants.iter().map(|v| v.ident.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Everything else a class declares, found by the name bindgen gave it:
+        // a member of class `X` lands in the enclosing mod as `X_member`, so
+        // that is where a nested type, a nested enum or a static data member
+        // which hides an inherited function is to be found. Items which carry
+        // a C++ name of their own are asked instead, since an unrelated
+        // `X_member` written that way in C++ says so and is nobody's member;
+        // it is the ones bindgen named for itself which follow the convention.
+        let flat_scope: HashSet<String> = apis
+            .iter()
+            .filter(|api| {
+                api.name_info()
+                    .cpp_name_if_present()
+                    .is_none_or(|cpp_name| cpp_name.is_nested())
+            })
+            .map(|api| api.name().to_string())
+            .collect();
+
+        // Each class by the C++ spelling of its name, which is what the shim's
+        // cast has to write. Taken here rather than left to codegen because
+        // codegen's name map holds only the classes which survive garbage
+        // collection, and a base nobody asked for does not; its fallback is
+        // bindgen's flattened identifier, which names nothing in C++. A class
+        // bindgen reported no name for is absent altogether: it is one C++ hid
+        // - a private nested class, say - whose public members stay callable
+        // on a derived object that nothing outside may cast.
+        let nameable_classes: HashMap<&QualifiedName, String> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct { name, .. } => name.cpp_name_if_present().map(|cpp_name| {
+                    (
+                        &name.name,
+                        name.name
+                            .get_namespace()
+                            .iter()
+                            .chain(std::iter::once(cpp_name.for_original_name_map()))
+                            .join("::"),
+                    )
+                }),
+                _ => None,
+            })
+            .collect();
+        let mut imports = Vec::new();
+        for api in apis.iter() {
+            let Api::Function {
+                name,
+                fun,
+                analysis:
+                    FnAnalysis {
+                        kind:
+                            FnKind::Method {
+                                impl_for: base,
+                                method_kind:
+                                    MethodKind::Normal
+                                    | MethodKind::Virtual(_)
+                                    | MethodKind::PureVirtual(_),
+                            },
+                        ignore_reason,
+                        param_details,
+                        ..
+                    },
+            } = api
+            else {
+                continue;
+            };
+            if !matches!(fun.cpp_vis, CppVisibility::Public) {
+                continue;
+            }
+            // The receiver the base declared the member with, which is the
+            // receiver the shim takes and so the constness its cast needs.
+            let Some((_, receiver_mutability)) = param_details
+                .first()
+                .and_then(|param| param.self_type.as_ref())
+            else {
+                continue;
+            };
+            if !matches!(
+                ignore_reason,
+                Ok(())
+                    | Err(ConvertErrorWithContext(
+                        ConvertErrorFromCpp::MethodOfNonAllowlistedType,
+                        _
+                    ))
+            ) {
+                continue;
+            }
+            let Some(base_cpp_spelling) = nameable_classes.get(base) else {
+                continue;
+            };
+            let cpp_name = name.cpp_name().to_string_for_cpp_generation().to_string();
+            if member_functions.get(&(base.clone(), cpp_name.clone())) != Some(&1)
+                || merged_names.contains(&(base.clone(), cpp_name.clone()))
+            {
+                continue;
+            }
+            for derived in &importers {
+                // One base subobject, publicly reached: neither question
+                // answers the other. Two paths make two subobjects whatever
+                // their access, and one public path may still leave a second
+                // subobject sitting behind a private one.
+                if derived == base
+                    || !reached_exactly_once(&self.ancestry, derived, base, Inheritance::Any)
+                    || !reached_exactly_once(&self.ancestry, derived, base, Inheritance::Public)
+                {
+                    continue;
+                }
+                let resolves_here = matches!(
+                    look_up_member(
+                        &self.ancestry,
+                        &declared_names,
+                        &flat_scope,
+                        derived,
+                        &cpp_name
+                    ),
+                    MemberLookup::Found(found) if found == *base
+                );
+                if resolves_here {
+                    imports.push(import_member_into(
+                        derived,
+                        CppVisibility::Public,
+                        name,
+                        fun,
+                        Some((base_cpp_spelling, receiver_mutability)),
+                    ));
+                }
+            }
+        }
+
+        let mut results = apis;
+        for (name, fun) in imports {
             self.analyze_and_add(
                 name,
                 fun,
@@ -1919,6 +2340,16 @@ impl<'a> FnAnalyzer<'a> {
                     self.config.is_on_throws_list(&method_qualified_name)
                 }
                 FnKind::Function => false,
+            }
+            || match &fun.synthetic_cpp {
+                // A member imported from a base class, which the C++ author
+                // designates under the name they wrote it with - the base's.
+                // The check above sees only the class it was imported into,
+                // which the author never wrote at all.
+                Some((CppFunctionBody::BaseClassMethodCall(base, name, _), _)) => self
+                    .config
+                    .is_on_throws_list(&format!("{base}::{}", name.to_string_for_cpp_generation())),
+                _ => false,
             };
         // A designation cannot be honoured for a function whose Rust shape is
         // fixed by a trait we do not own. Every one of these implements a
@@ -3137,21 +3568,23 @@ fn special_member_to_string(special_member: SpecialMemberKind) -> &'static str {
     }
 }
 
-/// Whether exactly one path runs from `derived` up to `ancestor`.
+/// Whether exactly one path runs from `derived` up to `ancestor` through the
+/// bases `inheritance` allows.
 ///
-/// A `using Base::foo;` may name any base, not only a direct one, so a direct
-/// base list does not answer whether it names a base at all; and one path is
-/// what says the member can be called through `derived`, because two paths are
-/// two base subobjects and C++ rejects the conversion between them.
+/// A base a member is reached through need not be a direct one, so a direct
+/// base list does not answer whether `ancestor` is a base at all; and one path
+/// is what says the member can be called through `derived`, because two paths
+/// are two base subobjects and C++ rejects the conversion between them.
 ///
 /// `false` where a class on the way has a base bindgen could not name - a
 /// template instantiation, which it announces through no callback. Such a base
 /// may lead to `ancestor` too, so a path count taken without it would be an
 /// undercount rather than an answer.
 fn reached_exactly_once(
-    ancestry: &HashMap<&QualifiedName, (&HashSet<QualifiedName>, bool)>,
+    ancestry: &HashMap<QualifiedName, Ancestry>,
     derived: &QualifiedName,
     ancestor: &QualifiedName,
+    inheritance: Inheritance,
 ) -> bool {
     /// More than one path, or a path which cannot be counted, are the same
     /// answer here, so both stop the walk.
@@ -3165,23 +3598,24 @@ fn reached_exactly_once(
     // reported rather than the compiler's own, so bound the walk by the number
     // of classes there are: no path can be longer than that.
     fn walk(
-        ancestry: &HashMap<&QualifiedName, (&HashSet<QualifiedName>, bool)>,
+        ancestry: &HashMap<QualifiedName, Ancestry>,
         derived: &QualifiedName,
         ancestor: &QualifiedName,
+        inheritance: Inheritance,
         depth: usize,
     ) -> Paths {
-        let Some((bases, has_unnamed_base)) = ancestry.get(derived).filter(|_| depth > 0) else {
+        let Some(here) = ancestry.get(derived).filter(|_| depth > 0) else {
             return Paths::None;
         };
-        if *has_unnamed_base {
+        if here.has_unnamed_base {
             return Paths::Unusable;
         }
         let mut found = Paths::None;
-        for base in bases.iter() {
+        for base in here.bases(inheritance) {
             let through_here = if base == ancestor {
                 Paths::One
             } else {
-                walk(ancestry, base, ancestor, depth - 1)
+                walk(ancestry, base, ancestor, inheritance, depth - 1)
             };
             found = match (found, through_here) {
                 (Paths::Unusable, _) | (_, Paths::Unusable) => return Paths::Unusable,
@@ -3192,13 +3626,104 @@ fn reached_exactly_once(
         found
     }
     matches!(
-        walk(ancestry, derived, ancestor, ancestry.len()),
+        walk(ancestry, derived, ancestor, inheritance, ancestry.len()),
         Paths::One
     )
 }
 
+/// What C++ member name lookup finds for one name in one class.
+enum MemberLookup {
+    /// Neither the class nor any base declares the name.
+    Nothing,
+    /// Exactly one class does, however many paths reach it.
+    Found(QualifiedName),
+    /// More than one class does, so C++ would call the use ambiguous - or the
+    /// ancestry is not known well enough to say which.
+    Ambiguous,
+}
+
+/// Look a member name up in `class` the way C++ does: the class's own
+/// declarations hide anything a base declares, and two bases declaring it is
+/// ambiguous rather than a choice.
+///
+/// A declaration is anything of that name, not merely a function of it: a data
+/// member, a nested type, a nested enum and a static data member all hide an
+/// inherited function, and calling one is an error rather than a call. So
+/// `declared` is consulted for what the class reported directly, and
+/// `flat_scope` for the rest, a member of class `X` being an item bindgen put
+/// in the enclosing mod as `X_member`.
+///
+/// Access is not consulted, because C++ does not consult it either until after
+/// the name has been found - a private member of a base still hides a public
+/// member of that base's own base.
+///
+/// The one rule left out is domination through a virtual base, which would
+/// turn some of these `Ambiguous` answers into a class. It says nothing wrong,
+/// only less: bindgen reports which bases are virtual for the class declaring
+/// them alone, so the case cannot be recognised, and an inherited member left
+/// unbound is what happened before any of this existed.
+fn look_up_member(
+    ancestry: &HashMap<QualifiedName, Ancestry>,
+    declared: &HashMap<QualifiedName, HashSet<String>>,
+    flat_scope: &HashSet<String>,
+    class: &QualifiedName,
+    name: &str,
+) -> MemberLookup {
+    // C++ forbids an inheritance cycle, but this graph is what bindgen
+    // reported rather than the compiler's own, so bound the walk by the number
+    // of classes there are: no path can be longer than that.
+    fn walk(
+        ancestry: &HashMap<QualifiedName, Ancestry>,
+        declared: &HashMap<QualifiedName, HashSet<String>>,
+        flat_scope: &HashSet<String>,
+        class: &QualifiedName,
+        name: &str,
+        depth: usize,
+    ) -> MemberLookup {
+        if depth == 0 {
+            return MemberLookup::Ambiguous;
+        }
+        if declared
+            .get(class)
+            .is_some_and(|declared| declared.contains(name))
+            || flat_scope.contains(&format!("{class}_{name}"))
+        {
+            return MemberLookup::Found(class.clone());
+        }
+        let Some(here) = ancestry.get(class) else {
+            return MemberLookup::Nothing;
+        };
+        if here.has_unnamed_base {
+            return MemberLookup::Ambiguous;
+        }
+        let mut found = MemberLookup::Nothing;
+        for base in here.bases.iter() {
+            let through_here = walk(ancestry, declared, flat_scope, base, name, depth - 1);
+            found = match (found, through_here) {
+                (MemberLookup::Ambiguous, _) | (_, MemberLookup::Ambiguous) => {
+                    return MemberLookup::Ambiguous
+                }
+                (MemberLookup::Nothing, other) | (other, MemberLookup::Nothing) => other,
+                (MemberLookup::Found(one), MemberLookup::Found(other)) if one == other => {
+                    MemberLookup::Found(one)
+                }
+                (MemberLookup::Found(_), MemberLookup::Found(_)) => return MemberLookup::Ambiguous,
+            };
+        }
+        found
+    }
+    walk(
+        ancestry,
+        declared,
+        flat_scope,
+        class,
+        name,
+        ancestry.len() + 1,
+    )
+}
+
 /// The base class member `fun`, as a function reached through a derived class
-/// which named it in a `using Base::foo;`.
+/// which inherits it, or which named it in a `using Base::foo;`.
 ///
 /// The receiver becomes the derived class and the call is forced through a C++
 /// shim of our own. It has to be: the member belongs to the base, so cxx would
@@ -3207,11 +3732,18 @@ fn reached_exactly_once(
 /// private, which makes even naming it from outside an error. Letting C++
 /// make the call is also what gets the `this` adjustment right for a base
 /// which does not sit at offset zero within the derived class.
+///
+/// `through_base` names the base to make the call through, for a caller which
+/// wants the member settled rather than looked up on the receiver: see
+/// [`CppFunctionBody::BaseClassMethodCall`]. A `using Base::foo;` passes
+/// `None`, since the point of one may be a base, or a member, which the shim
+/// is not allowed to name.
 fn import_member_into(
     importer: &QualifiedName,
     visibility: CppVisibility,
     base_method: &ApiName,
     fun: &FuncToConvert,
+    through_base: Option<(&str, &ReceiverMutability)>,
 ) -> (ApiName, Box<FuncToConvert>) {
     // The importer's name in front of the base method's whole bindgen name,
     // which already names the base: this only has to be unique and to be an
@@ -3238,7 +3770,14 @@ fn import_member_into(
     fun.virtualness = None;
     fun.special_member = None;
     fun.synthetic_cpp = Some((
-        CppFunctionBody::FunctionCall(Namespace::new(), base_method.cpp_name()),
+        match through_base {
+            Some((base, receiver_mutability)) => CppFunctionBody::BaseClassMethodCall(
+                base.to_string(),
+                base_method.cpp_name(),
+                *receiver_mutability,
+            ),
+            None => CppFunctionBody::FunctionCall(Namespace::new(), base_method.cpp_name()),
+        },
         CppFunctionKind::Method,
     ));
     (name, Box::new(fun))

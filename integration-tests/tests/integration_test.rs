@@ -6317,7 +6317,6 @@ fn test_const_virtual_fns() {
 }
 
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/197
 fn test_virtual_fns_inheritance() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -6339,6 +6338,903 @@ fn test_virtual_fns_inheritance() {
         assert_eq!(b.pin_mut().foo(2), 3);
     };
     run_test("", hdr, rs, &["B"], &[]);
+}
+
+#[test]
+fn test_inherited_non_virtual_method_of_a_non_allowlisted_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t plain(uint32_t a) const { return a + 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            uint32_t own = 4;
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.plain(2), 3);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
+#[test]
+fn test_inherited_method_beside_the_upcast_to_an_allowlisted_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t plain(uint32_t a) const { return a + 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            uint32_t own = 4;
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        // Through the upcast, which is what an allowlisted base has always
+        // given, and directly, which is what it did not.
+        let base: &ffi::inh_Base = d.as_ref().unwrap().as_ref();
+        assert_eq!(base.plain(2), 3);
+        assert_eq!(d.plain(2), 3);
+    };
+    run_test("", hdr, rs, &["inh_Base", "inh_Derived"], &[]);
+}
+
+#[test]
+fn test_inherited_method_from_an_indirect_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t reached() const { return 7; }
+        };
+        class inh_B : public inh_A {};
+        class inh_C : public inh_B {};
+    "};
+    let rs = quote! {
+        let c = ffi::inh_C::new().within_unique_ptr();
+        assert_eq!(c.reached(), 7);
+    };
+    run_test("", hdr, rs, &["inh_C"], &[]);
+}
+
+#[test]
+fn test_inherited_method_from_a_base_at_a_nonzero_offset() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_First {
+        public:
+            uint64_t padding = 12;
+        };
+        class inh_Second {
+        public:
+            uint32_t held = 42;
+            uint32_t held_value() const { return held; }
+        };
+        class inh_Derived : public inh_First, public inh_Second {};
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.held_value(), 42);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
+#[test]
+fn test_inherited_method_resolves_to_the_nearest_declaration() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            virtual uint32_t which() const { return 1; }
+            virtual ~inh_Base() {}
+        };
+        class inh_Middle : public inh_Base {
+        public:
+            uint32_t which() const override { return 2; }
+        };
+        class inh_Most : public inh_Middle {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let most = ffi::inh_Most::new().within_unique_ptr();
+            assert_eq!(most.which(), 2);
+        },
+        directives_from_lists(&["inh_Most"], &[], None),
+        None,
+        // Two classes declare `which`; only the nearer is imported. Importing
+        // both would have given the second the overload tracker's next name.
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Most",
+            method: "which1",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_virtual_method_dispatches_on_the_dynamic_type() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <memory>
+        class inh_Base {
+        public:
+            virtual uint32_t which() const { return 1; }
+            virtual ~inh_Base() {}
+        };
+        class inh_Middle : public inh_Base {};
+        class inh_Most : public inh_Middle {
+        public:
+            uint32_t which() const override { return 2; }
+        };
+        inline std::unique_ptr<inh_Middle> inh_make_most() {
+            return std::unique_ptr<inh_Middle>(new inh_Most());
+        }
+    "};
+    let rs = quote! {
+        let plain = ffi::inh_Middle::new().within_unique_ptr();
+        assert_eq!(plain.which(), 1);
+        let most = ffi::inh_make_most();
+        assert_eq!(most.which(), 2);
+    };
+    run_test("", hdr, rs, &["inh_Middle", "inh_make_most"], &[]);
+}
+
+/// A single path to a virtual base is still a single subobject, and the shim's
+/// call needs no more than that.
+#[test]
+fn test_inherited_method_from_a_virtual_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t reached() const { return 7; }
+            virtual ~inh_Base() {}
+        };
+        class inh_Derived : public virtual inh_Base {};
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.reached(), 7);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
+/// Access does not remove a base subobject: `inh_A` is reached publicly
+/// through `inh_B` and privately through `inh_C`, so there are two of them and
+/// C++ rejects `d.foo()` for that reason alone.
+#[test]
+fn test_inherited_method_declines_a_subobject_reached_through_a_private_path() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_B : public inh_A {};
+        class inh_C : private inh_A {};
+        class inh_D : public inh_B, public inh_C {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// `inh_B` writes `using inh_A::foo;` beside a `foo` of its own, so its `foo`
+/// is a merged set of two overloads however few of them autocxx can see, and
+/// a shim calling one of them through `inh_D` would be ambiguous.
+#[test]
+fn test_inherited_method_declines_a_base_whose_own_name_is_merged() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t foo(uint32_t, uint32_t = 0) const { return 1; }
+        };
+        class inh_B : public inh_A {
+        public:
+            using inh_A::foo;
+            uint32_t foo(uint32_t) const { return 2; }
+        };
+        class inh_D : public inh_B {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// A using-declaration is a declaration of the name in the class which wrote
+/// it, and this one puts the inherited `foo` behind `private:`.
+#[test]
+fn test_inherited_method_declines_a_name_the_class_redeclares_privately() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_B : public inh_A {
+        public:
+            using inh_A::foo;
+        };
+        class inh_D : public inh_B {
+        private:
+            using inh_B::foo;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// The using-declaration puts the inherited `foo` behind `private:` in
+/// `inh_D`, and names `inh_B` rather than the `inh_A` which declares it - so
+/// nothing the preceding pass could bind marks the name, and only the
+/// declaration itself says `inh_D::foo` is not callable.
+#[test]
+fn test_inherited_method_declines_a_name_redeclared_through_a_middle_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_B : public inh_A {};
+        class inh_D : public inh_B {
+        private:
+            using inh_B::foo;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_hidden_by_an_enumerator() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            enum inh_E { foo = 2 };
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// `inh_Derived_foo` is a class of its own, not a member of `inh_Derived`,
+/// however alike the two spellings are once bindgen has flattened one.
+#[test]
+fn test_inherited_method_beside_a_class_named_like_a_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {};
+        class inh_Derived_foo {};
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.foo(), 1);
+    };
+    run_test("", hdr, rs, &["inh_Derived", "inh_Derived_foo"], &[]);
+}
+
+/// The base overloads `foo` with a member function template, which bindgen
+/// does not report. The shim asks C++ to resolve the call in the base's own
+/// scope, which is what picks the reported overload out of a set autocxx never
+/// saw the whole of.
+#[test]
+fn test_inherited_method_from_a_base_which_overloads_it_with_a_template() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo(uint32_t a) const { return a + 1; }
+            template<typename T> uint32_t foo(T, T) const { return 99; }
+        };
+        class inh_Derived : public inh_Base {};
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.foo(2), 3);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
+/// The base is a nested class nobody asked autocxx to generate, so it is
+/// collected before the C++ is written and the shim's cast has to have kept
+/// its C++ spelling - `inh_Outer::inh_Base`, not the identifier bindgen
+/// flattened it to.
+#[test]
+fn test_inherited_method_from_a_nested_base() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct inh_Outer {
+            struct inh_Base {
+                uint32_t foo() const { return 7; }
+            };
+        };
+        struct inh_Derived : inh_Outer::inh_Base {};
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.foo(), 7);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
+/// The designation names the base as C++ spells it, nesting and all.
+#[test]
+fn test_inherited_method_honours_a_throws_designation_on_a_nested_base() {
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void inh_Outer::inh_Base::boom() const {
+            throw std::runtime_error(\"inherited error\");
+        }
+    "};
+    let hdr = indoc! {"
+        struct inh_Outer {
+            struct inh_Base {
+                void boom() const;
+            };
+        };
+        struct inh_Derived : inh_Outer::inh_Base {
+            inh_Derived() {}
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert!(d.boom().is_err());
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("inh_Derived")
+            throws!("inh_Outer::inh_Base::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The base is a private nested class: its public members are callable on a
+/// derived object, but nothing outside `inh_Outer` may name the class, so the
+/// shim has no way to say which member it means.
+#[test]
+fn test_inherited_method_of_a_base_which_cannot_be_named() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Outer {
+            struct inh_Hidden {
+                uint32_t foo() const { return 1; }
+            };
+        public:
+            struct inh_Shown : inh_Hidden {};
+        };
+    "};
+    // Not constructed: the hidden base leaves autocxx unable to say what
+    // constructors the derived class has, which is a separate matter from the
+    // method this examines.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["inh_Outer_inh_Shown"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Outer_inh_Shown",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// A `throws!` designation names the member as C++ declares it, on the base.
+/// The class it is inherited into is one the C++ author never wrote.
+#[test]
+fn test_inherited_method_honours_a_throws_designation_on_the_base() {
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void inh_Base::boom() const {
+            throw std::runtime_error(\"inherited error\");
+        }
+    "};
+    let hdr = indoc! {"
+        class inh_Base {
+        public:
+            void boom() const;
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            inh_Derived() {}
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert!(d.boom().is_err());
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("inh_Derived")
+            throws!("inh_Base::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A nested enum says which class it belongs to by a C++ name which carries
+/// the enclosing classes and not the enclosing namespaces, so two namespaces
+/// may each hold a `inh_D` reporting the same one.
+#[test]
+fn test_inherited_method_beside_a_same_named_class_in_another_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace inh_one {
+            class inh_Base { public: uint32_t foo() const { return 1; } };
+            class inh_D : public inh_Base { public: enum inh_E { foo = 2 }; };
+        }
+        namespace inh_two {
+            class inh_Base { public: uint32_t foo() const { return 7; } };
+            class inh_D : public inh_Base {};
+        }
+    "};
+    let rs = quote! {
+        let d = ffi::inh_two::inh_D::new().within_unique_ptr();
+        assert_eq!(d.foo(), 7);
+    };
+    run_test("", hdr, rs, &["inh_one::inh_D", "inh_two::inh_D"], &[]);
+}
+
+/// A member function template hides the inherited `foo` in C++ and bindgen
+/// reports no such declaration, so autocxx binds `foo` regardless. The shim
+/// names the base's member, so what it calls is that member and not the
+/// template - which is the whole reason the call is made that way.
+#[test]
+fn test_inherited_method_bound_past_an_unreported_member_template() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo(uint32_t a) const { return a + 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            template<typename T> uint32_t foo(T) const { return 99; }
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.foo(2), 3);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
+#[test]
+fn test_inherited_method_hidden_by_a_nested_type() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            struct foo {};
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_hidden_by_a_nested_enum() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            enum foo { INH_ONE };
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_hidden_by_a_static_data_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            static const int foo = 5;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+/// The hiding member is spelled `type` in C++ and `type_` by bindgen, which
+/// has to rename it to keep it a Rust identifier.
+#[test]
+fn test_inherited_method_hidden_by_a_data_member_bindgen_renamed() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t type() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            uint32_t type = 5;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "type",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_declines_an_ambiguous_base_subobject() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_B : public inh_A {};
+        class inh_C : public inh_A {};
+        class inh_D : public inh_B, public inh_C {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_declines_the_same_name_from_two_bases() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_A {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_B {
+        public:
+            uint32_t foo() const { return 2; }
+        };
+        class inh_D : public inh_A, public inh_B {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_D::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_D"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_D",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_declines_a_name_the_base_overloads() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo(uint32_t) const { return 1; }
+            uint32_t foo(uint32_t, uint32_t = 0) const { return 2; }
+        };
+        class inh_Derived : public inh_Base {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_defers_to_a_member_which_hides_it() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo(uint32_t a) const { return a + 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            uint32_t foo() const { return 9; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::inh_Derived::new().within_unique_ptr();
+            assert_eq!(d.foo(), 9);
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        // The base's `foo` is hidden in C++, so importing it would have
+        // produced a second Rust method under the overload tracker's next
+        // name for it.
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo1",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_hidden_by_a_data_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            uint32_t foo = 5;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_method_of_a_private_base_is_not_imported() {
+    // The public base is there so the class is one this pass considers at all;
+    // what declines `foo` is then the access of the base which declares it.
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Public {
+        public:
+            uint32_t bar() const { return 2; }
+        };
+        class inh_Derived : private inh_Base, public inh_Public {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::inh_Derived::new().within_unique_ptr();
+            assert_eq!(d.bar(), 2);
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_protected_member_of_a_base_is_not_imported() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        protected:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "foo",
+        })),
+        None,
+    );
+}
+
+#[test]
+fn test_inherited_static_member_is_passed_over() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            static uint32_t counted() { return 3; }
+        };
+        class inh_Derived : public inh_Base {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_Derived::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_Derived"], &[], None),
+        None,
+        Some(Box::new(NoMethodNamed {
+            ty: "inh_Derived",
+            method: "counted",
+        })),
+        None,
+    );
 }
 
 #[test]
@@ -28314,7 +29210,7 @@ impl CodeCheckerFns for NoMethodNamed {
         }
         if walk(&rs.items, self.ty, self.method) {
             return Err(TestError::RsCodeExaminationFail(format!(
-                "`{}::{}` was bound, so the using-declaration was imported after all",
+                "`{}::{}` was bound, so the base class member was imported after all",
                 self.ty, self.method
             )));
         }

@@ -24,6 +24,7 @@ use itertools::Itertools;
 use std::borrow::Cow;
 use type_to_cpp::CppNameMap;
 
+use crate::conversion::analysis::fun::ReceiverMutability;
 use crate::minisyn::Ident;
 
 use super::{
@@ -728,6 +729,31 @@ impl<'a> CppCodeGenerator<'a> {
                     )
                 }
             },
+            CppFunctionBody::BaseClassMethodCall(base, id, receiver_mutability) => {
+                // On the receiver cast to the base, rather than on the
+                // receiver itself. `self.foo(args)` would let anything the
+                // receiver's own class declares under that name decide what is
+                // called - a data member, a nested type, an enumerator, or a
+                // member function template, which bindgen does not report at
+                // all - and the answer would not be the member whose signature
+                // this wrapper was built from. The cast moves the lookup into
+                // the base, where it finds that member; it is not a qualified
+                // call, `self.Base::foo(args)`, which would settle the name
+                // and lose the virtual dispatch with it.
+                let receiver = receiver.expect("a base class method call with no receiver");
+                let constness = match receiver_mutability {
+                    ReceiverMutability::Const => "const ",
+                    ReceiverMutability::Mutable => "",
+                };
+                (
+                    format!(
+                        "static_cast<{constness}{base}&>({receiver}).{}({arg_list})",
+                        id.to_string_for_cpp_generation()
+                    ),
+                    "".to_string(),
+                    false,
+                )
+            }
             CppFunctionBody::StaticMethodCall(ns, ty_id, fn_id) => {
                 // The bindgen name flattens nesting - a `struct B` inside
                 // `struct A` is `A_B` - so joining the namespace to it would
