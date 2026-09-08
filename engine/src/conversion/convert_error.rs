@@ -146,7 +146,7 @@ pub enum ConvertErrorFromCpp {
     AliasTemplate { declared: usize, type_params: usize },
     #[error("{}", STD_FUNCTION_ADVICE)]
     UnsupportedStdFunction,
-    #[error("bindgen could not name this C++ type, and replaced it with an opaque blob of bytes ({0}) of the same size and alignment. autocxx will not put that blob into the bindings in place of the type, because the result would compile and be the wrong signature. The usual two causes are a type which C++ only reaches through a `using` declaration, which bindgen does not follow - no `generate!` directive names what the declaration introduced, so the way out is for the header to spell the type through the namespace which declares it - and std::function; any other type bindgen could not name arrives the same way. {}", STD_FUNCTION_ADVICE)]
+    #[error("bindgen could not name this C++ type, and replaced it with an opaque blob of bytes ({0}) of the same size and alignment. autocxx will not put that blob into the bindings in place of the type, because the result would compile and be the wrong signature. The usual two causes are a type C++ only reaches through a `using` declaration bindgen cannot follow - one written in a class, one naming a template, or one whose name two declarations answer to, since a namespace-scope declaration of a type is followed - for which the way out is for the header to spell the type through the namespace which declares it, and std::function; any other type bindgen could not name arrives the same way. {}", STD_FUNCTION_ADVICE)]
     BindgenOpaqueBlob(String),
     #[error("This item relies on a type not known to autocxx ({})", .0.to_cpp_name())]
     UnknownDependentType(QualifiedName),
