@@ -97,3 +97,64 @@ This crate shares the general approach to safety and soundness pioneered by cxx,
 
 There are preliminary explorations to avoid this problem by using a C++ reference wrapper type. See `examples/reference-wrappers`.
 
+## Thread safety
+
+`autocxx` assumes nothing about the thread safety of your C++ types, so the non-POD types it generates are neither [`Send`](https://doc.rust-lang.org/std/marker/trait.Send.html) nor [`Sync`](https://doc.rust-lang.org/std/marker/trait.Sync.html). This follows cxx, which says the same of its opaque types.
+
+Nothing in a C++ class declaration reveals whether its objects may cross a thread boundary. A class might hold a lock it has taken, an index into a thread-local pool, or a destructor which has to run on the thread that constructed the object. `Send` is exactly the claim that moving a value to another thread is allowed, and `autocxx` is not in a position to make that claim on your behalf.
+
+This extends to the pointers you hold them in: `cxx` grants `UniquePtr<T>: Send` only where `T: Send`, so a `UniquePtr` to a non-POD type won't cross a thread boundary either.
+
+If you know a particular C++ type really is thread safe, you can say so. `include_cpp!` expands into the crate that invokes it, so in that crate the generated type is local and the impl is yours to write:
+
+```rust,ignore
+// SAFETY: a MyType may be used and destroyed on any one thread.
+unsafe impl Send for ffi::MyType {}
+
+// SAFETY: MyType's const methods may additionally be called concurrently
+// through shared references.
+unsafe impl Sync for ffi::MyType {}
+```
+
+The `unsafe` is the point: those claims are yours to justify, and they are two different claims. `Send` says an object may be handed from one thread to another - so audit the destructor as well as the methods, since it runs wherever the value is finally dropped. `Sync` says two threads may use one object *at the same time* through `&`, which is a stronger thing to promise: a C++ `const` method is free to update a `mutable` cache without synchronising, and that races even though nothing in Rust looks mutable.
+
+Audit the whole safe API the impl exposes, not merely the calls you have in mind today. Once written, the impl licenses every caller, including your own downstream users.
+
+Generated types with type or lifetime parameters can have the impl too, but there the claim must hold for *every* instantiation it admits, which usually means a bound:
+
+```rust,ignore
+// SAFETY: MyContainer owns its element and shares nothing else, so it may go
+// wherever the element may go.
+unsafe impl<T: Send> Send for ffi::MyContainer<T> {}
+```
+
+`T: Send` is not a universal answer - it suits a container which owns its elements, whereas one handing out shared access to them would want `T: Sync`, and a container which is thread-affine for reasons of its own is unsuitable whatever `T` is. Work out which the C++ actually is.
+
+### If the bindings come from someone else's crate
+
+Only the crate containing the `include_cpp!` can write that impl. If you depend on a library which generates bindings and re-exports them, the type is foreign to you and Rust's orphan rule refuses the impl - re-exporting or aliasing it doesn't change that:
+
+```rust,ignore
+use their_bindings::MyType;
+unsafe impl Send for MyType {} // error[E0117]
+```
+
+Ask that library to make the claim, since its author is the one who knows the C++ type. Failing that, wrap it in a type of your own and make the claim about the wrapper:
+
+```rust,ignore
+pub struct SendMyType(cxx::UniquePtr<their_bindings::MyType>);
+
+// SAFETY: audited - MyType may be used and destroyed on any thread.
+unsafe impl Send for SendMyType {}
+
+impl SendMyType {
+    pub fn count(&self) -> u32 { self.0.count() }
+}
+```
+
+Note this doesn't make `their_bindings::MyType` itself `Send`, so it won't satisfy an API which demands that bound, and you'll be forwarding any methods you need.
+
+### POD types
+
+POD types are unaffected: they're plain data, and they're `Send` and `Sync` on the same terms as any other Rust struct with the same fields. Be aware that this is a statement about the data, not a promise about the C++ methods. A POD type which is merely an integer handle into thread-local state on the C++ side is `Send` as far as Rust is concerned, and keeping its methods on the right thread is still yours to arrange.
+
