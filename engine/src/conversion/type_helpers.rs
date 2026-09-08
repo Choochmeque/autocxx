@@ -132,6 +132,55 @@ pub(crate) fn unwrap_const(ty: &TypePath) -> Option<&syn::Type> {
     unwrap_bindgen_marker(ty, "__bindgen_marker_Const")
 }
 
+/// If `ty` is a C++ `long double`, return the Rust type bindgen substituted
+/// for it - which is the right size and nothing else. See
+/// [`crate::conversion::ConvertErrorFromCpp::LongDouble`] for why that is not
+/// enough to put in a signature.
+pub(crate) fn unwrap_long_double(ty: &TypePath) -> Option<&syn::Type> {
+    unwrap_bindgen_marker(ty, "__bindgen_marker_LongDouble")
+}
+
+/// Whether `ty` mentions a C++ `long double` anywhere inside it, including as
+/// a template argument.
+///
+/// [`unwrap_long_double`] only sees a marker the type converter recursed into,
+/// and it does not recurse into the arguments of a template it is about to
+/// name in C++ verbatim. Without this the marker reaches the generated header
+/// as a literal `Wrapper<__bindgen_marker_LongDouble<double>>`.
+pub(crate) fn mentions_long_double(ty: &Type) -> bool {
+    match ty {
+        Type::Path(typ) => {
+            if unwrap_long_double(typ).is_some() {
+                return true;
+            }
+            typ.path.segments.iter().any(|seg| {
+                let PathArguments::AngleBracketed(args) = &seg.arguments else {
+                    return false;
+                };
+                args.args.iter().any(|arg| match arg {
+                    GenericArgument::Type(inner) => mentions_long_double(inner),
+                    _ => false,
+                })
+            })
+        }
+        Type::Array(arr) => mentions_long_double(&arr.elem),
+        Type::Ptr(ptr) => mentions_long_double(&ptr.elem),
+        Type::Reference(r) => mentions_long_double(&r.elem),
+        // bindgen writes a C function pointer as `Option<unsafe extern "C"
+        // fn(..)>`, so this is reached through the `Option`'s argument above.
+        Type::BareFn(f) => {
+            f.inputs.iter().any(|arg| mentions_long_double(&arg.ty))
+                || match &f.output {
+                    syn::ReturnType::Type(_, ty) => mentions_long_double(ty),
+                    syn::ReturnType::Default => false,
+                }
+        }
+        Type::Paren(inner) => mentions_long_double(&inner.elem),
+        Type::Group(inner) => mentions_long_double(&inner.elem),
+        _ => false,
+    }
+}
+
 /// Peels bindgen's `const` markers off `ty`, for the walks which care what a
 /// type is laid out as rather than whether C++ let anyone write to it. A
 /// `const T` occupies exactly what a `T` does.

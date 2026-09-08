@@ -306,6 +306,18 @@ impl ByValueChecker {
                     ));
                     break;
                 }
+                // A `long double` member. Its Rust stand-in has the right size
+                // and the wrong calling convention, so a struct holding one
+                // cannot cross by value either - which the arm below would
+                // conclude anyway, naming the marker rather than the type.
+                None if ty_id.get_final_item() == "__bindgen_marker_LongDouble" => {
+                    field_safety_problem = PodState::UnsafeToBePod(format!(
+                        "Type {tyname} could not be POD because it has a `long double` member, \
+                         which Rust has no type for - see the error for a `long double` in a \
+                         signature"
+                    ));
+                    break;
+                }
                 None => {
                     field_safety_problem = PodState::UnsafeToBePod(format!(
                         "Type {tyname} could not be POD because its dependent type {ty_id} isn't known"

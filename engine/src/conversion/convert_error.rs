@@ -68,6 +68,8 @@ pub enum ConvertErrorFromCpp {
     UnsupportedType(String),
     #[error("Encountered type not yet known by autocxx: {0}")]
     UnknownType(String),
+    #[error("This signature mentions C++'s `long double`, which autocxx does not pass between the languages, for a reason which differs by target. Where it is 8 bytes wide (MSVC, Apple Arm) it is a `double` under another name, and cxx checks the C++ function's exact type against the one it was told about, so declaring a `f64` is rejected by the C++ compiler. Where it is 16 bytes wide it is an 80-bit x87 float (x86-64 System V, passed in memory and returned in st(0)) or an IEEE binary128 (AArch64 Linux), and Rust has no such type at all. A representation which works on some targets and does not exist on others is not one autocxx can offer, so the signature is turned down everywhere instead. Declaring the C++ function in terms of `double`, or adding a C++ wrapper which converts, is the way across. A `long double` *field* is unaffected: it is bytes the struct carries and Rust never reads.")]
+    LongDouble,
     #[error("Encountered static data whose type autocxx can't represent - only variables of POD type, or of a type which bindgen expresses directly in Rust, are supported")]
     StaticDataOfUnsupportedType,
     #[error("The C++ variable {0} has internal linkage, so there is no symbol for Rust to link against. (A namespace-scope variable declared `static`, or declared `const` without `extern`, or declared in an anonymous namespace, exists separately in each translation unit which includes the header.) Declare it `extern` and define it in exactly one C++ file if you want to use it from Rust.")]

@@ -1,0 +1,106 @@
+Subject: Add `--use-distinct-wchar-t`, mirroring `--use-distinct-char16-t`
+
+`wchar_t` is a distinct type in C++, and bindgen erases it: `IntKind::WChar`
+survives the IR intact, but codegen renders it through
+`Layout::known_type_for_size`, so a `wchar_t` and the plain integer of the same
+width become the same token. A consumer which has to name the C++ type again -
+a bridge generator, say, whose C++ compiler checks the function's exact type -
+has nothing left to name it with.
+
+The erasure loses a second fact along with the first. `wchar_t`'s width *and*
+its signedness are the target's business: 32 bits on most Unix targets and 16
+on Windows, `int` on x86-64 Linux and Darwin, `unsigned int` under AAPCS. The
+IR keeps neither. Width is recovered from the layout, and signedness is not
+recovered at all - `IntKind::WChar::is_signed()` answers a hardcoded `false`,
+with a standing `TODO(emilio)` above it saying there is no way to know. So
+`wchar_t` never sign-extends where it should, and the type bindgen chooses is
+unsigned on every target.
+
+`--use-distinct-wchar-t` emits a fake type called `bindgen_cwchar_t` instead,
+exactly as `--use-distinct-char16-t` emits `bindgen_cchar16_t`, and leaves the
+representation to the caller. That is also the only place the target's answer
+is available: the caller's substitute is *compiled for* the target, so it can
+select the right width and signedness with a `cfg` rather than infer them.
+Off by default, so no existing output changes.
+
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -277,6 +277,13 @@
+             IntKind::ULong => raw_type(ctx, "c_ulong"),
+             IntKind::LongLong => raw_type(ctx, "c_longlong"),
+             IntKind::ULongLong => raw_type(ctx, "c_ulonglong"),
++            // As with `bindgen_cchar16_t` above, and for the same reason: the
++            // integer of the right width is not the same type as `wchar_t`,
++            // and it is the caller - compiled for the target - which knows
++            // whether that integer is signed.
++            IntKind::WChar if ctx.options().use_distinct_wchar_t => {
++                syn::parse_quote! { bindgen_cwchar_t }
++            }
+             IntKind::WChar => {
+                 let layout =
+                     layout.expect("Couldn't compute wchar_t's layout?");
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -481,6 +481,9 @@
+     /// Use distinct char16_t
+     #[arg(long)]
+     use_distinct_char16_t: bool,
++    /// Use distinct wchar_t
++    #[arg(long)]
++    use_distinct_wchar_t: bool,
+     /// Output C++ overloaded operators
+     #[arg(long)]
+     represent_cxx_operators: bool,
+@@ -692,6 +695,7 @@
+         explicit_padding,
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
++        use_distinct_wchar_t,
+         represent_cxx_operators,
+         use_opaque_newtype_wrapper,
+         use_reference_newtype_wrapper,
+@@ -1002,6 +1006,7 @@
+             explicit_padding,
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
++            use_distinct_wchar_t,
+             represent_cxx_operators,
+             use_opaque_newtype_wrapper,
+             use_reference_newtype_wrapper,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -261,6 +261,34 @@
+         },
+         as_args: "--use-distinct-char16-t",
+     },
++
++    /// Whether we should distinguish between C++'s `wchar_t` and the plain
++    /// integer of the same width.
++    ///
++    /// `wchar_t` is a distinct type in C++, and both its width and its
++    /// signedness are the target's to choose: 32 bits on most Unix targets and
++    /// 16 on Windows, signed on some targets and unsigned on others. bindgen
++    /// renders it as whichever Rust integer has the right size, which loses
++    /// the distinction - and loses the signedness too, because `IntKind::WChar`
++    /// answers `is_signed()` with a hardcoded `false`.
++    ///
++    /// When this option is enabled, bindgen generates a fake type called
++    /// `bindgen_cwchar_t` instead, in the same way `use_distinct_char16_t`
++    /// does for `char16_t`. Downstream code post-processors should arrange to
++    /// replace this with a real type - which is also where the target's answer
++    /// about width and signedness is known, since that code is compiled for
++    /// the target rather than about it.
++    use_distinct_wchar_t: bool {
++        methods: {
++            /// If this is true, denote `wchar_t` as a separate type from the
++            /// integer of the same width. Disabled by default.
++            pub fn use_distinct_wchar_t(mut self, doit: bool) -> Builder {
++                self.options.use_distinct_wchar_t = doit;
++                self
++            }
++        },
++        as_args: "--use-distinct-wchar-t",
++    },
+     /// Whether we should output C++ overloaded operators. By itself,
+     /// this option is not sufficient to produce valid output, because
+     /// such operators will have names that are not acceptable Rust

@@ -1,0 +1,159 @@
+Subject: Mark `long double` with a newtype wrapper
+
+`long double` is the one builtin bindgen renders differently on different
+targets without saying so. `float_kind_rust_type` picks by layout size: `f64`
+where the type is eight bytes - MSVC, Apple Arm - and `integer_type(layout)`,
+i.e. `u128`, where it is sixteen. Both are the right size. Neither is the right
+type, and nothing in the output distinguishes either from the type it was
+spelled as, so one unchanged header produces `f64` on one target and `u128` on
+the next, with a consumer unable to tell that from a header which really said
+`double` or `unsigned __int128`.
+
+Whether a consumer can do anything with either depends on the target, and it
+cannot tell which it is looking at. Where `long double` is eight bytes it is
+`double` under another name, so the `f64` is right about everything except which
+C++ type it is - enough to matter to anything which has to name the type again.
+Where it is sixteen it is an 80-bit x87 float (x86-64 System V) or an IEEE
+binary128 (AArch64 Linux), and Rust has neither type. A consumer which cares has
+to treat those cases differently, or refuse both; either way it has to be able
+to see what it is looking at.
+
+`--use-long-double-newtype-wrapper` wraps the chosen type in
+`__bindgen_marker_LongDouble<T>`, the same shape
+`--use-opaque-newtype-wrapper` and `--use-reference-newtype-wrapper` already
+use: a fake type the caller declares itself, through `--raw-line` or by
+post-processing. What it wraps is left as it was, so a caller who declares the
+marker `#[repr(transparent)]` gets the layout bindgen chose, along with the
+fact that the layout is all it is.
+
+The wrap is at the `TypeKind::Float` arm of `TryToRustTy for Type`, which
+leaves `TypeKind::Complex(FloatKind::LongDouble)` alone: a `_Complex long
+double` is already `__BindgenComplex<T>`, which says on its face that it is not
+a plain float. Off by default, so no existing output changes.
+
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -4,7 +4,7 @@
+ 
+ use crate::ir::context::BindgenContext;
+ use crate::ir::layout::Layout;
+-use crate::ir::ty::RUST_DERIVE_IN_ARRAY_LIMIT;
++use crate::ir::ty::{FloatKind, RUST_DERIVE_IN_ARRAY_LIMIT};
+ 
+ pub(crate) mod attributes {
+     use proc_macro2::{Ident, Span, TokenStream};
+@@ -186,6 +186,31 @@
+     }
+ }
+ 
++/// The name of the marker newtype `long_double_wrapper` puts round a
++/// `long double`.
++const LONG_DOUBLE_MARKER: &str = "__bindgen_marker_LongDouble";
++
++/// A C++ `long double`, wrapped in a marker newtype if one was asked for.
++///
++/// `ty` is what `float_kind_rust_type` chose for it, which is right about the
++/// size and silent about everything else: `f64` where the type is eight bytes,
++/// an integer of the same width where it is not. The marker says which of
++/// those two the caller is looking at, without changing either.
++pub(crate) fn long_double_wrapper(
++    ty: syn::Type,
++    kind: FloatKind,
++    ctx: &BindgenContext,
++) -> syn::Type {
++    if kind == FloatKind::LongDouble &&
++        ctx.options().use_long_double_newtype_wrapper
++    {
++        let marker = Ident::new(LONG_DOUBLE_MARKER, Span::call_site());
++        syn::parse_quote! { #marker < #ty > }
++    } else {
++        ty
++    }
++}
++
+ /// Undoes [`const_wrapper`], for the one place which needs to *name* a type
+ /// rather than declare something of it: a newtype alias's constructor. The
+ /// marker is not part of that constructor's name, and `Marker<Inner>(v)` is
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -4784,9 +4784,11 @@
+             TypeKind::Int(ik) => {
+                 Ok(int_kind_rust_type(ctx, ik, self.layout(ctx)))
+             }
+-            TypeKind::Float(fk) => {
+-                Ok(float_kind_rust_type(ctx, fk, self.layout(ctx)))
+-            }
++            TypeKind::Float(fk) => Ok(helpers::long_double_wrapper(
++                float_kind_rust_type(ctx, fk, self.layout(ctx)),
++                fk,
++                ctx,
++            )),
+             TypeKind::Complex(fk) => {
+                 let float_path =
+                     float_kind_rust_type(ctx, fk, self.layout(ctx));
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -490,6 +490,9 @@
+     /// Use distinct char8_t
+     #[arg(long)]
+     use_distinct_char8_t: bool,
++    /// Wrap long double in a newtype marker
++    #[arg(long)]
++    use_long_double_newtype_wrapper: bool,
+     /// Output C++ overloaded operators
+     #[arg(long)]
+     represent_cxx_operators: bool,
+@@ -708,6 +711,7 @@
+         use_opaque_newtype_wrapper,
+         use_reference_newtype_wrapper,
+         use_const_newtype_wrapper,
++        use_long_double_newtype_wrapper,
+         vtable_generation,
+         sort_semantically,
+         merge_extern_blocks,
+@@ -1021,6 +1025,7 @@
+             use_opaque_newtype_wrapper,
+             use_reference_newtype_wrapper,
+             use_const_newtype_wrapper,
++            use_long_double_newtype_wrapper,
+             vtable_generation,
+             sort_semantically,
+             merge_extern_blocks,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -237,6 +237,35 @@
+         as_args: "--use-const-newtype-wrapper",
+     },
+ 
++    /// Whether a C++ `long double` should be marked as one.
++    ///
++    /// bindgen renders `long double` by its size: `f64` where it is eight
++    /// bytes wide, and the integer of the same width where it is not, since
++    /// Rust has no 80-bit x87 float and no `f128`. Both are the right size and
++    /// neither is the right type, and nothing in the output says which one is
++    /// being looked at - so a consumer cannot tell a `long double` from a
++    /// `double` on one target, or from a `u128` on another, and the answer
++    /// changes with the target for one unchanged header.
++    ///
++    /// `--use-long-double-newtype-wrapper` wraps such a type in
++    /// `__bindgen_marker_LongDouble<T>`, the same shape
++    /// `--use-opaque-newtype-wrapper` and `--use-reference-newtype-wrapper`
++    /// already use: a fake type the caller declares itself, through
++    /// `--raw-line` or by post-processing. What it wraps is unchanged, so a
++    /// caller who declares it `#[repr(transparent)]` gets the layout it had
++    /// before. Off by default.
++    use_long_double_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap `long double` in
++            /// `__bindgen_marker_LongDouble`. Disabled by default.
++            pub fn use_long_double_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_long_double_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-long-double-newtype-wrapper",
++    },
++
+     /// Whether we should distinguish between C++'s `char16_t` and `u16`.
+     /// The C++ type `char16_t` is its own special type; it's not a typedef
+     /// of some other integer (this differs from C).

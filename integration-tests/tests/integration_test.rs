@@ -17838,57 +17838,61 @@ fn test_issue_1125() {
     );
 }
 
-// Four C++ built-in types which are distinct types in C++ and which autocxx
-// cannot bind: `wchar_t`, `char32_t`, `char8_t` and `long double`. All four
-// are blocked in autocxx-bindgen rather than here, but by three different
-// things, and they do not all fail in the same place - so each test below says
-// which applies to it.
+// Four C++ built-in types which are distinct types in C++ and which no Rust
+// primitive is: `wchar_t`, `char32_t`, `char8_t` and `long double`. Three of
+// them now cross the bridge; the fourth is refused, which is the most that can
+// honestly be done with it.
 //
-// `char16_t` was in this list and no longer is, which is what the others are
-// measured against. autocxx-bindgen's `use_distinct_char16_t` option makes
-// `IntKind::Char16` render as a `bindgen_cchar16_t` marker instead of `u16`;
-// `known_types` binds that name to the `autocxx::c_char16_t` newtype and emits
-// `typedef char16_t c_char16_t;` for the C++ side. Every one of these needs
-// that same first step - a rendering that survives bindgen - but reaching it
-// is a different job for each.
+// `char16_t` is what the others are measured against. bindgen's
+// `use_distinct_char16_t` option makes `IntKind::Char16` render as a
+// `bindgen_cchar16_t` marker instead of `u16`; `known_types` binds that name to
+// the `autocxx::c_char16_t` newtype and emits `typedef char16_t c_char16_t;`
+// for the C++ side. Every one of these needed that same first step - a
+// rendering that survives bindgen - and reaching it was a different job for
+// each.
 //
-// 1. A deliberate collapse to a same-width primitive. `char32_t` is
+// 1. A deliberate collapse to a same-width primitive. `char32_t` was
 //    `CXType_Char32 => TypeKind::Int(IntKind::U32)` in `build_builtin_ty`;
-//    `wchar_t` keeps an `IntKind::WChar` of its own but codegen renders it
-//    through `Layout::known_type_for_size`, so it too comes out as a bare
-//    `u16`/`u32`. Adding the marker is the same edit `char16_t` already had.
+//    `wchar_t` kept an `IntKind::WChar` of its own but codegen rendered it
+//    through `Layout::known_type_for_size`, so it too came out as a bare
+//    `u16`/`u32`. `23-distinct-char32-t.patch` and
+//    `22-distinct-wchar-t.patch` add the option and the marker rendering,
+//    which is the same edit `char16_t` already had.
 //
-// 2. A type libclang does not expose. There is no `CXType_Char8` at all - the
-//    kinds run `CXType_UChar = 5`, `CXType_Char16 = 6`, `CXType_Char32 = 7` -
-//    so `build_builtin_ty` returns `None` for `char8_t` and bindgen falls back
-//    to an opaque type of the right layout: the bindings say
-//    `__bindgen_marker_Opaque<u8>`, which autocxx unwraps to `u8`. bindgen
-//    cannot gain a `Char8` arm the way it gained `Char16`; it would first have
-//    to recognise the type some other way.
+//    `wchar_t` has a second problem the others do not: its width *and* its
+//    signedness are the target's to choose, and bindgen knows neither
+//    (`IntKind::WChar::is_signed` is a hardcoded `false`). The marker moves
+//    that decision to `autocxx::wchar_t`, which is a `cfg` in code compiled
+//    for the target. `test_wchar_t_values` asks C++ whether that `cfg` agreed
+//    with it.
 //
-// 3. A width that varies by target, taking the failure to a different layer.
-//    `FloatKind::LongDouble` renders by layout size: 8 bytes gives `f64`, so
-//    on MSVC and 64-bit Arm `long double` behaves like the collapses above.
-//    16 bytes - x86-64 with the System V ABI, where 80 bits are stored in 16 -
-//    gives `integer_type(layout)`, i.e. `u128`, which `known_types` does not
-//    register at all. So the same header fails in different ways on different
-//    targets, and on x86-64 Linux it fails during autocxx's own analysis,
-//    before any C++ is generated.
+// 2. A type libclang does not expose. There is no `CXType_Char8` - the kinds
+//    run `CXType_UChar = 5`, `CXType_Char16 = 6`, `CXType_Char32 = 7` - so
+//    `build_builtin_ty` returned `None` for `char8_t` and bindgen fell back to
+//    an opaque type of the right layout. It does not need the enumerator:
+//    clang spells the type `char8_t`, and `24-distinct-char8-t.patch`
+//    recognises it that way. This was recorded as gated below bindgen, on an
+//    LLVM C-API addition; it was not.
 //
-// Cases 1 and 2 fail the same way as each other: autocxx declares the
-// primitive to cxx, cxx emits its check that the C++ function really has the
-// signature it was told about - `::std::uint32_t (*f$)(::std::uint32_t) =
-// ::f;` - and the C++ compiler rejects it, because function pointer types are
-// exact. Nothing is silently mis-generated. Nor can autocxx refuse any of
-// these cleanly instead: by the time the bindings arrive a `char32_t` and a
-// `uint32_t` are the same token.
+// 3. A type whose answer differs by target. `FloatKind::LongDouble` renders by
+//    layout size - `f64` at 8 bytes (MSVC, Apple Arm), an integer of the same
+//    width at 16 - and neither is usable. Where it is 8 bytes `long double`
+//    *is* `double`, so the `f64` has the right layout and is still the wrong
+//    C++ type, which cxx's exact-signature check catches; where it is 16 it is
+//    an 80-bit x87 float (x86-64 System V) or an IEEE binary128 (AArch64
+//    Linux), and Rust has no type for either. So the answer is not a newtype
+//    but a refusal, and what was missing was the means to refuse precisely:
+//    `25-long-double-newtype-marker.patch` marks the type so that autocxx can
+//    name what it is turning down. See `test_long_double`.
 //
-// Each test below asks only that the type work, so each goes green as it is
-// once its own gate lifts. See https://github.com/google/autocxx/issues/1141
-// for the wchar_t half.
+// Before all this, cases 1 and 2 failed the same way as each other: autocxx
+// declared the primitive to cxx, cxx emitted its check that the C++ function
+// really has the signature it was told about - `::std::uint32_t (*f$)(::std::
+// uint32_t) = ::f;` - and the C++ compiler rejected it, because function
+// pointer types are exact. See https://github.com/google/autocxx/issues/1141
+// for the `wchar_t` half.
 
 #[test]
-#[ignore] // case 1 above: codegen renders IntKind::WChar by layout size
 fn test_wchar_issue_1141() {
     let cxx = indoc! {"
         wchar_t next_wchar(wchar_t c) {
@@ -17903,8 +17907,45 @@ fn test_wchar_issue_1141() {
     run_test(cxx, hdr, rs, &["next_wchar"], &[]);
 }
 
+/// `wchar_t` values crossing the bridge, and the two things about `wchar_t`
+/// which are the target's to decide asked of both languages at once.
+///
+/// `autocxx::c_wchar_t` wraps a Rust integer picked by `cfg`, and nothing in
+/// the generated code would notice if that pick disagreed with the C++
+/// compiler's - a value would simply be read from the wrong bytes. So the test
+/// asks C++ what `sizeof(wchar_t)` and its signedness are and compares them
+/// with what the Rust side chose, on whichever target it is running.
 #[test]
-#[ignore] // case 1 above: CXType_Char32 => IntKind::U32 in build_builtin_ty
+fn test_wchar_t_values() {
+    let hdr = indoc! {"
+        inline wchar_t next_wchar(wchar_t c) { return c + 1; }
+        inline void bump(wchar_t& c) { c = c + 1; }
+        inline int wchar_width() { return static_cast<int>(sizeof(wchar_t)); }
+        inline bool wchar_is_signed() { return static_cast<wchar_t>(-1) < 0; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_wchar(autocxx::c_wchar_t(65)), autocxx::c_wchar_t(66));
+        // The newtype is transparent over the target's integer both ways.
+        assert_eq!(autocxx::wchar_t::from(ffi::next_wchar(65.into())), 66);
+        let mut c = autocxx::c_wchar_t(70);
+        ffi::bump(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        assert_eq!(
+            ::std::mem::size_of::<autocxx::c_wchar_t>(),
+            ffi::wchar_width().0 as usize
+        );
+        assert_eq!(autocxx::wchar_t::MIN < 0, ffi::wchar_is_signed());
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["next_wchar", "bump", "wchar_width", "wchar_is_signed"],
+        &[],
+    );
+}
+
+#[test]
 fn test_char32_t() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -17913,8 +17954,31 @@ fn test_char32_t() {
     run_test("", hdr, quote! {}, &["next_char32"], &[]);
 }
 
+/// `char32_t` values crossing the bridge in both directions, as
+/// `test_char16_t_values` does for `char16_t`.
 #[test]
-#[ignore] // case 2 above: libclang has no CXType_Char8, so this arrives opaque
+fn test_char32_t_values() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char32_t next_char32(char32_t c) { return c + 1; }
+        inline void bump32(char32_t& c) { c = c + 1; }
+        inline uint32_t widen32(char32_t c) { return c; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_char32(autocxx::c_char32_t(65)), autocxx::c_char32_t(66));
+        // The newtype is transparent over u32 in both directions.
+        assert_eq!(u32::from(ffi::next_char32(65u32.into())), 66);
+        let mut c = autocxx::c_char32_t(70);
+        ffi::bump32(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        // A code point outside the Basic Multilingual Plane survives, which
+        // is the whole reason `char32_t` is not `char16_t`.
+        assert_eq!(ffi::widen32(autocxx::c_char32_t(0x1F600)), 0x1F600);
+    };
+    run_test("", hdr, rs, &["next_char32", "bump32", "widen32"], &[]);
+}
+
+#[test]
 fn test_char8_t() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -17931,19 +17995,115 @@ fn test_char8_t() {
     );
 }
 
+/// `char8_t` values crossing the bridge in both directions, as
+/// `test_char16_t_values` does for `char16_t`.
 #[test]
-#[ignore] // case 3 above: f64 where it is 8 bytes, unregistered u128 where it is 16
+fn test_char8_t_values() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline char8_t next_char8(char8_t c) { return c + 1; }
+        inline void bump8(char8_t& c) { c = c + 1; }
+        inline uint32_t widen8(char8_t c) { return c; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::next_char8(autocxx::c_char8_t(65)), autocxx::c_char8_t(66));
+        // The newtype is transparent over u8 in both directions.
+        assert_eq!(u8::from(ffi::next_char8(65u8.into())), 66);
+        let mut c = autocxx::c_char8_t(70);
+        ffi::bump8(::std::pin::Pin::new(&mut c));
+        assert_eq!(c.0, 71);
+        // `char8_t` is unsigned, so a continuation byte is not negative.
+        assert_eq!(ffi::widen8(autocxx::c_char8_t(0x80)), 0x80);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["next_char8", "bump8", "widen8"], &[], None),
+        make_cpp20_adder(),
+        None,
+        None,
+    );
+}
+
+/// `long double` in a signature is refused, and the refusal says so.
+///
+/// It used to fail two different ways on two different targets, neither of
+/// which named `long double`: a C++ build failure where the type is 8 bytes
+/// (cxx checked the function's exact type against the `double` autocxx had
+/// declared), and an autocxx analysis failure about an unregistered `u128`
+/// where it is 16. Now bindgen marks the type, so the same refusal happens
+/// everywhere and names what it turned down.
+#[test]
 fn test_long_double() {
-    // Note that this test fails in two different ways depending on the target,
-    // as case 3 above describes: a C++ build failure where `long double` is 8
-    // bytes, and an autocxx analysis failure - before any C++ exists - where it
-    // is 16. Whatever eventually represents it on the Rust side therefore
-    // cannot be one fixed type, which is a reason to keep it distinct rather
-    // than to collapse it to whichever primitive happens to match the width.
     let hdr = indoc! {"
         inline long double ld_double_it(long double x) { return x * 2; }
     "};
-    run_test("", hdr, quote! {}, &["ld_double_it"], &[]);
+    run_test_expect_fail_with_error("", hdr, quote! {}, &["ld_double_it"], &[], "long double");
+}
+
+/// A `long double` as a template argument, which reaches the C++ by a route
+/// of its own: a concrete instantiation is named by writing its arguments out
+/// again, without converting them, so nothing else would catch the marker and
+/// it would land in the generated header verbatim.
+#[test]
+fn test_long_double_template_argument() {
+    let hdr = indoc! {"
+        template <typename T> struct Wrapper { T x; };
+        inline int unbox(const Wrapper<long double>& b) { return 1; }
+    "};
+    run_test_expect_fail_with_error("", hdr, quote! {}, &["unbox"], &[], "long double");
+}
+
+/// A struct with a `long double` member cannot be POD, because passing it by
+/// value has the same problem the member does. The refusal says `long double`
+/// rather than naming bindgen's marker.
+#[test]
+fn test_long_double_field_cannot_be_pod() {
+    let hdr = indoc! {"
+        struct Holder { long double ld; int tag; };
+        inline int tag_of(const Holder& h) { return h.tag; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["tag_of"],
+        &["Holder"],
+        "`long double` member",
+    );
+}
+
+/// A `long double` *field*, which is unaffected: it is bytes the struct
+/// carries, and neither language reads them across the boundary.
+///
+/// C++ makes the `Holder`, rather than Rust calling a constructor, because
+/// autocxx does not offer one where `long double` is 16 bytes wide: bindgen
+/// substitutes a `u128` there, which is not a type autocxx knows, so the
+/// field's own type never resolves and constructor inference gives up. That is
+/// a gap of its own and not this test's subject - the field is carried either
+/// way, which is what this checks.
+#[test]
+fn test_long_double_field() {
+    let hdr = indoc! {"
+        #include <memory>
+        struct Holder {
+            long double ld;
+            int tag;
+        };
+        inline std::unique_ptr<Holder> make_holder() {
+            auto h = std::unique_ptr<Holder>(new Holder);
+            h->ld = 1.0L;
+            h->tag = 7;
+            return h;
+        }
+        inline int tag_of(const Holder& h) { return h.tag; }
+    "};
+    let rs = quote! {
+        let h = ffi::make_holder();
+        assert_eq!(ffi::tag_of(h.as_ref().unwrap()), autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["Holder", "make_holder", "tag_of"], &[]);
 }
 
 #[test]

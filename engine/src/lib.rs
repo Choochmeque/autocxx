@@ -297,8 +297,8 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
 /// 12. Garbage collection: follow the edges outwards from the allowlist, and
 ///     drop everything unreachable.
 /// 13. C int analysis: spot the C types cxx cannot spell - the
-///     variable-length integers, `void` and `char16_t` - and add an API for
-///     each so the generated C++ declares a typedef for it.
+///     variable-length integers, `void` and the C++ character types - and add
+///     an API for each so the generated C++ declares a typedef for it.
 /// 14. Confirm that every `generate!` still names something which survived
 ///     all of the above, and that every `derive!` names a type whose Rust
 ///     definition the user can actually see - and isn't asking for `Default`
@@ -383,7 +383,7 @@ impl IncludeCppEngine {
         // (`self.x() as u32`). A newtype makes both of those `error[E0605]:
         // non-primitive cast`. An alias is invisible to all of it and just as
         // visible to us, since we match on the type bindgen printed.
-        let bindgen_marker_newtypes = ["Opaque", "Reference", "RValueReference"];
+        let bindgen_marker_newtypes = ["Opaque", "Reference", "RValueReference", "LongDouble"];
         let bindgen_marker_aliases = ["Const"];
         let raw_line = bindgen_marker_newtypes
             .iter()
@@ -416,7 +416,18 @@ impl IncludeCppEngine {
             .iter()
             .map(|t| format!("__bindgen_marker_{t}"))
             .join(", ");
-        let all_module_raw_line = format!("#[allow(unused_imports)] use super::{{{use_list}}}; #[allow(unused_imports)] use autocxx::c_char16_t as bindgen_cchar16_t;");
+        // bindgen names each C++ character type with a name of its own
+        // invention rather than an integer; these bind those names to the
+        // newtypes which represent them. `parse_bindgen` knows to skip them
+        // rather than read them back as typedefs.
+        let char_type_uses = known_types::CXX_CHARACTER_TYPES
+            .iter()
+            .map(|(_, bindgen_name, rs_name)| {
+                format!("#[allow(unused_imports)] use {rs_name} as {bindgen_name};")
+            })
+            .join(" ");
+        let all_module_raw_line =
+            format!("#[allow(unused_imports)] use super::{{{use_list}}}; {char_type_uses}");
 
         let mut builder = bindgen::builder()
             .clang_args(make_clang_args(inc_dirs, extra_clang_args))
@@ -442,8 +453,12 @@ impl IncludeCppEngine {
             .use_opaque_newtype_wrapper(true)
             .use_reference_newtype_wrapper(true)
             .use_const_newtype_wrapper(true)
+            .use_long_double_newtype_wrapper(true)
             .represent_cxx_operators(true)
             .use_distinct_char16_t(true)
+            .use_distinct_wchar_t(true)
+            .use_distinct_char32_t(true)
+            .use_distinct_char8_t(true)
             .generate_deleted_functions(true)
             .generate_pure_virtual_functions(true)
             .raw_line(raw_line)
