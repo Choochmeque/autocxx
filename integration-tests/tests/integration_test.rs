@@ -27,7 +27,7 @@ use autocxx_integration_tests::{
 use indoc::indoc;
 use itertools::Itertools;
 use proc_macro2::{Span, TokenStream};
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn::{parse_quote, Token};
 
 #[test]
@@ -20339,13 +20339,15 @@ fn test_template_argument_left_to_its_default() {
     );
 }
 
+/// `au<bb>` is a complete type built on one which is only declared, and
+/// destroying it destroys the `std::unique_ptr<bb>` inside - which C++ rejects
+/// while `bb` is incomplete. So `std::vector<au<bb>>` is refused: cxx's vector
+/// glue destroys its elements, whether or not Rust ever asks it to.
+///
+/// The bindgen half of this - `au<bb>` keeping its template argument at all -
+/// is what rust-lang/rust-bindgen#3161 was about and what the two tests above
+/// cover.
 #[test]
-// The bindgen half of this is fixed: `au<bb>` keeps its template argument now,
-// which is what rust-lang/rust-bindgen#3161 was about and what the two tests
-// above cover. What is left is autocxx's: it emits `impl UniquePtr<T>` for the
-// concrete instantiation, and cxx's deleter for that instantiates
-// `~std::unique_ptr<bb>`, which C++ rejects while `bb` is only declared.
-#[ignore]
 fn test_issue_1065a() {
     let hdr = indoc! {"
         #include <memory>
@@ -20363,7 +20365,83 @@ fn test_issue_1065a() {
         };
     "};
     let rs = quote! {};
-    run_test("", hdr, rs, &["RenderFrameHost"], &[]);
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        // Not just that it compiles: the refusal has to name what was wrong,
+        // because a `bd` which quietly vanished would compile too.
+        Some(make_string_finder(
+            ["au_bb_AutocxxConcrete", "bb", "only declares"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// The other half of the rule the test above pins: such an instantiation is
+/// still a type, so a C++ function which hands out a reference to one is bound
+/// as it always was. What goes is autocxx's own `UniquePtr`/`SharedPtr`/
+/// `WeakPtr` support for it, since each of those is C++ which destroys one.
+#[test]
+fn test_instantiation_on_incomplete_type_is_still_reachable_by_reference() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        class RenderFrameHost {
+        public:
+        virtual bc &bd() = 0;
+        virtual ~RenderFrameHost() {}
+        };
+    "};
+    let rs = quote! {};
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["RenderFrameHost"], &[], None),
+        None,
+        Some(Box::new(SmartPointerImplsWithheld)),
+        None,
+    );
+}
+
+/// Checks that `bd` came back with the concrete type in it, that the type
+/// carries the note saying what it did not get, and that it indeed did not get
+/// it.
+struct SmartPointerImplsWithheld;
+
+impl CodeCheckerFns for SmartPointerImplsWithheld {
+    fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        let toks = rs.to_token_stream().to_string();
+        for expected in [
+            "-> Pin < & 'a mut au_bb_AutocxxConcrete >",
+            "has not added its usual `UniquePtr`",
+        ] {
+            if !toks.contains(expected) {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "Couldn't find {expected}"
+                )));
+            }
+        }
+        for unexpected in [
+            "impl UniquePtr < au_bb_AutocxxConcrete >",
+            "impl SharedPtr < au_bb_AutocxxConcrete >",
+            "impl WeakPtr < au_bb_AutocxxConcrete >",
+        ] {
+            if toks.contains(unexpected) {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "Unexpectedly found {unexpected}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[test]
