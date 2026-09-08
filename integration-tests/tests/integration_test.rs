@@ -9337,50 +9337,355 @@ fn test_std_array_by_value() {
     run_test("", hdr, rs, &["get_ivs", "sum_ivs"], &[]);
 }
 
-/// The element has to be one of cxx's own atoms, and a class is not one, even
-/// a POD class autocxx would otherwise pass by value. cxx counts the extern
-/// type a bridge declares as sized only where something else in the bridge
-/// requires it to be trivially movable, and it does not read an array element
-/// as such a requirement - see `permissible_within_array`, which names the cxx
-/// source. Left to cxx the refusal arrives as "unsupported array element
-/// type", pointing at generated code the user did not write.
+/// A POD class as the element. cxx counts the extern type a bridge declares
+/// as sized only where something else in the bridge requires it to be
+/// trivially movable, and an array element is not among the uses it reads as
+/// such a requirement - see `required_trivial_reasons`, cxx-gen 0.7.200
+/// `src/syntax/trivial.rs:30`. autocxx says it in one of the ways cxx does
+/// read, a by-value function nothing calls, for an element it has already
+/// proved trivially relocatable.
 #[test]
-fn test_std_array_of_pod_class_refused() {
+fn test_std_array_of_pod_class_by_value() {
     let hdr = indoc! {"
     #include <array>
     #include <cstdint>
     struct Elem { uint32_t x; };
     inline std::array<Elem, 3> get_elems() { return {Elem{7}, Elem{8}, Elem{9}}; }
+    inline uint32_t sum_elems(std::array<Elem, 3> a) { return a[0].x + a[1].x + a[2].x; }
+    "};
+    let rs = quote! {
+        let elems = ffi::get_elems();
+        assert_eq!(elems[0].x, 7);
+        assert_eq!(elems[2].x, 9);
+        assert_eq!(ffi::sum_elems(elems), 24);
+        assert_eq!(
+            ffi::sum_elems([ffi::Elem { x: 1 }, ffi::Elem { x: 2 }, ffi::Elem { x: 3 }]),
+            6
+        );
+    };
+    run_test("", hdr, rs, &["get_elems", "sum_elems"], &["Elem"]);
+}
+
+/// A C integer whose width varies by platform reaches Rust as an
+/// `autocxx::c_uint`, which the bridge declares as a type of its own rather
+/// than as one of cxx's atoms, so it needs the same certificate a class does.
+/// `uint32_t` is a typedef to one of those, so this is the shape a header is
+/// most likely to be written with after the byte array.
+///
+/// The return type is the same `uint32_t` and is a plain `u32`: the newtype
+/// stands in only where cxx needs a named type, which an array element is and
+/// a return value is not.
+#[test]
+fn test_std_array_of_platform_width_integer() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline std::array<uint32_t, 4> get_u32s() { return {1, 2, 3, 4}; }
+    inline uint32_t sum_u32s(std::array<uint32_t, 4> a) { return a[0] + a[1] + a[2] + a[3]; }
+    "};
+    let rs = quote! {
+        let v = ffi::get_u32s();
+        assert_eq!(
+            v,
+            [
+                autocxx::c_uint(1),
+                autocxx::c_uint(2),
+                autocxx::c_uint(3),
+                autocxx::c_uint(4)
+            ]
+        );
+        assert_eq!(ffi::sum_u32s(v), 10);
+    };
+    run_test("", hdr, rs, &["get_u32s", "sum_u32s"], &[]);
+}
+
+/// A class autocxx will not pass by value is still turned down. Holding one
+/// means holding it behind a pointer, and an array of them is not a run of
+/// bytes to be moved whole - which is the property the certificate would be
+/// claiming.
+#[test]
+fn test_std_array_of_non_pod_class_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <string>
+    struct Elem { std::string s; };
+    inline std::array<Elem, 2> get_elems() { return {}; }
     "};
     run_test_expect_fail_with_error(
         "",
         hdr,
         quote! {},
         &["get_elems"],
-        &["Elem"],
-        "cxx will not hold in one",
+        &[],
+        "cannot cross by value",
     );
 }
 
-/// A C integer whose width varies by platform is not an atom either: it
-/// reaches Rust as `autocxx::c_uint`, which the bridge declares as a type of
-/// its own, and cxx will not put one in an array. `uint32_t` is a typedef to
-/// one of those, so this is the shape a header is most likely to be written
-/// with after the byte array which does work.
+/// An array of arrays of a class: one certificate covers the element wherever
+/// the nesting puts it, because what needs certifying is the type, not the
+/// position.
 #[test]
-fn test_std_array_of_platform_width_integer_refused() {
+fn test_std_array_of_std_array_of_pod_class() {
     let hdr = indoc! {"
     #include <array>
     #include <cstdint>
-    inline std::array<uint32_t, 4> get_u32s() { return {1, 2, 3, 4}; }
+    struct Elem { uint32_t x; };
+    inline std::array<std::array<Elem, 2>, 2> get_grid() {
+        return {{{Elem{1}, Elem{2}}, {Elem{3}, Elem{4}}}};
+    }
+    inline uint32_t total(std::array<std::array<Elem, 2>, 2> g) {
+        return g[0][0].x + g[0][1].x + g[1][0].x + g[1][1].x;
+    }
     "};
-    run_test_expect_fail_with_error(
+    let rs = quote! {
+        let grid = ffi::get_grid();
+        assert_eq!(grid[1][0].x, 3);
+        assert_eq!(ffi::total(grid), 10);
+    };
+    run_test("", hdr, rs, &["get_grid", "total"], &["Elem"]);
+}
+
+/// An element in a namespace. The certificate is named after the whole of the
+/// element's name rather than its last segment, so two classes called the same
+/// thing in different namespaces get one each, and the C++ it is defined with
+/// names the element the way C++ does.
+#[test]
+fn test_std_array_of_pod_class_in_namespaces() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    namespace a { struct Elem { uint32_t x; }; }
+    namespace b { struct Elem { uint32_t x; }; }
+    inline std::array<a::Elem, 2> get_as() { return {a::Elem{1}, a::Elem{2}}; }
+    inline std::array<b::Elem, 2> get_bs() { return {b::Elem{3}, b::Elem{4}}; }
+    inline uint32_t total(std::array<a::Elem, 2> p, std::array<b::Elem, 2> q) {
+        return p[0].x + p[1].x + q[0].x + q[1].x;
+    }
+    "};
+    let rs = quote! {
+        let p = ffi::get_as();
+        let q = ffi::get_bs();
+        assert_eq!(p[1].x, 2);
+        assert_eq!(q[1].x, 4);
+        assert_eq!(ffi::total(p, q), 10);
+    };
+    run_test(
         "",
         hdr,
-        quote! {},
-        &["get_u32s"],
-        &[],
-        "cxx will not hold in one",
+        rs,
+        &["get_as", "get_bs", "total"],
+        &["a::Elem", "b::Elem"],
+    );
+}
+
+/// An element which some other signature already passes by value. cxx keeps
+/// one certificate per type and reads every reason for it, so the one autocxx
+/// adds is redundant here rather than conflicting - which is what makes it
+/// safe to add without first proving nothing else said it.
+#[test]
+fn test_std_array_of_pod_class_also_passed_alone() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Elem { uint32_t x; };
+    inline uint32_t take_one(Elem e) { return e.x; }
+    inline std::array<Elem, 2> get_elems() { return {Elem{5}, Elem{6}}; }
+    "};
+    let rs = quote! {
+        // Destructured rather than indexed: a POD class is not `Copy`, so
+        // moving one element out of the array is what this has to be.
+        let [_first, second] = ffi::get_elems();
+        assert_eq!(ffi::take_one(second), 6);
+    };
+    run_test("", hdr, rs, &["take_one", "get_elems"], &["Elem"]);
+}
+
+/// A subclass callback's `std::array`. That signature reaches the bridge as an
+/// `extern "Rust"` function rather than as one of the C++ ones, and cxx
+/// applies the same rule to an array wherever it appears - so the certificate
+/// has to be found by reading those signatures too. The C++ side of the call
+/// is what proves it: the array is built in Rust and read in C++.
+///
+/// The virtual is `protected` so that the callback is the *only* place the
+/// array is declared. A public one is bound as an ordinary method too, and
+/// that binding would supply the certificate by itself - leaving the test
+/// green whether or not the callback is read.
+#[test]
+fn test_pv_subclass_returning_std_array() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    #include <memory>
+    struct Elem { uint32_t x; };
+    class Observer {
+    public:
+        Observer() {}
+        virtual ~Observer() {}
+        uint32_t total() const {
+            auto a = get();
+            return a[0].x + a[1].x;
+        }
+    protected:
+        virtual std::array<Elem, 2> get() const = 0;
+    };
+    inline uint32_t total(std::unique_ptr<Observer> o) { return o->total(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            use autocxx::subclass::CppSubclass;
+            let obs = MyObserver::new_cpp_owned(MyObserver { a: 5, cpp_peer: Default::default() });
+            let obs = MyObserver::as_Observer_unique_ptr(obs);
+            assert_eq!(ffi::total(obs), 11);
+        },
+        quote! {
+            generate!("total")
+            generate_pod!("Elem")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+                fn get(&self) -> [ffi::Elem; 2] {
+                    [ffi::Elem { x: self.a }, ffi::Elem { x: self.a + 1 }]
+                }
+            }
+        }),
+    );
+}
+
+/// A class whose name ends in an underscore. The certificate's name is built
+/// from the element's, and cxx turns down any C++ identifier holding a double
+/// underscore, so the readable part is reduced to single ones before the rest
+/// is appended.
+#[test]
+fn test_std_array_of_pod_class_with_trailing_underscore() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Elem_ { uint32_t x; };
+    inline std::array<Elem_, 2> get_elems() { return {Elem_{1}, Elem_{2}}; }
+    inline uint32_t total(std::array<Elem_, 2> a) { return a[0].x + a[1].x; }
+    "};
+    let rs = quote! {
+        let elems = ffi::get_elems();
+        assert_eq!(elems[0].x, 1);
+        assert_eq!(ffi::total(elems), 3);
+    };
+    run_test("", hdr, rs, &["get_elems", "total"], &["Elem_"]);
+}
+
+/// An enum crosses by value as a class does, and gets the certificate the same
+/// way.
+#[test]
+fn test_std_array_of_enum() {
+    let hdr = indoc! {"
+    #include <array>
+    enum Colour { Red, Green, Blue };
+    inline std::array<Colour, 3> get_colours() { return {Red, Green, Blue}; }
+    inline bool starts_red(std::array<Colour, 3> a) { return a[0] == Red; }
+    "};
+    let rs = quote! {
+        assert!(ffi::starts_red(ffi::get_colours()));
+    };
+    run_test("", hdr, rs, &["get_colours", "starts_red"], &[]);
+}
+
+/// No Rust caller can reach the certificate: it is declared in the bridge mod,
+/// which is private, and nothing re-exports it, so it is in neither the API nor
+/// the documentation. (Its C++ definition is an ordinary function, and callable
+/// as one; it does nothing.) Worth asserting, because a function invented in
+/// someone else's API is only acceptable while it stays out of sight.
+#[test]
+fn test_std_array_element_witness_is_not_api() {
+    struct WitnessIsHidden;
+    impl CodeCheckerFns for WitnessIsHidden {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            let mentions = text.matches("Elem_autocxx_array_element").count();
+            // Once: the declaration. A second would be a `use` carrying it out
+            // of the bridge.
+            if mentions != 1 {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "expected the certificate declared once and re-exported nowhere, found {mentions} mentions"
+                )));
+            }
+            if !text.contains("doc (hidden)") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "the certificate is not marked doc(hidden)".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Elem { uint32_t x; };
+    inline std::array<Elem, 3> get_elems() { return {Elem{7}, Elem{8}, Elem{9}}; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::get_elems()[0].x, 7);
+        },
+        quote! { generate!("get_elems") generate_pod!("Elem") },
+        None,
+        Some(Box::new(WitnessIsHidden)),
+        None,
+    );
+}
+
+/// No certificate is written for an array nothing in the bridge holds. A
+/// private method's is one of those - it is dropped well before the
+/// certificates are collected - so this passes for more than one reason and is
+/// a guard rather than a proof: it fails if the collection ever widens to
+/// signatures which are not emitted, which would invent a by-value use for a
+/// function that is not there.
+#[test]
+fn test_std_array_in_uncallable_method_gets_no_witness() {
+    struct NoWitness;
+    impl CodeCheckerFns for NoWitness {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if text.contains("Elem_autocxx_array_element") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "a certificate was written for a signature which is not emitted".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Elem { uint32_t x; };
+    class Keys {
+    public:
+        uint32_t count() const { return 2; }
+    private:
+        std::array<Elem, 2> hidden() const { return {}; }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let keys = ffi::Keys::new().within_unique_ptr();
+            assert_eq!(keys.count(), 2);
+        },
+        quote! { generate!("Keys") generate_pod!("Elem") },
+        None,
+        Some(Box::new(NoWitness)),
+        None,
     );
 }
 
@@ -9474,24 +9779,29 @@ fn test_std_array_of_each_atom_kind() {
     );
 }
 
-/// `size_t` is not one of them, which is the same fact as `uint32_t` not being
-/// one: it is a typedef to an integer whose width the platform chooses, so it
-/// reaches Rust as an `autocxx::c_*` newtype rather than as `usize`.
+/// `size_t` is the same case as `uint32_t`: a typedef to an integer whose
+/// width the platform chooses, so it reaches Rust as an `autocxx::c_*` newtype
+/// rather than as `usize`, and the newtype gets the certificate.
+///
+/// Which newtype it is depends on the target - `unsigned long` on one,
+/// `unsigned long long` on another - so the element is read through the
+/// wrapper's field rather than named.
 #[test]
-fn test_std_array_of_size_t_refused() {
+fn test_std_array_of_size_t() {
     let hdr = indoc! {"
     #include <array>
     #include <cstddef>
+    #include <cstdint>
     inline std::array<size_t, 2> get_sizes() { return {3, 4}; }
+    inline uint32_t sum_sizes(std::array<size_t, 2> a) { return a[0] + a[1]; }
     "};
-    run_test_expect_fail_with_error(
-        "",
-        hdr,
-        quote! {},
-        &["get_sizes"],
-        &[],
-        "cxx will not hold in one",
-    );
+    let rs = quote! {
+        let sizes = ffi::get_sizes();
+        assert_eq!(sizes[0].0, 3);
+        assert_eq!(sizes[1].0, 4);
+        assert_eq!(ffi::sum_sizes(sizes), 7);
+    };
+    run_test("", hdr, rs, &["get_sizes", "sum_sizes"], &[]);
 }
 
 /// An element which is itself a C++ array is turned down, because `[T; N]`
