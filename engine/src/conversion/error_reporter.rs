@@ -105,11 +105,13 @@ pub(crate) fn convert_apis<FF, SF, EF, TF, SCF, A, B>(
                 rs_definition,
                 cpp_definition,
                 holder_surface,
+                constructor_and_allocator_deps,
             } => Ok(Box::new(std::iter::once(Api::ConcreteType {
                 name,
                 rs_definition,
                 cpp_definition,
                 holder_surface,
+                constructor_and_allocator_deps,
             }))),
             Api::ForwardDeclaration { name, err } => {
                 Ok(Box::new(std::iter::once(Api::ForwardDeclaration {

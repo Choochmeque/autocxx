@@ -1880,14 +1880,33 @@ fn test_pod_method() {
     run_test(cxx, hdr, rs, &[], &["Bob"]);
 }
 
+/// A typedef naming a concrete instantiation of a class template used to
+/// re-export bindgen's rendering of the template with its arguments filled
+/// in - `root::A<u32>` - which is a Rust type cxx has never been told about,
+/// so nothing could be done with one. autocxx makes a type of its own for
+/// each instantiation it meets; the alias now names that, and an
+/// `instantiable!` instantiation is given a default constructor.
+///
+/// The directive is required because bindgen reports nothing whatsoever about
+/// a specialization, so the constructor is claimed rather than found and the
+/// C++ compiler is its only arbiter -
+/// [`test_no_constructors_for_types_not_declared_instantiable`] is what would
+/// break without it, and [`test_methods_for_specialized_types`] is the other
+/// half of the same silence.
+///
+/// `new()` hands back a [`cxx::UniquePtr`] rather than the usual recipe,
+/// because such a type's Rust side is cxx's zero-sized opaque type and so
+/// cannot hold a C++ object: only C++ may allocate one. That is the rule
+/// autocxx already applies to a function returning a concrete type.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/723
 fn test_constructors_for_specialized_types() {
-    // bindgen sometimes makes such opaque types as type Bob = u32[2];
     let hdr = indoc! {"
         #include <cstdint>
         template<typename T>
         class A {
+        public:
             uint32_t foo() { return 12; };
         private:
             T a[2];
@@ -1896,11 +1915,262 @@ fn test_constructors_for_specialized_types() {
         typedef A<uint32_t> B;
         typedef B C;
     "};
-    let rs = quote! {
-        let a = ffi::C::new().within_unique_ptr();
-        assert_eq!(a.foo(), 12);
-    };
-    run_test("", hdr, rs, &["C"], &[]);
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert!(!a.is_null());
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same instantiation named by a `concrete!` directive rather than
+/// reached through a typedef. Both spellings arrive at the same concrete-type
+/// machinery, and before this both lacked constructors alike.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_constructors_for_concrete_directive_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() { return 12; };
+        private:
+            T a[2];
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::AConc::new();
+            assert!(!a.is_null());
+        },
+        quote! {
+            concrete!("A<uint32_t>", AConc)
+            instantiable!("AConc")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `concrete!` directive gives an instantiation two names - the C++
+/// expression and the Rust identifier - and `instantiable!` answers to either,
+/// because the user wrote both in the same breath.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_constructors_for_concrete_directive_types_named_in_cpp() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() { return 12; };
+        private:
+            T a[2];
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::AConc::new();
+            assert!(!a.is_null());
+        },
+        quote! {
+            concrete!("A<uint32_t>", AConc)
+            instantiable!("A<uint32_t>")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `block_constructors!` beats `instantiable!` where the two name the same
+/// alias. The instantiation's own name is autocxx's invention, so the
+/// directive the user writes for either is the alias, and the constructor
+/// suppression has to follow it the same way the permission does.
+#[test]
+fn test_blocked_constructors_beat_instantiable() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+        inline uint32_t take_a(const C&) { return 3; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("C")
+            generate!("take_a")
+            instantiable!("C")
+            block_constructors!("C")
+        },
+        None,
+        Some(make_string_absence_finder(vec![
+            "AutocxxConcrete_autocxx_alloc".into(),
+            "new_autocxx".into(),
+        ])),
+        None,
+    );
+}
+
+/// Without the directive an instantiation gets no special members at all,
+/// and it has to be that way round: autocxx is told nothing about a
+/// specialization, so a claim it makes for one it merely met in a signature
+/// can be wrong, and wrong here means C++ which does not compile. This
+/// template declares a constructor of its own, so C++ gives it no default
+/// one - `test_cycle_generic_type` is the same shape reached through a
+/// function, and the three
+/// `test_template_class_with_const_*_argument*` tests are the other way to
+/// lose it, a `const` template argument making a `const` member.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_no_constructors_for_types_not_declared_instantiable() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            A(T first) : a{first, first} {}
+            uint32_t foo() { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+        inline uint32_t take_a(const C&) { return 3; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("C")
+            generate!("take_a")
+        },
+        None,
+        // No allocator and no constructor wrapper in the generated Rust, so
+        // nothing asks C++ for a constructor this class hasn't got.
+        Some(make_string_absence_finder(vec![
+            "AutocxxConcrete_autocxx_alloc".into(),
+            "new_autocxx".into(),
+        ])),
+        None,
+    );
+}
+
+/// The method half of google/autocxx#723, which the constructor work above
+/// does not reach: bindgen reports no member functions whatsoever for a class
+/// template, so autocxx has nothing to synthesize a call from. Verified
+/// against the vendored bindgen with `foo` public and with an explicit
+/// instantiation (`template class A<uint32_t>;`) present, which makes no
+/// difference: the generated bindings mention `foo` nowhere. Recovering it
+/// needs a member-function reporting hook on the bindgen side, at which point
+/// this test's assertion is what it should produce.
+#[test]
+#[ignore] // bindgen reports no member functions for a class template
+fn test_methods_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> B;
+        typedef B C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.foo(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The opaque holders autocxx lowers a `std::shared_ptr<const T>` and friends
+/// to are concrete types too, and must *not* pick up the constructor above
+/// even where the user declares their alias `instantiable!`: what such a
+/// holder wraps is made and destroyed by the shims beside it, and a
+/// default-constructed `std::shared_ptr` owns nothing at all.
+///
+/// Addresses the bug reported upstream as google/autocxx#723 (and
+/// google/autocxx#799, whose lowering this protects).
+#[test]
+fn test_no_constructors_for_smart_pointer_holders() {
+    let hdr = indoc! {"
+        #include <memory>
+        typedef std::shared_ptr<const int> Handle;
+        inline Handle make_shared_int() {
+            return std::make_shared<const int>(3);
+        }
+        inline int take_shared_int(Handle a) {
+            return *a;
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::make_shared_int();
+            // Names the alias, which is the other half of this: it has to be
+            // the holder, not bindgen's rendering of `std::shared_ptr`.
+            let _: &ffi::Handle = a.as_ref().unwrap();
+            assert_eq!(ffi::take_shared_int(a.clone()), autocxx::c_int(3));
+        },
+        quote! {
+            generate!("make_shared_int")
+            generate!("take_shared_int")
+            generate!("Handle")
+            instantiable!("Handle")
+        },
+        None,
+        // The holder's own name plus the suffix every synthesized allocator
+        // and special member carries.
+        Some(make_string_absence_finder(vec![
+            "AutocxxConcrete_autocxx_alloc".into(),
+            "AutocxxConcrete_autocxx_free".into(),
+            "new_autocxx".into(),
+        ])),
+        None,
+    );
 }
 
 #[test]

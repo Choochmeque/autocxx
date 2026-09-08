@@ -166,7 +166,7 @@ impl<'a> BridgeConverter<'a> {
                 Self::dump_apis("static data", &analyzed_apis);
                 let analyzed_apis = replace_hopeless_typedef_targets(self.config, analyzed_apis);
                 let analyzed_apis = add_casts(analyzed_apis);
-                let analyzed_apis = create_alloc_and_frees(analyzed_apis);
+                let analyzed_apis = create_alloc_and_frees(analyzed_apis, self.config);
                 // Next, figure out how we materialize different functions.
                 // Some will be simple entries in the cxx::bridge module; others will
                 // require C++ wrapper functions. This is probably the most complex

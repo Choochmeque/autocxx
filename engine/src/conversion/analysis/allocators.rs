@@ -8,6 +8,7 @@
 
 //! Code to create functions to alloc and free while unitialized.
 
+use autocxx_parser::IncludeCppConfig;
 use syn::{parse_quote, punctuated::Punctuated, token::Comma, FnArg, ReturnType};
 
 use crate::{
@@ -23,9 +24,14 @@ use crate::{
 use super::{
     fun::function_wrapper::{CppFunctionBody, CppFunctionKind},
     pod::PodPhase,
+    tdef::instantiable_concrete_types,
 };
 
-pub(crate) fn create_alloc_and_frees(apis: ApiVec<PodPhase>) -> ApiVec<PodPhase> {
+pub(crate) fn create_alloc_and_frees(
+    apis: ApiVec<PodPhase>,
+    config: &IncludeCppConfig,
+) -> ApiVec<PodPhase> {
+    let instantiable = instantiable_concrete_types(&apis, config);
     apis.into_iter()
         .flat_map(|api| -> Box<dyn Iterator<Item = Api<PodPhase>>> {
             match &api {
@@ -34,6 +40,14 @@ pub(crate) fn create_alloc_and_frees(apis: ApiVec<PodPhase>) -> ApiVec<PodPhase>
                 }
                 Api::Subclass { name, .. } => {
                     Box::new(create_alloc_and_free(name.cpp()).chain(std::iter::once(api)))
+                }
+                // A concrete template instantiation the user declared
+                // `instantiable!` is an ordinary C++ class which autocxx has
+                // given a name of its own, so C++ can allocate and free one.
+                // See google/autocxx#723 and `instantiable_concrete_types`,
+                // which is where the directive is required and why.
+                Api::ConcreteType { name, .. } if instantiable.contains(&name.name) => {
+                    Box::new(create_alloc_and_free(name.name.clone()).chain(std::iter::once(api)))
                 }
                 _ => Box::new(std::iter::once(api)),
             }

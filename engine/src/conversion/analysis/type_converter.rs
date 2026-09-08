@@ -1259,6 +1259,7 @@ impl<'a> TypeConverter<'a> {
                 rs_definition,
                 cpp_definition,
                 holder_surface: surface,
+                constructor_and_allocator_deps: Vec::new(),
             });
         }
         Ok(new_tn)
@@ -1301,6 +1302,7 @@ impl<'a> TypeConverter<'a> {
                     cpp_definition: cpp_definition.clone(),
                     rs_definition: Some(Box::new(rs_definition.clone().into())),
                     holder_surface: None,
+                    constructor_and_allocator_deps: Vec::new(),
                 };
                 self.concrete_templates
                     .insert(cpp_definition, api.name().clone());
@@ -1518,11 +1520,13 @@ pub(crate) fn add_analysis<A: AnalysisPhase>(api: UnanalyzedApi) -> Api<A> {
             rs_definition,
             cpp_definition,
             holder_surface,
+            constructor_and_allocator_deps,
         } => Api::ConcreteType {
             name,
             rs_definition,
             cpp_definition,
             holder_surface,
+            constructor_and_allocator_deps,
         },
         Api::IgnoredItem { name, err, ctx } => Api::IgnoredItem { name, err, ctx },
         _ => panic!("Function analysis created an unexpected type of extra API"),
