@@ -7015,6 +7015,29 @@ fn test_inherited_method_hidden_by_an_enumerator() {
     );
 }
 
+/// A *scoped* enum's enumerators are members of the enumeration and not of
+/// the class it is nested in, so one named after an inherited member hides
+/// nothing and the member is still callable.
+#[test]
+fn test_inherited_method_not_hidden_by_a_scoped_enumerator() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_Base {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_Derived : public inh_Base {
+        public:
+            enum class inh_ScopedE { foo = 2 };
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_Derived::new().within_unique_ptr();
+        assert_eq!(d.foo(), 1);
+    };
+    run_test("", hdr, rs, &["inh_Derived"], &[]);
+}
+
 /// `inh_Derived_foo` is a class of its own, not a member of `inh_Derived`,
 /// however alike the two spellings are once bindgen has flattened one.
 #[test]
