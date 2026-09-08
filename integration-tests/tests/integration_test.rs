@@ -23360,6 +23360,315 @@ fn test_issue_1265_sound_swap() {
     )
 }
 
+/// A non-POD C++ class, plus the size and alignment C++ gives it, for the
+/// thread-safety tests below.
+///
+/// Deliberately pointer-free. Whether the generated wrapper came out `Send` was
+/// decided by the *bindgen* struct underneath it, so the class has to be one
+/// whose bindgen struct holds no pointer. A `std::string` member would not do:
+/// autocxx hands bindgen a stand-in class containing a `char* ptr` for it (see
+/// `get_prelude_entry` in `known_types`), so such a class was already `!Send`
+/// by accident and would pass these tests with or without the fix. `fx_Affine`
+/// stores one integer, so its bindgen struct is plain data and the wrapper
+/// inherited `Send` from it. The user-declared destructor is what makes the
+/// class non-POD, and it is also the hazard: `~fx_Affine` running on a thread
+/// that never constructed the object is precisely what `!Send` has to prevent.
+fn thread_affinity_header() -> &'static str {
+    indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+
+        class fx_Affine {
+        public:
+          fx_Affine() : owner(1) {}
+          ~fx_Affine() {}
+
+          [[nodiscard]] auto owner_tag() const -> uint32_t { return this->owner; }
+
+        private:
+          uint32_t owner;
+        };
+
+        inline size_t fx_affine_sizeof() { return sizeof(fx_Affine); }
+        inline size_t fx_affine_alignof() { return alignof(fx_Affine); }
+    "}
+}
+
+/// The same, as a class template, for the generic wrapper tests. Non-POD for
+/// the same reason, and its member is a parameter rather than a pointer.
+fn generic_thread_affinity_header() -> &'static str {
+    indoc! {"
+        template<class T> struct fx_Gen {
+          T value;
+          ~fx_Gen() {}
+        };
+    "}
+}
+
+/// The generated wrapper for a non-POD C++ type must not be `Send`.
+///
+/// `Send` is Rust's claim that a value may cross a thread boundary. autocxx
+/// cannot know whether an arbitrary C++ class tolerates that: plenty do not.
+/// A type holding a `pthread_mutex_t` it locked, a handle into a thread-local
+/// arena, or a destructor that asserts it runs on the constructing thread are
+/// all thread-affine, and none of them look any different through bindgen than
+/// a type that is perfectly portable. The only sound default is "no", which is
+/// what `non_pod_struct`'s constraint (3) has always said.
+///
+/// Nothing enforced it. The wrapper's markers were `UnsafeCell` (which does
+/// block `Sync`) and `PhantomData<PhantomPinned>` (which blocks `Unpin`), but
+/// `PhantomPinned` is itself `Send`, and the bindgen struct underneath is a
+/// byte array or a bag of plain pointers - so the wrapper inherited `Send` from
+/// its own contents, and safe code could hand a thread-affine C++ object to
+/// another thread with no `unsafe` anywhere.
+#[test]
+fn test_non_pod_is_not_send() {
+    let err = do_run_test(
+        "",
+        thread_affinity_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["fx_Affine"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            fn assert_send<T: Send>() {}
+            fn run() {
+                assert_send::<ffi::fx_Affine>();
+            }
+        }),
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("the opaque wrapper for a non-POD C++ type claimed to be `Send`");
+    match err {
+        TestError::RsBuild(diagnostics) => assert!(
+            diagnostics.contains("cannot be sent between threads safely"),
+            "expected the generated Rust to be rejected because `fx_Affine` is not \
+             `Send`, but rustc complained about something else:\n{diagnostics}"
+        ),
+        other => panic!("expected a generated-Rust build failure, got {other:?}"),
+    }
+}
+
+/// The hazard [`test_non_pod_is_not_send`] describes, in the shape a user would
+/// actually hit it: `UniquePtr<T>` is `Send` only where `T` is (cxx bounds it
+/// that way in `unique_ptr.rs`), so an owning pointer to a C++ object could be
+/// moved to another thread and dropped there - running `~fx_Affine` on a thread
+/// that never constructed it. Making the pointee `!Send` closes this without
+/// cxx needing to change.
+#[test]
+fn test_non_pod_unique_ptr_is_not_sent_across_threads() {
+    let err = do_run_test(
+        "",
+        thread_affinity_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["fx_Affine"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            fn run() {
+                let ptr = UniquePtr::emplace(ffi::fx_Affine::new());
+                std::thread::spawn(move || {
+                    // The C++ destructor would run on a thread which never
+                    // constructed the object.
+                    drop(ptr);
+                })
+                .join()
+                .unwrap();
+            }
+        }),
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("a UniquePtr to a non-POD C++ type was moved to another thread and dropped there");
+    match err {
+        TestError::RsBuild(diagnostics) => assert!(
+            diagnostics.contains("cannot be sent between threads safely"),
+            "expected the generated Rust to be rejected because `fx_Affine` is not \
+             `Send`, but rustc complained about something else:\n{diagnostics}"
+        ),
+        other => panic!("expected a generated-Rust build failure, got {other:?}"),
+    }
+}
+
+/// The wrapper must not be `Sync` either. This has held all along, but only as
+/// a side effect of the `UnsafeCell` that constraint (5) asks for: nothing said
+/// `!Sync` was wanted in its own right, so a future change to how the contents
+/// are stored could have taken it away silently. The `!Send` marker guarantees
+/// it independently now; this test pins the property to the type rather than to
+/// whichever field currently happens to supply it.
+#[test]
+fn test_non_pod_is_not_sync() {
+    let err = do_run_test(
+        "",
+        thread_affinity_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["fx_Affine"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            fn assert_sync<T: Sync>() {}
+            fn run() {
+                assert_sync::<ffi::fx_Affine>();
+            }
+        }),
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("the opaque wrapper for a non-POD C++ type claimed to be `Sync`");
+    match err {
+        TestError::RsBuild(diagnostics) => assert!(
+            diagnostics.contains("cannot be shared between threads safely"),
+            "expected the generated Rust to be rejected because `fx_Affine` is not \
+             `Sync`, but rustc complained about something else:\n{diagnostics}"
+        ),
+        other => panic!("expected a generated-Rust build failure, got {other:?}"),
+    }
+}
+
+/// The marker which removes `Send` must cost nothing. The wrapper is
+/// `repr(transparent)` over the bindgen struct and its size and alignment are
+/// load-bearing - constraint (1) in `non_pod_struct` is precisely that Rust
+/// must see the C++ type's real layout - so the marker has to be a 1-ZST.
+/// `PhantomData<T>` is zero-sized with alignment 1 for every `T`, which is why
+/// it can be spelled that way here and why `repr(transparent)` still accepts
+/// the struct. Compared against C++'s own `sizeof`/`alignof`.
+#[test]
+fn test_non_pod_thread_safety_markers_are_zero_sized() {
+    run_test_ex(
+        "",
+        thread_affinity_header(),
+        quote! {
+            assert_eq!(
+                std::mem::size_of::<ffi::fx_Affine>(),
+                ffi::fx_affine_sizeof()
+            );
+            assert_eq!(
+                std::mem::align_of::<ffi::fx_Affine>(),
+                ffi::fx_affine_alignof()
+            );
+        },
+        directives_from_lists(
+            &["fx_Affine", "fx_affine_sizeof", "fx_affine_alignof"],
+            &[],
+            None,
+        ),
+        None,
+        None,
+        None,
+    )
+}
+
+/// The opt-back-in, for a user who knows their C++ type really is thread safe.
+///
+/// `include_cpp!` expands into the user's own crate, so the generated type is
+/// local to them and the orphan rule permits `unsafe impl Send`. This is the
+/// same escape hatch cxx documents for its opaque types, and the `unsafe` is
+/// the point: the claim is the user's to make and to justify, not autocxx's to
+/// assume. Note it restores `UniquePtr<fx_Affine>: Send` too, via cxx's bound.
+#[test]
+fn test_non_pod_send_can_be_opted_back_in() {
+    run_test_ex(
+        "",
+        thread_affinity_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["fx_Affine"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            // SAFETY: this test's `fx_Affine` owns nothing but an integer, and
+            // its destructor touches no thread-local state.
+            unsafe impl Send for ffi::fx_Affine {}
+
+            fn assert_send<T: Send>() {}
+
+            fn run() {
+                assert_send::<ffi::fx_Affine>();
+                let ptr = UniquePtr::emplace(ffi::fx_Affine::new());
+                let tag = std::thread::spawn(move || ptr.owner_tag())
+                    .join()
+                    .unwrap();
+                assert_eq!(tag, 1);
+            }
+        }),
+    )
+}
+
+/// A class template's wrapper, which reaches none of the above.
+///
+/// The wrapper for a class template carries bindgen's own parameters, and
+/// codegen stops short of handing generic types to cxx - there is no bridge
+/// entry for one, so it exists only in the output module. Nothing else here
+/// would have covered that path, and the marker has to be admissible on it:
+/// the pointee is deliberately a concrete `u8` rather than a parameter, so the
+/// field adds no variance over `T`.
+#[test]
+fn test_generic_non_pod_is_not_send() {
+    let err = do_run_test(
+        "",
+        generic_thread_affinity_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["fx_Gen"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            fn assert_send<T: Send>() {}
+            fn run() {
+                assert_send::<ffi::fx_Gen<u32>>();
+            }
+        }),
+        "unsafe_ffi",
+        None,
+    )
+    .expect_err("the opaque wrapper for a class template claimed to be `Send`");
+    match err {
+        TestError::RsBuild(diagnostics) => assert!(
+            diagnostics.contains("cannot be sent between threads safely"),
+            "expected the generated Rust to be rejected because `fx_Gen` is not \
+             `Send`, but rustc complained about something else:\n{diagnostics}"
+        ),
+        other => panic!("expected a generated-Rust build failure, got {other:?}"),
+    }
+}
+
+/// The escape hatch on the generic path, where the claim has to hold for every
+/// instantiation the impl admits - hence the bound, rather than a bare
+/// `unsafe impl<T>`.
+#[test]
+fn test_generic_non_pod_send_can_be_opted_back_in() {
+    run_test_ex(
+        "",
+        generic_thread_affinity_header(),
+        quote! {
+            run();
+        },
+        directives_from_lists(&["fx_Gen"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            // SAFETY: fx_Gen owns nothing but its T, so it may go wherever a T
+            // may go.
+            unsafe impl<T: Send> Send for ffi::fx_Gen<T> {}
+
+            fn assert_send<T: Send>() {}
+
+            fn run() {
+                assert_send::<ffi::fx_Gen<u32>>();
+            }
+        }),
+    )
+}
+
 #[test]
 fn test_ignore_va_list() {
     let hdr = indoc! {"
