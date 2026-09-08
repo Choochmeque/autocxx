@@ -25,6 +25,7 @@ use std::borrow::Cow;
 use type_to_cpp::CppNameMap;
 
 use crate::conversion::analysis::fun::ReceiverMutability;
+use crate::conversion::array_witness::{array_element_witnesses, witness_name};
 use crate::minisyn::Ident;
 
 use super::{
@@ -191,6 +192,7 @@ impl<'a> CppCodeGenerator<'a> {
         // The 'filter' on the following line is designed to ensure we don't accidentally
         // end up out of sync with needs_cpp_codegen
         gen.add_needs(apis.iter().filter(|api| api.needs_cpp_codegen()))?;
+        gen.generate_array_element_witnesses(apis);
         Ok(gen.generate())
     }
 
@@ -438,6 +440,25 @@ impl<'a> CppCodeGenerator<'a> {
             .join("\n");
         s.push('\n');
         s
+    }
+
+    /// Define the never-called by-value function which tells cxx that an
+    /// array element is trivially movable.
+    ///
+    /// `inline`, and in the header rather than the implementation, because cxx
+    /// calls it from a shim of its own: the definition has to be visible
+    /// wherever that shim is compiled. See
+    /// [`crate::conversion::array_witness::array_element_witnesses`] for why
+    /// saying it at all is necessary.
+    fn generate_array_element_witnesses(&mut self, apis: &ApiVec<FnPhase>) {
+        for name in array_element_witnesses(apis) {
+            let cpp_name = self.original_name_map.map(&name);
+            let witness = witness_name(self.config, &name);
+            self.additional_functions.push(ExtraCpp {
+                declaration: Some(format!("inline void {witness}({cpp_name}) {{}}")),
+                ..Default::default()
+            })
+        }
     }
 
     fn generate_pod_assertion(&mut self, name: String) {

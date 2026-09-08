@@ -9,6 +9,7 @@
 mod analysis;
 mod api;
 mod apivec;
+mod array_witness;
 mod codegen_cpp;
 mod codegen_rs;
 #[cfg(test)]

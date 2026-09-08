@@ -33,6 +33,7 @@ use syn::{
 use utils::{find_output_mod_root, generate_cxx_use_stmt, generate_cxx_use_stmt_for_id};
 
 use crate::{
+    conversion::array_witness::{array_element_witnesses, witness_name},
     conversion::codegen_rs::unqualify::{unqualify_params, unqualify_ret_type, unqualify_type},
     minisyn::minisynize_punctuated,
     types::{make_ident, Namespace, QualifiedName},
@@ -251,6 +252,7 @@ impl<'a> RsCodeGenerator<'a> {
         let non_pod_types = find_non_pod_types(&all_apis);
         let concrete_typedefs = find_concrete_typedefs(&all_apis);
         let types_with_no_rust_storage = find_types_with_no_rust_storage(&all_apis);
+        let array_element_witnesses = array_element_witnesses(&all_apis);
         // Now let's generate the Rust code.
         let (rs_codegen_results_and_namespaces, additional_cpp_needs): (Vec<_>, Vec<_>) = all_apis
             .into_iter()
@@ -304,8 +306,25 @@ impl<'a> RsCodeGenerator<'a> {
         // And a list of global items to include at the top level.
         let mut all_items: Vec<Item> = all_items.into_iter().flatten().collect();
         // And finally any C++ we need to generate. And by "we" I mean autocxx not cxx.
-        let has_additional_cpp_needs = additional_cpp_needs.into_iter().any(std::convert::identity);
+        // A witness is C++ autocxx writes, so the bridge has to include the
+        // header it is written into even where nothing else needed one.
+        let has_additional_cpp_needs = additional_cpp_needs.into_iter().any(std::convert::identity)
+            || !array_element_witnesses.is_empty();
         extern_c_mod_items.extend(self.build_include_foreign_items(has_additional_cpp_needs));
+        // The by-value use which tells cxx an array element is trivially
+        // movable. No Rust caller can reach one: the bridge mod is private and
+        // no `use` re-exports them, so they appear in neither the API nor the
+        // documentation. The C++ definition is an ordinary function at global
+        // scope, and callable as one; it does nothing. See
+        // `array_element_witnesses`.
+        extern_c_mod_items.extend(array_element_witnesses.iter().map(|name| {
+            let witness = make_ident(witness_name(self.config, name));
+            let id = self.bridge_type_names.get(name);
+            parse_quote! {
+                #[doc(hidden)]
+                fn #witness(_: #id);
+            }
+        }));
         // We will always create an extern "C" mod even if bindgen
         // didn't generate one, e.g. because it only generated types.
         // We still want cxx to know about those types.

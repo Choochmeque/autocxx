@@ -3226,7 +3226,7 @@ impl<'a> FnAnalyzer<'a> {
         // catch-all at the end of this match, which hands whatever it is to
         // cxx unconverted - which is where a `std::array` parameter goes, cxx
         // spelling it back as the `std::array` it came from.
-        check_signature_array(ty)?;
+        self.check_signature_array(ty)?;
         if let Some(holder_id) = is_subclass_holder {
             let subclass = SubclassName::from_holder_name(holder_id);
             return Ok({
@@ -3415,7 +3415,7 @@ impl<'a> FnAnalyzer<'a> {
                 let boxed_type = annotated_type.ty;
                 let ty: &Type = boxed_type.as_ref();
                 // As for a parameter.
-                check_signature_array(ty)?;
+                self.check_signature_array(ty)?;
                 match ty {
                     Type::Path(p)
                         if !self
@@ -4384,30 +4384,57 @@ impl HasFieldsAndBases for Api<FnPrePhase3> {
     }
 }
 
-/// Turn down the arrays a signature cannot carry, and let a `std::array`
-/// through.
-///
-/// Two different refusals, neither of which is about the array standing on its
-/// own: [`denotes_indirect_cpp_array`] is the C++ type autocxx cannot tell
-/// apart from a `std::array` once it is behind a reference, and
-/// [`TypeDatabase::permissible_within_array`] is the element cxx will not hold
-/// in one.
-fn check_signature_array(ty: &Type) -> Result<(), ConvertErrorFromCpp> {
-    if denotes_indirect_cpp_array(ty) {
-        return Err(ConvertErrorFromCpp::CppArrayInSignature(
-            ty.to_token_stream().to_string(),
-        ));
-    }
-    if let Some(element) = cpp_array_element(ty) {
-        let permissible = matches!(element, Type::Path(path)
-            if known_types().permissible_within_array(&QualifiedName::from_type_path(path)));
-        if !permissible {
-            return Err(ConvertErrorFromCpp::CppArrayElementNotSupported(
+impl FnAnalyzer<'_> {
+    /// Turn down the arrays a signature cannot carry, and let a `std::array`
+    /// through.
+    ///
+    /// Two different refusals, neither of which is about the array standing on
+    /// its own: [`denotes_indirect_cpp_array`] is the C++ type autocxx cannot
+    /// tell apart from a `std::array` once it is behind a reference, and
+    /// [`Self::permissible_array_element`] is the element cxx will not hold in
+    /// one.
+    fn check_signature_array(&self, ty: &Type) -> Result<(), ConvertErrorFromCpp> {
+        if denotes_indirect_cpp_array(ty) {
+            return Err(ConvertErrorFromCpp::CppArrayInSignature(
                 ty.to_token_stream().to_string(),
             ));
         }
+        if let Some(element) = cpp_array_element(ty) {
+            let permissible = matches!(element, Type::Path(path)
+                if self.permissible_array_element(&QualifiedName::from_type_path(path)));
+            if !permissible {
+                return Err(ConvertErrorFromCpp::CppArrayElementNotSupported(
+                    ty.to_token_stream().to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Whether `name` may be the element of a `std::array` which crosses the
+    /// bridge.
+    ///
+    /// One of cxx's atoms, which needs nothing further, or a type the bridge
+    /// declares under a name of its own which autocxx has already proved
+    /// trivially relocatable: the `c_*` newtypes, and any class or enum the
+    /// POD analysis passed. Those need the certificate cxx will not write for
+    /// an array element, which `array_element_witnesses` supplies.
+    ///
+    /// The proof is the one `generate_pod!` already rests on, and it is
+    /// checked in C++ rather than taken on trust. A POD struct is asserted
+    /// `IsRelocatable` by autocxx itself - `generate_pod_assertion` - and an
+    /// enum or an `extern_cpp_type!` marked POD is not, so for those the
+    /// certificate is what introduces the check: cxx asserts `IsRelocatable`
+    /// for every type one names. A class whose destructor does something fails
+    /// that assertion and the build stops, unless the C++ has opted into
+    /// relocatability by hand with `using IsRelocatable = std::true_type`,
+    /// which cxx documents and which is a claim its author has made rather
+    /// than one autocxx invented.
+    fn permissible_array_element(&self, name: &QualifiedName) -> bool {
+        known_types().permissible_within_array(name)
+            || known_types().relocatable_newtype(name)
+            || (!known_types().is_known_type(name) && self.pod_safe_types.contains(name))
+    }
 }
 
 /// Stringify a function argument for diagnostics
