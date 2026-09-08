@@ -80,6 +80,14 @@ impl CppOriginalName {
         &self.0
     }
 
+    /// The C++ scope this name is written inside, for a name which is written
+    /// inside one: `Outer` for `Outer::Inner`. bindgen reports a nested item's
+    /// name qualified this way, so this is what says which class such an item
+    /// is a member of.
+    pub(crate) fn enclosing_cpp_scope(&self) -> Option<&str> {
+        self.0.rsplit_once("::").map(|(prefix, _)| prefix)
+    }
+
     /// Used to give the final part of the name which can be used
     /// to figure out the name for constructors, destructors etc.
     pub(crate) fn get_final_segment_for_special_members(&self) -> Option<&str> {

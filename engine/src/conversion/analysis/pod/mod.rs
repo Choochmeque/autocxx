@@ -59,6 +59,11 @@ pub(crate) struct PodAnalysis {
     pub(crate) kind: TypeKind,
     /// Every base class, whether or not bindgen generated a field for it.
     pub(crate) bases: HashSet<QualifiedName>,
+    /// The subset of `bases` C++ inherits publicly. Only through one of these
+    /// is a base's member reachable from outside the class, so this is the
+    /// ancestry a caller sees; `bases` is the ancestry name lookup walks,
+    /// which C++ runs before it applies access control at all.
+    pub(crate) public_bases: HashSet<QualifiedName>,
     /// Whether this class has a base bindgen reported but could not name -
     /// a template instantiation, which it announces through no callback. Such
     /// a base is missing from `bases` above, so the sets there are known to be
@@ -241,10 +246,13 @@ fn analyze_struct(
     } else {
         TypeKind::NonPod
     };
-    let castable_bases = bases
+    let public_bases: HashSet<QualifiedName> = bases
         .iter()
         .filter(|(_, base)| base.is_public)
-        .map(|(base, _)| base)
+        .map(|(base, _)| base.clone())
+        .collect();
+    let castable_bases = public_bases
+        .iter()
         .filter(|base| nested_cpp_names.is_on_allowlist(base))
         .cloned()
         .collect();
@@ -264,6 +272,7 @@ fn analyze_struct(
         analysis: PodAnalysis {
             kind: type_kind,
             bases: bases.into_keys().collect(),
+            public_bases,
             using_declarations,
             has_unnamed_base,
             virtual_bases,

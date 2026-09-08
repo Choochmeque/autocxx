@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use crate::conversion::analysis::fun::ReceiverMutability;
 use crate::conversion::parse::CppRefQualifier;
 use crate::conversion::{ConvertErrorFromCpp, CppEffectiveName};
 use crate::minisyn::Ident;
@@ -596,6 +597,18 @@ fn unique_ptr_of(innerty: &crate::minisyn::Type) -> Type {
 #[derive(Clone, Debug)]
 pub(crate) enum CppFunctionBody {
     FunctionCall(Namespace, CppEffectiveName),
+    /// A call to a member the receiver's class inherits from a base, made on
+    /// the receiver cast to that base so that nothing the receiver's own class
+    /// declares can decide which member is called.
+    ///
+    /// The base is carried as the C++ spelling of its name rather than as a
+    /// [`QualifiedName`], because the cast has to write that spelling and
+    /// nothing else here keeps the base alive: garbage collection drops a base
+    /// class nobody asked for, and the name map codegen would otherwise ask
+    /// then falls back on bindgen's flattened identifier, which names nothing
+    /// in C++. The [`ReceiverMutability`] is the cast's, the receiver being a
+    /// reference to `const` for a `const` member.
+    BaseClassMethodCall(String, CppEffectiveName, ReceiverMutability),
     StaticMethodCall(Namespace, Ident, CppEffectiveName),
     PlacementNew(Namespace, Ident),
     ConstructSuperclass(String),

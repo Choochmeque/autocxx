@@ -390,6 +390,51 @@ without running any C++ destructor - leaking whatever resources the C++
 implementation tracked. See
 [here](https://github.com/google/autocxx/issues/829).
 
+## Inherited member functions
+
+C++ calls an inherited member on the object which inherits it - `derived.foo()`
+- and `bindgen` reports nothing of the sort: a base class arrives as a field of
+the derived class, and the base's members as functions over the base's own
+type. So `autocxx` binds each public member of each public base a second time,
+against the classes which inherit it, and the Rust method is where C++ puts it.
+
+The call itself is made in C++, on the object cast to the base -
+`static_cast<const Base&>(d).foo(args)`. That is what dispatches a virtual
+member on the object's own dynamic type, what adjusts `this` for a base which
+does not sit at the start of the derived class, and what makes the Rust method
+call the member whose signature it was generated from rather than whatever the
+deriving class might declare under the same name. Adding the base to your
+`generate!` list is not needed for any of it - if you do, you also get the
+base's own type and an `AsRef` upcast to it, and both routes work.
+
+A member is bound this way only where `autocxx` can say that
+`derived.foo(args)` would have named it, so several shapes are left alone: a
+name the deriving class declares itself, or one a class between it and the base
+declares, since either hides the inherited member; a name two bases both
+declare, which C++ calls ambiguous rather than choosing; a base reached over
+anything but public inheritance, which is not a conversion a caller may make;
+a base reached by more than one path, which is more than one base subobject -
+`autocxx` declines these even where C++ would allow the conversion, as it does
+for a virtual base, because `bindgen` says which bases are virtual only for the
+class declaring them; a base whose C++ name `bindgen` never reported, which the
+cast could not write; a name the base merges with a `using` declaration of its
+own; and a name the base overloads, since `bindgen` reports neither the default
+arguments nor enough of the parameter types to say which overload C++ would
+pick. Static members are not imported, a static call having no receiver to make
+it on, and neither are data members.
+
+Three kinds of declaration hide an inherited member in C++ which `bindgen` does
+not describe well enough for `autocxx` to notice: a member of an anonymous
+union, an unnamed `enum`'s enumerators, and a member function template. Where a
+class hides an inherited `foo` with one of those, `autocxx` binds `foo` anyway,
+and the binding calls the base's member - the name reads as C++'s would not,
+but it does what it says.
+
+A member a class re-exports with `using Base::foo;` is bound too, by a pass of
+its own. That is how C++ reaches a member of a *private* base and how it widens
+the access of a protected one, so its call is made on the object itself - there
+being no cast to a private base to make.
+
 ## Abstract types
 
 `autocxx` does not allow instantiation of abstract types[^abstract] (aka types with pure virtual methods).
