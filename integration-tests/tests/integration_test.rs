@@ -2541,15 +2541,20 @@ fn test_no_constructors_for_types_not_declared_instantiable() {
 }
 
 /// The method half of google/autocxx#723, which the constructor work above
-/// does not reach: bindgen reports no member functions whatsoever for a class
-/// template, so autocxx has nothing to synthesize a call from. Verified
-/// against the vendored bindgen with `foo` public and with an explicit
-/// instantiation (`template class A<uint32_t>;`) present, which makes no
-/// difference: the generated bindings mention `foo` nowhere. Recovering it
-/// needs a member-function reporting hook on the bindgen side, at which point
-/// this test's assertion is what it should produce.
+/// does not reach. bindgen used to report no member function whatsoever for a
+/// class template - it discards them while parsing, because the set of
+/// instantiations is open ended and there is no monomorphization to emit code
+/// for - so autocxx had nothing to synthesize a call from, with `foo` public
+/// and even with an explicit instantiation
+/// (`template class A<uint32_t>;`) present. `denote_template_member_function`
+/// now reports them and each is bound as a method of the instantiation.
+///
+/// `foo` is not `const`, so it is called through `pin_mut()` exactly as a
+/// non-const method of any other class is;
+/// [`test_const_methods_for_specialized_types`] is the other half of that.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
 #[test]
-#[ignore] // bindgen reports no member functions for a class template
 fn test_methods_for_specialized_types() {
     let hdr = indoc! {"
         #include <cstdint>
@@ -2568,6 +2573,43 @@ fn test_methods_for_specialized_types() {
         "",
         hdr,
         quote! {
+            let mut a = ffi::C::new();
+            assert_eq!(a.pin_mut().foo(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `const` member of a class template, which takes its receiver by
+/// reference rather than by `Pin<&mut>` - the one thing about the signature
+/// which is autocxx's to decide, since bindgen reports the member's constness
+/// and leaves the receiver out of the signature it reports.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_const_methods_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() const { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
             let a = ffi::C::new();
             assert_eq!(a.foo(), 12);
         },
@@ -2577,6 +2619,813 @@ fn test_methods_for_specialized_types() {
         },
         None,
         None,
+        None,
+    );
+}
+
+/// A `static` member of a class template, which has no receiver at all: the
+/// shim names the member through the instantiation
+/// (`A_uint32_t_AutocxxConcrete::stat()`, which is a typedef for
+/// `A<uint32_t>`) instead of calling it on one.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_static_methods_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            static uint32_t stat() { return 5; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::C::stat(), 5);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// An overload set declared by a class template. bindgen numbers an overload
+/// set as it emits it and emitted none of these, so every member of the set
+/// arrives under the one name and the numbering is autocxx's own - which is
+/// what it already is for the overloads of any other class.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_overloaded_methods_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t get() const { return 1; };
+            uint32_t get(uint32_t extra) const { return extra + 1; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.get(), 1);
+            assert_eq!(a.get1(41), 42);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A member whose signature mentions a type bindgen reports by name, rather
+/// than a built-in: the rendering autocxx binds is bindgen's own, markers and
+/// all, so a `const Norm&` parameter arrives as the reference it is.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_specialized_types_naming_other_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Norm { uint32_t x; };
+        template<typename T>
+        class A {
+        public:
+            uint32_t take(const Norm& other) const { return other.x; };
+            Norm give() const { Norm n; n.x = 7; return n; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            let n = ffi::Norm { x: 4 };
+            assert_eq!(a.take(&n), 4);
+            assert_eq!(a.give().x, 7);
+        },
+        quote! {
+            generate!("C")
+            generate_pod!("Norm")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A member whose signature mentions a template parameter is refused, one
+/// member at a time, and said so against the instantiation: the signature the
+/// member has for `A<uint32_t>` is the template's with `uint32_t` put in for
+/// `T`, and substituting is clang's job rather than autocxx's - the
+/// specialization cursor libclang offers for an instantiation has no member
+/// children at all, even where C++ instantiates it explicitly. The members
+/// beside it are bound as usual.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_dependent_methods_for_specialized_types_are_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t plain() const { return 12; };
+            T dependent() const { return a[0]; };
+            void takes_dependent(T extra) { a[0] = extra; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.plain(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        // Both refused members get a stub of their own, and the reason
+        // recorded against them says what autocxx could not do.
+        Some(make_string_finder(vec![
+            "fn dependent (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn takes_dependent (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "mentions a template parameter".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// One member of an overload set is refused and the other is bound. The note
+/// standing in for the refused one is a method of the instantiation like any
+/// other, so it has to be numbered by the same overload tracker: otherwise the
+/// note and the binding are two `fn get` in one `impl` block, which Rust
+/// rejects outright.
+///
+/// The numbering is by declaration order and takes no notice of which member
+/// was refused, which is what autocxx does for a refused overload of any other
+/// class - so `put` names the refused member here and the one which works is
+/// `put1`.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_dependent_overload_for_specialized_types_is_numbered() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t get() const { return 1; };
+            T get(uint32_t) const { return a[0]; };
+            T put(uint32_t) const { return a[0]; };
+            uint32_t put() const { return 2; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.get(), 1);
+            assert_eq!(a.put1(), 2);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn get1 (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn put (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A name the class template declares for itself is not a name an overload of
+/// another member may be numbered into. `reserve_ideal_names` reserves those
+/// names from the APIs bindgen produced, and a class template's members are in
+/// none of them, so they are reserved here instead: without that the second
+/// `get` takes `get1`, and the `get1` C++ declares is pushed out to `get11` -
+/// so `get1()` would quietly call an overload of `get`.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_specialized_types_do_not_take_a_real_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t get() const { return 1; };
+            T get(uint32_t) const { return a[0]; };
+            uint32_t get1() const { return 20; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.get(), 1);
+            assert_eq!(a.get1(), 20);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        // The refused overload took the first free number, which is not the
+        // one a real member had already claimed.
+        Some(make_string_finder(vec![
+            "fn get2 (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A `concrete!` directive naming a type *inside* an instantiation rather than
+/// an instantiation. `Outer<uint32_t>::Inner` is not an `Outer<uint32_t>`, so
+/// `Outer`'s members are not its members: calling one on it is C++ which does
+/// not compile. The expression is read as a template's name only where the `>`
+/// closing the first `<` is the end of it, which is why the nested type having
+/// template arguments of its own does not make it one.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_no_methods_for_a_type_nested_inside_an_instantiation() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class Outer {
+        public:
+            uint32_t outer_only() const { return 1; };
+            struct Inner { uint32_t x; };
+            template<typename U> struct Deeper { U y; };
+        private:
+            T a[2];
+        };
+
+        // Puts `Outer<uint32_t>` on the allowlist, so that its member really is
+        // reported and there really is something to attach to the wrong type.
+        inline uint32_t take_outer(const Outer<uint32_t>& outer) {
+            return outer.outer_only();
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let inner = ffi::InnerInt::new();
+            assert!(!inner.is_null());
+            let deeper = ffi::DeeperInt::new();
+            assert!(!deeper.is_null());
+        },
+        quote! {
+            generate!("take_outer")
+            concrete!("Outer<uint32_t>::Inner", InnerInt)
+            concrete!("Outer<uint32_t>::Deeper<uint32_t>", DeeperInt)
+            instantiable!("InnerInt")
+            instantiable!("DeeperInt")
+        },
+        None,
+        Some(make_string_absence_finder(vec!["outer_only".to_string()])),
+        None,
+    );
+}
+
+/// A ref-qualified member of a class template. `void f() &&` may only be called
+/// on an rvalue, and autocxx has no rvalue to call it on, so it is refused
+/// exactly as one on any other class is; `void f() &` is called on the lvalue
+/// autocxx has, through the shim it already writes for every one of these.
+///
+/// The two are otherwise identical declarations, so a class which declares both
+/// is where the distinction earns its keep: without the ref-qualifier reported,
+/// both would be bound and both shims would call whichever the lvalue selects,
+/// which is the `&` one - the same wrong answer twice, quietly.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_ref_qualified_methods_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t value() const & { return 1; };
+            uint32_t value() const && { return 2; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.value(), 1);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn value1 (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A member returning an instantiation of a *member* template of the same class
+/// template. The instantiation supplies its own template argument and not the
+/// enclosing template's, so its rendering would name a parameter it does not
+/// define; the member is refused with the rest of the dependent ones.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_nested_template_methods_for_specialized_types_are_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            template<typename U> struct B { T t; U u; };
+            B<uint32_t> nested() const { return B<uint32_t>(); };
+            uint32_t plain() const { return 1; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.plain(), 1);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn nested (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A member whose signature names a type nothing else in the bindings asks for.
+/// bindgen does not generate such a type - keeping a class template's members
+/// deliberately does not put what their signatures name on the allowlist,
+/// because for a header which includes `<string>` that would be the standard
+/// library's internals and the Rust generated for those does not compile - so
+/// the member arrives naming something autocxx has never heard of, and is
+/// refused saying so. The way to have it is to ask for the type.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_specialized_types_naming_unasked_for_types_are_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct OnlyInATemplateMember { uint32_t x; };
+        template<typename T>
+        class A {
+        public:
+            uint32_t take(const OnlyInATemplateMember& other) const {
+                return other.x;
+            };
+            uint32_t plain() const { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.plain(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn take (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "type not known to autocxx (OnlyInATemplateMember)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The members of a class template, parsed the way clang parses for the MSVC
+/// target: `-fdelayed-template-parsing` is part of MSVC compatibility and is on
+/// by default there, and it keeps the body of a member defined inside its class
+/// template as tokens rather than parsing it. libclang then reports no
+/// definition for such a member, and bindgen's test for a deleted function - an
+/// inline function with no definition and no `= default` - concluded that this
+/// `foo` was `= delete`. Every member whose body it deferred was, so the whole
+/// of this was generated for nobody on that one target.
+///
+/// What C++ really did delete is still refused, which is what says the answer
+/// now comes from the declaration rather than from having stopped asking. The
+/// deleted members here are the shapes reading a declaration has to get right:
+/// a macro wrote the end of one, so its tokens are the macro's use and say
+/// nothing - the old answer stands, which errs towards refusing rather than
+/// towards calling a deleted member; a macro wrote the *start* of another,
+/// which makes the tokens libclang gives begin in the macro's definition and
+/// run through the intervening source; a comment sits between the `=` and the
+/// `delete` of a third; a fourth has braces of its own, in a default argument; a
+/// macro wrote the `=` of a fifth; a preprocessor directive interrupts the sixth
+/// between its `=` and its `delete`; and a macro of a macro wrote the end of the
+/// seventh, which libclang tokenizes as nothing past its return type. `with_a_lambda` is the other way
+/// round: a member which is not deleted and whose default argument contains a
+/// declaration which is.
+///
+/// The flag reaches the clang which parses the headers and not the C++
+/// compiler, which on most of these platforms is not clang; what it makes clang
+/// do is the same everywhere, so this pins the MSVC condition on every
+/// platform.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_specialized_types_with_delayed_template_parsing() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #define FX_DELETED = delete
+        #define FX_VOID void
+        #define FX_EQUALS =
+        #define FX_WRAP(x) x
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() const { return 12; };
+            uint32_t with_a_lambda(uint32_t x = [] {
+                struct Local { void unrelated() = delete; };
+                return 1;
+            }()) const { return x; };
+            void by_macro() FX_DELETED;
+            FX_VOID after_a_macro() = delete;
+            void by_comment() = /* unavailable */ delete;
+            void with_braces(uint32_t x = uint32_t{ }) = delete;
+            void with_a_macro_equals() FX_EQUALS delete;
+            void by_a_nested_macro() FX_WRAP(FX_DELETED);
+            void across_a_directive() =
+        #if 1
+                delete
+        #endif
+            ;
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.foo(), 12);
+            assert_eq!(a.with_a_lambda(7), 7);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        make_bindgen_only_clang_arg_adder(&["-fdelayed-template-parsing"]),
+        Some(make_string_finder(vec![
+            "fn by_macro (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn after_a_macro (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn by_comment (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn with_braces (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn with_a_macro_equals (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn across_a_directive (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn by_a_nested_macro (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A `private` member of a class template is not bound, as a private member of
+/// any other class is not: bindgen reports the access along with the member.
+#[test]
+fn test_private_methods_for_specialized_types_are_not_bound() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t visible() const { return 12; };
+        private:
+            uint32_t secret() const { return 13; };
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.visible(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_absence_finder(vec!["secret".to_string()])),
+        None,
+    );
+}
+
+/// A member whose signature names one of cxx's own vocabulary types. The
+/// signature autocxx binds is bindgen's rendering, which reaches autocxx's type
+/// substitution like any other: `std::string` becomes a [`cxx::CxxString`] and a
+/// returned one comes back in a [`cxx::UniquePtr`].
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_specialized_types_naming_cxx_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        template<typename T>
+        class A {
+        public:
+            uint32_t take(const std::string& other) const {
+                return static_cast<uint32_t>(other.size());
+            };
+            std::string give() const { return std::string(\"hello\"); };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.take(&ffi::make_string("abcd")), 4);
+            assert_eq!(a.give().to_str().unwrap(), "hello");
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Two instantiations of one class template, each declared `instantiable!`:
+/// both get the members, and each gets its own shim. The C++ name of the member
+/// is the same for both, so the names autocxx files them under have to be the
+/// instantiation's rather than the member's.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_two_specializations_of_one_template() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() const { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+        typedef A<uint16_t> D;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::C::new();
+            let d = ffi::D::new();
+            assert_eq!(c.foo(), 12);
+            assert_eq!(d.foo(), 12);
+        },
+        quote! {
+            generate!("C")
+            generate!("D")
+            instantiable!("C")
+            instantiable!("D")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A class template in a namespace. The instantiation autocxx invents lives in
+/// the root namespace whatever the template's own, so the member is looked up
+/// against the template's namespaced name and the shim names the instantiation.
+///
+/// Addresses the bug reported upstream as google/autocxx#723.
+#[test]
+fn test_methods_for_specialized_types_in_a_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            template<typename T>
+            class A {
+            public:
+                uint32_t foo() const { return 12; };
+                static uint32_t stat() { return 5; };
+            private:
+                T a[2];
+            };
+
+            typedef A<uint32_t> C;
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::fx_ns::C::new();
+            assert_eq!(a.foo(), 12);
+            assert_eq!(ffi::fx_ns::C::stat(), 5);
+        },
+        quote! {
+            generate!("fx_ns::C")
+            instantiable!("fx_ns::C")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `= delete`d member of a class template is not called, as a deleted member
+/// of any other class is not: bindgen reports `= delete` along with the member,
+/// and the note saying so is what the user gets instead of a call which C++
+/// would refuse.
+#[test]
+fn test_deleted_methods_for_specialized_types_are_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t kept() const { return 12; };
+            void gone() = delete;
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::C::new();
+            assert_eq!(a.kept(), 12);
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn gone (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A `[[deprecated]]` member of a class template carries its marker to Rust,
+/// where it warns whoever calls it, and the C++ which names it is written
+/// inside the pragma which stops `-Wdeprecated-declarations` failing the build.
+/// bindgen reports the marker along with the member; nothing else would say so,
+/// since no function is emitted for it to carry one.
+#[test]
+fn test_deprecated_methods_for_specialized_types() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            [[deprecated(\"use bar instead\")]] uint32_t foo() const { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            #[allow(deprecated)]
+            fn calls_it() {
+                let a = ffi::C::new();
+                assert_eq!(a.foo(), 12);
+            }
+            calls_it();
+        },
+        quote! {
+            generate!("C")
+            instantiable!("C")
+        },
+        None,
+        Some(make_string_finder(vec!["use bar instead".to_string()])),
+        None,
+    );
+}
+
+/// Without `instantiable!` an instantiation gets no methods either, for the
+/// same reason it gets no constructors: autocxx is told nothing about a
+/// specialization, so what it generates for one is claimed rather than found
+/// and the C++ compiler is the only arbiter. An explicit specialization may
+/// declare something else entirely, or nothing, under the name the template
+/// declares.
+/// [`test_no_constructors_for_types_not_declared_instantiable`] is the
+/// constructor half of the same rule.
+#[test]
+fn test_no_methods_for_types_not_declared_instantiable() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class A {
+        public:
+            uint32_t foo() const { return 12; };
+        private:
+            T a[2];
+        };
+
+        typedef A<uint32_t> C;
+        inline uint32_t take_a(const C&) { return 3; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("C")
+            generate!("take_a")
+        },
+        None,
+        // No wrapper for the method, and no stub saying it was refused: the
+        // question was never asked.
+        Some(make_string_absence_finder(vec!["foo".to_string()])),
         None,
     );
 }
