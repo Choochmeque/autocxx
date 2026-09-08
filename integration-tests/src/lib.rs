@@ -302,7 +302,16 @@ impl LinkableTryBuilder {
             );
         }
         let temp_path = self.temp_dir.path().to_str().unwrap();
-        let mut rustflags = format!("-L {temp_path}");
+        // This string REPLACES whatever RUSTFLAGS the run was started with, so a
+        // choice made there has to be restated here or the child falls back to
+        // the profile default - for debug info, the dev profile's 2. `=1` is
+        // what CI asks of workspace builds, for reasons that hold here too: the
+        // file and line in a panic backtrace, which is how a fixture that builds
+        // and then fails at runtime says what went wrong, and a PDB on
+        // windows-msvc, without which those backtraces are bare addresses. The
+        // asan job picks `=0` for its own workspace build; its fixtures get `=1`
+        // like everyone else's, which only lets a sanitizer report name a line.
+        let mut rustflags = format!("-L {temp_path} -Cdebuginfo=1");
         if std::env::var_os("AUTOCXX_ASAN").is_some() {
             rustflags.push_str(" -Z sanitizer=address -Clinker=clang++ -Clink-arg=-fuse-ld=lld");
         }
