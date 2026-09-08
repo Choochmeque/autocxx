@@ -390,6 +390,25 @@ fn main() {
     assert_eq!(format!("{:?}", a), "Point { x: 1, y: 2 }");
 }
 </code></pre>
+<h2 id="stdarray"><a class="header" href="#stdarray"><code>std::array</code></a></h2>
+<p>A <code>std::array&lt;T, N&gt;</code> crosses as a Rust <code>[T; N]</code>, by value, in either direction:
+<code>cxx</code> spells a Rust array as <code>std::array&lt;T, N&gt;</code>, so what the bridge declares is
+the type the header was written with, and there is no wrapper in between.</p>
+<p>Two things do not:</p>
+<ul>
+<li>An element <code>cxx</code> will not hold in an array. It has to be one of <code>cxx</code>'s own
+atoms, which for a type written in a header means <code>uint8_t</code> or <code>int8_t</code>, a
+<code>float</code> or a <code>double</code>, a <code>bool</code>, or a <code>char</code>. A class is not one, and neither
+is an integer whose width the platform chooses, such as <code>int</code> or <code>unsigned</code> -
+which rules out the typedefs to them, <code>uint32_t</code> and <code>size_t</code> among them.</li>
+<li>A <code>std::array</code> behind a reference or a pointer. <code>const T (&amp;)[N]</code> and <code>const std::array&lt;T, N&gt;&amp;</code> reach <code>autocxx</code> as the same Rust type, and <code>cxx</code> writes
+the second for either, so binding one would silently be binding the other.
+By value there is no such pair: no C++ function takes or returns a plain
+array that way.</li>
+</ul>
+<p>Both get a refusal which says so. <code>std::array&lt;T, 0&gt;</code> gets one too: C++ gives
+the empty array a size and Rust's <code>[T; 0]</code> has none, so they are not the same
+object.</p>
 <h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
 <p>A type which is incomplete in the C++ headers (i.e. represented only by a forward
 declaration) can't be held in a <code>UniquePtr</code> within Rust (because Rust can't know
