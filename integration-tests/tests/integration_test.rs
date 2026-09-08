@@ -20608,10 +20608,15 @@ fn test_instantiation_on_incomplete_type_beside_and_within_its_own_template() {
 }
 
 /// A class *with a member* of such an instantiation is generated as any other
-/// class is. Whether it can be destroyed is C++'s business - its destructor
-/// may be defined where `bb` is complete - and refusing the member would only
-/// hide its type from the analysis which decides what constructors the class
-/// has, which is how C++ deleting the copy constructor reaches Rust.
+/// class is: the member is read, an accessor which borrows it is written, and
+/// the constructors autocxx cannot work out are withheld with the note which
+/// says so. Whether the class can be destroyed is C++'s business - its
+/// destructor may be defined where `bb` is complete.
+///
+/// Refusing the member instead would lose that: a field whose conversion fails
+/// is dropped rather than kept with its error, so the constructor analysis
+/// would see a class it understood completely and offer a copy constructor
+/// C++ had deleted.
 #[test]
 fn test_member_of_instantiation_on_incomplete_type_is_still_a_member() {
     let hdr = indoc! {"
@@ -20625,10 +20630,16 @@ fn test_member_of_instantiation_on_incomplete_type_is_still_a_member() {
         quote! {},
         directives_from_lists(&["Owner"], &[], None),
         None,
-        Some(make_checks_without_building(vec![
-            make_string_finder(vec!["type Owner".to_string()]),
-            // C++ deleted `Owner`'s copy constructor, because the member's is
-            // deleted. Reading the member's type is the only way to know.
+        Some(make_checks(vec![
+            make_string_finder(
+                [
+                    // The accessor borrows the member rather than copying it.
+                    "-> & output :: au_bb_AutocxxConcrete",
+                    "has not given this type a copy constructor",
+                ]
+                .map(|s| s.to_string())
+                .to_vec(),
+            ),
             make_string_absence_finder(vec!["synthetic_const_copy_ctor".to_string()]),
         ])),
         None,

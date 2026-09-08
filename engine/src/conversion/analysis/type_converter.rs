@@ -1566,9 +1566,11 @@ impl<'a> TypeConverter<'a> {
         // of syntax, and a name repeating in it - `Pair<au<int>, au<bb>>`, or
         // `au<au<bb>>` - is not a circle. `QualifiedName` drops the arguments,
         // so barring a name here would bar the second `au` in each of those
-        // and lose the `bb` inside it. Re-expanding an alias already expanded
-        // would find what it found the first time, which was nothing, or this
-        // would have returned.
+        // and lose the `bb` inside it. Barring the second expansion of one
+        // alias loses nothing: the map is fixed and nothing substitutes into
+        // what it holds, so the expansion already under way is walking the
+        // same target, and whatever it finds comes back through the caller
+        // which started it.
         if let Some(target) = self.alias_targets.get(&qn) {
             if seen.insert(qn.clone()) {
                 if let Some(found) = self.incompleteness_of_argument(target, seen) {
