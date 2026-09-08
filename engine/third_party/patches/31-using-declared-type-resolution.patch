@@ -53,6 +53,13 @@ handling above the match returns an `UnresolvedTypeRef` for the declaration
 first. The arm listing `CXCursor_UsingDeclaration` among the kinds deliberately
 not handled is therefore already dead, and is left as it is.
 
+A name is not resolved to the declaration whose own definition is being parsed.
+Such a type would stand for something which stands, in the end, for the type
+itself, and nothing downstream is obliged to cope with a type graph that comes
+back round. The ordinary resolution path cannot produce one, because it is
+reached from the declaration and bindgen stops it there; resolution by name
+arrives from the use site, with no such stop, so it asks.
+
 Only type declarations are recorded, and a template is not one: a
 using-declaration naming a function, a variable or a template introduces
 nothing a type can be written as, since a use of a template carries template
@@ -116,12 +123,10 @@ to start.
      /// There is no `CXType_Char8` to compare against: libclang's kinds go
 --- a/ir/context.rs
 +++ b/ir/context.rs
-@@ -304,6 +304,35 @@
- enum TypeKey {
-     Usr(String),
+@@ -306,6 +306,35 @@
      Declaration(Cursor),
-+}
-+
+ }
+ 
 +/// A type's name as clang prints it, without its own qualifiers, so that
 +/// `const fx_BU` and `fx_BU` are the one name.
 +///
@@ -149,23 +154,25 @@ to start.
 +        }
 +    }
 +    name
- }
- 
++}
++
  /// A context used during parsing and generation of structs.
-@@ -337,6 +366,13 @@
+ #[derive(Debug)]
+ pub(crate) struct BindgenContext {
+@@ -336,6 +365,13 @@
+     /// parents of the cursor differ, like when a nested class is defined
      /// outside of the parent class.
      semantic_parents: HashMap<Cursor, ItemId>,
- 
++
 +    /// The type declarations namespace-scope using-declarations have made
 +    /// visible, keyed on the qualified name clang prints for each.
 +    ///
 +    /// This is the only channel back to the declaration a type named through a
 +    /// using-declaration was written with; see `using_declared_declaration`.
 +    using_declared_types: HashMap<String, Vec<Cursor>>,
-+
+ 
      /// A stack with the current type declarations and types we're parsing. This
      /// is needed to avoid infinite recursion when parsing a type like:
-     ///
 @@ -586,6 +622,7 @@
              root_module: root_module_id,
              current_module: root_module_id,
@@ -174,10 +181,12 @@ to start.
              currently_parsed_types: vec![],
              parsed_macros: Default::default(),
              replacements: Default::default(),
-@@ -1888,6 +1925,124 @@
+@@ -1886,8 +1923,143 @@
+                     .and_then(|usr| self.types.get(&TypeKey::Usr(usr)))
+             })
              .copied()
-     }
- 
++    }
++
 +    /// Record what a namespace-scope using-declaration makes visible.
 +    ///
 +    /// bindgen generates nothing for the declaration itself - it is a second
@@ -227,8 +236,8 @@ to start.
 +                }
 +            }
 +        }
-+    }
-+
+     }
+ 
 +    /// The declaration a using-declaration made visible under the name this
 +    /// type is written with.
 +    ///
@@ -296,10 +305,27 @@ to start.
 +        matches.next().is_none().then_some(*found)
 +    }
 +
++    /// Is this the declaration whose own definition is being parsed?
++    ///
++    /// Resolving a type to it would make the type stand for something which
++    /// stands, in the end, for the type itself. Nothing downstream of here is
++    /// obliged to cope with a type graph which comes back round, and the
++    /// ordinary resolution path cannot produce one: it is reached from the
++    /// declaration, and bindgen stops it there
++    /// (`Item::from_ty_with_id`'s `currently_parsed_types` check). Resolution
++    /// by name arrives from the use site instead, with no such stop, so it asks
++    /// here.
++    fn is_being_parsed(&self, declaration: &Cursor) -> bool {
++        let canonical = declaration.canonical();
++        self.currently_parsed_types()
++            .iter()
++            .any(|parsed| *parsed.decl() == canonical)
++    }
++
      /// Looks up for an already resolved type, either because it's builtin, or
      /// because we already have it in the map.
      pub(crate) fn builtin_or_resolved_ty(
-@@ -1903,7 +2058,13 @@
+@@ -1903,7 +2075,14 @@
          };
          debug!("builtin_or_resolved_ty: {ty:?}, {location:?}, {with_id:?}, {parent_id:?}");
  
@@ -307,6 +333,7 @@ to start.
 +        let declaration =
 +            ty.canonical_declaration(location.as_ref()).or_else(|| {
 +                self.using_declared_declaration(ty)
++                    .filter(|found| !self.is_being_parsed(found))
 +                    .and_then(|found| ty.canonical_declaration_of(found))
 +            });
 +
