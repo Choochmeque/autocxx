@@ -14,7 +14,7 @@ mod subclass;
 
 use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use crate::vendored_bindgen::callbacks::{
-    Explicitness, MethodKind as CppMethodKind, SpecialMemberKind, Virtualness,
+    Explicitness, MethodKind as CppMethodKind, RefQualifier, SpecialMemberKind, Virtualness,
 };
 use crate::{
     conversion::{
@@ -38,7 +38,7 @@ use crate::{
     },
     known_types::known_types,
     minisyn::{minisynize_punctuated, FnArg},
-    parse_callbacks::UsingDeclaration,
+    parse_callbacks::{TemplateMemberFunction, UsingDeclaration},
     types::validate_ident_ok_for_rust,
 };
 use indexmap::map::IndexMap as HashMap;
@@ -417,6 +417,11 @@ pub(crate) struct FnAnalyzer<'a> {
     /// enumerators are members of the enumeration rather than of the class it
     /// is nested in.
     scoped_enums: HashSet<QualifiedName>,
+    /// For each class template some concrete instantiation in these APIs
+    /// instantiates, the member functions bindgen reported for it. Keyed on the
+    /// template, because that is the only thing bindgen says anything about: it
+    /// announces no item for an instantiation at all.
+    template_member_functions: HashMap<QualifiedName, Vec<TemplateMemberFunction>>,
     force_wrapper_generation: bool,
 }
 
@@ -505,6 +510,10 @@ impl<'a> FnAnalyzer<'a> {
             using_declarations_by_base: Self::build_using_declarations_by_base(&apis, &ancestry),
             ancestry,
             scoped_enums,
+            template_member_functions: Self::build_template_member_functions(
+                &apis,
+                parse_callback_results,
+            ),
             force_wrapper_generation,
         };
         me.reserve_ideal_names(&apis);
@@ -520,6 +529,7 @@ impl<'a> FnAnalyzer<'a> {
         );
         let results = me.add_using_declaration_imports(results);
         let results = me.add_inherited_member_imports(results);
+        let results = me.add_template_instantiation_members(results);
         let results = me.add_constructors_present(results);
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
@@ -602,6 +612,34 @@ impl<'a> FnAnalyzer<'a> {
                     ..
                 } if *num_generics > 0 => Some(api.name().clone()),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// The member functions bindgen reported for each class template which
+    /// some concrete instantiation here instantiates.
+    ///
+    /// Collected from the instantiations rather than from the class templates,
+    /// because an instantiation is the only thing which is going to ask: a
+    /// class template's own members are never bound - see
+    /// `ConvertErrorFromCpp::MethodOfGenericType`.
+    fn build_template_member_functions(
+        apis: &ApiVec<PodPhase>,
+        parse_callback_results: &ParseCallbackResults,
+    ) -> HashMap<QualifiedName, Vec<TemplateMemberFunction>> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::ConcreteType {
+                    rs_definition,
+                    cpp_definition,
+                    holder_surface: None,
+                    ..
+                } => instantiated_template(rs_definition.as_deref(), cpp_definition),
+                _ => None,
+            })
+            .filter_map(|template| {
+                let members = parse_callback_results.template_member_functions(&template);
+                (!members.is_empty()).then(|| (template, members.to_vec()))
             })
             .collect()
     }
@@ -1595,6 +1633,183 @@ impl<'a> FnAnalyzer<'a> {
         results
     }
 
+    /// Bind the member functions of each `instantiable!` concrete template
+    /// instantiation, which C++ calls on the instantiation itself - `a.foo()` -
+    /// and bindgen generates nothing whatsoever for.
+    ///
+    /// bindgen discards a class template's member functions while parsing,
+    /// because there is no monomorphization for it to emit code for, and it
+    /// reports nothing at all about a specialization. So an instantiation
+    /// arrived with no methods however many the template declares: that is the
+    /// method half of google/autocxx#723, which the constructor work beside it
+    /// does not reach. `denote_template_member_function` now reports the
+    /// template's members, and each is bound here as a method of the
+    /// instantiation with a C++ shim of autocxx's own to make the call.
+    ///
+    /// Unlike the inherited-member shims above, the shim calls the member on the
+    /// receiver itself rather than on a cast to anything: the receiver is an
+    /// instantiation of the very class which declares the member - see
+    /// [`instantiated_template`], which is what makes that true - so there is
+    /// nothing to cast to, and nothing the class declares beside the member can
+    /// resolve under its name, C++ having refused the class if it could.
+    ///
+    /// Only where the user wrote `instantiable!`, as for the constructors and
+    /// for the same reason: autocxx cannot inspect a specialization, so what it
+    /// generates for one is claimed rather than found and the C++ compiler is
+    /// the only arbiter. What is claimed here is narrower than a constructor -
+    /// that the instantiation has the member the template declares, which an
+    /// explicit specialization may contradict - but it is the same kind of
+    /// claim, so it takes the same permission.
+    ///
+    /// Constructors and the destructor are reported too, and are left alone
+    /// here: an instantiation's special members are `instantiable!`'s own
+    /// business (see `find_constructors_present`), and binding the ones the
+    /// template declares would first have to decide which of them the
+    /// specialization has, which is the question that directive exists to
+    /// answer.
+    fn add_template_instantiation_members(
+        &mut self,
+        apis: ApiVec<FnPrePhase1>,
+    ) -> ApiVec<FnPrePhase1> {
+        if self.template_member_functions.is_empty() {
+            return apis;
+        }
+        // What to do with each member, in the order the members were declared,
+        // because that is the order the overload tracker has to number them in.
+        enum Member {
+            Bind(ApiName, Box<FuncToConvert>, QualifiedName, String),
+            Refuse(ApiName, QualifiedName, String, ConvertErrorFromCpp),
+        }
+        let mut members_to_add = Vec::new();
+        for api in apis.iter() {
+            let Api::ConcreteType {
+                name,
+                rs_definition,
+                cpp_definition,
+                holder_surface: None,
+                ..
+            } = api
+            else {
+                continue;
+            };
+            if !self.instantiable_concrete_types.contains(&name.name) {
+                continue;
+            }
+            let Some(template) = instantiated_template(rs_definition.as_deref(), cpp_definition)
+            else {
+                continue;
+            };
+            let Some(members) = self.template_member_functions.get(&template) else {
+                continue;
+            };
+            // The bindgen-style name each member is filed under. bindgen
+            // numbers an overload set when it emits one and emitted none of
+            // these, so every member of an overload set arrives under the one
+            // name; this name only has to be an identifier and to be unique,
+            // since the Rust name comes from the C++ name and the overload
+            // tracker numbers that.
+            let mut idents: HashSet<String> = HashSet::new();
+            for member in members {
+                if !matches!(member.visibility, CppVisibility::Public) {
+                    continue;
+                }
+                if matches!(
+                    member.kind,
+                    CppMethodKind::Constructor
+                        | CppMethodKind::Destructor
+                        | CppMethodKind::VirtualDestructor { .. }
+                ) {
+                    continue;
+                }
+                let mut ident = format!("{}_{}", name.name.get_final_item(), member.name);
+                let mut suffix = 1;
+                while !idents.insert(ident.clone()) {
+                    ident = format!("{}_{}{suffix}", name.name.get_final_item(), member.name);
+                    suffix += 1;
+                }
+                let ident = make_ident(ident);
+                let cpp_name = CppOriginalName::from_template_member_function_name(&member.name);
+                let api_name = ApiName::new_with_cpp_name(
+                    name.name.get_namespace(),
+                    ident.clone(),
+                    Some(cpp_name.clone()),
+                );
+                // The name the method wants in Rust before the overload tracker
+                // numbers it, worked out exactly as it is for a method which is
+                // analyzed: a refused member never reaches the analysis, and
+                // the note standing in for it is a method of the instantiation
+                // which has to be named as the method would have been.
+                let rust_name = ideal_rust_name(ident.to_string(), Some(&cpp_name));
+                members_to_add.push(
+                    match template_member_function(&name.name, member, ident, cpp_name) {
+                        Ok(fun) => Member::Bind(api_name, fun, name.name.clone(), rust_name),
+                        Err(err) => Member::Refuse(api_name, name.name.clone(), rust_name, err),
+                    },
+                );
+            }
+        }
+
+        // Every name these members will want, before any of them is numbered.
+        // `reserve_ideal_names` ran over the APIs bindgen produced and none of
+        // these were among them; without this the overload tracker hands a
+        // numbered name to one member which another member declares for
+        // itself, and the numbered one wins - so a call to `get1` would reach
+        // an overload of `get` rather than the `get1` C++ declares.
+        for member in &members_to_add {
+            let (self_ty, rust_name) = match member {
+                Member::Bind(_, _, self_ty, rust_name)
+                | Member::Refuse(_, self_ty, rust_name, _) => (self_ty, rust_name),
+            };
+            self.overload_trackers_by_mod
+                .entry(self_ty.get_namespace().clone())
+                .or_default()
+                .reserve(Some(self_ty.get_final_item()), rust_name);
+        }
+
+        let mut results = apis;
+        for member in members_to_add {
+            match member {
+                Member::Bind(name, fun, _, _) => {
+                    self.analyze_and_add(
+                        name,
+                        fun,
+                        &mut results,
+                        TypeConversionSophistication::Regular,
+                        None,
+                    );
+                }
+                // Numbered by the same overload tracker as the members which
+                // were bound, in the same pass over the declarations, because
+                // a refused member is one of the overload set: without that
+                // the note for a refused `get` and the binding for a `get`
+                // beside it are two `fn get` in one `impl` block. That is what
+                // `analyze_foreign_fn` does for a method it refuses on an
+                // ordinary class, and the numbering has to agree with it.
+                //
+                // The API itself is filed under the name the member was going
+                // to get, as an ignored function is, because the
+                // instantiation's own name is taken. The context is what puts
+                // the note in the instantiation's `impl` block, and what keeps
+                // it through garbage collection - see
+                // `filter_apis_by_following_edges_from_allowlist`.
+                Member::Refuse(name, self_ty, rust_name, err) => {
+                    let rust_name = self.get_overload_name(
+                        self_ty.get_namespace(),
+                        self_ty.get_final_item(),
+                        rust_name,
+                    );
+                    let ctx = self.error_context_for_method(&self_ty, &rust_name);
+                    results.push(Api::IgnoredItem {
+                        name,
+                        err,
+                        ctx: Some(ctx),
+                    });
+                }
+            }
+        }
+        results
+    }
+
     /// Adds an API, usually a synthesized API. Returns the final calculated API name, which can be used
     /// for others to depend on this.
     fn analyze_and_add<P: AnalysisPhase<FunAnalysis = FnAnalysis>>(
@@ -1690,29 +1905,7 @@ impl<'a> FnAnalyzer<'a> {
 
         // End of parameter processing.
         // Work out naming, part one.
-        // bindgen may have mangled the name either because it's invalid Rust
-        // syntax (e.g. a keyword like 'async') or it's an overload.
-        // If the former, we respect that mangling. If the latter, we don't,
-        // because we'll add our own overload counting mangling later.
-        // Cases:
-        //   function, IRN=foo,    CN=<none>                    output: foo    case 1
-        //   function, IRN=move_,  CN=move   (keyword problem)  output: move_  case 2
-        //   function, IRN=foo1,   CN=foo    (overload)         output: foo    case 3
-        //   method,   IRN=A_foo,  CN=foo                       output: foo    case 4
-        //   method,   IRN=A_move, CN=move   (keyword problem)  output: move_  case 5
-        //   method,   IRN=A_foo1, CN=foo    (overload)         output: foo    case 6
-        let ideal_rust_name = match cpp_original_name {
-            None => initial_rust_name, // case 1
-            Some(cpp_original_name) => {
-                if initial_rust_name.ends_with('_') {
-                    initial_rust_name // case 2
-                } else if validate_ident_ok_for_rust(cpp_original_name).is_err() {
-                    format!("{}_", cpp_original_name.to_string_for_rust_name()) // case 5
-                } else {
-                    cpp_original_name.to_string_for_rust_name() // cases 3, 4, 6
-                }
-            }
-        };
+        let ideal_rust_name = ideal_rust_name(initial_rust_name, cpp_original_name);
 
         // Let's spend some time figuring out the kind of this function (i.e. method,
         // virtual function, etc.)
@@ -2676,18 +2869,7 @@ impl<'a> FnAnalyzer<'a> {
         for api in apis.iter() {
             if let Api::Function { name, fun, .. } = api {
                 let initial_rust_name = fun.ident.to_string();
-                let bare = match name.cpp_name_if_present() {
-                    None => initial_rust_name,
-                    Some(cpp_original_name) => {
-                        if initial_rust_name.ends_with('_') {
-                            initial_rust_name
-                        } else if validate_ident_ok_for_rust(cpp_original_name).is_err() {
-                            format!("{}_", cpp_original_name.to_string_for_rust_name())
-                        } else {
-                            cpp_original_name.to_string_for_rust_name()
-                        }
-                    }
-                };
+                let bare = ideal_rust_name(initial_rust_name, name.cpp_name_if_present());
                 let ns = name.name.get_namespace().clone();
                 // Methods reserve within their type's scope; free
                 // functions within the namespace's function scope --
@@ -3732,6 +3914,152 @@ fn look_up_member(
     )
 }
 
+/// The class template a concrete type instantiates, where it instantiates one
+/// outright.
+///
+/// Two routes arrive at a concrete type and they carry different things. One
+/// autocxx met in a signature or a typedef has bindgen's own rendering of it,
+/// `root::A<u32>`, whose leading path is the template. One the user named in a
+/// `concrete!` directive has only the C++ expression they wrote, and that
+/// expression need not be an instantiation at all: `Outer<int>::Inner` and
+/// `Outer<int>::Inner<float>` both name a type *inside* one, whose members are
+/// not `Outer`'s and would not compile called on it. So such an expression
+/// counts only where the `>` closing the first `<` is the end of it -
+/// `A<uint32_t>` - and anything else answers `None`.
+fn instantiated_template(
+    rs_definition: Option<&crate::minisyn::Type>,
+    cpp_definition: &str,
+) -> Option<QualifiedName> {
+    if let Some(Type::Path(typ)) = rs_definition.map(|ty| &ty.0) {
+        return Some(QualifiedName::from_type_path(typ));
+    }
+    let (template, arguments) = cpp_definition.split_once('<')?;
+    // Counted rather than matched on the last character, because an expression
+    // may have several argument lists and only the first one's belongs to the
+    // name in front of it. An expression this cannot make sense of - a `>`
+    // inside a non-type argument, say - runs off the end and answers `None`,
+    // which costs the members rather than attaching them to the wrong type.
+    let mut depth = 1usize;
+    for (offset, character) in arguments.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return arguments[offset + 1..]
+                        .trim()
+                        .is_empty()
+                        .then(|| QualifiedName::new_from_cpp_name(template.trim()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One member function of a class template, as a method of a concrete
+/// instantiation of that template.
+///
+/// The signature is bindgen's own rendering of the member's, in the shape
+/// bindgen writes a method it can generate: a leading `this` pointer for a
+/// non-static member, whose constness is the member's, and then the parameters.
+/// Only the receiver is autocxx's to supply - bindgen reports the rest - because
+/// the receiver is the one part of the signature which names the class template
+/// and so names its parameters.
+fn template_member_function(
+    self_ty: &QualifiedName,
+    member: &TemplateMemberFunction,
+    ident: crate::minisyn::Ident,
+    cpp_name: CppOriginalName,
+) -> Result<Box<FuncToConvert>, ConvertErrorFromCpp> {
+    let signature = member
+        .signature
+        .as_ref()
+        .ok_or(ConvertErrorFromCpp::TemplateMemberWithDependentSignature)?;
+    let is_static = matches!(member.kind, CppMethodKind::Static);
+    let mut inputs: Punctuated<syn::FnArg, Comma> = Punctuated::new();
+    if !is_static {
+        let path = self_ty.to_type_path();
+        inputs.push(if member.is_const {
+            parse_quote! { this: *const #path }
+        } else {
+            parse_quote! { this: *mut #path }
+        });
+    }
+    for argument in &signature.arguments {
+        inputs.push(
+            syn::parse_str::<syn::FnArg>(argument).map_err(|_| {
+                ConvertErrorFromCpp::TemplateMemberSignatureNotRust(argument.clone())
+            })?,
+        );
+    }
+    let output = match &signature.return_type {
+        None => ReturnType::Default,
+        Some(text) => {
+            let ty = syn::parse_str::<Type>(text)
+                .map_err(|_| ConvertErrorFromCpp::TemplateMemberSignatureNotRust(text.clone()))?;
+            parse_quote! { -> #ty }
+        }
+    };
+    Ok(Box::new(FuncToConvert {
+        provenance: Provenance::SynthesizedOther,
+        ident,
+        doc_attrs: Vec::new(),
+        inputs: minisynize_punctuated(inputs),
+        variadic: signature.is_variadic,
+        output: output.into(),
+        vis: parse_quote! { pub },
+        virtualness: match member.kind {
+            CppMethodKind::Virtual { pure_virtual: true } => Some(Virtualness::PureVirtual),
+            CppMethodKind::Virtual {
+                pure_virtual: false,
+            } => Some(Virtualness::Virtual),
+            _ => None,
+        },
+        cpp_vis: CppVisibility::Public,
+        special_member: member.special_member,
+        method_kind: Some(member.kind),
+        original_name: Some(cpp_name.clone()),
+        // Set for every member, not only the static ones: for the rest the
+        // `this` parameter above answers the same question, and
+        // `analyze_foreign_fn` prefers it.
+        self_ty: Some(self_ty.clone()),
+        synthesized_this_type: None,
+        add_to_trait: None,
+        // The receiver is the class which declares the member, so the shim
+        // calls it by name on the receiver. A static member is named through
+        // the class instead, which is what the `StaticMethodCall` body writes.
+        synthetic_cpp: Some(if is_static {
+            (
+                CppFunctionBody::StaticMethodCall(
+                    self_ty.get_namespace().clone(),
+                    self_ty.get_final_ident(),
+                    cpp_name.to_effective_name(),
+                ),
+                CppFunctionKind::Function,
+            )
+        } else {
+            (
+                CppFunctionBody::FunctionCall(Namespace::new(), cpp_name.to_effective_name()),
+                CppFunctionKind::Method,
+            )
+        }),
+        is_deleted: member.explicitness,
+        deprecation: member.deprecation.clone(),
+        // Reported rather than recovered from the `#[link_name]` mangling, as
+        // it is for a member bindgen generates: there is no function for one of
+        // these to carry a mangled name at all. It has to come from somewhere,
+        // because a class may declare both qualifications of one name and the
+        // shim would call whichever the lvalue it holds selects.
+        ref_qualifier: match member.ref_qualifier {
+            RefQualifier::None => CppRefQualifier::None,
+            RefQualifier::LValue => CppRefQualifier::LValue,
+            RefQualifier::RValue => CppRefQualifier::RValue,
+        },
+    }))
+}
+
 /// The base class member `fun`, as a function reached through a derived class
 /// which inherits it, or which named it in a `using Base::foo;`.
 ///
@@ -3791,6 +4119,46 @@ fn import_member_into(
         CppFunctionKind::Method,
     ));
     (name, Box::new(fun))
+}
+
+/// The name a function would like in Rust, before the overload tracker numbers
+/// it: the C++ name, unless the identifier bindgen chose ends in an underscore.
+///
+/// bindgen may have mangled the name either because it is not valid Rust syntax
+/// (a keyword like `async`, which it makes `async_`) or because it is an
+/// overload (which it numbers). The former is respected and the latter is not,
+/// since overloads are numbered here instead - and the two are told apart by
+/// the trailing underscore, which therefore also keeps the mangled name for a
+/// C++ function called `foo_` in the first place. Cases:
+/// ```text
+///   function, IRN=foo,    CN=<none>                    output: foo    case 1
+///   function, IRN=move_,  CN=move   (keyword problem)  output: move_  case 2
+///   function, IRN=foo1,   CN=foo    (overload)         output: foo    case 3
+///   method,   IRN=A_foo,  CN=foo                       output: foo    case 4
+///   method,   IRN=A_move, CN=move   (keyword problem)  output: move_  case 5
+///   method,   IRN=A_foo1, CN=foo    (overload)         output: foo    case 6
+/// ```
+///
+/// Shared by the three places which have to agree about it: the pass which
+/// reserves the names real functions will want, the analysis which assigns
+/// them, and the synthesis of a class template's members, whose refused members
+/// get a name from here without being analyzed at all.
+fn ideal_rust_name(
+    initial_rust_name: String,
+    cpp_original_name: Option<&CppOriginalName>,
+) -> String {
+    match cpp_original_name {
+        None => initial_rust_name, // case 1
+        Some(cpp_original_name) => {
+            if initial_rust_name.ends_with('_') {
+                initial_rust_name // case 2
+            } else if validate_ident_ok_for_rust(cpp_original_name).is_err() {
+                format!("{}_", cpp_original_name.to_string_for_rust_name()) // case 5
+            } else {
+                cpp_original_name.to_string_for_rust_name() // cases 3, 4, 6
+            }
+        }
+    }
 }
 
 /// Whether this function is a constructor, and if so the suffix which

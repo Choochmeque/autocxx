@@ -1,0 +1,825 @@
+Subject: Report a class template's member functions through `ParseCallbacks`
+
+bindgen discards the member functions of a class template while parsing, in
+`CompInfo::from_ty`, and so says nothing about them anywhere: they are in no
+callback, and `Function::codegen` would have bailed on them a second time had
+they survived. The reason is sound for code generation - the set of
+instantiations is open ended, so there is no monomorphization to emit - and it
+throws away everything C++ said about the members along with the code nobody
+could have called.
+
+A consumer which writes its own C++ can call them. Calling a member on a chosen
+instantiation instantiates it: `a.foo()` on an `A<int>` needs no symbol bindgen
+emitted, only a shim naming the member and the arguments to pass it. What such a
+consumer cannot do is invent the signature, which is the one thing only bindgen
+knows - it is bindgen's own type mapping, down to whichever newtype-wrapper
+markers the caller asked for.
+
+`--report-template-member-functions` keeps the members at parse time and reports
+each of them from the point codegen gives up, through
+`denote_template_member_function`: the name, the method kind, the constness, the
+access, `= delete`/`= default`, any `[[deprecated]]`, the ref-qualifier, and the
+signature. Constructors and the destructor are reported too, being member
+functions like any other. A class *nested* inside a class template is reported
+from there as well: its own members were never discarded, having no template
+parameters of their own to be discarded over, but codegen gives up on them for
+the parameters they inherit and so says nothing about them either.
+
+One thing had to be fixed rather than reported. `Cursor::is_deleted_function`
+is a heuristic - an inline function with no definition and no `= default` - and
+it says yes to an inline member of a class template whose body clang deferred,
+which it does by default on the MSVC target, `-fdelayed-template-parsing` being
+part of MSVC compatibility: the body is not parsed, and is not even in the tokens
+of the declaration, so there is no definition to find. It was never
+reached for such a member before, these having been discarded while parsing.
+
+`Cursor::is_deleted_as_written` reads the declaration instead, and
+`is_deleted_function_in_any_context` uses it for a member of a class template
+alone, leaving every other function classified exactly as before. It reads the
+last token rather than scanning: the deleted-function body is the last thing in
+a declaration which has one, so whatever the declaration contains of its own - a
+braced default argument, a lambda, a trailing return type, a requires-clause, an
+attribute - comes before it, and nothing else a declaration can end with is the
+word `delete`.
+
+It answers `None` where the declaration cannot be read that way, which is where
+a macro wrote the end of it: the tokens are then the macro's use rather than its
+replacement, and may not even be the whole declaration - `void f() DELETED;`
+tokenizes as one identifier, `void f() WRAP(DELETED);` as nothing past `void`,
+and a declaration whose first token comes from a macro defined in another file
+as nothing at all. Two things are asked for that: whether the tokens reach the
+end of the declaration, and whether the last of them was written by a macro,
+which the detailed preprocessing record answers. The heuristic's answer stands
+for a declaration which fails either, erring towards refusing a member rather
+than towards a call to a function C++ deleted.
+
+The ref-qualifier is the one fact bindgen recorded nowhere. For a member it
+generates, the qualifier survives in the mangled name the `#[link_name]`
+carries, and there is no mangled name here; a class may declare both `void f()
+&` and `void f() &&`, which differ in nothing else reported here, so a consumer
+calling one of them by name would silently call whichever the lvalue it has
+selects. `Type::cxx_ref_qualifier` asks libclang, and the answer joins the other
+C++ facts on `AutocxxFuncInfo`.
+
+The report is subject to the same per-function exclusions as codegen: a
+blocklisted member is not reported, nor is one whose kind `--generate` leaves
+out.
+
+Opt-in rather than unconditional because keeping the members is not free: they
+and their signatures are IR again, which costs parse time and memory on any
+header which uses the standard library, where a great many class templates have
+a great many members. With the option off nothing changes at all - the report is
+behind the same option, so a nested class, whose members were never discarded, is
+not reported either.
+
+With it on, nothing is *generated* for them either. The existing
+`all_template_params` check in `CompInfo::codegen` is what stops that, and is
+where the report is made instead; and `CompInfo::trace` stops short of a
+member of a class which has template parameters in scope, so the types in its
+signature are not allowlisted by it. That last one is not tidiness. Tracing them
+allowlists whatever a member's signature names, and for a header which includes
+`<string>` that is the standard library's internals - `_CharT` and friends, whose
+generated Rust does not compile. A signature naming a type nothing else asked for
+is therefore reported with a name the consumer cannot resolve, which is the
+consumer's to refuse; that is the trade, and it is the right way round.
+
+The signature is reported only for a member whose signature names none of the
+template parameters in scope, because a rendering which named one would be Rust
+nobody outside the template can write. Which members those are is a property of
+their signatures rather than of the class, so a template's members are usually a
+mixture, and `names_template_parameter` decides it structurally: a parameter is
+named by the parameter itself, by a type declared inside a template - bindgen
+renders one with the template's parameters in scope - and by anything built out
+of either. A template instantiation's arguments count and the parameters its
+definition declares do not, so `A<int>` names nothing even though `A` has a
+parameter - but the parameters that definition is declared *inside* do, an
+instantiation of `A<T>::B<U>` supplying only `U`. The receiver is
+left out of the report altogether: for a non-static member it is a pointer to
+the class template, which names every parameter the template has, and a consumer
+supplies its own receiver anyway - `is_const` is what tells it how to take one.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -3,7 +3,7 @@
+ pub use crate::ir::analysis::DeriveTrait;
+ pub use crate::ir::comp::{MethodKind, SpecialMemberKind};
+ pub use crate::ir::derive::CanDerive as ImplementsTrait;
+-pub use crate::ir::function::{Deprecation, Visibility};
++pub use crate::ir::function::{Deprecation, RefQualifier, Visibility};
+ pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
+ pub use crate::ir::int::IntKind;
+ pub use cexpr::token::Kind as TokenKind;
+@@ -394,6 +394,39 @@
+         &self,
+         _id: DiscoveredItemId,
+         _deprecation: &Deprecation,
++    ) {
++    }
++
++    /// Report one member function of a class template, which bindgen
++    /// generates nothing at all for.
++    ///
++    /// A class template's member functions are absent from the output, and
++    /// from every other callback with them: the set of instantiations is open
++    /// ended, so there is no monomorphization for bindgen to name, and
++    /// `Function::codegen` returns before it reports anything. A consumer
++    /// which writes its own C++ for one chosen instantiation can call such a
++    /// member - `a.foo()` on an `A<int>` instantiates it - and has nothing to
++    /// build the call from.
++    ///
++    /// Called for each member function bindgen kept of every compound type
++    /// codegen writes out which has template parameters in scope - a class
++    /// nested inside a class template as well as a class template itself.
++    /// `parent` is that class, never an instantiation of it: bindgen announces
++    /// no item for an instantiation.
++    ///
++    /// Reported in the order codegen would have generated them, which is the
++    /// ordinary members in declaration order, then the constructors, then the
++    /// destructor, and subject to the same per-function exclusions: a
++    /// blocklisted member is not reported, nor is one whose kind
++    /// `--generate` leaves out. Kept is not the same as declared either,
++    /// because the parser's own filters run first - a member function template
++    /// is absent altogether, libclang reporting one as a
++    /// `CXCursor_FunctionTemplate`, which bindgen does not parse as a member of
++    /// the class at all.
++    fn denote_template_member_function(
++        &self,
++        _parent: DiscoveredItemId,
++        _member: TemplateMemberFunctionInfo<'_>,
+     ) {
+     }
+ 
+@@ -645,7 +678,97 @@
+     /// the member's own access and cannot be read off the member.
+     pub visibility: Visibility,
+ }
++
++/// What [`ParseCallbacks::denote_template_member_function`] reports about one
++/// member function of a class template.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct TemplateMemberFunctionInfo<'a> {
++    /// The name bindgen would have generated the function under, which is the
++    /// C++ name put through the same two changes bindgen makes for a member it
++    /// does generate: a destructor's leading `~` is dropped and a
++    /// `_destructor` suffix added, and
++    /// [`ParseCallbacks::generated_name_override`] has already been consulted.
++    pub name: &'a str,
++
++    /// What kind of member function C++ declared, which is the same answer
++    /// [`ParseCallbacks::denote_method_kind`] gives for a member bindgen did
++    /// generate.
++    pub kind: MethodKind,
+ 
++    /// Whether C++ declared the member `const`, which says how a consumer
++    /// must take the receiver it supplies.
++    pub is_const: bool,
++
++    /// The access C++ gave the member.
++    pub visibility: Visibility,
++
++    /// Which special member this is, where it is one: the same answer
++    /// [`ParseCallbacks::denote_special_member`] gives for a member bindgen did
++    /// generate.
++    pub special_member: Option<SpecialMemberKind>,
++
++    /// Whether C++ wrote `= delete` or `= default` on the member, as
++    /// [`ParseCallbacks::denote_explicit`] reports for one bindgen did
++    /// generate. A consumer which emits a call must not emit one to a deleted
++    /// member.
++    pub explicitness: Option<Explicitness>,
++
++    /// What C++ marked the member `[[deprecated]]` with, where it did, as
++    /// [`ParseCallbacks::denote_deprecation`] reports for one bindgen did
++    /// generate.
++    pub deprecation: Option<&'a Deprecation>,
++
++    /// The ref-qualifier C++ declared the member with, which bindgen records
++    /// for no other member: for one it generates, the qualifier survives in
++    /// the mangled name a `#[link_name]` carries. A class may declare both
++    /// qualifications of one name, and they differ in nothing else reported
++    /// here, so a consumer which emits a call has to be told which it is
++    /// calling - and a `&&`-qualified member cannot be called on an lvalue at
++    /// all.
++    pub ref_qualifier: RefQualifier,
++
++    /// The signature, where it can be written down outside the template;
++    /// `None` where it cannot. See [`TemplateMemberFunctionSignature`].
++    pub signature: Option<TemplateMemberFunctionSignature<'a>>,
++}
++
++/// The signature of a class template's member function, as bindgen would have
++/// rendered it had there been an instantiation to render it for.
++///
++/// Reported only for a member whose signature names none of the template
++/// parameters in scope, because a rendering which named one would be Rust
++/// nobody outside the template can write: the parameter has no meaning there,
++/// and bindgen has no instantiation to substitute for it. That is a property of
++/// the signature rather than of the member - a class template's members are
++/// usually a mixture - and it is decided structurally: a parameter is named by
++/// the parameter itself, by a type declared inside the template, and by
++/// anything built out of either. The template *arguments* of an instantiation
++/// count and the definition's own parameters do not, so `A<int>` names nothing
++/// even though `A` has a parameter - but the parameters that definition is
++/// itself declared inside do, an instantiation of `A<T>::B<U>` supplying only
++/// `U`.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct TemplateMemberFunctionSignature<'a> {
++    /// Each parameter as Rust source, in the form bindgen writes one in the
++    /// `extern "C"` block it generates for a member it can generate -
++    /// `arg1: *const root::Foo` - with the same name mangling and the same
++    /// markers any enabled newtype-wrapper option asks for.
++    ///
++    /// The receiver is not among them. For a non-static member it is a pointer
++    /// to the class template itself, so it names every parameter the template
++    /// has; the consumer knows what it is calling the member on, and `is_const`
++    /// is what says how to take it.
++    pub arguments: &'a [String],
++
++    /// The return type as Rust source, or `None` where C++ returns `void`.
++    pub return_type: Option<&'a str>,
++
++    /// Whether C++ declared the member variadic.
++    pub is_variadic: bool,
++}
++
+ /// Whether a method is virtual or pure virtual.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Virtualness {
+--- a/clang.rs
++++ b/clang.rs
+@@ -668,8 +668,93 @@
+         self.is_inlined_function() &&
+             self.definition().is_none() &&
+             !self.is_defaulted_function()
++    }
++
++    /// Whether this function declaration was written `= delete`, read from the
++    /// declaration rather than concluded from the absence of a definition.
++    ///
++    /// The deleted-function body is the last thing in such a declaration, so
++    /// this reads the last token rather than scanning: whatever the declaration
++    /// contains of its own - a braced default argument, a lambda, a trailing
++    /// return type, a requires-clause, an attribute, `override` - comes before
++    /// it, and nothing else a declaration can end with is the word `delete`. A
++    /// member whose body clang deferred ends at its declarator and one whose
++    /// body clang parsed ends at the body's `}`; a pure virtual ends at `0` and
++    /// a defaulted one at `default`.
++    ///
++    /// `None` where the declaration cannot be read this way, which is where a
++    /// macro wrote the end of it. The tokens are then the macro's use rather
++    /// than its replacement and say nothing about deletion, and they may not
++    /// even be the whole declaration: `void f() DELETED;` tokenizes as one
++    /// identifier, `void f() WRAP(DELETED);` as nothing past `void`, and a
++    /// declaration whose first token comes from a macro defined in another file
++    /// as nothing at all. Two things are checked for that: that the tokens
++    /// reach the end of the declaration, and that the last of them was not
++    /// written by a macro. The caller decides what to do with a declaration it
++    /// cannot read.
++    pub(crate) fn is_deleted_as_written(&self) -> Option<bool> {
++        let tokens = self.tokens();
++        let mut tail = tokens
++            .iter()
++            .filter(|token| token.kind != CXToken_Comment)
++            .collect::<Vec<_>>();
++        while tail.last().is_some_and(|token| token.spelling() == b";") {
++            tail.pop();
++        }
++        let last = tail.pop()?;
++        let reaches_the_end = unsafe {
++            let (declaration_file, declaration_end) =
++                spelling_location(clang_getRangeEnd(self.extent()));
++            let (token_file, token_end) =
++                spelling_location(clang_getRangeEnd(last.extent));
++            declaration_end == token_end &&
++                clang_File_isEqual(declaration_file, token_file) != 0
++        };
++        if !reaches_the_end || tokens.is_macro_expansion(&last) {
++            return None;
++        }
++        Some(last.spelling() == b"delete")
+     }
+ 
++    /// Whether this cursor is declared inside a class template, however deeply
++    /// nested, and so in a context whose bodies clang may not have parsed.
++    pub(crate) fn is_within_a_class_template(&self) -> bool {
++        let mut parent = self.semantic_parent();
++        loop {
++            match parent.kind() {
++                CXCursor_ClassTemplate |
++                CXCursor_ClassTemplatePartialSpecialization => return true,
++                CXCursor_StructDecl | CXCursor_ClassDecl |
++                CXCursor_UnionDecl => parent = parent.semantic_parent(),
++                _ => return false,
++            }
++        }
++    }
++
++    /// Whether this function is deleted, answered for a member of a class
++    /// template as well as for everything else.
++    ///
++    /// [`Self::is_deleted_function`] is a heuristic - an inline function with
++    /// no definition and no `= default` - and it says yes to an inline member of
++    /// a class template whose body clang deferred, which it does by default for
++    /// the MSVC target, `-fdelayed-template-parsing` being part of MSVC
++    /// compatibility: the body is not parsed, and is not even in the tokens of
++    /// the declaration, so there is no definition to find. So for a member of a
++    /// class template the declaration is read instead.
++    ///
++    /// Where the declaration cannot be read - a macro wrote part of it - the
++    /// heuristic's answer stands, which errs towards refusing a member rather
++    /// than towards emitting a call to a function C++ deleted.
++    pub(crate) fn is_deleted_function_in_any_context(&self) -> bool {
++        if !self.is_deleted_function() {
++            return false;
++        }
++        if !self.is_within_a_class_template() {
++            return true;
++        }
++        self.is_deleted_as_written().unwrap_or(true)
++    }
++
+     /// Is the referent a bit field declaration?
+     pub(crate) fn is_bit_field(&self) -> bool {
+         unsafe { clang_Cursor_isBitField(self.x) != 0 }
+@@ -1170,6 +1255,21 @@
+             return &[];
+         }
+         unsafe { slice::from_raw_parts(self.tokens, self.token_count as usize) }
++    }
++
++    /// Whether the cursor which describes this token's location is a macro
++    /// expansion, which is what a token written by a macro - the macro's own
++    /// name, `clang_tokenize` handing back the source as written rather than
++    /// the replacement - answers. It is the location's describing cursor and
++    /// not an exact test for a macro name, so a token inside a macro
++    /// invocation's arguments answers yes too; a caller reading a declaration
++    /// wants to stop for either.
++    pub(crate) fn is_macro_expansion(&self, token: &ClangToken) -> bool {
++        unsafe {
++            let start = clang_getRangeStart(token.extent);
++            clang_getCursorKind(clang_getCursor(self.tu, start)) ==
++                CXCursor_MacroExpansion
++        }
+     }
+ 
+     /// Get an iterator over these tokens.
+@@ -1661,6 +1761,15 @@
+     /// Is this type a variadic function type?
+     pub(crate) fn is_variadic(&self) -> bool {
+         unsafe { clang_isFunctionTypeVariadic(self.x) != 0 }
++    }
++
++    /// The ref-qualifier this function type was declared with:
++    /// `CXRefQualifier_LValue` for `void f() &`, `CXRefQualifier_RValue` for
++    /// `void f() &&`, and `CXRefQualifier_None` for everything else. libclang
++    /// has a query of its own for it because it is part of the type and not of
++    /// anything a cursor's children describe.
++    pub(crate) fn cxx_ref_qualifier(&self) -> CXRefQualifierKind {
++        unsafe { clang_Type_getCXXRefQualifier(self.x) }
+     }
+ 
+     /// Given that this type is a function type, get the type of its return
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -3238,6 +3238,19 @@
+                     );
+                 }
+             }
++        } else if ctx.options().report_template_member_functions {
++            // Nothing above ran: no member of a class which has template
++            // parameters in scope has a monomorphization to generate, so
++            // `Function::codegen` bails on every one of them and no callback
++            // reports them either. Report them here, where the IR still has
++            // them - which is only where the option was asked for, since it is
++            // also what kept them.
++            //
++            // A class nested inside a template is here too, having template
++            // parameters in scope without declaring any of its own. Its
++            // members were never discarded at parse time, so this is the only
++            // place they could be reported from either.
++            utils::report_template_member_functions(ctx, item, self);
+         }
+ 
+         // NB: We can't use to_rust_ty here since for opaque types this tries to
+@@ -5851,15 +5864,19 @@
+     use super::serialize::CSerialize;
+     use super::{error, CodegenError, CodegenResult, ToRustTyOrOpaque};
+     use crate::callbacks::{
+-        DataMemberInfo, DiscoveredItemId, UsingDeclarationInfo, Visibility,
++        DataMemberInfo, DiscoveredItemId, Explicitness, UsingDeclarationInfo,
++        Visibility,
+     };
+-    use crate::ir::comp::{CompInfo, Field, FieldMethods};
++    use crate::ir::comp::{CompInfo, Field, FieldMethods, Method, MethodKind};
+     use crate::ir::context::BindgenContext;
+-    use crate::ir::context::TypeId;
++    use crate::ir::context::{ItemId, TypeId};
+     use crate::ir::function::{Abi, ClangAbi, FunctionSig};
+     use crate::ir::item::{Item, ItemCanonicalPath};
++    use crate::ir::template::TemplateParameters;
+     use crate::ir::ty::TypeKind;
++    use crate::HashSet;
+     use crate::{args_are_cpp, file_is_cpp};
++    use quote::ToTokens;
+     use std::borrow::Cow;
+     use std::io::Write;
+     use std::mem;
+@@ -6679,6 +6696,190 @@
+         item.as_module().is_some_and(|item_mod| !item_mod.is_inline())
+     }
+ 
++    /// Report each member function of a class template through
++    /// [`crate::callbacks::ParseCallbacks::denote_template_member_function`].
++    ///
++    /// The facts are the ones the generated Rust does not carry because there
++    /// is no generated Rust: bindgen emits nothing for these members, so a
++    /// consumer which writes its own C++ for a chosen instantiation has
++    /// nothing to build a call from.
++    pub(super) fn report_template_member_functions(
++        ctx: &BindgenContext,
++        item: &Item,
++        comp: &CompInfo,
++    ) {
++        let parent = DiscoveredItemId::new(item.id().as_usize());
++        // Constructors and the destructor are held apart from the other
++        // members in the IR and are member functions all the same, so they are
++        // put back together here, in the order `CompInfo::codegen` generates
++        // them in for a class which has no template parameters.
++        let mut members: Vec<Method> = comp
++            .methods()
++            .iter()
++            .map(|method| {
++                Method::new(method.kind(), method.signature(), method.is_const())
++            })
++            .collect();
++        members.extend(comp.constructors().iter().map(|signature| {
++            Method::new(MethodKind::Constructor, *signature, false)
++        }));
++        if let Some((kind, destructor)) = comp.destructor() {
++            members.push(Method::new(kind, destructor, false));
++        }
++        for method in &members {
++            let function_item = ctx.resolve_item(method.signature());
++            // The checks `Item::process_before_codegen` makes for a member
++            // which is generated, minus the once-only bookkeeping: a caller
++            // which excluded a function from codegen, by kind or by name,
++            // did not ask to hear about it either.
++            if !function_item.is_enabled_for_codegen(ctx) ||
++                function_item.is_blocklisted(ctx)
++            {
++                continue;
++            }
++            let Some(function) = function_item.kind().as_function() else {
++                continue;
++            };
++            let signature_item = ctx.resolve_item(function.signature());
++            let TypeKind::Function(ref signature) =
++                *signature_item.expect_type().kind()
++            else {
++                continue;
++            };
++            // The receiver is dropped: for a non-static member it is a
++            // pointer to the class template, which names every parameter the
++            // template has, and a consumer supplies its own anyway.
++            let arguments = signature
++                .argument_types()
++                .iter()
++                .skip(usize::from(!method.is_static()));
++            let writable =
++                !names_template_parameter(ctx, signature.return_type()) &&
++                    arguments.clone().all(|(_, ty)| {
++                        !names_template_parameter(ctx, *ty)
++                    });
++            let rendered_arguments: Vec<String> = if writable {
++                fnsig_arguments_iter(ctx, arguments, false)
++                    .into_iter()
++                    .map(|argument| argument.to_string())
++                    .collect()
++            } else {
++                Vec::new()
++            };
++            let rendered_return = match fnsig_return_ty_internal(ctx, signature)
++            {
++                syn::Type::Tuple(syn::TypeTuple { ref elems, .. })
++                    if elems.is_empty() =>
++                {
++                    None
++                }
++                ref ty => Some(ty.to_token_stream().to_string()),
++            };
++            let member = crate::callbacks::TemplateMemberFunctionInfo {
++                name: function.name(),
++                kind: method.kind(),
++                is_const: method.is_const(),
++                visibility: function.visibility(),
++                special_member: function.special_member(),
++                explicitness: if function.deleted_fn() {
++                    Some(Explicitness::Deleted)
++                } else if function.defaulted_fn() {
++                    Some(Explicitness::Defaulted)
++                } else {
++                    None
++                },
++                deprecation: function.deprecation(),
++                ref_qualifier: function.ref_qualifier(),
++                signature: writable.then_some(
++                    crate::callbacks::TemplateMemberFunctionSignature {
++                        arguments: &rendered_arguments,
++                        return_type: rendered_return.as_deref(),
++                        is_variadic: signature.is_variadic(),
++                    },
++                ),
++            };
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_template_member_function(parent, member);
++            });
++        }
++    }
++
++    /// Whether the Rust rendering of `ty` would name a template parameter, so
++    /// cannot be written outside the template the parameter belongs to.
++    ///
++    /// Structural, and deliberately so: a parameter is named by the parameter
++    /// itself, by a type declared inside a template - which bindgen renders
++    /// with the template's parameters in scope - and by anything built out of
++    /// either. A template instantiation's *arguments* are followed and the
++    /// parameters its definition declares are not, so `A<int>` names nothing
++    /// even though `A`'s own declaration has a parameter; the parameters that
++    /// definition is declared *inside* are another matter, and are the one
++    /// thing the definition is consulted for.
++    ///
++    /// Errs towards `true`: a type declared inside a template counts whether or
++    /// not it happens to use the parameter, and a reference bindgen never
++    /// resolved counts because nothing can be said about what it would render
++    /// as.
++    fn names_template_parameter(ctx: &BindgenContext, ty: TypeId) -> bool {
++        fn walk(
++            ctx: &BindgenContext,
++            id: ItemId,
++            seen: &mut HashSet<ItemId>,
++        ) -> bool {
++            if !seen.insert(id) {
++                // Already being answered further up the walk; whichever path
++                // introduced it decides.
++                return false;
++            }
++            let item = ctx.resolve_item(id);
++            if !item.all_template_params(ctx).is_empty() {
++                return true;
++            }
++            let Some(ty) = item.as_type() else {
++                return false;
++            };
++            match *ty.kind() {
++                TypeKind::TypeParam => true,
++                TypeKind::Pointer(inner) |
++                TypeKind::Reference(inner, _) |
++                TypeKind::Array(inner, _) |
++                TypeKind::Vector(inner, _) |
++                TypeKind::BlockPointer(inner) |
++                TypeKind::Alias(inner) |
++                TypeKind::TemplateAlias(inner, ..) |
++                TypeKind::ResolvedTypeRef(inner) => {
++                    walk(ctx, inner.into(), seen)
++                }
++                TypeKind::TemplateInstantiation(ref instantiation) => {
++                    let definition =
++                        ctx.resolve_item(instantiation.template_definition());
++                    // A template declared inside another template renders with
++                    // the outer one's parameters in scope, and an instantiation
++                    // of the inner one supplies only the inner one's arguments,
++                    // so the rendering names what it does not define. Reached
++                    // through the parentage check above wherever the IR keeps
++                    // the enclosing template on the instantiation, and stated
++                    // here because it is a property of the rendering rather
++                    // than of where the item happens to hang.
++                    definition.all_template_params(ctx).len() >
++                        definition.self_template_params(ctx).len() ||
++                        instantiation.template_arguments().iter().any(
++                            |argument| walk(ctx, (*argument).into(), seen),
++                        )
++                }
++                TypeKind::Function(ref signature) => {
++                    walk(ctx, signature.return_type().into(), seen) ||
++                        signature.argument_types().iter().any(|(_, argument)| {
++                            walk(ctx, (*argument).into(), seen)
++                        })
++                }
++                TypeKind::UnresolvedTypeRef(..) => true,
++                _ => false,
++            }
++        }
++        walk(ctx, ty.into(), &mut HashSet::default())
++    }
++
+     pub(super) fn call_discovered_item_callback(
+         ctx: &BindgenContext,
+         item: &Item,
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -1656,7 +1656,15 @@
+                     // Methods of template functions not only used to be inlined,
+                     // but also instantiated, and we wouldn't be able to call
+                     // them, so just bail out.
+-                    if !ci.template_params.is_empty() {
++                    //
++                    // `--report-template-member-functions` keeps them instead,
++                    // for a consumer which writes its own C++ for one chosen
++                    // instantiation. Nothing is generated for them either way:
++                    // `CompInfo::codegen` generates no member of a class which
++                    // has template parameters, and reports them there.
++                    if !ci.template_params.is_empty() &&
++                        !ctx.options().report_template_member_functions
++                    {
+                         return CXChildVisit_Continue;
+                     }
+ 
+@@ -2052,16 +2060,28 @@
+             tracer.visit_kind(var.into(), EdgeKind::InnerVar);
+         }
+ 
+-        for method in self.methods() {
+-            tracer.visit_kind(method.signature.into(), EdgeKind::Method);
+-        }
+-
+-        if let Some((_kind, signature)) = self.destructor() {
+-            tracer.visit_kind(signature.into(), EdgeKind::Destructor);
+-        }
++        // A member of a class which has template parameters in scope is
++        // generated for nobody - `CompInfo::codegen` skips every one of them -
++        // and is here at all only because
++        // `--report-template-member-functions` kept it to be reported. Tracing
++        // one would allowlist the types in its signature and so emit types
++        // nothing else in the bindings reaches, which is a change to the
++        // output that reporting is not meant to make: a header which uses the
++        // standard library has a great many such members, and the types they
++        // drag in are its internals. Without the option there is nothing here
++        // to skip, the members having been discarded while parsing.
++        if item.all_template_params(context).is_empty() {
++            for method in self.methods() {
++                tracer.visit_kind(method.signature.into(), EdgeKind::Method);
++            }
+ 
+-        for ctor in self.constructors() {
+-            tracer.visit_kind(ctor.into(), EdgeKind::Constructor);
++            if let Some((_kind, signature)) = self.destructor() {
++                tracer.visit_kind(signature.into(), EdgeKind::Destructor);
++            }
++
++            for ctor in self.constructors() {
++                tracer.visit_kind(ctor.into(), EdgeKind::Constructor);
++            }
+         }
+ 
+         // Base members and fields are not generated for opaque types (but all
+--- a/ir/function.rs
++++ b/ir/function.rs
+@@ -72,6 +72,23 @@
+     Internal,
+ }
+ 
++/// The ref-qualifier a C++ member function was declared with.
++///
++/// It is part of the declaration, and the generated Rust carries it only in the
++/// mangled name a `#[link_name]` holds - which a member bindgen generates no
++/// function for does not have. A class may declare both qualifications of one
++/// name, so a consumer which emits a call of its own has no way to tell which
++/// member it is calling.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum RefQualifier {
++    /// No ref-qualifier: `void f();`.
++    None,
++    /// `void f() &`, which may only be called on an lvalue.
++    LValue,
++    /// `void f() &&`, which may only be called on an rvalue.
++    RValue,
++}
++
+ /// Extra C++ facts autocxx needs which vanilla bindgen does not record.
+ #[derive(Debug)]
+ pub(crate) struct AutocxxFuncInfo {
+@@ -83,6 +100,8 @@
+     is_deleted: bool,
+     /// `= default`
+     is_defaulted: bool,
++    /// `void f() &` or `void f() &&`, where C++ wrote one.
++    ref_qualifier: RefQualifier,
+ }
+ 
+ impl AutocxxFuncInfo {
+@@ -91,12 +110,14 @@
+         visibility: Visibility,
+         is_deleted: bool,
+         is_defaulted: bool,
++        ref_qualifier: RefQualifier,
+     ) -> Self {
+         Self {
+             special_member,
+             visibility,
+             is_deleted,
+             is_defaulted,
++            ref_qualifier,
+         }
+     }
+ 
+@@ -118,6 +139,11 @@
+     /// Whether this function is `= default`.
+     pub fn defaulted_fn(&self) -> bool {
+         self.is_defaulted
++    }
++
++    /// The ref-qualifier C++ declared this member function with.
++    pub fn ref_qualifier(&self) -> RefQualifier {
++        self.ref_qualifier
+     }
+ }
+ 
+@@ -276,6 +302,11 @@
+     pub fn defaulted_fn(&self) -> bool {
+         self.autocxx.defaulted_fn()
+     }
++
++    /// The ref-qualifier C++ declared this member function with.
++    pub fn ref_qualifier(&self) -> RefQualifier {
++        self.autocxx.ref_qualifier()
++    }
+ }
+ 
+ impl DotAttributes for Function {
+@@ -885,7 +916,7 @@
+                 return Err(ParseError::Continue);
+             }
+ 
+-            if cursor.is_deleted_function() &&
++            if cursor.is_deleted_function_in_any_context() &&
+                 !context.options().generate_deleted_functions
+             {
+                 return Err(ParseError::Continue);
+@@ -984,8 +1015,13 @@
+         let autocxx_info = AutocxxFuncInfo::new(
+             special_member,
+             visibility,
+-            cursor.is_deleted_function(),
++            cursor.is_deleted_function_in_any_context(),
+             cursor.is_defaulted_function(),
++            match cursor.cur_type().cxx_ref_qualifier() {
++                CXRefQualifier_LValue => RefQualifier::LValue,
++                CXRefQualifier_RValue => RefQualifier::RValue,
++                _ => RefQualifier::None,
++            },
+         );
+ 
+         let function = Self::new(
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -702,6 +702,7 @@
+         translate_enum_integer_types,
+         c_naming,
+         explicit_padding,
++        report_template_member_functions,
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
+         use_distinct_wchar_t,
+@@ -1016,6 +1017,7 @@
+             translate_enum_integer_types,
+             c_naming,
+             explicit_padding,
++            report_template_member_functions,
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
+             use_distinct_wchar_t,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -203,6 +203,30 @@
+             }
+         },
+         as_args: "--use-reference-newtype-wrapper",
++    },
++
++    /// Parse the member functions of a class template and report them through
++    /// [`ParseCallbacks::denote_template_member_function`], rather than
++    /// discarding them at parse time.
++    ///
++    /// They are still not generated: there is no monomorphization to generate,
++    /// which is why they were discarded. A consumer which writes its own C++
++    /// for one chosen instantiation can call them all the same, and needs to be
++    /// told the signatures.
++    ///
++    /// [`ParseCallbacks::denote_template_member_function`]:
++    ///     callbacks::ParseCallbacks::denote_template_member_function
++    report_template_member_functions: bool {
++        methods: {
++            /// If this is true, keep the member functions of a class template
++            /// and report them through `ParseCallbacks`, instead of discarding
++            /// them while parsing.
++            pub fn report_template_member_functions(mut self, doit: bool) -> Builder {
++                self.options.report_template_member_functions = doit;
++                self
++            }
++        },
++        as_args: "--report-template-member-functions",
+     },
+ 
+     /// Use a newtype wrapper to denote types which are `const` in their own

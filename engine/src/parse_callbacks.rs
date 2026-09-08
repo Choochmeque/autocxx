@@ -12,7 +12,8 @@ use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
-    Explicitness, MethodKind, SpecialMemberKind, UsingDeclarationInfo, Visibility,
+    Explicitness, MethodKind, RefQualifier, SpecialMemberKind, TemplateMemberFunctionInfo,
+    UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -122,6 +123,19 @@ impl CppOriginalName {
         Self(name.to_string())
     }
 
+    /// The C++ name of a member function of a class template, which bindgen
+    /// reports through `denote_template_member_function` and generates no
+    /// function for. It is the member's own spelling once the rename
+    /// `generated_name_override` asks for has come off, so it is a C++ name in
+    /// the same sense every other one here is; what makes it worth its own
+    /// constructor is that there is no function under it for the usual
+    /// `denote_cpp_name` route to have named. A destructor's reported name is
+    /// not a spelling - bindgen trades the `~` for a suffix - and none is
+    /// passed here, the caller binding no destructor.
+    pub(crate) fn from_template_member_function_name(name: &str) -> Self {
+        Self(name.to_string())
+    }
+
     /// Work out what to call a Rust-side API given a C++-side name.
     pub(crate) fn to_string_for_rust_name(&self) -> String {
         self.0.clone()
@@ -218,6 +232,54 @@ pub(crate) struct DataMember {
     pub(crate) has_default_member_initializer: bool,
 }
 
+/// One member function of a class template, as bindgen reported it.
+///
+/// bindgen generates nothing for these - there is no monomorphization to
+/// generate - so this is the only thing which says a class template has any
+/// member functions at all, and the only place their signatures are to be had.
+#[derive(Debug, Clone)]
+pub(crate) struct TemplateMemberFunction {
+    /// The name bindgen would have generated the function under: the C++ name
+    /// with a destructor's `~` traded for a `_destructor` suffix, and with the
+    /// rename `generated_name_override` asks for taken off again.
+    pub(crate) name: String,
+    /// What kind of member function C++ declared.
+    pub(crate) kind: MethodKind,
+    /// Whether C++ declared the member `const`, which is what says how a
+    /// receiver has to be taken to call it.
+    pub(crate) is_const: bool,
+    pub(crate) visibility: Visibility,
+    /// Which special member this is, where it is one.
+    pub(crate) special_member: Option<SpecialMemberKind>,
+    /// Whether C++ wrote `= delete` or `= default` on the member.
+    pub(crate) explicitness: Option<Explicitness>,
+    /// What C++ marked the member `[[deprecated]]` with, where it did.
+    pub(crate) deprecation: Option<Deprecation>,
+    /// The ref-qualifier C++ declared the member with. Not recoverable any
+    /// other way for one of these: autocxx reads a member's ref-qualifier out
+    /// of the mangled name bindgen puts in a `#[link_name]`, and bindgen
+    /// generates no function for a class template's member to carry one.
+    pub(crate) ref_qualifier: RefQualifier,
+    /// The signature, for a member whose signature names none of the
+    /// template's parameters. `None` where it names one: there is then no Rust
+    /// anyone outside the template can write for it, because the parameter has
+    /// no meaning there and bindgen has no instantiation to substitute.
+    pub(crate) signature: Option<TemplateMemberSignature>,
+}
+
+/// The signature of a class template's member function, as bindgen would have
+/// rendered it. The receiver is not among the arguments - see
+/// [`TemplateMemberFunction::is_const`].
+#[derive(Debug, Clone)]
+pub(crate) struct TemplateMemberSignature {
+    /// Each parameter as bindgen writes one in the `extern "C"` block it
+    /// generates for a member it can generate: `arg1: *const root::Foo`.
+    pub(crate) arguments: Vec<String>,
+    /// The return type, or `None` where C++ returns `void`.
+    pub(crate) return_type: Option<String>,
+    pub(crate) is_variadic: bool,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct NameAndParent {
     parent: DiscoveredItemId,
@@ -302,6 +364,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     data_members: HashMap<DiscoveredItemId, Vec<DataMember>>,
     deprecations: HashMap<DiscoveredItemId, Deprecation>,
     using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
+    template_member_functions: HashMap<DiscoveredItemId, Vec<TemplateMemberFunction>>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -363,11 +426,18 @@ impl UnindexedParseCallbackResults {
             })
             .collect();
 
+        let template_member_functions = self
+            .template_member_functions
+            .iter()
+            .filter_map(|(id, members)| Some((self.qualified_name(*id)?, members.clone())))
+            .collect();
+
         ParseCallbackResults {
             results: self,
             index,
             bases,
             using_declarations,
+            template_member_functions,
         }
     }
 
@@ -407,6 +477,7 @@ pub(crate) struct ParseCallbackResults {
     index: HashMap<NameAndParent, DiscoveredItemId>,
     bases: HashMap<QualifiedName, BaseClasses>,
     using_declarations: HashMap<QualifiedName, Vec<UsingDeclaration>>,
+    template_member_functions: HashMap<QualifiedName, Vec<TemplateMemberFunction>>,
 }
 
 impl ParseCallbackResults {
@@ -572,6 +643,20 @@ impl ParseCallbackResults {
     /// members of.
     pub(crate) fn using_declarations(&self, name: &QualifiedName) -> &[UsingDeclaration] {
         self.using_declarations
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The member functions bindgen reported for a class template: the ordinary
+    /// members in declaration order, then the constructors, then the
+    /// destructor. Empty for anything which is not one, and for a class
+    /// template bindgen wrote no members of.
+    pub(crate) fn template_member_functions(
+        &self,
+        name: &QualifiedName,
+    ) -> &[TemplateMemberFunction] {
+        self.template_member_functions
             .get(name)
             .map(Vec::as_slice)
             .unwrap_or_default()
@@ -783,6 +868,35 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                 base: base.base,
                 is_virtual: matches!(base.kind, BaseKind::Virtual),
                 is_public: matches!(base.visibility, Visibility::Public),
+            });
+    }
+
+    fn denote_template_member_function(
+        &self,
+        parent: DiscoveredItemId,
+        member: TemplateMemberFunctionInfo<'_>,
+    ) {
+        self.results
+            .borrow_mut()
+            .template_member_functions
+            .entry(parent)
+            .or_default()
+            .push(TemplateMemberFunction {
+                // bindgen reports the name under which it would have emitted
+                // the function, which `generated_name_override` above renamed.
+                name: strip_bindgen_original_suffix(member.name).to_string(),
+                kind: member.kind,
+                is_const: member.is_const,
+                visibility: member.visibility,
+                special_member: member.special_member,
+                explicitness: member.explicitness,
+                deprecation: member.deprecation.cloned(),
+                ref_qualifier: member.ref_qualifier,
+                signature: member.signature.map(|signature| TemplateMemberSignature {
+                    arguments: signature.arguments.to_vec(),
+                    return_type: signature.return_type.map(str::to_string),
+                    is_variadic: signature.is_variadic,
+                }),
             });
     }
 

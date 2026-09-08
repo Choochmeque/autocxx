@@ -19,7 +19,7 @@ use crate::{
     types::QualifiedName,
 };
 
-use super::{deps::HasDependencies, fun::FnPhase};
+use super::{deps::HasDependencies, fun::FnPhase, tdef::instantiable_concrete_types};
 
 /// This is essentially mark-and-sweep garbage collection of the
 /// [Api]s that we've discovered. Why do we do this, you might wonder?
@@ -43,11 +43,24 @@ pub(crate) fn filter_apis_by_following_edges_from_allowlist(
     config: &IncludeCppConfig,
 ) -> ApiVec<FnPhase> {
     let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
+    // A concrete template instantiation the user declared `instantiable!` is
+    // named by a directive as surely as an allowlisted class is: the name
+    // autocxx gave the instantiation is its own invention rather than anything
+    // the user wrote, so `is_on_allowlist` cannot recognise it. Everything
+    // which hangs off one is something autocxx synthesized because of that
+    // directive - its special members and allocators, the member functions of
+    // its class template, and the note saying why one of those members could
+    // not be generated - and a method is otherwise kept only where an
+    // allowlist directive names its type. The special members are also reached
+    // through the instantiation's own dependencies; the members and the notes
+    // have nothing else at all to keep them. See google/autocxx#723.
+    let instantiable = instantiable_concrete_types(&apis, config);
     let mut todos: Vec<QualifiedName> = apis
         .iter()
         .filter(|api| {
             api.allowlist_names(&nested_cpp_names)
                 .any(|name| config.is_on_allowlist(&name))
+                || instantiable.contains(&api.name_for_allowlist())
         })
         .map(Api::name)
         .cloned()
