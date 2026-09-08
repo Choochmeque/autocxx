@@ -133,6 +133,31 @@ impl BuilderModifierFns for ClangArgAdder {
     }
 }
 
+/// Clang arguments for bindgen alone, leaving the C++ compiler as it was.
+///
+/// [`make_clang_arg_adder`] hands its flags to both, which is what a flag the
+/// two have to agree on needs - a C++ standard, a `-D`. A `--target` is not
+/// one of those: a test about a type only some targets have needs bindgen to
+/// parse as one of them, and the host's C++ compiler cannot be asked to become
+/// it. Such a test skips the build; see `make_checks_without_building`.
+pub(crate) fn make_bindgen_only_clang_arg_adder(args: &[&str]) -> Option<BuilderModifier> {
+    Some(Box::new(BindgenOnlyClangArgAdder(
+        args.iter().map(|a| a.to_string()).collect(),
+    )))
+}
+
+struct BindgenOnlyClangArgAdder(Vec<String>);
+
+impl BuilderModifierFns for BindgenOnlyClangArgAdder {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        let refs: Vec<_> = self.0.iter().map(|s| s.as_str()).collect();
+        builder.extra_clang_args(&refs)
+    }
+}
+
 pub(crate) struct SetSuppressSystemHeaders;
 
 impl BuilderModifierFns for SetSuppressSystemHeaders {

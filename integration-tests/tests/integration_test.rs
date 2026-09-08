@@ -8,8 +8,9 @@
 
 use crate::{
     builder_modifiers::{
-        combine_modifiers, make_clang_arg_adder, make_clang_optional_arg_adder, make_cpp17_adder,
-        make_cpp20_adder, make_unsigned_char_adder, EnableAutodiscover, ForceWrapperGeneration,
+        combine_modifiers, make_bindgen_only_clang_arg_adder, make_clang_arg_adder,
+        make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
+        make_unsigned_char_adder, EnableAutodiscover, ForceWrapperGeneration,
         SetSuppressSystemHeaders,
     },
     code_checkers::{
@@ -213,50 +214,144 @@ fn test_return_int128() {
     run_test("", hdr, rs, &["give_i128", "round_trip_i128"], &[]);
 }
 
-/// `unsigned __int128` is not one type by the time it reaches us: bindgen
-/// renders it and a `__float128` as the same bare `u128` token, and nothing
-/// that survives to this side says which was written. (A 16-byte `long
-/// double` used to be a third claimant; it is now marked and refused by name
-/// of its own.) Binding it would mean picking one of the three and emitting C++
-/// that says so, which is a miscompile for the other two - so the token is
-/// refused with that as the reason instead. See the note beside the ctypes in
+/// `unsigned __int128`, the other half of `test_return_int128`. It travels as
+/// `autocxx::c_u128`, and can only do so because it is now the one C++ type
+/// which arrives as a bare `u128`: a 16-byte `long double` and a `__float128`
+/// used to reach us as that same token, and each is marked and refused by name
+/// of its own now. See the note beside the ctypes in
 /// `engine/src/known_types.rs`.
 ///
-/// `__int128` has no such problem: `i128` means that and nothing else, which
-/// is why `test_return_int128` above works.
+/// Not compiled for MSVC, which has no `__int128` at all.
 #[test]
-#[ignore] // Two C++ types share this token; see the doc comment.
 #[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
 fn test_return_uint128() {
     let hdr = indoc! {"
         inline unsigned __int128 give_u128() {
             return 5;
         }
+        inline unsigned __int128 round_trip_u128(unsigned __int128 x) {
+            return x;
+        }
     "};
     let rs = quote! {
-        assert_eq!(ffi::give_u128(), 5);
+        assert_eq!(ffi::give_u128(), autocxx::c_u128(5));
+        assert_eq!(ffi::round_trip_u128(autocxx::c_u128(u128::MAX - 7)).0, u128::MAX - 7);
     };
-    run_test("", hdr, rs, &["give_u128"], &[]);
+    run_test("", hdr, rs, &["give_u128", "round_trip_u128"], &[]);
 }
 
-/// What that refusal looks like today, so that it stays a refusal which says
-/// why rather than reverting to a bare "unknown type".
+/// The type which used to share that token. bindgen renders a `__float128` as
+/// `u128` because that is the right size and Rust has no 128-bit float, so
+/// without the marker `34-float128-newtype-marker.patch` puts round it the
+/// signature would be bound as the integer beside it and read as a different
+/// kind of number on both sides. Refused by name instead.
+///
+/// `__float128` exists on x86 Linux and nowhere else clang will admit to - not
+/// even x86 macOS - so bindgen is told to parse as that target and the build is
+/// skipped, which is what lets this run everywhere rather than on one CI leg.
 #[test]
-#[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
-fn test_uint128_is_refused_by_name() {
+fn test_float128_is_refused_by_name() {
     let hdr = indoc! {"
-        inline unsigned __int128 give_u128() {
+        inline __float128 give_f128() {
             return 5;
         }
     "};
-    run_test_expect_fail_with_error("", hdr, quote! {}, &["give_u128"], &[], "unsigned __int128");
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["give_f128"], &[], None),
+        float128_target(),
+        // Not just the name: this used to be refused as "either an
+        // `unsigned __int128` or a `__float128`", which mentions it too.
+        "`__float128`, a 128-bit floating-point type",
+    );
 }
 
-/// A container of a `__int128` is refused: `autocxx::c_type_vectors` is
-/// compiled on every target autocxx supports and MSVC has no `__int128`, so
-/// there is no `UniquePtrTarget` for `c_i128` to be had and letting the
-/// signature through would buy a missing `cxxbridge1$unique_ptr$...` symbol at
-/// link time.
+/// A `__float128` *field* is bytes the struct carries, which is fine - but the
+/// struct cannot then cross by value, because a 16-byte float and the 16-byte
+/// integer standing in for it are not passed the same way. So the type stays
+/// opaque, and its accessor is refused by name rather than handing back the
+/// integer.
+#[test]
+fn test_float128_field_makes_a_type_non_pod() {
+    let hdr = indoc! {"
+        struct HasF128 { __float128 f; };
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&[], &["HasF128"], None),
+        float128_target(),
+        "could not be POD because it has a `__float128` member",
+    );
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["HasF128"], &[], None),
+        float128_target(),
+        Some(make_checks_without_building(vec![make_string_finder(
+            vec!["`__float128`".to_string()],
+        )])),
+        None,
+    );
+}
+
+/// A `__float128` *variable* is turned down by name too. It reaches us by a
+/// route of its own - a variable is re-exported as bindgen declared it rather
+/// than converted, so nothing on the conversion path sees it - and a silent
+/// re-export would hand Rust the bytes of a float to do integer arithmetic on.
+#[test]
+fn test_float128_static() {
+    let cxx = indoc! {"
+        const __float128 F = 1.0;
+    "};
+    let hdr = indoc! {"
+        extern const __float128 F;
+    "};
+    run_test_expect_fail_with_error_modified(
+        cxx,
+        hdr,
+        quote! {},
+        directives_from_lists(&["F"], &[], None),
+        float128_target(),
+        "`__float128`, a 128-bit floating-point type",
+    );
+}
+
+/// A `__float128` as a template argument, which reaches the C++ by a route of
+/// its own: a concrete instantiation is named by writing its arguments out
+/// again, without converting them, so nothing else would catch the marker and
+/// it would land in the generated header verbatim.
+#[test]
+fn test_float128_template_argument() {
+    let hdr = indoc! {"
+        template <typename T> struct Wrapper { T x; };
+        inline int unbox(const Wrapper<__float128>& b) { return 1; }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["unbox"], &[], None),
+        float128_target(),
+        "`__float128`, a 128-bit floating-point type",
+    );
+}
+
+/// The target the `__float128` tests ask bindgen to parse as. See
+/// `make_bindgen_only_clang_arg_adder`.
+fn float128_target() -> Option<BuilderModifier> {
+    make_bindgen_only_clang_arg_adder(&["--target=x86_64-unknown-linux-gnu"])
+}
+
+/// A container of either 128-bit integer is refused: `autocxx::c_type_vectors`
+/// is compiled on every target autocxx supports and MSVC has no `__int128`, so
+/// there is no `UniquePtrTarget` for `c_i128` or `c_u128` to be had and letting
+/// the signature through would buy a missing `cxxbridge1$unique_ptr$...` symbol
+/// at link time.
 #[test]
 #[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
 fn test_int128_containers_are_refused() {
@@ -268,11 +363,16 @@ fn test_int128_containers_are_refused() {
             Thing() {}
             std::unique_ptr<__int128> up() const { return nullptr; }
             const std::vector<__int128>& vec() const;
+            std::unique_ptr<unsigned __int128> uup() const { return nullptr; }
+            const std::vector<unsigned __int128>& uvec() const;
             __int128 plain() const { return 3; }
+            unsigned __int128 uplain() const { return 4; }
         };
     "};
     let rs = quote! {
-        assert_eq!(ffi::Thing::new().within_unique_ptr().plain(), autocxx::c_i128(3));
+        let thing = ffi::Thing::new().within_unique_ptr();
+        assert_eq!(thing.plain(), autocxx::c_i128(3));
+        assert_eq!(thing.uplain(), autocxx::c_u128(4));
     };
     run_test("", hdr, rs, &["Thing"], &[]);
 }
