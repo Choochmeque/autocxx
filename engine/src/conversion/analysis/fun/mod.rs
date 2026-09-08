@@ -39,7 +39,7 @@ use crate::{
     },
     known_types::known_types,
     minisyn::{minisynize_punctuated, FnArg},
-    parse_callbacks::{TemplateMemberFunction, UsingDeclaration},
+    parse_callbacks::{MemberFunctionTemplate, TemplateMemberFunction, UsingDeclaration},
     types::validate_ident_ok_for_rust,
 };
 use indexmap::map::IndexMap as HashMap;
@@ -432,6 +432,11 @@ pub(crate) struct FnAnalyzer<'a> {
     /// template, because that is the only thing bindgen says anything about: it
     /// announces no item for an instantiation at all.
     template_member_functions: HashMap<QualifiedName, Vec<TemplateMemberFunction>>,
+    /// For each class these APIs give methods to, the member function templates
+    /// bindgen reported for it. Keyed on the class which declares them, which
+    /// for an instantiation is the class template: bindgen says nothing about
+    /// an instantiation, so the template's declaration is all there is.
+    member_function_templates: HashMap<QualifiedName, Vec<MemberFunctionTemplate>>,
     force_wrapper_generation: bool,
 }
 
@@ -531,6 +536,10 @@ impl<'a> FnAnalyzer<'a> {
                 &apis,
                 parse_callback_results,
             ),
+            member_function_templates: Self::build_member_function_templates(
+                &apis,
+                parse_callback_results,
+            ),
             force_wrapper_generation,
         };
         me.reserve_ideal_names(&apis);
@@ -547,6 +556,7 @@ impl<'a> FnAnalyzer<'a> {
         let results = me.add_using_declaration_imports(results);
         let results = me.add_inherited_member_imports(results);
         let results = me.add_template_instantiation_members(results);
+        let results = me.add_member_function_template_notes(results);
         let results = me.add_constructors_present(results);
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
@@ -657,6 +667,35 @@ impl<'a> FnAnalyzer<'a> {
             .filter_map(|template| {
                 let members = parse_callback_results.template_member_functions(&template);
                 (!members.is_empty()).then(|| (template, members.to_vec()))
+            })
+            .collect()
+    }
+
+    /// The member function templates bindgen reported for each class which is
+    /// going to have an `impl` block to put a note in.
+    ///
+    /// Two kinds of class ask: an ordinary one, which declares its own, and a
+    /// concrete instantiation, whose members are the class template's - keyed
+    /// on the template for the same reason
+    /// [`Self::build_template_member_functions`] is.
+    fn build_member_function_templates(
+        apis: &ApiVec<PodPhase>,
+        parse_callback_results: &ParseCallbackResults,
+    ) -> HashMap<QualifiedName, Vec<MemberFunctionTemplate>> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Struct { name, .. } => Some(name.name.clone()),
+                Api::ConcreteType {
+                    rs_definition,
+                    cpp_definition,
+                    holder_surface: None,
+                    ..
+                } => instantiated_template(rs_definition.as_deref(), cpp_definition),
+                _ => None,
+            })
+            .filter_map(|owner| {
+                let members = parse_callback_results.member_function_templates(&owner);
+                (!members.is_empty()).then(|| (owner, members.to_vec()))
             })
             .collect()
     }
@@ -1823,6 +1862,135 @@ impl<'a> FnAnalyzer<'a> {
                     });
                 }
             }
+        }
+        results
+    }
+
+    /// Leave a note in place of each member function template a class declares,
+    /// none of which autocxx binds.
+    ///
+    /// The note is a method of the class like any other, so it takes its Rust
+    /// name from the same calculation and its number from the same overload
+    /// tracker as the methods which were bound: otherwise a note for a template
+    /// `both` and the binding for the `both(int)` beside it are two `fn both`
+    /// in one `impl` block. Runs after every method which is analyzed and after
+    /// the instantiation members, so those names are taken before these ask.
+    ///
+    /// For an instantiation the members are the class template's, on the terms
+    /// `add_template_instantiation_members` reads them: from the primary
+    /// template, and only under `instantiable!`. A constructor template is left
+    /// alone, as a class template's declared constructors are - a note named
+    /// `new` would collide with the constructor autocxx generates.
+    fn add_member_function_template_notes(
+        &mut self,
+        apis: ApiVec<FnPrePhase1>,
+    ) -> ApiVec<FnPrePhase1> {
+        if self.member_function_templates.is_empty() {
+            return apis;
+        }
+        // The class the note hangs off, and the class whose declaration the
+        // member was read from, which differ for an instantiation.
+        let mut owners: Vec<(QualifiedName, QualifiedName)> = Vec::new();
+        for api in apis.iter() {
+            match api {
+                // A class template's own `impl` block is never generated -
+                // autocxx cannot `impl A` where C++ wrote `A<T>` - so a note
+                // put there would have nowhere to go. Its members are reached
+                // through the instantiations below.
+                Api::Struct { name, .. } if !self.is_generic_type(&name.name) => {
+                    owners.push((name.name.clone(), name.name.clone()));
+                }
+                Api::ConcreteType {
+                    name,
+                    rs_definition,
+                    cpp_definition,
+                    holder_surface: None,
+                    ..
+                } if self.instantiable_concrete_types.contains(&name.name) => {
+                    if let Some(template) =
+                        instantiated_template(rs_definition.as_deref(), cpp_definition)
+                    {
+                        owners.push((name.name.clone(), template));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Every name already spoken for, the types analysis manufactured
+        // included: those are merged in after these notes, so a note which took
+        // one would collide with it. `ApiVec::push` replaces a pair of
+        // same-named APIs with one error, so a collision costs both the note
+        // and whatever it landed on.
+        let mut taken: HashSet<QualifiedName> = apis
+            .iter()
+            .map(|api| api.name().clone())
+            .chain(self.extra_apis.iter().map(|api| api.name().clone()))
+            .collect();
+        let mut notes = Vec::new();
+        for (self_ty, declarer) in owners {
+            let Some(members) = self.member_function_templates.get(&declarer) else {
+                continue;
+            };
+            for member in members {
+                if !matches!(member.visibility, CppVisibility::Public) {
+                    continue;
+                }
+                if matches!(member.kind, CppMethodKind::Constructor) {
+                    continue;
+                }
+                let cpp_name = CppOriginalName::from_member_function_template_name(&member.name);
+                // An operator template has no name here: what to call an
+                // operator in Rust is `--represent-cxx-operators`' question,
+                // decided on a path a member function template never reaches.
+                let Some(rust_name) = note_rust_name(&cpp_name) else {
+                    continue;
+                };
+                let stem = format!("{}_{}", self_ty.get_final_item(), member.name);
+                let mut ident = stem.clone();
+                let mut suffix = 1;
+                while !taken.insert(QualifiedName::new(
+                    self_ty.get_namespace(),
+                    make_ident(&ident),
+                )) {
+                    ident = format!("{stem}{suffix}");
+                    suffix += 1;
+                }
+                let api_name = ApiName::new_with_cpp_name(
+                    self_ty.get_namespace(),
+                    make_ident(ident),
+                    Some(cpp_name.clone()),
+                );
+                notes.push((
+                    api_name,
+                    self_ty.clone(),
+                    rust_name,
+                    // Which of the two notes it gets: an instantiation's
+                    // members were read from its class template, and only that
+                    // was read.
+                    self_ty != declarer,
+                    member.template_parameters,
+                ));
+            }
+        }
+
+        let mut results = apis;
+        for (name, self_ty, rust_name, from_class_template, template_parameters) in notes {
+            let rust_name = self.get_overload_name(
+                self_ty.get_namespace(),
+                self_ty.get_final_item(),
+                rust_name,
+            );
+            let ctx = self.error_context_for_method(&self_ty, &rust_name);
+            results.push(Api::IgnoredItem {
+                name,
+                err: if from_class_template {
+                    ConvertErrorFromCpp::MemberFunctionTemplateOfClassTemplate(template_parameters)
+                } else {
+                    ConvertErrorFromCpp::MemberFunctionTemplate(template_parameters)
+                },
+                ctx: Some(ctx),
+            });
         }
         results
     }
@@ -4216,6 +4384,26 @@ fn ideal_rust_name(
             }
         }
     }
+}
+
+/// The Rust name a note left in place of a C++ member would take, or `None`
+/// where there is none to take.
+///
+/// [`ideal_rust_name`] cannot be asked directly, because it decides by building
+/// the identifier and `Ident::new` panics rather than refusing on a name C++
+/// spells with something which is not an identifier - `operator()`. So the
+/// spelling is checked before it and its answer after: `_` lexes as an
+/// identifier and is not one Rust lets anything be called, and an item under
+/// that name would be dropped later without a word.
+fn note_rust_name(cpp_name: &CppOriginalName) -> Option<String> {
+    let spelling = cpp_name.for_validation();
+    if syn::parse_str::<syn::Ident>(spelling).is_err()
+        && syn::parse_str::<syn::Ident>(&format!("{spelling}_")).is_err()
+    {
+        return None;
+    }
+    let name = ideal_rust_name(spelling.to_string(), Some(cpp_name));
+    syn::parse_str::<syn::Ident>(&name).is_ok().then_some(name)
 }
 
 /// Whether this function is a constructor, and if so the suffix which

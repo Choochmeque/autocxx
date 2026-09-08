@@ -507,7 +507,13 @@ impl IncludeCppEngine {
             // of what a concrete instantiation can be asked to do: bindgen
             // generates nothing for a specialization, so autocxx writes its own
             // shims from these. See google/autocxx#723.
-            .report_template_member_functions(true);
+            .report_template_member_functions(true)
+            // The member function templates of any class, which bindgen
+            // otherwise does not parse as members at all. autocxx cannot bind
+            // one - calling it means choosing its template arguments - so what
+            // this buys is the note which says the member is there, in place of
+            // silence. See google/autocxx#109.
+            .report_member_function_templates(true);
 
         // 3. Passes allowlist and other options to the bindgen::Builder equivalent
         //    to --output-style=cxx --allowlist=<as passed in>

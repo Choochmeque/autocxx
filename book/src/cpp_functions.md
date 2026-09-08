@@ -303,3 +303,39 @@ object which is about to be discarded, and autocxx only ever holds a C++ object
 behind a reference or a smart pointer. There's no way to express that, so no
 bindings are generated for such methods. The rest of the type is unaffected,
 and the generated code carries an explanation where the method would have been.
+
+## Member function templates
+
+```cpp
+class Sloth {
+public:
+    template<typename T> void hang_from(T branch);
+};
+```
+
+Calling `hang_from` means choosing what `T` is, and nothing autocxx generates
+can say so: a `cxx::bridge` names C++ functions, and the function you want here
+does not exist until something names the arguments which would instantiate it.
+There is no turbofish for a C++ template. So no bindings are generated for a
+member function template. The rest of the type is unaffected, and the generated
+code carries an explanation where the method would have been - which is the
+point of this, because such a member used to be simply missing, with nothing in
+the bindings to say it had ever been declared.
+
+To call one, give C++ a name for the instantiation you want and bind that:
+
+```cpp
+inline void hang_from_branch(Sloth& sloth, Branch branch) {
+    sloth.hang_from(branch);
+}
+```
+
+An explicit specialization written in the header is not enough on its own: C++
+does provide a callable function that way, but libclang reports it outside the
+class rather than as a member of it, so autocxx does not reach it. The wrapper
+is the reliable route.
+
+The same applies to the member functions of a class template, which are
+described under [generic types](cpp_types.md#generic-templated-types):
+those *are* bound for an instantiation you declare `instantiable!`, and a member
+function template among them is the one kind which is not.

@@ -12,8 +12,8 @@ use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
-    Explicitness, MethodKind, RefQualifier, SpecialMemberKind, TemplateMemberFunctionInfo,
-    UsingDeclarationInfo, Visibility,
+    Explicitness, MemberFunctionTemplateInfo, MethodKind, RefQualifier, SpecialMemberKind,
+    TemplateMemberFunctionInfo, UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -133,6 +133,15 @@ impl CppOriginalName {
     /// not a spelling - bindgen trades the `~` for a suffix - and none is
     /// passed here, the caller binding no destructor.
     pub(crate) fn from_template_member_function_name(name: &str) -> Self {
+        Self(name.to_string())
+    }
+
+    /// The C++ name of a member function template, which bindgen reports
+    /// through `denote_member_function_template` and generates no function
+    /// for. Its own spelling, with no rename to take off: bindgen makes no item
+    /// for such a member, so `generated_name_override` was never asked about
+    /// it.
+    pub(crate) fn from_member_function_template_name(name: &str) -> Self {
         Self(name.to_string())
     }
 
@@ -284,6 +293,35 @@ pub(crate) struct TemplateMemberSignature {
     pub(crate) is_variadic: bool,
 }
 
+/// One member function template of a class, as bindgen reported it.
+///
+/// A different thing from a [`TemplateMemberFunction`], which is an ordinary
+/// member of a class *template*: this is a member which is itself a template,
+/// and it can be declared by any class at all. bindgen does not parse one as a
+/// member of its class, so this is the only thing which says such a member
+/// exists.
+///
+/// There is no signature. bindgen reports that the member exists and what C++
+/// declared it as; a member function template's signature may name the member's
+/// own template parameters, which nothing outside it can write, and rendering
+/// only the ones which do not would be a feature of its own.
+#[derive(Debug, Clone)]
+pub(crate) struct MemberFunctionTemplate {
+    /// The member's name, as C++ spells it. No rename has to come off this one:
+    /// bindgen makes no item for such a member, so `generated_name_override`
+    /// was never asked about it.
+    pub(crate) name: String,
+    /// Which kind of member function the template declares. Never a destructor
+    /// and never virtual: C++ allows neither.
+    pub(crate) kind: MethodKind,
+    pub(crate) visibility: Visibility,
+    /// How many template parameters the member declares of its own. Not how
+    /// many a caller must write: deduction and default template arguments may
+    /// supply them. A parameter pack counts as the one parameter C++ declared
+    /// it as.
+    pub(crate) template_parameters: usize,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct NameAndParent {
     parent: DiscoveredItemId,
@@ -369,6 +407,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     deprecations: HashMap<DiscoveredItemId, Deprecation>,
     using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<DiscoveredItemId, Vec<TemplateMemberFunction>>,
+    member_function_templates: HashMap<DiscoveredItemId, Vec<MemberFunctionTemplate>>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -436,12 +475,19 @@ impl UnindexedParseCallbackResults {
             .filter_map(|(id, members)| Some((self.qualified_name(*id)?, members.clone())))
             .collect();
 
+        let member_function_templates = self
+            .member_function_templates
+            .iter()
+            .filter_map(|(id, members)| Some((self.qualified_name(*id)?, members.clone())))
+            .collect();
+
         ParseCallbackResults {
             results: self,
             index,
             bases,
             using_declarations,
             template_member_functions,
+            member_function_templates,
         }
     }
 
@@ -482,6 +528,7 @@ pub(crate) struct ParseCallbackResults {
     bases: HashMap<QualifiedName, BaseClasses>,
     using_declarations: HashMap<QualifiedName, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<QualifiedName, Vec<TemplateMemberFunction>>,
+    member_function_templates: HashMap<QualifiedName, Vec<MemberFunctionTemplate>>,
 }
 
 impl ParseCallbackResults {
@@ -661,6 +708,19 @@ impl ParseCallbackResults {
         name: &QualifiedName,
     ) -> &[TemplateMemberFunction] {
         self.template_member_functions
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The member function templates bindgen reported for a class, in
+    /// declaration order. Empty for a class which declares none, and for one
+    /// bindgen wrote nothing of.
+    pub(crate) fn member_function_templates(
+        &self,
+        name: &QualifiedName,
+    ) -> &[MemberFunctionTemplate] {
+        self.member_function_templates
             .get(name)
             .map(Vec::as_slice)
             .unwrap_or_default()
@@ -901,6 +961,27 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                     return_type: signature.return_type.map(str::to_string),
                     is_variadic: signature.is_variadic,
                 }),
+            });
+    }
+
+    fn denote_member_function_template(
+        &self,
+        parent: DiscoveredItemId,
+        member: MemberFunctionTemplateInfo<'_>,
+    ) {
+        self.results
+            .borrow_mut()
+            .member_function_templates
+            .entry(parent)
+            .or_default()
+            .push(MemberFunctionTemplate {
+                name: member.name.to_string(),
+                kind: member.kind,
+                // `is_const` is reported and not kept: it says how a receiver
+                // must be taken to call the member, and autocxx calls none of
+                // them.
+                visibility: member.visibility,
+                template_parameters: member.template_parameters,
             });
     }
 
