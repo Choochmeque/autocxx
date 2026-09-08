@@ -16,7 +16,7 @@ use itertools::Itertools;
 use syn::{PatType, Type};
 
 use crate::conversion::analysis::type_converter::TypeKind;
-use crate::conversion::type_helpers::{array_element_type, type_is_reference};
+use crate::conversion::type_helpers::{array_element_type, type_is_reference, unwrap_reference};
 use crate::{
     conversion::{
         analysis::{
@@ -140,12 +140,10 @@ pub(crate) enum WhyNoSpecialMember {
     /// Only the default constructor is withdrawn here. A `const` field of
     /// *class* type can also delete the copy and move constructors, when the
     /// class has no copy constructor taking a const source - the const member
-    /// cannot be moved from, and falls back to a copy which is not there.
-    /// That rule is not implemented: the checks in `find_constructors_present`
-    /// ask what the field's own type can do, not what can be done to a `const`
-    /// one of it, so a class with such a member still gets copy and move
-    /// constructors C++ deletes. `test_const_class_member_deletes_copy` is
-    /// written and `#[ignore]`d against it.
+    /// cannot be moved from, and falls back to a copy which is not there. That
+    /// rule runs where `fields_items_found` is built, and reports itself as
+    /// [`Self::DependencyLacksIt`] naming the field, so it does not arrive
+    /// here.
     ConstField { field: Option<String> },
     /// The class has a field of rvalue reference (`&&`) type.
     RvalueReferenceField,
@@ -260,12 +258,20 @@ fn describe_base(base: &QualifiedName) -> String {
 
 /// Describes a field for [`WhyNoSpecialMember::DependencyLacksIt`], with
 /// whatever of its name and type we happen to know.
+///
+/// Says when the field is `const`, because the answers recorded against a
+/// `const` field are about the field and not about its type - see where
+/// `fields_items_found` is built - and a reader who went and looked the type up
+/// would find it can do the thing we said was missing.
 fn describe_field(field: &FieldInfo, ty: Option<&QualifiedName>) -> String {
+    let qualifier = if field.is_const { "`const` " } else { "" };
     match (&field.name, ty) {
-        (Some(name), Some(ty)) => format!("field `{name}` of type `{}`", ty.to_cpp_name()),
-        (Some(name), None) => format!("field `{name}`"),
-        (None, Some(ty)) => format!("field of type `{}`", ty.to_cpp_name()),
-        (None, None) => "a field".to_string(),
+        (Some(name), Some(ty)) => {
+            format!("{qualifier}field `{name}` of type `{}`", ty.to_cpp_name())
+        }
+        (Some(name), None) => format!("{qualifier}field `{name}`"),
+        (None, Some(ty)) => format!("{qualifier}field of type `{}`", ty.to_cpp_name()),
+        (None, None) => format!("a {qualifier}field"),
     }
 }
 
@@ -330,6 +336,19 @@ pub(super) struct ItemsFound {
     /// Remember that [`const_copy_constructor`] may be used in place of this if it exists.
     pub(super) non_const_copy_constructor: SpecialMemberFound,
     pub(super) move_constructor: SpecialMemberFound,
+    /// Whether the class *declared* a `T(const T&&)`, and if so whether it
+    /// can be called. C++ counts both spellings of a move constructor, and
+    /// only this one can be handed the const xvalue a `const` member of this
+    /// type produces, so a `const` field asks for it by name.
+    ///
+    /// Declaration matters as well as availability, because overload
+    /// resolution stops at whichever constructor it selects: a declared
+    /// `T(const T&&) = delete` is chosen for a const xvalue and then refused,
+    /// and C++ does not go on to the copy constructor.
+    ///
+    /// `None` where the class declared none, which is also what the stand-ins
+    /// say: C++ declares no `T(const T&&)` of its own accord.
+    pub(super) const_move_constructor: Option<SpecialMemberFound>,
 
     /// Whether C++ calls this class's destructor *trivial*: the class declares
     /// none of its own, and every base and field is itself trivially
@@ -477,7 +496,11 @@ fn found_if_user_defined(explicit: Option<&ExplicitFound>) -> SpecialMemberFound
 pub(super) fn find_constructors_present(
     apis: &ApiVec<FnPrePhase1>,
 ) -> HashMap<QualifiedName, ItemsFound> {
-    let (explicits, unknown_types) = find_explicit_items(apis);
+    let ExplicitItems {
+        explicits,
+        unknown_types,
+        const_move_constructors,
+    } = find_explicit_items(apis);
     let enums: HashSet<QualifiedName> = apis
         .iter()
         .filter_map(|api| match api {
@@ -544,6 +567,7 @@ pub(super) fn find_constructors_present(
                         const_copy_constructor: SpecialMemberFound::Implicit,
                         non_const_copy_constructor: SpecialMemberFound::NotPresent,
                         move_constructor: SpecialMemberFound::Implicit,
+                        const_move_constructor: None,
                         // An enum is an integer with a name on it.
                         destructor_is_trivial: true,
                         name: Some(name.clone()),
@@ -562,7 +586,8 @@ pub(super) fn find_constructors_present(
             // get the same treatment: an alias can add `const` to what it
             // names, which changes the answers here and which bindgen does not
             // report, so following one for a field would run the rules over a
-            // type the field is not. See `test_const_class_member_deletes_copy`.
+            // type the field is not. `field_info.is_const` is what carries that
+            // difference, and `fields_items_found` below acts on it.
             let get_base_items_found = |qn: &QualifiedName| -> Option<ItemsFound> {
                 get_items_found(&resolve_typedefs(&typedef_targets, qn))
             };
@@ -619,6 +644,7 @@ pub(super) fn find_constructors_present(
                             const_copy_constructor: SpecialMemberFound::Implicit,
                             non_const_copy_constructor: SpecialMemberFound::NotPresent,
                             move_constructor: SpecialMemberFound::Implicit,
+                            const_move_constructor: None,
                             // Destroying a pointer does not destroy the
                             // pointee; C++ leaves that to whoever owns it.
                             destructor_is_trivial: true,
@@ -635,6 +661,7 @@ pub(super) fn find_constructors_present(
                             const_copy_constructor: SpecialMemberFound::Implicit,
                             non_const_copy_constructor: SpecialMemberFound::NotPresent,
                             move_constructor: SpecialMemberFound::Implicit,
+                            const_move_constructor: None,
                             // As for a pointer: a reference member binds to
                             // something it does not own.
                             destructor_is_trivial: true,
@@ -649,6 +676,32 @@ pub(super) fn find_constructors_present(
                     // google/autocxx#816.
                     if field_info.has_default_initializer {
                         items_found.default_constructor = SpecialMemberFound::Implicit;
+                    }
+                    // The rest of this analysis asks what a type can do. A
+                    // `const` field is not that type: moving from it yields a
+                    // `const M&&`, which binds to `M(const M&&)` if the class
+                    // declared one and otherwise to `M(const M&)`. `M(M&&)`
+                    // never runs for it, and neither does `M(M&)`, which cannot
+                    // take a const lvalue at all. Answer for the field rather
+                    // than for its type.
+                    //
+                    // The default constructor is left alone here: C++ withdraws
+                    // it for a `const` field which is not
+                    // const-default-constructible, and `const_field` below
+                    // withdraws it for every `const` field without a default
+                    // member initializer, which is the safe direction and is
+                    // where that rule is documented.
+                    if field_info.is_const {
+                        // Only where the class declared no `M(const M&&)` at
+                        // all does the const xvalue reach `M(const M&)`. Where
+                        // it declared one which cannot be called, that is the
+                        // answer: C++ defines the containing move constructor
+                        // as deleted, and a deleted move is what the whole
+                        // class then has, however copyable this field is.
+                        items_found.move_constructor = items_found
+                            .const_move_constructor
+                            .unwrap_or(items_found.const_copy_constructor);
+                        items_found.non_const_copy_constructor = SpecialMemberFound::NotPresent;
                     }
                     Some((describe_field(field_info, ty.as_ref()), items_found))
                 })
@@ -793,6 +846,12 @@ pub(super) fn find_constructors_present(
                     const_copy_constructor: is_explicit(ExplicitKind::ConstCopyConstructor),
                     non_const_copy_constructor: is_explicit(ExplicitKind::NonConstCopyConstructor),
                     move_constructor: is_explicit(ExplicitKind::MoveConstructor),
+                    // Not understanding this class's fields says nothing
+                    // about a constructor it declared, and the line above
+                    // keeps the user-defined one.
+                    const_move_constructor: const_move_constructors
+                        .contains(&name.name)
+                        .then(|| is_explicit(ExplicitKind::MoveConstructor)),
                     // We don't know all this class's bases and fields, so we
                     // cannot know that none of them has a destructor to run.
                     // The optimism above about the destructor *existing* is
@@ -1178,6 +1237,9 @@ pub(super) fn find_constructors_present(
                     const_copy_constructor,
                     non_const_copy_constructor,
                     move_constructor,
+                    const_move_constructor: const_move_constructors
+                        .contains(&name.name)
+                        .then_some(move_constructor),
                     destructor_is_trivial,
                     name: Some(name.clone()),
                     why_no_constructors: WhyNoConstructors {
@@ -1287,10 +1349,18 @@ pub(super) fn discard_deleted_defaulted_members(
         .collect()
 }
 
-fn find_explicit_items(
-    apis: &ApiVec<FnPrePhase1>,
-) -> (HashMap<ExplicitType, ExplicitFound>, HashSet<QualifiedName>) {
+/// What [`find_explicit_items`] read out of the declarations bindgen gave us.
+struct ExplicitItems {
+    explicits: HashMap<ExplicitType, ExplicitFound>,
+    unknown_types: HashSet<QualifiedName>,
+    /// The classes whose declared move constructor takes a `const T&&`. See
+    /// [`ItemsFound::const_move_constructor`].
+    const_move_constructors: HashSet<QualifiedName>,
+}
+
+fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
     let mut result = HashMap::new();
+    let mut const_move_constructors = HashSet::new();
     let mut merge_fun = |ty: QualifiedName, kind: ExplicitKind, fun: &FuncToConvert| match result
         .entry(ExplicitType { ty, kind })
     {
@@ -1428,7 +1498,18 @@ fn find_explicit_items(
                 // rule choosing the shape of a containing class's implicit
                 // copy constructor asks about.
                 TraitMethodKind::CopyConstructor => Some(ExplicitKind::ConstCopyConstructor),
-                TraitMethodKind::MoveConstructor => Some(ExplicitKind::MoveConstructor),
+                TraitMethodKind::MoveConstructor => {
+                    // C++ counts `T(const T&&)` as a move constructor like any
+                    // other, so it stays in the same slot and every rule which
+                    // asks whether one was declared still sees it. The one
+                    // question the slot cannot answer is whether the parameter
+                    // takes a const source, which is what a `const` member of
+                    // this type has to offer, so record that separately.
+                    if source_is_const_rvalue_reference(&fun.inputs) {
+                        const_move_constructors.insert(impl_for.clone());
+                    }
+                    Some(ExplicitKind::MoveConstructor)
+                }
                 _ => None,
             }
             .map_or((), |explicit_kind| {
@@ -1437,7 +1518,11 @@ fn find_explicit_items(
             _ => (),
         }
     }
-    (result, unknown_types)
+    ExplicitItems {
+        explicits: result,
+        unknown_types,
+        const_move_constructors,
+    }
 }
 
 fn any_input_is_rvalue_reference(
@@ -1447,6 +1532,29 @@ fn any_input_is_rvalue_reference(
         syn::FnArg::Receiver(_) => false,
         syn::FnArg::Typed(PatType { ty, .. }, ..) => type_is_reference(ty.as_ref(), true),
     })
+}
+
+/// Whether the object a constructor moves *from* is a `const T&&`.
+///
+/// bindgen writes an rvalue reference as `__bindgen_marker_RValueReference<P>`
+/// where `P` is a pointer, and the pointer carries the constness of what C++
+/// referred to - the same signal `analyze_foreign_fn` splits the copy
+/// constructors on. Only the source is asked about: C++ still calls
+/// `T(T&&, const int&& = 0)` a move constructor, and reading every parameter
+/// would take the trailing one's constness for the source's.
+fn source_is_const_rvalue_reference(
+    inputs: &syn::punctuated::Punctuated<crate::minisyn::FnArg, syn::token::Comma>,
+) -> bool {
+    // bindgen puts the receiver first and the source immediately after it.
+    match inputs.iter().nth(1).map(|input| &input.0) {
+        Some(syn::FnArg::Typed(PatType { ty, .. }, ..)) => match ty.as_ref() {
+            Type::Path(typ) => {
+                matches!(unwrap_reference(typ, true), Some(ptr) if ptr.mutability.is_none())
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Returns the information for a given known type.
@@ -1465,6 +1573,7 @@ fn known_type_items_found(constructor_details: KnownTypeConstructorDetails) -> I
         const_copy_constructor: exists_public_if(constructor_details.has_const_copy_constructor),
         non_const_copy_constructor: SpecialMemberFound::NotPresent,
         move_constructor: exists_public_if(constructor_details.has_move_constructor),
+        const_move_constructor: None,
         destructor_is_trivial: constructor_details.destructor_is_trivial,
         name: None,
         why_no_constructors: Default::default(),

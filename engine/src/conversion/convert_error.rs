@@ -84,6 +84,8 @@ pub enum ConvertErrorFromCpp {
     TemplatedTypeContainingNonPathArg(QualifiedName),
     #[error("Pointer pointed to an array, which is not yet supported")]
     InvalidArrayPointee,
+    #[error("This function or method keeps a C++ array in its signature ({0}). cxx writes a Rust '[T; N]' as 'std::array<T, N>', which is a different C++ type from the 'T[N]' this was, so the bridge would declare a signature C++ does not have. An array parameter which C++ decays to a pointer is unaffected: that arrives as a pointer and is bound as one.")]
+    CppArrayInSignature(String),
     #[error("Pointer pointed to another pointer, which is not yet supported")]
     InvalidPointerPointee,
     #[error("Pointer pointed to something unsupported (autocxx only supports pointers to named types): {0}")]

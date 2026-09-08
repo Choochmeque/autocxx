@@ -6291,8 +6291,16 @@ fn test_private_constructor_make_unique() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
+/// C++ decays an array parameter to a pointer before autocxx ever sees it:
+/// clang reports `const uint32_t a[4]` as `const uint32_t *`, bindgen writes
+/// `*const u32`, and the length is gone at the ABI. So what this pins is the
+/// decayed-parameter case of the arrays request reported upstream as
+/// google/autocxx#266 - the pointer arrives intact and is callable. The rest
+/// of that request is elsewhere: an array passed or returned by value, and
+/// `std::array`.
+///
+/// `test_take_array_in_function` spells the same call for `char a[4]`.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/266
 fn test_take_array() {
     let hdr = indoc! {"
     #include <cstdint>
@@ -6302,10 +6310,110 @@ fn test_take_array() {
     "};
     let rs = quote! {
         let c: [u32; 4usize] = [ 10, 20, 30, 40 ];
-        let c = c as *const [_];
-        assert_eq!(ffi::take_array(&c), 40);
+        unsafe {
+            assert_eq!(ffi::take_array(c.as_ptr()), 40);
+        }
     };
     run_test("", hdr, rs, &["take_array"], &[]);
+}
+
+/// A *reference* to an array keeps the array type where a plain array
+/// parameter would have decayed: `const uint32_t (&a)[4]` reaches autocxx as
+/// `&[u32; 4]`, and cxx writes a Rust `[T; N]` as `std::array<T, N>`, so the
+/// bridge declared a parameter the function has not got. autocxx turns it down
+/// instead. Part of the arrays request reported upstream as google/autocxx#266;
+/// `test_take_array` is the decayed parameter, which is unaffected.
+#[test]
+fn test_array_reference_param_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    inline uint32_t take_array_ref(const uint32_t (&a)[4]) {
+        return a[0] + a[2];
+    }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_array_ref"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
+/// As `test_array_reference_param_refused`, for the mutable spelling, which
+/// arrives as `Pin<&mut [u32; 4]>` rather than as a reference.
+#[test]
+fn test_mutable_array_reference_param_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    inline void take_mut_array_ref(uint32_t (&a)[4]) { a[0] = 1; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_mut_array_ref"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
+/// A pointer to an array is refused by `ensure_pointee_is_valid` when the
+/// array is spelled out, but an alias hides it: `A4*` is a pointer to a path
+/// when that check looks, and only becomes `*mut [u32; 4]` once the alias is
+/// resolved. cxx then wrote `::std::array< ::std::uint32_t, 4> *` for a
+/// function taking `uint32_t (*)[4]`.
+#[test]
+fn test_array_pointer_through_alias_refused() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    using A4 = uint32_t[4];
+    inline uint32_t take_alias_ptr(A4* p) { return (*p)[0]; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_alias_ptr"],
+        &[],
+        "keeps a C++ array in its signature",
+    );
+}
+
+/// A `const` member is moved by whatever accepts a `const M&&`, and
+/// `M(const M&&)` is exactly that - C++ counts it as a move constructor, and it
+/// is the one spelling of one a const member can use. `fx_CRM` has no copy
+/// constructor to fall back on, so asking only "is there a copy from a const
+/// source?" would cost `fx_S4` the move constructor C++ gives it. The move sets
+/// `x` to 4, which is how the test tells the move from a copy.
+#[test]
+fn test_const_class_member_with_const_rvalue_constructor_keeps_move() {
+    let hdr = indoc! {"
+    struct fx_CRM {
+        fx_CRM() : x(3) {}
+        fx_CRM(const fx_CRM&&) : x(4) {}
+        fx_CRM(const fx_CRM&) = delete;
+        int x;
+    };
+    struct fx_S4 { const fx_CRM m; };
+    inline fx_S4 fx_make_s4() { return fx_S4{fx_CRM()}; }
+    inline int fx_read_s4(const fx_S4& s) { return s.m.x; }
+    "};
+    let rs = quote! {
+        let s = ffi::fx_make_s4().within_unique_ptr();
+        moveit! {
+            let moved = autocxx::moveit::new::mov(s);
+        }
+        assert_eq!(ffi::fx_read_s4(&moved), autocxx::c_int(4));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_S4", "fx_CRM", "fx_make_s4", "fx_read_s4"],
+        &[],
+    );
 }
 
 #[test]
@@ -7353,8 +7461,14 @@ fn test_defines_effective() {
     );
 }
 
+/// A method whose parameter is a class template instantiated with a *function*
+/// type, `std::b<int()>`, reached through two typedefs - the reduction attached
+/// to the bug reported upstream as google/autocxx#227.
+///
+/// bindgen cannot represent that template argument, so it makes the typedef's
+/// target opaque and autocxx turns `Solver::e` down, emitting the rest of the
+/// class. What this pins is that the whole `include_cpp!` survives it.
 #[test]
-#[ignore] // https://github.com/google/autocxx/issues/227
 fn test_function_pointer_template() {
     let hdr = indoc! {"
         typedef int a;
@@ -17418,19 +17532,28 @@ fn test_issue_1089() {
     run_generate_all_test(hdr);
 }
 
-/// google/autocxx#1094's own repro: `g` is an alias template whose only
-/// template parameter is a non-type one, which bindgen drops, so `g` reaches
-/// autocxx as `pub type g = root::b::f;` - a plain typedef naming a template
-/// without arguments. autocxx handles that now, and `test_issue_1094b` is the
-/// same shape written so that it runs everywhere.
+/// google/autocxx#1094's own repro, with the one thing in it autocxx has no
+/// stake in taken out. The reduction on the issue is:
 ///
-/// This one does not run everywhere, and not for an autocxx reason: the repro
-/// is written around `__make_integer_seq`, which is a Clang builtin, so the
-/// C++ autocxx generates from it compiles only where the C++ compiler is
-/// Clang. The libclang matrix pins libclang and leaves the runner's g++ in
-/// place, where this is `'__make_integer_seq' does not name a type`.
+/// ```cpp
+/// namespace {
+/// typedef int a;
+/// }
+/// namespace b {
+/// template <typename> struct c;
+/// template <typename d, d e> using f = __make_integer_seq<c, d, e>;
+/// template <a e> using g = f<a, e>;
+/// } // namespace b
+/// ```
+///
+/// `__make_integer_seq` is a Clang builtin, so that header only compiles under
+/// Clang, and the libclang matrix legs build with g++. `make_seq` below is an
+/// ordinary class template with the same parameter list, and everything the
+/// bug turned on is kept: the anonymous namespace typedef, the incomplete `c`,
+/// the alias template `f` whose non-type parameter bindgen drops, and `g`
+/// aliasing that. The two headers generate the same Rust, item for item, `g`
+/// included - which is refused by the alias-template rule.
 #[test]
-#[ignore] // the repro is written around a Clang builtin - see above
 fn test_issue_1094() {
     let hdr = indoc! {"
         namespace {
@@ -17438,7 +17561,8 @@ fn test_issue_1094() {
         }
         namespace b {
         template <typename> struct c;
-        template <typename d, d e> using f = __make_integer_seq<c, d, e>;
+        template <template <typename> class, typename d, d> struct make_seq;
+        template <typename d, d e> using f = make_seq<c, d, e>;
         template <a e> using g = f<a, e>;
         } // namespace b
     "};
@@ -21929,15 +22053,12 @@ fn test_const_bitfield_with_initializer_keeps_default_constructor() {
     );
 }
 
-/// A `const` member of class type also deletes the copy constructor, when the
-/// class has no copy constructor accepting a const source: the member cannot
-/// be moved from, and the copy it falls back to is not there. autocxx now
-/// knows the field is `const` but does not run that rule - the checks in
-/// `find_constructors_present` ask what the field's type can do, not what can
-/// be done to a `const` one of it - so it offers a copy constructor C++
-/// deletes.
+/// A `const` member of class type deletes the copy *and* the move constructor
+/// when its class has no constructor taking a const source: moving from a
+/// `const fx_M` yields a `const fx_M&&`, which `fx_M(fx_M&&)` cannot take, and
+/// the copy it falls back to is deleted. Asking what the field's *type* can do
+/// said "movable".
 #[test]
-#[ignore] // engine: the copy/move checks ignore field constness
 fn test_const_class_member_deletes_copy() {
     let hdr = indoc! {"
         struct fx_M {
@@ -21950,6 +22071,65 @@ fn test_const_class_member_deletes_copy() {
         inline int fx_read_s(const fx_S& s) { return s.m.x; }
     "};
     run_test("", hdr, quote! {}, &["fx_S", "fx_read_s", "fx_M"], &[]);
+}
+
+/// The other half of the same rule, which must not withdraw what C++ keeps.
+/// `fx_CM` declares a copy constructor, so C++ gives it no move constructor at
+/// all - but the copy it does have takes a const source, which is the one C++
+/// uses to move a `const` member. So `fx_S2` has both a copy and a move
+/// constructor, and returning one by value has to work. Asking `fx_CM` what it
+/// can do would say "no move constructor" and cost `fx_S2` its own.
+#[test]
+fn test_const_class_member_copyable_from_const_keeps_move() {
+    let hdr = indoc! {"
+        struct fx_CM {
+            fx_CM() : x(3) {}
+            fx_CM(const fx_CM& other) : x(other.x) {}
+            int x;
+        };
+        struct fx_S2 { const fx_CM m; };
+        inline fx_S2 fx_make_s2() { return fx_S2{fx_CM()}; }
+        inline int fx_read_s2(const fx_S2& s) { return s.m.x; }
+    "};
+    let rs = quote! {
+        let s = ffi::fx_make_s2().within_unique_ptr();
+        moveit! {
+            let moved = autocxx::moveit::new::mov(s);
+        }
+        assert_eq!(ffi::fx_read_s2(&moved), autocxx::c_int(3));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_S2", "fx_CM", "fx_make_s2", "fx_read_s2"],
+        &[],
+    );
+}
+
+/// A declared `fx_DRM(const fx_DRM&&) = delete` is what a `const` member's
+/// xvalue selects, so C++ defines `fx_S5`'s move constructor as deleted -
+/// however copyable the member is on its own. That has to be the answer for
+/// the field rather than "copyable, so near enough": `fx_S5` also holds an
+/// `fx_N` which cannot be copied, so its copy constructor is deleted too and
+/// `fx_S5(std::move(s))` has nothing left to call. Treating the member as
+/// movable-because-copyable synthesized a move wrapper both compilers refuse.
+#[test]
+fn test_const_class_member_with_deleted_const_rvalue_constructor_deletes_move() {
+    let hdr = indoc! {"
+        struct fx_DRM {
+            fx_DRM();
+            fx_DRM(const fx_DRM&);
+            fx_DRM(const fx_DRM&&) = delete;
+        };
+        struct fx_N {
+            fx_N();
+            fx_N(const fx_N&) = delete;
+            fx_N(fx_N&&);
+        };
+        struct fx_S5 { const fx_DRM m; fx_N n; };
+    "};
+    run_test("", hdr, quote! {}, &["fx_S5", "fx_DRM", "fx_N"], &[]);
 }
 
 /// The marker and the array layers alternate all the way down for a
