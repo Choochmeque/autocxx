@@ -5673,7 +5673,18 @@ fn test_two_type_constructors() {
     run_test("", hdr, rs, &["A", "B"], &[]);
 }
 
-#[ignore] // https://github.com/rust-lang/rust-bindgen/issues/1924
+// The vendored bindgen can now give `value_type` its real type rather than a
+// blob, behind `dependent_qualified_types` - see
+// `engine/third_party/patches/32-dependent-qualified-types.patch` and the
+// bug reported upstream as https://github.com/rust-lang/rust-bindgen/issues/1924.
+// autocxx does not ask for it, for the reason that patch's header gives: the
+// trait bound it puts on `STRING_TYPE` cannot be satisfied by `std::string`,
+// which reaches bindgen as a `replaces=` substitute with no inner types. Even
+// with it on and that bound satisfied, this test needs one more thing:
+// `Origin`'s implicit constructors are withheld because its member's type is a
+// concrete type autocxx synthesized, which `implicit_constructors` does not
+// understand (`DependenciesNotUnderstood`).
+#[ignore]
 #[test]
 fn test_associated_type_templated_typedef_in_struct() {
     let hdr = indoc! {"
@@ -8022,12 +8033,30 @@ fn test_issues_217_222() {
 }
 
 #[test]
-// Still gated on bindgen. bindgen can't represent the dependent qualified name
-// `typename T::value_type`, so it reports MyStringView (and its
-// view_value_type member) as UnusedTemplateParam; we then fail with
-// DidNotGenerateAnythingUsable("take_string_view", IgnoredDependent({MyStringView})).
-// This is the google/autocxx#106 family; see also
-// https://github.com/rust-lang/rust-bindgen/pull/1975.
+// The google/autocxx#106 family. Without help from bindgen, the dependent
+// qualified name `typename T::value_type` has no type, so MyStringView (and its
+// view_value_type member) are reported as UnusedTemplateParam and this fails
+// with DidNotGenerateAnythingUsable("take_string_view",
+// IgnoredDependent({MyStringView})).
+//
+// The vendored bindgen can represent it, behind `dependent_qualified_types` -
+// see `engine/third_party/patches/32-dependent-qualified-types.patch`, which
+// rebases the bug reported upstream as
+// https://github.com/rust-lang/rust-bindgen/issues/1924. With that option on
+// this test passes. autocxx does not ask for it, for the reason that patch's
+// header gives: the trait bound it puts on a template parameter cannot be
+// satisfied by a type bindgen was handed a `replaces=` substitute for, which is
+// every `std::` type, so turning it on stops `BasicStringPiece<std::string>`
+// compiling - see `test_associated_type_templated_typedef`.
+//
+// The obvious way to satisfy it is a trap, and was measured: implement the
+// trait for such a type with the same opaque stand-in the member had before,
+// `[u8; 0]`. That does make this test pass, and the two above it, but a member
+// which names the dependent qualified type *by value* rather than through a
+// pointer then has a zero-sized Rust field where C++ has an object - a wrong
+// layout, where before there was a compile error. Whatever satisfies the bound
+// has to carry the size C++ gives it, or the instantiation has to go back to
+// being an opaque blob measured from C++.
 #[ignore]
 fn test_dependent_qualified_type() {
     let hdr = indoc! {"

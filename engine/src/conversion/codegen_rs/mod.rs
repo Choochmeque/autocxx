@@ -27,7 +27,8 @@ use itertools::Itertools;
 use proc_macro2::{Span, TokenStream};
 use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, Attribute, Expr, FnArg, ForeignItem,
-    ForeignItemFn, Ident, ImplItem, Item, ItemForeignMod, ItemMod, TraitItem, Type, TypePath,
+    ForeignItemFn, Generics, Ident, ImplItem, Item, ItemForeignMod, ItemMod, TraitItem, Type,
+    TypePath,
 };
 use utils::{find_output_mod_root, generate_cxx_use_stmt, generate_cxx_use_stmt_for_id};
 
@@ -1558,6 +1559,13 @@ impl<'a> RsCodeGenerator<'a> {
             .as_ref()
             .map(|maybe_item| maybe_item.1.clone())
             .unwrap_or_default();
+        // The generic parameters bindgen declared, carried verbatim into any
+        // wrapper this generates: a parameter can have a bound, which a fresh
+        // parameter of our own invention could not reproduce.
+        let bindgen_generics = match orig_item.as_ref().map(|(item, _)| item) {
+            Some(Item::Struct(s)) => s.generics.clone(),
+            _ => Generics::default(),
+        };
         // We have a choice here to either:
         // a) tell cxx to generate an opaque type using 'type A;'
         // b) generate a concrete type definition, e.g. by using bindgen's
@@ -1575,7 +1583,7 @@ impl<'a> RsCodeGenerator<'a> {
                 //    A is a class rather than a namespace.
                 output_mod_items.push(match type_kind {
                     TypeKind::Pod => Self::generate_bindgen_use_stmt(name),
-                    _ => non_pod_struct::generate_opaque_type(name, num_generics, &doc_attrs),
+                    _ => non_pod_struct::generate_opaque_type(name, &bindgen_generics, &doc_attrs),
                 });
                 if num_generics > 0 {
                     // Still generate the type as emitted by bindgen,
@@ -1608,7 +1616,7 @@ impl<'a> RsCodeGenerator<'a> {
                     // not forward-declare aliases.
                     output_mod_items.push(non_pod_struct::generate_opaque_type(
                         name,
-                        num_generics,
+                        &bindgen_generics,
                         &doc_attrs,
                     ));
                     output_mod_items.append(&mut self.generate_extern_type_impl(type_kind, name));
