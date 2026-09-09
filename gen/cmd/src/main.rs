@@ -278,6 +278,13 @@ fn main() -> miette::Result<()> {
         // Spot any fundamental parsing or command line problems before we start
         // to do the complex processing.
         let parsed_file = parse_file(input, auto_allowlist)?;
+        // The dependency recorder below hears only about headers, from the
+        // preprocessor; these are the other half of what codegen read, and a
+        // depfile which lists one and not the other describes a rule that can
+        // go stale without being rebuilt.
+        if let Some(depfile) = &depfile {
+            depfile.borrow_mut().add_dependency(&PathBuf::from(input));
+        }
         parsed_files.push(parsed_file);
     }
 
@@ -473,7 +480,7 @@ impl FileWriter<'_> {
 struct RecordIntoDepfile(Rc<RefCell<Depfile>>);
 
 impl RebuildDependencyRecorder for RecordIntoDepfile {
-    fn record_header_file_dependency(&self, filename: &str) {
+    fn record_dependency(&self, filename: &str) {
         self.0.borrow_mut().add_dependency(&PathBuf::from(filename))
     }
 }

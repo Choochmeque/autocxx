@@ -7,6 +7,7 @@
 // except according to those terms.
 
 use std::{
+    ffi::OsStr,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
@@ -50,35 +51,44 @@ impl Depfile {
     }
 
     /// Return a string giving a relative path from the depfile.
-    // TODO: both .expect()s below are reachable from user input: --outdir
-    // accepts non-UTF-8 paths (panics at to_str), and on Windows a
-    // dependency on a different drive root than the depfile makes
-    // diff_paths return None. Should propagate a clean error like
-    // main.rs does, but relativize's callers don't return Result yet.
+    // TODO: the .expect() below is reachable from user input: --outdir
+    // accepts non-UTF-8 paths (panics at to_str). Should propagate a clean
+    // error like main.rs does, but relativize's callers don't return Result
+    // yet.
     fn relativize(&self, path: &Path) -> String {
-        let relative = pathdiff::diff_paths(path, &self.depfile_dir).expect(
-            "Unable to make a relative path from the depfile's directory to the dependency",
-        );
         // A .d file is Make syntax, where backslash is the escape character,
         // so Windows separators would produce a file no consumer parses
         // back to these paths. Forward slashes are understood by make and
         // ninja on every platform, Windows included, so the depfile speaks
         // them regardless of what the OS calls its own.
-        relative
-            .components()
-            .map(|c| {
-                c.as_os_str()
-                    .to_str()
-                    .expect("Unable to represent the file path in a UTF8 encoding")
-            })
-            .collect::<Vec<_>>()
-            .join("/")
+        match pathdiff::diff_paths(path, &self.depfile_dir) {
+            Some(relative) => relative
+                .components()
+                .map(|c| utf8(c.as_os_str()))
+                .collect::<Vec<_>>()
+                .join("/"),
+            // There is not always a relative path to give: a Windows
+            // dependency on another drive root, or a dependency and a depfile
+            // of which only one is relative to the working directory - which
+            // the .rs inputs can be while the preprocessor's header paths are
+            // absolute. Make and ninja both take an absolute dependency, so
+            // the path stands as it is rather than the depfile being
+            // abandoned. Its root, and on Windows its drive prefix, is not a
+            // component the join above could put back together.
+            None => utf8(path.as_os_str()).replace('\\', "/"),
+        }
     }
+}
+
+fn utf8(path: &OsStr) -> String {
+    path.to_str()
+        .expect("Unable to represent the file path in a UTF8 encoding")
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Read};
+    use std::{fs::File, io::Read, path::Path};
 
     use tempfile::tempdir;
 
@@ -115,5 +125,24 @@ mod tests {
         let mut contents = String::new();
         f.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "a/b: c/d \\\n  e/f\n\nz: c/d \\\n  e/f\n\n");
+    }
+
+    /// A dependency with no relative path to the depfile - here one relative
+    /// to the working directory where the depfile is not - is written out
+    /// absolute rather than bringing the run down. `--depfile` is normally
+    /// given absolute while an input `.rs` is named relatively.
+    #[test]
+    fn test_dependency_with_no_relative_path() {
+        let tmp_dir = tempdir().unwrap();
+        let f = tmp_dir.path().join("depfile.d");
+        let mut df = Depfile::new(&f).unwrap();
+        df.add_output(&tmp_dir.path().join("a/b"));
+        df.add_dependency(Path::new("src/main.rs"));
+        df.write().unwrap();
+
+        let mut f = File::open(&f).unwrap();
+        let mut contents = String::new();
+        f.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "a/b: src/main.rs\n\n");
     }
 }

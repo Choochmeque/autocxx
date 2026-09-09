@@ -417,7 +417,7 @@ impl CompositeDepRecorder {
 impl UnwindSafe for CompositeDepRecorder {}
 
 impl RebuildDependencyRecorder for CompositeDepRecorder {
-    fn record_header_file_dependency(&self, filename: &str) {
-        self.0.record_header_file_dependency(filename);
+    fn record_dependency(&self, filename: &str) {
+        self.0.record_dependency(filename);
     }
 }
