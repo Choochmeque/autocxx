@@ -260,7 +260,9 @@ cached, reordered or elided. So a C++ declaration mapped straight onto a Rust
 type loses it: <code>autocxx</code> would have to generate a volatile <em>access</em>, and where
 it cannot, the binding does not keep what the qualifier says.</p>
 <p>The dividing line is <em>where the read happens</em>. C++ performing the access keeps
-the promise; an ordinary Rust load of a plainly mapped type does not.</p>
+the promise; an ordinary Rust load of a plainly mapped type does not. Rust can
+keep it too, but only through a type which says so - which is what the handle
+below is for, in the one position where Rust is the side doing the reading.</p>
 <p><strong>Refused, by name.</strong> A <code>volatile</code> variable, a field of a <code>generate_pod!</code>
 struct, and a template argument. In each of these Rust would end up doing the
 access itself - a re-exported <code>static</code> is read by ordinary Rust loads, a POD
@@ -303,16 +305,62 @@ no part of a function's type, so <code>void f(volatile int)</code> and <code>voi
 one function.</p>
 <p>A struct with a <code>volatile</code> member is still usable, whichever of these applies;
 it simply cannot be <code>generate_pod!</code>.</p>
-<p><strong>Not yet handled.</strong> A pointer or reference <em>to</em> something <code>volatile</code> -
-<code>volatile int*</code>, <code>volatile int&amp;</code> - which is the position <code>volatile</code> is most
-often used in real headers. A refusal is not the right answer for it; what it
-needs is a generated wrapper performing the access through
-<code>read_volatile</code>/<code>write_volatile</code>, and that does not exist yet. Until it does,
-such a signature fails to build inside generated C++ rather than being reported
-against the function you asked for. A volatile-qualified <em>method</em>
-(<code>void f() volatile</code>) is likewise unhandled, and worse: <code>libclang</code> exposes no
-way to ask, so where a class has both a plain and a volatile-qualified overload
-of one name, both bind to the plain one.</p>
+<p><strong>Bound through a handle - a pointer or reference <em>to</em> something <code>volatile</code>.</strong>
+<code>volatile int*</code> and <code>volatile int&amp;</code> are where the qualifier is most often used
+in real headers, and they are the one position in which <em>Rust</em> performs the
+access. There is no Rust pointer type which carries the promise, so <code>autocxx</code>
+hands over one which does: <code>autocxx::VolatilePtr&lt;T&gt;</code>, whose <code>read</code> and <code>write</code>
+are <code>read_volatile</code> and <code>write_volatile</code>.</p>
+<pre><code class="language-cpp">volatile uint32_t* uart_status();
+void configure(volatile uint32_t* reg);
+</code></pre>
+<pre><code class="language-rust ignore">let reg = unsafe { ffi::uart_status() };
+let flags = unsafe { reg.read() };
+unsafe { reg.write(flags | 1) };
+unsafe { ffi::configure(reg) };</code></pre>
+<p>The handle is the currency in both directions, so what one function returns
+goes straight into another which takes it. <code>autocxx::VolatilePtr::new</code> makes
+one from an address Rust already knows - <code>0x4000_0000 as *mut u32</code> - and
+<code>as_raw</code> gets the address back out.</p>
+<p>A <code>const volatile</code> pointee - how a status register the program may read but not
+write is declared - becomes <code>autocxx::VolatileConstPtr&lt;T&gt;</code>, which has no
+<code>write</code>.</p>
+<p>Three things are worth knowing about the handle. It is deliberately not <code>&amp;T</code>:
+a Rust shared reference promises the referent does not change while it lives,
+which is the one thing a hardware register is guaranteed to do, so a reference
+here would be a false statement to the compiler rather than merely a lost
+guarantee. <code>read</code> and <code>write</code> are <code>unsafe</code>, because whether the address is
+valid is C++'s business and <code>autocxx</code> cannot check it. And a volatile access is
+<em>not</em> an atomic one and carries no ordering relative to anything but other
+volatile accesses: concurrent access from another thread is a data race exactly
+as it would be otherwise, and
+<a href="https://doc.rust-lang.org/core/sync/atomic/"><code>core::sync::atomic</code></a> is what to
+reach for when synchronization is what you want.</p>
+<p>The handle appears only where the pointee is of built-in type, because that is
+where Rust is the side reading it. <code>read</code> is a <code>read_volatile</code>, which needs a
+<code>Copy</code> type: a class is not, and neither is a C++ enumeration, whose generated
+Rust counterpart does not implement <code>Copy</code>. (A <code>volatile</code> enumeration <em>member</em>
+is bound, because there C++ does the copying.) A pointer-valued pointee is left
+out for a second reason - a qualifier written on a pointer binds to the
+declarator rather than reading left to right, so <code>T* const volatile</code> is not
+<code>const volatile T*</code>, and the generated C++ cannot name it by putting the
+qualifiers in front.</p>
+<p>Any other pointee is left exactly as it was rather than turned down, because
+where C++ performs the access, handing it the address is already right - a copy
+constructor taking <code>const volatile T&amp;</code> binds as it always did.</p>
+<p><strong>Not yet handled.</strong> A volatile-qualified <em>method</em> (<code>void f() volatile</code>).
+<code>libclang</code> exposes no way to ask, so where a class has both a plain and a
+volatile-qualified overload of one name, both bind to the plain one.</p>
+<p>A qualifier which reaches a signature through a type alias - <code>typedef volatile uint32_t vu32;</code>, or <code>using P = volatile uint32_t*;</code> - is also not seen.
+<code>bindgen</code> resolves an alias to its target before recording the qualifier, so
+nothing downstream knows the type was <code>volatile</code>, and the same is true of
+<code>const</code>. Such a signature fails to build inside the generated C++ rather than
+being reported against the function you asked for; it is never bound as though
+the qualifier were absent. Writing the qualifier at the point of use rather
+than in the alias is the way round it.</p>
+<p><code>volatile</code> nested deeper than the immediately pointed-at type - <code>volatile uint32_t*&amp;</code>, a reference to a pointer to something volatile - is likewise not
+handled, and fails the same loud way. The handle covers one level, which is the
+level register code is written at.</p>
 <h2 id="string-constants"><a class="header" href="#string-constants">String constants</a></h2>
 <p>Whether from a preprocessor symbol or from a C++ <code>char*</code> constant,
 strings appear as <code>[u8]</code> with a null terminator. To get a Rust string,
