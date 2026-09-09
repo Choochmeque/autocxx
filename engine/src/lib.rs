@@ -31,6 +31,7 @@ include!(concat!(env!("OUT_DIR"), "/vendored_bindgen_mount.rs"));
 mod ast_discoverer;
 mod clang_target;
 mod conversion;
+mod cpp_standard;
 mod cxxbridge;
 mod known_types;
 mod minisyn;
@@ -178,7 +179,37 @@ pub struct CodegenOptions<'a> {
     pub cpp_codegen_options: CppCodegenOptions<'a>,
 }
 
-const AUTOCXX_CLANG_ARGS: &[&str; 4] = &["-x", "c++", "-std=c++14", "-DBINDGEN"];
+/// The arguments autocxx parses headers with, before a caller's own.
+///
+/// The standard here is the one the headers are *parsed* at, which is not the
+/// one the generated C++ is compiled at - the caller's `cc::Build` chooses that,
+/// and autocxx generates C++ which compiles as C++14. C++17 is the parse
+/// standard because a C++17 function type carries the function's exception
+/// specification, which is the only way to learn which way a `noexcept(expr)`
+/// operand resolved; see [`cpp_standard`]. It comes first in the argument
+/// vector, so a caller who needs an older one can say so - see
+/// [`builder::Builder::extra_clang_args`].
+const AUTOCXX_CLANG_ARGS: &[&str; 7] = &[
+    "-x",
+    "c++",
+    "-std=c++17",
+    // C++17 removed three things a header written for an older standard may
+    // still contain, and clang's diagnostic for each of them is an error by
+    // default, which bindgen treats as fatal. Raising the standard autocxx
+    // parses at must not stop it reading a header it read before, so each is
+    // demoted to a warning - `-Wno-error=`, not `-Wno-`, which would silence it
+    // outright and hide a real thing about the header. bindgen prints a
+    // warning and carries on.
+    //
+    // These change only how loudly clang reports what it parsed. Nothing here
+    // changes the declarations autocxx sees, which is why a library facility
+    // C++17 removed - `std::auto_ptr` - is not addressed the same way and needs
+    // the `-std=` escape instead.
+    "-Wno-error=dynamic-exception-spec",
+    "-Wno-error=register",
+    "-Wno-error=increment-bool",
+    "-DBINDGEN",
+];
 
 /// Implement to learn of header files which get included
 /// by this build process, such that your build system can choose
@@ -724,7 +755,9 @@ impl IncludeCppEngine {
         let conversion = converter
             .convert(
                 bindings,
-                parse_callback_results.index(),
+                parse_callback_results.index(
+                    cpp_standard::exception_specifications_are_part_of_the_type(extra_clang_args),
+                ),
                 self.config.unsafe_policy.clone(),
                 header_contents,
                 codegen_options,

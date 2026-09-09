@@ -33,7 +33,9 @@ fn do_test(input: ItemMod) {
     // never the generated C++.
     let bc = BridgeConverter::new(&[], &tc, 4);
     let inclusions = "".into();
-    let parse_callback_results = UnindexedParseCallbackResults::with_only_a_root_mod().index();
+    // Any answer about exception specifications: these results are hand-written
+    // and report no function which has one.
+    let parse_callback_results = UnindexedParseCallbackResults::with_only_a_root_mod().index(true);
     bc.convert(
         input,
         parse_callback_results,
