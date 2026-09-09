@@ -32,7 +32,9 @@ use crate::minisyn::Ident;
 use super::{
     analysis::{
         fun::{
-            function_wrapper::{CppFunction, CppFunctionBody, RECEIVER_ARG_NAME},
+            function_wrapper::{
+                CppExceptionSpecification, CppFunction, CppFunctionBody, RECEIVER_ARG_NAME,
+            },
             FnPhase, PodAndDepAnalysis, SubclassAnalysis,
         },
         pod::PodAnalysis,
@@ -640,15 +642,26 @@ impl<'a> CppCodeGenerator<'a> {
         } else {
             ""
         };
-        let declaration =
-            format!("{ret_type} {name}({args}){constness}{ref_qualifier}{override_keyword}");
+        // Only ever non-empty for a subclass peer's override of a superclass
+        // virtual method which promises not to throw - see
+        // `override_exception_specification`. Unlike `override` it belongs on
+        // the out-of-line definition too: C++ requires every declaration of a
+        // function to carry a compatible specification.
+        let exception_specification = match details.exception_specification {
+            CppExceptionSpecification::None => "",
+            CppExceptionSpecification::Noexcept => " noexcept",
+        };
+        let declaration = format!(
+            "{ret_type} {name}({args}){constness}{ref_qualifier}{exception_specification}{override_keyword}"
+        );
         let qualification = if let Some(qualification) = &details.qualification {
             format!("{}::", qualification.to_cpp_name())
         } else {
             "".to_string()
         };
-        let qualified_declaration =
-            format!("{ret_type} {qualification}{name}({args}){constness}{ref_qualifier}");
+        let qualified_declaration = format!(
+            "{ret_type} {qualification}{name}({args}){constness}{ref_qualifier}{exception_specification}"
+        );
         // Whether there's a placement param in which to put the return value
         let placement_param = details
             .argument_conversion
@@ -1256,6 +1269,10 @@ impl<'a> CppCodeGenerator<'a> {
                 // it overrides nothing and only shares a shape with the method
                 // that does.
                 super_method.ref_qualifier = CppRefQualifier::None;
+                // Nor its exception specification: `super_foo` calls the
+                // superclass method instead of overriding it, and C++ lets a
+                // function which may throw call one which may not.
+                super_method.exception_specification = CppExceptionSpecification::None;
                 super_method.is_virtual_override = false;
                 // Named during analysis, where the cxx bridge was given the
                 // same name to call it by.

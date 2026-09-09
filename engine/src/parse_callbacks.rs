@@ -12,8 +12,8 @@ use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
-    Explicitness, MemberFunctionTemplateInfo, MethodKind, RefQualifier, SpecialMemberKind,
-    TemplateMemberFunctionInfo, UsingDeclarationInfo, Visibility,
+    ExceptionSpecification, Explicitness, MemberFunctionTemplateInfo, MethodKind, RefQualifier,
+    SpecialMemberKind, TemplateMemberFunctionInfo, UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -405,6 +405,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
     data_members: HashMap<DiscoveredItemId, Vec<DataMember>>,
     deprecations: HashMap<DiscoveredItemId, Deprecation>,
+    exception_specifications: HashMap<DiscoveredItemId, ExceptionSpecification>,
     using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<DiscoveredItemId, Vec<TemplateMemberFunction>>,
     member_function_templates: HashMap<DiscoveredItemId, Vec<MemberFunctionTemplate>>,
@@ -607,6 +608,18 @@ impl ParseCallbackResults {
     pub(crate) fn get_method_kind(&self, name: &QualifiedName) -> Option<MethodKind> {
         self.id_by_name(name)
             .and_then(|id| self.results.method_kinds.get(&id).cloned())
+    }
+
+    /// The exception specification C++ declared a function with. bindgen
+    /// reports none for a function declared without one, which is what
+    /// [`ExceptionSpecification::None`] says here.
+    pub(crate) fn get_exception_specification(
+        &self,
+        name: &QualifiedName,
+    ) -> ExceptionSpecification {
+        self.id_by_name(name)
+            .and_then(|id| self.results.exception_specifications.get(&id).cloned())
+            .unwrap_or(ExceptionSpecification::None)
     }
 
     /// What C++ marked a function `[[deprecated]]` with, or `None` where it
@@ -877,6 +890,17 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_method_kind(&self, id: DiscoveredItemId, kind: MethodKind) {
         self.results.borrow_mut().method_kinds.insert(id, kind);
+    }
+
+    fn denote_exception_specification(
+        &self,
+        id: DiscoveredItemId,
+        specification: ExceptionSpecification,
+    ) {
+        self.results
+            .borrow_mut()
+            .exception_specifications
+            .insert(id, specification);
     }
 
     fn denote_using_declaration(&self, parent: DiscoveredItemId, using: UsingDeclarationInfo<'_>) {

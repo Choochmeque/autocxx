@@ -36325,3 +36325,324 @@ fn test_smart_pointer_nested_template_named_either_way() {
         None,
     );
 }
+
+#[test]
+fn test_subclass_noexcept_pure_virtual() {
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { a: 3, cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+                a: u32
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_noexcept_virtual_and_super() {
+    // A non-pure `noexcept` virtual. The override has to repeat the
+    // `noexcept`, and the `_super` helper must not: it calls the superclass
+    // method rather than overriding it, so nothing constrains it.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept { return 2; }
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 5);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        // The `_super` helper's own declaration is not pinned positively; the
+        // assertion above calls it, which says it exists and works. What is
+        // pinned is that it carries no specification of its own.
+        Some(Box::new(CppMatcher::new(
+            &["uint32_t foo() const noexcept override;"],
+            &["foo_autocxx_super() const noexcept"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    use ffi::Observer_supers;
+                    self.foo_super() + 3
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_noexcept_reaches_declaration_and_definition() {
+    // C++ requires the specification on every declaration of the function, so
+    // the out-of-line definition of the override carries it as well as the
+    // in-class declaration. `override` goes on the declaration alone, which is
+    // what tells the two apart here.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &[
+                "uint32_t foo() const noexcept override;",
+                "uint32_t MyObserverCpp::foo() const noexcept",
+            ],
+            &["uint32_t foo() const override;"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_virtual_without_specification_gets_none() {
+    // The override of a method which may throw is unconstrained, so autocxx
+    // writes no specification at all. Writing `noexcept` here would be legal
+    // C++ - an override may be more restrictive than what it overrides - and
+    // would turn an exception leaving the override into a call to
+    // `std::terminate`.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["uint32_t foo() const override;"],
+            &["foo() const noexcept"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_conditional_noexcept_non_pure_virtual() {
+    // `noexcept(expr)` reaches autocxx as a kind which says the specification
+    // is conditional and nothing about which way the condition resolved, so
+    // neither writing `noexcept` on the override nor leaving it off is known to
+    // be right. A non-pure virtual therefore gets no override at all, exactly
+    // as an `&&`-qualified one does, and the superclass's own implementation
+    // stands; `other` shows the rest of the subclass is unaffected.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t conditional() const noexcept(true) { return 2; }
+        virtual uint32_t other() const { return 3; }
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_conditional(const Observer& o) { return o.conditional(); }
+    inline uint32_t call_other(const Observer& o) { return o.other(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_conditional(o.borrow().as_ref()), 2);
+            assert_eq!(ffi::call_other(o.borrow().as_ref()), 7);
+        },
+        quote! {
+            generate!("call_conditional")
+            generate!("call_other")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["uint32_t other() const override;"],
+            &[
+                "conditional() const override",
+                "conditional() const noexcept override",
+                "conditional_autocxx_super",
+            ],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn other(&self) -> u32 {
+                    7
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_conditional_noexcept_pure_virtual() {
+    // The same refusal where the method is pure virtual. There is nothing to
+    // fall back on: the peer class stays abstract and the C++ which allocates
+    // it does not compile, naming the method it has no override for. Refusing
+    // the subclass itself would say so in Rust instead, which needs the
+    // override APIs to depend on their subclass; they do not today.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept(true) = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    // The trait implementation is empty and the Rust never calls `foo`, so the
+    // diagnostic pinned here is the one the refusal causes and not a Rust error
+    // about a method the trait no longer has. `abstract` is the word every
+    // compiler the suite runs on uses for a class with an unoverridden pure
+    // virtual - clang "allocating an object of abstract class type", gcc
+    // "cannot allocate an object of abstract type", MSVC "cannot instantiate
+    // abstract class" - and it is what distinguishes this failure from the one
+    // a too-loose override emitted instead of the refusal would give, which
+    // speaks of exception specifications instead.
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {
+            MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+            }
+        }),
+        &["abstract"],
+    );
+}
+
+#[test]
+fn test_noexcept_virtual_method_call_unaffected() {
+    // Calling a `noexcept` virtual method from Rust, with no subclass in sight:
+    // the shim autocxx generates overrides nothing, so it carries no
+    // specification of its own.
+    let hdr = indoc! {"
+        #include <cstdint>
+        class A {
+        public:
+            virtual ~A() {}
+            virtual uint32_t foo() const noexcept { return 4; }
+        };
+        inline A make_a() { return A(); }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::make_a().within_unique_ptr().as_ref().unwrap().foo(), 4);
+    };
+    run_test("", hdr, rs, &["A", "make_a"], &[]);
+}

@@ -106,6 +106,9 @@ impl<'a> ParseForeignMod<'a> {
                     synthetic_cpp: None,
                     variadic: item.sig.variadic.is_some(),
                     ref_qualifier: ref_qualifier_from_attrs(&item.attrs),
+                    exception_specification: self
+                        .parse_callback_results
+                        .get_exception_specification(&qn),
                 });
                 Ok(())
             }

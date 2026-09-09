@@ -29,6 +29,7 @@ use super::{
     pod::{PodAnalysis, PodPhase},
     type_converter::concrete_type_ident,
 };
+use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 
 /// Expose each [`Api::Static`] - a C++ variable with static storage duration -
 /// in the shape its type allows.
@@ -271,6 +272,7 @@ fn getter(name: ApiName, holder: &QualifiedName) -> Api<PodPhase> {
             is_deleted: None,
             deprecation: None,
             ref_qualifier: CppRefQualifier::None,
+            exception_specification: ExceptionSpecification::None,
         }),
         name,
         analysis: (),

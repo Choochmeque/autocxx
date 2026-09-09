@@ -26,6 +26,7 @@ use super::{
     pod::PodPhase,
     tdef::instantiable_concrete_types,
 };
+use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 
 pub(crate) fn create_alloc_and_frees(
     apis: ApiVec<PodPhase>,
@@ -106,6 +107,7 @@ fn create_alloc_and_free(ty_name: QualifiedName) -> impl Iterator<Item = Api<Pod
                     provenance: Provenance::SynthesizedOther,
                     variadic: false,
                     ref_qualifier: CppRefQualifier::None,
+                    exception_specification: ExceptionSpecification::None,
                 }),
                 analysis: (),
             }

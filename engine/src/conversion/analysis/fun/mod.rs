@@ -48,8 +48,12 @@ use crate::{
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
+use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 use autocxx_parser::{ExternCppType, IncludeCppConfig, UnsafePolicy};
-use function_wrapper::{CppFunction, CppFunctionBody, TypeConversionPolicy, RECEIVER_ARG_NAME};
+use function_wrapper::{
+    CppExceptionSpecification, CppFunction, CppFunctionBody, TypeConversionPolicy,
+    RECEIVER_ARG_NAME,
+};
 use itertools::Itertools;
 use proc_macro2::Span;
 use quote::{quote, ToTokens};
@@ -79,7 +83,7 @@ use self::{
     overload_tracker::OverloadTracker,
     subclass::{
         create_subclass_constructor, create_subclass_fn_wrapper, create_subclass_function,
-        create_subclass_trait_item,
+        create_subclass_trait_item, override_exception_specification,
     },
 };
 
@@ -1077,6 +1081,15 @@ impl<'a> FnAnalyzer<'a> {
                     ..
                 }
             );
+            // What the override has to say about exceptions, or the reason
+            // there is no answer: see `override_exception_specification`. A
+            // method with no answer still reserves the `_super` name it would
+            // have used below, and leaves it unused: names are minted once for
+            // all the subclasses of a superclass and the escape in
+            // `get_cpp_super_fn_name` walks further each time, so letting a
+            // refusal skip one would move the name a later method gets.
+            let exception_specification =
+                override_exception_specification(fun.exception_specification);
             // Whether the peer class can offer a `foo_super` helper which
             // calls the superclass's own implementation. A pure virtual
             // method has no such implementation; a `private` one has one
@@ -1113,6 +1126,21 @@ impl<'a> FnAnalyzer<'a> {
             });
 
             for sub in self.subclasses_by_superclass(sup) {
+                let exception_specification = match &exception_specification {
+                    Ok(exception_specification) => *exception_specification,
+                    Err(err) => {
+                        results.push(Api::IgnoredItem {
+                            name: ApiName::new_in_root_namespace(make_ident(format!(
+                                "{}_{}",
+                                sub.0.name.get_final_item(),
+                                name.name.get_final_item()
+                            ))),
+                            err: err.clone(),
+                            ctx: None,
+                        });
+                        continue;
+                    }
+                };
                 // For each subclass, we need to create a plain-C++ method to call its superclass
                 // and a Rust/C++ bridge API to call _that_.
                 // What we're generating here is entirely about the subclass, so the
@@ -1159,6 +1187,7 @@ impl<'a> FnAnalyzer<'a> {
                     subclass_fn_deps,
                     self.unsafe_policy,
                     fun.ref_qualifier,
+                    exception_specification,
                     super_fn_cpp_name
                         .as_ref()
                         .map(QualifiedName::get_final_ident),
@@ -2954,8 +2983,11 @@ impl<'a> FnAnalyzer<'a> {
                 pass_obs_field: false,
                 qualification: None,
                 // Our wrapper is a free function which calls the method on an
-                // lvalue, so it never needs a ref-qualifier of its own.
+                // lvalue, so it never needs a ref-qualifier of its own - nor an
+                // exception specification, which only an override is required
+                // to repeat.
                 ref_qualifier: CppRefQualifier::None,
+                exception_specification: CppExceptionSpecification::None,
                 is_virtual_override: false,
                 calls_deprecated: fun.deprecation.is_some(),
             })
@@ -4214,6 +4246,7 @@ impl<'a> FnAnalyzer<'a> {
                         provenance: Provenance::SynthesizedOther,
                         variadic: false,
                         ref_qualifier: CppRefQualifier::None,
+                        exception_specification: ExceptionSpecification::None,
                     }),
                 )
             })
@@ -4526,6 +4559,11 @@ fn template_member_function(
         // these to carry a mangled name at all. It has to come from somewhere,
         // because a class may declare both qualifications of one name and the
         // shim would call whichever the lvalue it holds selects.
+        // bindgen reports a class template's members through a callback of its
+        // own, which carries no exception specification. Nothing reads this
+        // today: a member bound from that callback reaches `analyze_and_add`,
+        // which generates no subclass override.
+        exception_specification: ExceptionSpecification::None,
         ref_qualifier: match member.ref_qualifier {
             RefQualifier::None => CppRefQualifier::None,
             RefQualifier::LValue => CppRefQualifier::LValue,

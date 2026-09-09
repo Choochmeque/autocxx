@@ -37,6 +37,7 @@ use super::{
     pod::{pod_safe_types, FieldInfo, PodAnalysis, PodPhase},
     type_converter,
 };
+use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 
 /// What we append to the name bindgen gave a field to name the API which
 /// carries its accessor.
@@ -297,6 +298,7 @@ fn getter(
         is_deleted: None,
         deprecation: None,
         ref_qualifier: CppRefQualifier::None,
+        exception_specification: ExceptionSpecification::None,
     }
 }
 
