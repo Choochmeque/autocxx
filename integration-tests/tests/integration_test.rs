@@ -23352,22 +23352,21 @@ fn test_emplace_of_over_aligned_type_before_cpp17_is_refused() {
     );
 }
 
-/// A class whose only allocation function takes an alignment is refused.
-/// Nothing here can tell which `operator delete` would match it - a probe for
-/// one is answered by a placement overload as readily as by a usual one - so
-/// the allocation goes unpaired, and saying so beats guessing.
+/// A class whose only allocation function takes an alignment, for a type
+/// which does not need one, is refused: a new-expression passes no alignment
+/// for such a type, and clang and gcc both reject `new AlignedE` for want of
+/// anything to call. There is nothing to pair a deallocation with.
 #[test]
-fn test_emplace_of_over_aligned_type_with_only_an_aligned_new_is_refused() {
+fn test_emplace_with_only_an_aligned_new_is_refused() {
     let hdr = indoc! {"
         #include <cstddef>
         #include <cstdint>
         #include <new>
-        struct alignas(32) AlignedE {
+        struct AlignedE {
             AlignedE() {}
             static void* operator new(std::size_t count, std::align_val_t al);
             static void operator delete(void* ptr, std::align_val_t al) noexcept;
             uint32_t a = 7;
-            char pad[28] = {};
         };
     "};
     let rs = quote! {
@@ -39262,4 +39261,204 @@ fn test_generated_code_is_warning_free() {
         }),
     )
     .unwrap()
+}
+
+/// The block a `UniquePtr` gives up when the caller moves out of it goes back
+/// through `delete_appropriately`, which has to free it the way `delete p`
+/// would have. Here that is the class's sized deallocation function, the only
+/// one it declares - an arena in miniature, whose blocks a global free would
+/// never reach.
+#[test]
+fn test_uninitialized_storage_freed_by_sized_class_delete() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        inline uint32_t& fx_class_allocs() { static uint32_t n = 0; return n; }
+        inline uint32_t& fx_class_frees() { static uint32_t n = 0; return n; }
+        struct SizedOnly {
+            SizedOnly() {}
+            static void* operator new(::std::size_t n) {
+                fx_class_allocs()++;
+                return ::operator new(n);
+            }
+            static void operator delete(void* p, ::std::size_t) noexcept {
+                fx_class_frees()++;
+                ::operator delete(p);
+            }
+            uint32_t a;
+        };
+        inline uint32_t fx_read_class_allocs() { return fx_class_allocs(); }
+        inline uint32_t fx_read_class_frees() { return fx_class_frees(); }
+    "};
+    let rs = quote! {
+        use autocxx::moveit::AsMove;
+        let obj = ffi::SizedOnly::new().within_unique_ptr();
+        assert_eq!(ffi::fx_read_class_allocs(), 1);
+        {
+            autocxx::moveit::slot!(#[dropping] storage);
+            drop(obj.as_move(storage));
+        }
+        assert_eq!(ffi::fx_read_class_frees(), 1);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["SizedOnly", "fx_read_class_allocs", "fx_read_class_frees"],
+        &[],
+    );
+}
+
+/// A new-expression for an over-aligned type passes an alignment, so a class
+/// declaring both overloads gets the aligned one - and the `delete p` inside
+/// cxx's `unique_ptr` then calls the aligned deallocation function that goes
+/// with it. Taking the plain overload instead under-aligns the object, which
+/// `moveit` hands to Rust as a `&mut MaybeUninit<T>`.
+#[test]
+fn test_over_aligned_class_gets_its_aligned_operator_new() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <new>
+        inline uint32_t& fx_plain_news() { static uint32_t n = 0; return n; }
+        inline uint32_t& fx_aligned_news() { static uint32_t n = 0; return n; }
+        inline uint32_t& fx_ctor_offset() { static uint32_t n = 0; return n; }
+        // Blocks 16 past a 64-byte boundary, so that taking the plain
+        // overload for an over-aligned type shows up as a number rather than
+        // as luck. A class may return storage this weakly aligned from its
+        // plain overload precisely because C++ never routes `new Wide` there.
+        inline unsigned char* fx_slab() {
+            alignas(64) static unsigned char slab[256];
+            return slab + 16;
+        }
+        struct alignas(64) Wide {
+            Wide() {
+                fx_ctor_offset() = static_cast<uint32_t>(
+                    reinterpret_cast<::std::uintptr_t>(this) % 64);
+            }
+            static void* operator new(::std::size_t) {
+                fx_plain_news()++;
+                return fx_slab();
+            }
+            static void* operator new(::std::size_t n, ::std::align_val_t a) {
+                fx_aligned_news()++;
+                return ::operator new(n, a);
+            }
+            static void operator delete(void*) noexcept {}
+            static void operator delete(void* p, ::std::align_val_t a) noexcept {
+                // A slab block reaches here only from a build which wrongly
+                // took the plain overload; freeing one would end the process
+                // before the test could say which overload ran.
+                if (p != static_cast<void*>(fx_slab())) {
+                    ::operator delete(p, a);
+                }
+            }
+            uint64_t a = 0;
+            // Filled out to the alignment rather than left to the compiler,
+            // which would pad it there and say so - and MSVC's C4324 is an
+            // error under the warning settings these tests build with.
+            char pad[56] = {};
+        };
+        inline uint32_t fx_read_plain_news() { return fx_plain_news(); }
+        inline uint32_t fx_read_aligned_news() { return fx_aligned_news(); }
+        inline uint32_t fx_read_ctor_offset() { return fx_ctor_offset(); }
+    "};
+    let rs = quote! {
+        let obj = ffi::Wide::new().within_unique_ptr();
+        assert_eq!(ffi::fx_read_ctor_offset(), 0);
+        assert_eq!(ffi::fx_read_aligned_news(), 1);
+        assert_eq!(ffi::fx_read_plain_news(), 0);
+        drop(obj);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "Wide",
+                "fx_read_plain_news",
+                "fx_read_aligned_news",
+                "fx_read_ctor_offset",
+            ],
+            &[],
+            None,
+        ),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// An over-aligned class which declares only the aligned pair - the idiomatic
+/// shape for one, since C++ never routes its allocation anywhere else - is
+/// allocated and freed through that pair. Both ends reach it: the object is
+/// built with `AlignedF::operator new(size, align)`, and storage whose
+/// constructor threw goes back through
+/// `AlignedF::operator delete(ptr, align)`.
+#[test]
+fn test_emplace_of_over_aligned_type_uses_its_aligned_allocator_pair() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <new>
+        #include <stdexcept>
+        struct alignas(32) AlignedF {
+            AlignedF(uint32_t x) {
+                if (x == 0) throw std::runtime_error(\"aligned refuses\");
+                a = x;
+            }
+            static void* operator new(std::size_t count, std::align_val_t al);
+            static void operator delete(void* ptr, std::align_val_t al) noexcept;
+            uint32_t a = 0;
+            // Filled out to the alignment rather than left to the compiler,
+            // which would pad it there and say so - and MSVC's C4324 is an
+            // error under the warning settings these tests build with.
+            char pad[28] = {};
+            uintptr_t address() const { return reinterpret_cast<uintptr_t>(this); }
+        };
+        uint32_t aligned_class_news();
+        uint32_t aligned_class_deletes();
+    "};
+    let cxx = indoc! {"
+        static uint32_t aligned_new_count = 0;
+        static uint32_t aligned_delete_count = 0;
+        uint32_t aligned_class_news() { return aligned_new_count; }
+        uint32_t aligned_class_deletes() { return aligned_delete_count; }
+        void* AlignedF::operator new(std::size_t count, std::align_val_t al) {
+            aligned_new_count++;
+            return ::operator new(count, al);
+        }
+        void AlignedF::operator delete(void* ptr, std::align_val_t al) noexcept {
+            aligned_delete_count++;
+            ::operator delete(ptr, al);
+        }
+    "};
+    let rs = quote! {
+        {
+            let f = ffi::AlignedF::new(5).try_within_unique_ptr().unwrap();
+            assert_eq!(ffi::aligned_class_news(), 1);
+            assert_eq!(f.address() % 32, 0);
+        }
+        assert_eq!(ffi::aligned_class_deletes(), 1);
+        // A constructor which throws leaves storage nobody constructed into,
+        // which comes back through the other half of the pair.
+        assert!(ffi::AlignedF::new(0).try_within_unique_ptr().is_err());
+        assert_eq!(ffi::aligned_class_news(), 2);
+        assert_eq!(ffi::aligned_class_deletes(), 2);
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("AlignedF")
+            generate!("aligned_class_news")
+            generate!("aligned_class_deletes")
+            throws!("AlignedF::AlignedF")
+        },
+        make_cpp17_adder(),
+        None,
+        None,
+    );
 }
