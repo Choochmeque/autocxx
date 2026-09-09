@@ -79,9 +79,45 @@ pub fn doctest(
     rust_code: TokenStream,
     manifest_dir: &OsStr,
 ) -> Result<(), TestError> {
+    doctest_with_std(cxx_code, header_code, rust_code, manifest_dir, None)
+}
+
+/// As [`doctest`], for an example which needs a C++ standard other than the
+/// C++14 the rest of the book is built at - `Some("c++17")` for one which
+/// mentions `std::string_view`, say. Both halves of the build are told, since
+/// nothing else makes them agree.
+pub fn doctest_with_std(
+    cxx_code: &str,
+    header_code: &str,
+    rust_code: TokenStream,
+    manifest_dir: &OsStr,
+    cpp_std: Option<&'static str>,
+) -> Result<(), TestError> {
     std::env::set_var("CARGO_PKG_NAME", "autocxx-integration-tests");
     std::env::set_var("CARGO_MANIFEST_DIR", manifest_dir);
-    do_run_test_manual(cxx_code, header_code, rust_code, None, None)
+    do_run_test_manual(
+        cxx_code,
+        header_code,
+        rust_code,
+        cpp_std.map(|std| Box::new(DoctestStd(std)) as BuilderModifier),
+        None,
+    )
+}
+
+/// A C++ standard for both halves of a book example's build.
+struct DoctestStd(&'static str);
+
+impl BuilderModifierFns for DoctestStd {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        builder.extra_clang_args(&[&format!("-std={}", self.0)])
+    }
+
+    fn modify_cc_builder<'a>(&self, builder: &'a mut cc::Build) -> &'a mut cc::Build {
+        builder.std(self.0)
+    }
 }
 
 fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
