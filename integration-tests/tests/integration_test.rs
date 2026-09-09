@@ -14359,12 +14359,8 @@ fn test_string_view_mutable_ref_param_refused() {
 /// it. Asserted here rather than reasoned about, since nothing in autocxx gets
 /// to choose it.
 ///
-/// Scalar members only, which is what bindgen compensates for. An *array* of a
-/// prelude-substituted type gets no such padding, so a class with one is short
-/// in Rust: `[std::string; 3]` is three stand-ins, 24 bytes against the real 72.
-/// That is not this feature's doing and not specific to views. It is how every
-/// substituted type has always behaved, `std::string` included, and fixing it
-/// belongs to bindgen's array layout rather than here.
+/// An *array* of a substituted type is the same question one level down, and is
+/// pinned by `test_array_of_substituted_type_does_not_shrink_its_class`.
 #[test]
 fn test_string_view_member_does_not_shrink_its_class() {
     let hdr = indoc! {"
@@ -14417,6 +14413,298 @@ fn test_string_view_member_does_not_shrink_its_class() {
         make_cpp17_adder(),
         None,
         None,
+    );
+}
+
+/// A class holding an *array* of a prelude-substituted type is sized in Rust the
+/// way C++ sizes it.
+///
+/// Each stand-in out of the `replaces=` prelude is one pointer and the type it
+/// stands in for is wider, so `[std::string; 3]` is 24 bytes of Rust against 72
+/// bytes of C++. bindgen keeps the class honest by padding it out to the size
+/// clang reported, which it can only do if it measures the field as the
+/// stand-ins it actually wrote; measuring it as the array clang laid out leaves
+/// the class short by the difference, and `within_box` then has C++ construct
+/// past the end of the storage Rust allocated - see
+/// `test_array_of_substituted_type_is_not_built_past_its_rust_storage`.
+///
+/// One case per route an array takes to the layout: written as an array, an
+/// array of those, an array of a typedef to a substituted type, and an array
+/// in a union - both as a member of one and as the union itself, which is a
+/// different Rust type. The last rows compensate for nothing and say so: an
+/// array whose C++ element is also one pointer, and an array of no substituted
+/// type at all.
+///
+/// Two shapes are left out, because they are wrong for reasons no array sizing
+/// reaches and pinning them would only record the wrong number. A member
+/// declared `alignas` more strictly than its class needs is one: the padding
+/// bindgen writes for the gap in front of such a member takes up more room than
+/// the gap, which puts `alignas(16) std::string m` at 64 bytes against C++'s
+/// 48 with no array in sight. A `std::array<std::string, 3>` member is the
+/// other: the element recorded for it is the canonical
+/// `std::basic_string<char, std::allocator>` and not the replaced
+/// `std::string`, so no substitution applies to it to be compensated for.
+/// A third is a *packed* class whose array comes first, which stays short: the
+/// tracker does follow the C++ offset of the member after the array, but a
+/// packed class gets no padding field written for the gap it counted. The same
+/// class with the array last comes out right.
+#[test]
+fn test_array_of_substituted_type_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <memory>
+        #include <string>
+        #include <string_view>
+        // The array last, so only tail padding can make the size right.
+        struct fx_Trailing { uint32_t n; std::string m[3]; };
+        // And first, with a member after it to be placed correctly.
+        struct fx_Leading { std::string m[3]; uint32_t n; };
+        struct fx_Views { uint32_t n; std::string_view m[3]; };
+        struct fx_Nested { uint32_t n; std::string m[2][3]; };
+        typedef std::string fx_alias;
+        struct fx_Aliased { uint32_t n; fx_alias m[3]; };
+        // A view is trivially destructible, so the union has a destructor; the
+        // initializer is what gives it a default constructor.
+        struct fx_Union { uint32_t n; union { std::string_view m[3]; uint64_t o = 0; } u; };
+        // And the union in its own right, which is a Rust type of its own and
+        // reaches its size by its own route.
+        union fx_BareUnion { std::string_view m[3]; uint64_t o = 0; };
+        // A stand-in as wide as the type it stands in for: nothing to add.
+        struct fx_Same { uint32_t n; std::unique_ptr<uint32_t> m[3]; };
+        // No substitution at all: the arithmetic has to leave this alone.
+        struct fx_Plain { uint32_t n; uint64_t m[3]; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_Trailing);
+                case 1: return sizeof(fx_Leading);
+                case 2: return sizeof(fx_Views);
+                case 3: return sizeof(fx_Nested);
+                case 4: return sizeof(fx_Aliased);
+                case 5: return sizeof(fx_Union);
+                case 6: return sizeof(fx_BareUnion);
+                case 7: return sizeof(fx_Same);
+                default: return sizeof(fx_Plain);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_Trailing);
+                case 1: return alignof(fx_Leading);
+                case 2: return alignof(fx_Views);
+                case 3: return alignof(fx_Nested);
+                case 4: return alignof(fx_Aliased);
+                case 5: return alignof(fx_Union);
+                case 6: return alignof(fx_BareUnion);
+                case 7: return alignof(fx_Same);
+                default: return alignof(fx_Plain);
+            }
+        }
+    "};
+    let rs = quote! {
+        // Every row reported at once: one short class says little about the
+        // others, and the first assertion to fire would hide them.
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_Trailing, "a trailing std::string[3]");
+        check!(1, ffi::fx_Leading, "a leading std::string[3]");
+        check!(2, ffi::fx_Views, "a std::string_view[3]");
+        check!(3, ffi::fx_Nested, "a std::string[2][3]");
+        check!(4, ffi::fx_Aliased, "an array of a typedef to std::string");
+        check!(5, ffi::fx_Union, "a std::string_view[3] in a union");
+        check!(6, ffi::fx_BareUnion, "a std::string_view[3] in a bare union");
+        check!(7, ffi::fx_Same, "a std::unique_ptr<uint32_t>[3]");
+        check!(8, ffi::fx_Plain, "a uint64_t[3]");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with an array member disagrees with C++:{report}"
+        );
+        // Placement construction into Rust-provided storage of that size.
+        let _ = ffi::fx_Leading::new().within_box();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "fx_Trailing",
+                "fx_Leading",
+                "fx_Views",
+                "fx_Nested",
+                "fx_Aliased",
+                "fx_Union",
+                "fx_BareUnion",
+                "fx_Same",
+                "fx_Plain",
+                "fx_size",
+                "fx_align",
+            ],
+            &[],
+            None,
+        ),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// The same, for the two cxx vocabulary types C++ sees as classes of its own.
+///
+/// `rust::Str` and `rust::String` reach bindgen through the same prelude and are
+/// two and three pointers wide respectively, against the one-pointer stand-in.
+#[test]
+fn test_array_of_rust_vocabulary_type_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <cxx.h>
+        struct fx_TrailingStr { uint32_t n; rust::Str m[3]; };
+        struct fx_LeadingStr { rust::Str m[3]; uint32_t n; };
+        struct fx_Strings { uint32_t n; rust::String m[3]; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_TrailingStr);
+                case 1: return sizeof(fx_LeadingStr);
+                default: return sizeof(fx_Strings);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_TrailingStr);
+                case 1: return alignof(fx_LeadingStr);
+                default: return alignof(fx_Strings);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_TrailingStr, "a trailing rust::Str[3]");
+        check!(1, ffi::fx_LeadingStr, "a leading rust::Str[3]");
+        check!(2, ffi::fx_Strings, "a rust::String[3]");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with an array member disagrees with C++:{report}"
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_TrailingStr",
+            "fx_LeadingStr",
+            "fx_Strings",
+            "fx_size",
+            "fx_align",
+        ],
+        &[],
+    );
+}
+
+/// What a short class costs: C++ builds the object past the end of the storage
+/// Rust sized for it, over whatever Rust put next.
+///
+/// The size assertions above say the two languages agree on the number. This
+/// says what the number is for, and is the reason the agreement is worth a test:
+/// `new` is placement construction into storage the caller provides, `moveit`
+/// and `within_box` provide it at `size_of`, and a `size_of` short of `sizeof`
+/// is an overrun of exactly the difference. Here the storage is a field of a
+/// `repr(C)` struct, so what follows it is known rather than whatever the
+/// allocator happened to hand out.
+#[test]
+fn test_array_of_substituted_type_is_not_built_past_its_rust_storage() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <string>
+        struct fx_Guarded {
+            std::string m[3];
+            // Ordinary writes, one per element. Each reaches its own element,
+            // so the later ones land past where a short Rust size would end.
+            void fill() { m[0] = \"a\"; m[1] = \"b\"; m[2] = \"c\"; }
+        };
+        inline size_t fx_guarded_sizeof() { return sizeof(fx_Guarded); }
+    "};
+    let rs = quote! {
+        // Without this the test could pass by the difference reaching past the
+        // canary rather than by there being none.
+        assert!(
+            ffi::fx_guarded_sizeof() <= std::mem::size_of::<Guarded>(),
+            "the canary is too short to cover what C++ would write"
+        );
+        let mut guarded = Guarded {
+            obj: core::mem::MaybeUninit::uninit(),
+            canary: [FX_CANARY; 16],
+        };
+        // SAFETY: `obj` is fresh storage which nothing has pinned, so the
+        // `New` contract holds; `guarded` is never moved after this point, as
+        // the object in it is not trivially relocatable; and the object is
+        // destroyed in place, while initialised, before `guarded` dies.
+        unsafe {
+            ffi::fx_Guarded::new().new(core::pin::Pin::new_unchecked(&mut guarded.obj));
+            let obj = core::pin::Pin::new_unchecked(&mut *guarded.obj.as_mut_ptr());
+            obj.fill();
+            core::ptr::drop_in_place(guarded.obj.as_mut_ptr());
+        }
+        // SAFETY: `canary` is live, initialised and aligned, and every bit
+        // pattern is a valid `[u64; 16]` - including one C++ overwrote.
+        //
+        // Volatile because nothing in Rust's model writes to `canary`, so a
+        // plain read may be folded to the value it was initialised with.
+        let canary = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(guarded.canary)) };
+        assert!(
+            canary.iter().all(|&word| word == FX_CANARY),
+            "C++ built a {} byte object into the {} bytes Rust sized for it, over {:x?}",
+            ffi::fx_guarded_sizeof(),
+            std::mem::size_of::<ffi::fx_Guarded>(),
+            canary
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Guarded", "fx_guarded_sizeof"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            const FX_CANARY: u64 = 0x0123_4567_89ab_cdef;
+
+            /// `fx_Guarded` with Rust's own bytes immediately after it.
+            #[repr(C)]
+            struct Guarded {
+                obj: core::mem::MaybeUninit<ffi::fx_Guarded>,
+                canary: [u64; 16],
+            }
+        }),
     );
 }
 
