@@ -7263,17 +7263,18 @@ fn test_two_type_constructors() {
     run_test("", hdr, rs, &["A", "B"], &[]);
 }
 
-// The vendored bindgen can now give `value_type` its real type rather than a
-// blob, behind `dependent_qualified_types` - see
-// `engine/third_party/patches/32-dependent-qualified-types.patch` and the
-// bug reported upstream as https://github.com/rust-lang/rust-bindgen/issues/1924.
-// autocxx does not ask for it, for the reason that patch's header gives: the
-// trait bound it puts on `STRING_TYPE` cannot be satisfied by `std::string`,
-// which reaches bindgen as a `replaces=` substitute with no inner types. Even
-// with it on and that bound satisfied, this test needs one more thing:
-// `Origin`'s implicit constructors are withheld because its member's type is a
-// concrete type autocxx synthesized, which `implicit_constructors` does not
-// understand (`DependenciesNotUnderstood`).
+// `value_type` now has its real type rather than a blob, and the bound on
+// `STRING_TYPE` is satisfied - see
+// `engine/third_party/patches/32-dependent-qualified-types.patch`, the bug
+// reported upstream as https://github.com/rust-lang/rust-bindgen/issues/1924,
+// and the inner types `known_types` declares on the `std::string` stand-in. The
+// other two tests of this shape pass on that alone.
+//
+// This one needs one more thing, which has nothing to do with dependent
+// qualified names: `Origin`'s implicit constructors are withheld because its
+// member's type is a concrete type autocxx synthesized, which
+// `implicit_constructors` does not understand (`DependenciesNotUnderstood`), so
+// `Origin::new` is never generated.
 #[ignore]
 #[test]
 fn test_associated_type_templated_typedef_in_struct() {
@@ -7372,6 +7373,143 @@ fn test_associated_type_templated_typedef_by_value_regular() {
         None,
         None,
         None,
+    );
+}
+
+// A class can name `typename T::Inner` in an inner type of its own rather than
+// in any field. Where a field uses the parameter too, the class is rendered
+// with it and the bound has to be there: the impl saying the class has that
+// inner type assigns a projection through that parameter, and without the
+// bound that impl does not compile.
+#[test]
+fn test_dependent_qualified_type_named_by_an_inner_type() {
+    let hdr = indoc! {"
+        struct Params { typedef long difference_type; };
+
+        template <typename P> struct Holder {
+            typedef typename P::difference_type difference_type;
+            P p;
+        };
+
+        typedef Holder<Params> ConcreteHolder;
+
+        inline long take_holder(const ConcreteHolder&) { return 0; }
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_holder"], &[]);
+}
+
+// The same, but nothing else uses the parameter, so the class is rendered
+// without it. The inner type is still spelled in terms of that parameter, so
+// there is no impl this class could carry saying it has it, and bindgen says
+// nothing rather than naming a parameter which is not in scope.
+#[test]
+fn test_dependent_qualified_type_named_only_by_an_inner_type() {
+    let hdr = indoc! {"
+        struct Params2 { typedef long difference_type; };
+
+        template <typename P> struct Holder2 {
+            typedef typename P::difference_type difference_type;
+            long unrelated;
+        };
+
+        typedef Holder2<Params2> ConcreteHolder2;
+
+        inline long take_holder2(const ConcreteHolder2& h) { return h.unrelated; }
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_holder2"], &[]);
+}
+
+// A class template whose inner type is its own parameter - `typedef R rep;` -
+// instantiated and then projected through: `Uses<Dur<int>>` asks `Dur<int>` for
+// its `rep`. The impl saying it has one assigns that bare parameter, which
+// satisfies nothing the trait asks of its associated type, so the impl carries
+// what the trait asks as a bound of its own and holds for the arguments which
+// meet it. MSVC's `std::chrono::duration` declares `rep` this way and its
+// standard library projects it over `duration<long long>`.
+#[test]
+fn test_dependent_qualified_type_inner_type_is_the_parameter() {
+    let hdr = indoc! {"
+        struct ArgR { typedef int rep; };
+
+        template <class R> struct Dur {
+            typedef R rep;
+            R value;
+        };
+
+        template <class D> struct Uses {
+            typename D::rep field;
+        };
+
+        typedef Uses<ArgR> ConcreteUses;
+        typedef Uses<Dur<int> > NestedUses;
+
+        inline void take_uses(const ConcreteUses&) {}
+        inline void take_nested(const NestedUses&) {}
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_uses", "take_nested"], &[]);
+}
+
+// A class whose parameter nothing but an inner typedef names, projected over:
+// `UsesP<Dur2<ArgP>>` asks `Dur2<ArgP>` for its `period`. The class has to be
+// rendered with that parameter for the impl to name it, and the bound belongs on
+// the impl rather than on the class - `Dur2` holds nothing of the projected
+// type, so bounding the class would stop it being instantiated over an argument
+// which cannot answer the projection. MSVC's `std::chrono` is this shape twice
+// over: `duration` holds only its `rep` while declaring `period` through its
+// parameter, and `time_point` projects both off `duration`.
+#[test]
+fn test_dependent_qualified_type_parameter_named_only_by_an_inner_typedef() {
+    let hdr = indoc! {"
+        struct ArgP { typedef int type; };
+
+        template <class P> struct Dur2 {
+            typedef typename P::type period;
+            long rep_;
+        };
+
+        template <class D> struct UsesP {
+            typename D::period field;
+        };
+
+        typedef UsesP<Dur2<ArgP> > NestedP;
+
+        inline void take_nested_p(const NestedP&) {}
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_nested_p"], &[]);
+}
+
+// The class autocxx gives bindgen in place of `std::string` declares the inner
+// types whose definition the C++ standard fixes and no others, so a member
+// spelled through any other one still has no type. What autocxx says about it
+// names the type and the inner type, rather than leaving rustc to report an
+// unsatisfied bound on a trait whose name appears in no source the user wrote.
+#[test]
+fn test_dependent_qualified_type_on_substitute_is_refused() {
+    let hdr = indoc! {"
+        #include <string>
+
+        template <typename STRING_TYPE> class Piece {
+        public:
+            typedef typename STRING_TYPE::iterator iterator_type;
+            iterator_type it_;
+        };
+
+        typedef Piece<std::string> StringPiece;
+
+        inline void take_piece(const StringPiece&) {}
+    "};
+    let rs = quote! {};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        rs,
+        &["take_piece"],
+        &[],
+        "`typename std::string::iterator`",
     );
 }
 
@@ -9625,29 +9763,22 @@ fn test_issues_217_222() {
 #[test]
 // The google/autocxx#106 family. Without help from bindgen, the dependent
 // qualified name `typename T::value_type` has no type, so MyStringView (and its
-// view_value_type member) are reported as UnusedTemplateParam and this fails
+// view_value_type member) were reported as UnusedTemplateParam and this failed
 // with DidNotGenerateAnythingUsable("take_string_view",
 // IgnoredDependent({MyStringView})).
 //
-// The vendored bindgen can represent it, behind `dependent_qualified_types` -
-// see `engine/third_party/patches/32-dependent-qualified-types.patch`, which
-// rebases the bug reported upstream as
-// https://github.com/rust-lang/rust-bindgen/issues/1924. With that option on
-// this test passes. autocxx does not ask for it, for the reason that patch's
-// header gives: the trait bound it puts on a template parameter cannot be
-// satisfied by a type bindgen was handed a `replaces=` substitute for, which is
-// every `std::` type, so turning it on stops `BasicStringPiece<std::string>`
-// compiling - see `test_associated_type_templated_typedef`.
+// `engine/third_party/patches/32-dependent-qualified-types.patch` gives it one,
+// rebasing the bug reported upstream as
+// https://github.com/rust-lang/rust-bindgen/issues/1924: the member becomes an
+// associated type of a trait, and the template parameter carries a bound saying
+// it has that inner type. `MyString` declares `value_type`, so it implements
+// the trait and the instantiation has a layout rather than a blob.
 //
-// The obvious way to satisfy it is a trap, and was measured: implement the
-// trait for such a type with the same opaque stand-in the member had before,
-// `[u8; 0]`. That does make this test pass, and the two above it, but a member
-// which names the dependent qualified type *by value* rather than through a
-// pointer then has a zero-sized Rust field where C++ has an object - a wrong
-// layout, where before there was a compile error. Whatever satisfies the bound
-// has to carry the size C++ gives it, or the instantiation has to go back to
-// being an opaque blob measured from C++.
-#[ignore]
+// What the bound asks of a type autocxx hands bindgen a `replaces=` substitute
+// for is answered in `known_types`, whose stand-ins declare the inner types
+// whose identity is fixed. Where one is not declared there is no type for the
+// member and autocxx refuses the instantiation, saying which inner type it
+// wanted - see `test_dependent_qualified_type_on_substitute_is_refused`.
 fn test_dependent_qualified_type() {
     let hdr = indoc! {"
     #include <stddef.h>

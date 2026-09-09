@@ -7,21 +7,15 @@
 // except according to those terms.
 
 use syn::{
-    parse_quote, Attribute, GenericParam, Generics, Ident, Item, Path, TraitBound,
-    TraitBoundModifier, TypeParamBound,
+    parse_quote, Attribute, GenericParam, Generics, Item, TraitBound, TraitBoundModifier,
+    TypeParamBound,
 };
 
 use crate::types::{make_ident, Namespace, QualifiedName};
 
 use super::find_output_mod_root;
+use crate::conversion::inner_type_traits::inner_type_trait_named;
 use quote::quote;
-
-/// The prefix bindgen gives the traits through which it renders a dependent
-/// qualified name - `typename T::Inner` becomes
-/// `<T as __bindgen_has_inner_type_Inner>::Inner`, and the parameter carries a
-/// bound naming that trait. Such a trait is declared in bindgen's root module,
-/// so a bound copied out of that module has to be requalified to reach it.
-const INNER_TYPE_TRAIT_PREFIX: &str = "__bindgen_has_inner_type_";
 
 /// Make an opaque wrapper around a bindgen type.
 // Constraints here (thanks to dtolnay@ for this explanation of why the
@@ -225,28 +219,6 @@ fn requalified(mut bound: TypeParamBound, ns: &Namespace) -> TypeParamBound {
     );
     tb.path = parse_quote! { #(#prefix ::)* #trait_name };
     bound
-}
-
-/// The inner-type trait a path names, however bindgen spelled the path: bare
-/// from inside its root module, or through that module from anywhere else.
-fn inner_type_trait_named(path: &Path) -> Option<Ident> {
-    if path.leading_colon.is_some() {
-        return None;
-    }
-    let mut segments = path.segments.iter();
-    let last = match path.segments.len() {
-        1 => segments.next()?,
-        2 => {
-            let first = segments.next()?;
-            if first.ident != "root" || !first.arguments.is_none() {
-                return None;
-            }
-            segments.next()?
-        }
-        _ => return None,
-    };
-    (last.arguments.is_none() && last.ident.to_string().starts_with(INNER_TYPE_TRAIT_PREFIX))
-        .then(|| last.ident.clone())
 }
 
 #[cfg(test)]

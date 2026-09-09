@@ -27,6 +27,7 @@ use crate::{
     conversion::{
         convert_error::{ConvertErrorWithContext, ErrorContext},
         error_reporter::report_any_error,
+        inner_type_traits::INNER_TYPE_TRAIT_PREFIX,
     },
     types::validate_ident_ok_for_cxx,
 };
@@ -426,6 +427,14 @@ impl<'a> ParseBindgen<'a> {
                 });
                 Ok(())
             }
+            // The trait through which bindgen renders a dependent qualified
+            // name. Nothing here needs an `Api` for it: it is emitted with the
+            // rest of the bindgen mod, which autocxx copies out verbatim, and
+            // what a bound naming it requires of a template argument is read
+            // off the bounded type instead - see
+            // `conversion::inner_type_traits`. Any other trait is still
+            // unexpected.
+            Item::Trait(tr) if tr.ident.to_string().starts_with(INNER_TYPE_TRAIT_PREFIX) => Ok(()),
             _ => Err(ConvertErrorWithContext(
                 ConvertErrorFromCpp::UnexpectedItemInMod,
                 None,

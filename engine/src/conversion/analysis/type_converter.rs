@@ -14,6 +14,7 @@ use crate::{
         },
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
+        inner_type_traits::inner_types_required_of_params,
         type_helpers::{
             extract_pinned_mutable_reference_type, is_volatile_qualified, mentions_cpp_array,
             mentions_float128, mentions_long_double, mentions_volatile,
@@ -310,6 +311,10 @@ pub(crate) struct TypeConverter<'a> {
     /// is read only by [`Self::incompleteness_of_argument`], which has to see
     /// through an alias in a template argument before anything converts it.
     alias_targets: HashMap<QualifiedName, Type>,
+    /// Every generic type bindgen emitted, mapped to the inner types each of
+    /// its template parameters is bounded to have, by position. See
+    /// [`ConvertErrorFromCpp::DependentQualifiedTypeOnSubstitute`].
+    inner_types_required: HashMap<QualifiedName, Vec<Vec<String>>>,
     ignored_types: HashSet<QualifiedName>,
     /// The accessor surfaces of holders which already existed when a
     /// conversion worked one out. See [`Self::take_deferred_surfaces`].
@@ -357,6 +362,7 @@ impl<'a> TypeConverter<'a> {
             concrete_definitions: Self::find_concrete_definitions(apis),
             classes_we_may_not_destroy: HashMap::new(),
             alias_targets: Self::find_alias_targets(apis),
+            inner_types_required: Self::find_inner_types_required(apis),
             ignored_types: Self::find_ignored_types(apis),
             deferred_surfaces: HashMap::new(),
             config,
@@ -2046,6 +2052,20 @@ impl<'a> TypeConverter<'a> {
                 rs_definition.to_token_stream().to_string(),
             ));
         }
+        // Refused here rather than left to rustc, which would report an
+        // unsatisfied bound on a generated trait naming neither the type the
+        // user wrote nor the member which needs it.
+        if let Some((argument, inner_type)) = self.unsatisfiable_inner_type(rs_definition) {
+            let instantiation = match rs_definition {
+                Type::Path(typ) => QualifiedName::from_type_path(typ),
+                _ => unreachable!("only a path has template arguments to be refused over"),
+            };
+            return Err(ConvertErrorFromCpp::DependentQualifiedTypeOnSubstitute {
+                instantiation,
+                argument,
+                inner_type,
+            });
+        }
         let count = self.concrete_templates.len();
         // We just use this as a hash key, essentially.
         let cpp_definition = self.original_name_map.type_to_cpp(rs_definition)?;
@@ -2321,6 +2341,76 @@ impl<'a> TypeConverter<'a> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// What each generic type bindgen emitted requires of its template
+    /// parameters, read off the bound bindgen put on each. See the field of the
+    /// same name.
+    fn find_inner_types_required<A: AnalysisPhase>(
+        apis: &ApiVec<A>,
+    ) -> HashMap<QualifiedName, Vec<Vec<String>>> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Struct { details, .. } => {
+                    let required = inner_types_required_of_params(&details.item.generics);
+                    required
+                        .iter()
+                        .any(|inner_types| !inner_types.is_empty())
+                        .then(|| (api.name().clone(), required))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The inner type an instantiation's argument is required to have and does
+    /// not, where autocxx is the reason it does not.
+    ///
+    /// bindgen implements the trait for each type which declares such an inner
+    /// type, so a type it describes in full carries whatever C++ gave it. A
+    /// type autocxx replaces carries what the prelude class declares instead,
+    /// which is a shorter list, and the difference is the bound nothing can
+    /// satisfy - a rustc error deep in the generated bindings, in place of
+    /// anything naming the type the user wrote.
+    fn unsatisfiable_inner_type(&self, rs_definition: &Type) -> Option<(QualifiedName, String)> {
+        let Type::Path(typ) = rs_definition else {
+            return None;
+        };
+        let required = self
+            .inner_types_required
+            .get(&QualifiedName::from_type_path(typ))?;
+        let arguments = typ
+            .path
+            .segments
+            .last()
+            .into_iter()
+            .filter_map(|seg| match &seg.arguments {
+                PathArguments::AngleBracketed(ab) => Some(ab.args.iter()),
+                _ => None,
+            })
+            .flatten()
+            // Every type argument, in the order written. `required` is indexed
+            // by the position of a type parameter, so dropping the arguments
+            // which are not paths here would pair each of the rest with some
+            // other parameter's bounds.
+            .filter_map(|arg| match arg {
+                GenericArgument::Type(inner) => Some(inner),
+                _ => None,
+            });
+        for (argument, inner_types) in arguments.zip(required) {
+            let Type::Path(argument) = argument else {
+                continue;
+            };
+            let argument = QualifiedName::from_type_path(argument);
+            for inner_type in inner_types {
+                if known_types().substitute_declares_inner_type(&argument, inner_type)
+                    == Some(false)
+                {
+                    return Some((argument, inner_type.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// The concrete template instantiations which were built on a type nothing
