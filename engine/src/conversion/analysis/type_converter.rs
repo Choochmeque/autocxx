@@ -315,7 +315,10 @@ pub(crate) struct TypeConverter<'a> {
     /// its template parameters is bounded to have, by position. See
     /// [`ConvertErrorFromCpp::DependentQualifiedTypeOnSubstitute`].
     inner_types_required: HashMap<QualifiedName, Vec<Vec<String>>>,
-    ignored_types: HashSet<QualifiedName>,
+    /// Every item autocxx turned down, with the reason it turned it down, so
+    /// that a specialization refused for being one of these can say what was
+    /// wrong with the template rather than only that something was.
+    ignored_types: HashMap<QualifiedName, ConvertErrorFromCpp>,
     /// The accessor surfaces of holders which already existed when a
     /// conversion worked one out. See [`Self::take_deferred_surfaces`].
     deferred_surfaces: HashMap<QualifiedName, HolderSurface>,
@@ -1468,8 +1471,11 @@ impl<'a> TypeConverter<'a> {
                 // make. Err on the side of caution. In future we may be able to relax
                 // this a bit.
                 let qn = QualifiedName::from_type_path(&typ); // ignores generic params
-                if self.ignored_types.contains(&qn) {
-                    return Err(ConvertErrorFromCpp::ConcreteVersionOfIgnoredTemplate);
+                if let Some(reason) = self.ignored_types.get(&qn) {
+                    return Err(ConvertErrorFromCpp::ConcreteVersionOfIgnoredTemplate {
+                        name: qn,
+                        reason: Box::new(reason.clone()),
+                    });
                 }
                 // The concrete instantiation is named in C++ by writing its
                 // arguments out again, and this branch does not convert them
@@ -2487,13 +2493,14 @@ impl<'a> TypeConverter<'a> {
         }
     }
 
-    fn find_ignored_types<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashSet<QualifiedName> {
+    fn find_ignored_types<A: AnalysisPhase>(
+        apis: &ApiVec<A>,
+    ) -> HashMap<QualifiedName, ConvertErrorFromCpp> {
         apis.iter()
             .filter_map(|api| match api {
-                Api::IgnoredItem { .. } => Some(api.name()),
+                Api::IgnoredItem { err, .. } => Some((api.name().clone(), err.clone())),
                 _ => None,
             })
-            .cloned()
             .collect()
     }
 }
