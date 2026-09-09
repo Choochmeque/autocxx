@@ -100,6 +100,13 @@ pub(crate) fn expose_statics(apis: ApiVec<PodPhase>) -> ApiVec<PodPhase> {
                 name.name.clone(),
             ));
         }
+        // Asked before `holdable`, which answers yes for every known type: a
+        // holder over a `std::string_view` would have accessors naming a Rust
+        // type there is none of, and the reason is the one the view's own
+        // diagnostic gives rather than anything about holders.
+        if known_types().is_string_view(&cpp_ty) {
+            return Err(ConvertErrorFromCpp::StringViewOutOfCpp);
+        }
         if !holdable.contains(&cpp_ty) {
             return Err(ConvertErrorFromCpp::StaticDataOfUnholdableType(cpp_ty));
         }

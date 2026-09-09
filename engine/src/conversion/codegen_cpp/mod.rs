@@ -9,6 +9,7 @@
 mod function_wrapper_cpp;
 mod move_or_copy_prelude;
 mod new_and_delete_prelude;
+mod string_view_prelude;
 pub(crate) mod type_to_cpp;
 
 use crate::{
@@ -95,6 +96,7 @@ enum Header {
     CxxgenH,
     NewDeletePrelude,
     MoveOrCopyPrelude,
+    StringViewPrelude,
 }
 
 impl Header {
@@ -119,6 +121,7 @@ impl Header {
             }
             Header::NewDeletePrelude => new_and_delete_prelude::NEW_AND_DELETE_PRELUDE.to_string(),
             Header::MoveOrCopyPrelude => move_or_copy_prelude::MOVE_OR_COPY_PRELUDE.to_string(),
+            Header::StringViewPrelude => string_view_prelude::STRING_VIEW_PRELUDE.to_string(),
         }
     }
 
@@ -931,6 +934,16 @@ impl<'a> CppCodeGenerator<'a> {
         if needs_move_or_copy {
             headers.push(Header::System("type_traits"));
             headers.push(Header::MoveOrCopyPrelude);
+        }
+        // Asked of the arguments only: a `std::string_view` return never gets
+        // this far, being refused during analysis.
+        if details
+            .argument_conversion
+            .iter()
+            .any(|conv| conv.builds_a_string_view())
+        {
+            headers.push(Header::System("cstdint"));
+            headers.push(Header::StringViewPrelude);
         }
         Ok(ExtraCpp {
             declaration,

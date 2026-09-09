@@ -890,6 +890,44 @@ impl<'a> TypeConverter<'a> {
         if generic_behavior != CxxGenericType::Not && mentions_volatile(&Type::Path(typ.clone())) {
             return Err(ConvertErrorFromCpp::VolatileTemplateArgument);
         }
+        // A container's whole purpose is to give Rust something to reach the
+        // payload through, and a `std::string_view` payload has nothing to hand
+        // back - Rust has no type which is a view. Asked for every container,
+        // because the holder routes just below would otherwise build accessors
+        // naming it, and the plain-payload predicates further on would report it
+        // as a container problem rather than as the view it is about.
+        //
+        // The payload is asked about directly - one level, through one pointer,
+        // with aliases resolved - rather than searched for at any depth. A view
+        // nested inside some *other* template is that template's business: such
+        // an instantiation becomes an opaque holder of its own, whose accessors
+        // hand back the holder and never the view, and which is a shape that
+        // works.
+        if generic_behavior != CxxGenericType::Not {
+            for arg in direct_generic_args(&typ) {
+                // Through a pointer, and out of the `const` marker bindgen
+                // wraps a qualified argument in - `shared_ptr<const T>` arrives
+                // as `shared_ptr<__bindgen_marker_Const<T>>`.
+                let arg = match &arg {
+                    Type::Ptr(p) => (*p.elem).clone(),
+                    Type::Path(p) => unwrap_const(p).cloned().unwrap_or(arg),
+                    _ => arg,
+                };
+                if let Type::Path(p) = &arg {
+                    let mut tn = QualifiedName::from_type_path(p);
+                    if let Some(TypedefTargetInfo {
+                        ty: Type::Path(target),
+                        ..
+                    }) = self.resolve_typedef(&tn)?
+                    {
+                        tn = QualifiedName::from_type_path(target);
+                    }
+                    if known_types().is_string_view(&tn) {
+                        return Err(ConvertErrorFromCpp::StringViewOutOfCpp);
+                    }
+                }
+            }
+        }
         let payload_is_const = generic_behavior != CxxGenericType::Not
             && self.generic_args_are_const_qualified(&typ)?;
         if matches!(
@@ -2013,6 +2051,22 @@ impl<'a> TypeConverter<'a> {
 /// erasure being bindgen's and older than the lowering. So the match here is
 /// what keeps a single pointer argument the only shape that arrives, and not
 /// what decides which allocators are in reach.
+/// The template arguments `typ` was written with, as types, one level deep.
+fn direct_generic_args(typ: &TypePath) -> Vec<Type> {
+    let Some(PathArguments::AngleBracketed(args)) =
+        typ.path.segments.last().map(|seg| &seg.arguments)
+    else {
+        return Vec::new();
+    };
+    args.args
+        .iter()
+        .filter_map(|arg| match arg {
+            GenericArgument::Type(ty) => Some(ty.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn sole_pointer_generic_arg(typ: &TypePath) -> Option<Type> {
     let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
         return None;

@@ -17,6 +17,12 @@ use crate::conversion::{
 
 use super::type_to_cpp::CppNameMap;
 
+/// The C++ cxx spells a Rust `&[u8]` as - cxx-gen's `write.rs` writes
+/// `::rust::Slice<`, the element type, then `const`. The wrapper's parameter
+/// has to be this exact type: cxx checks its own shim against ours by
+/// assigning it to a function pointer.
+const RUST_BYTE_SLICE: &str = "::rust::Slice<::std::uint8_t const>";
+
 impl TypeConversionPolicy {
     pub(super) fn unconverted_type(
         &self,
@@ -31,6 +37,13 @@ impl TypeConversionPolicy {
                 cpp: WholeCppConversion::FromPtrToValue,
                 ..
             } => Ok(format!("{}*", self.unwrapped_type_as_string(cpp_name_map)?)),
+            // What cxx hands the wrapper for the bridge's `&[u8]`. Spelt here
+            // rather than derived from the bridge type, because the type this
+            // conversion is *about* is the `std::string_view` it produces.
+            Self::Whole {
+                cpp: WholeCppConversion::FromRustBytesToStringView,
+                ..
+            } => Ok(RUST_BYTE_SLICE.to_string()),
             // `&var`. What this conversion is handed is the C++ reference;
             // the pointer in `cxxbridge_type` is what it produces.
             Self::Pointer {
@@ -171,6 +184,28 @@ impl TypeConversionPolicy {
                     format!("::autocxx_move_or_copy({dereference})")
                 })
             }
+            // The view over the bytes Rust lent. `reinterpret_cast` because
+            // cxx carries them as `uint8_t` and `string_view` wants `char`:
+            // examining an object's bytes through `char` is what that cast is
+            // defined for. The two-argument constructor rather than a
+            // `strlen`-style one, because these bytes are not NUL-terminated
+            // and may contain NUL, and the length is already known.
+            //
+            // The empty case is spelt separately. `string_view(p, n)` requires
+            // `[p, p + n)` to be a valid range, and an empty Rust slice need
+            // not carry a pointer to anything - `Vec::new()` leaves a dangling
+            // well-aligned one, and cxx passes the pointer through as it found
+            // it (`cxx.h`'s `Slice::data`). `p + 0` on such a pointer is not
+            // something C++ promises anything about, so an empty slice becomes
+            // an empty view rather than a view over that address.
+            Self::Whole {
+                cpp: WholeCppConversion::FromRustBytesToStringView,
+                ..
+            } => Some(format!(
+                "({var_name}.empty() ? ::std::string_view() \
+                 : ::std::string_view(reinterpret_cast<const char*>({var_name}.data()), \
+                 {var_name}.size()))"
+            )),
             Self::Pointer {
                 cpp: PointerCppConversion::IgnoredPlacementPtrParameter,
                 ..
@@ -262,6 +297,19 @@ impl TypeConversionPolicy {
                 ..
             } => return Err(ConvertErrorFromCpp::RValueReturn),
         })
+    }
+
+    /// Whether [`Self::cpp_conversion`] names `std::string_view`, so that
+    /// callers know to ask for `<string_view>` and for the C++17 check which
+    /// goes with it.
+    pub(super) fn builds_a_string_view(&self) -> bool {
+        matches!(
+            self,
+            Self::Whole {
+                cpp: WholeCppConversion::FromRustBytesToStringView,
+                ..
+            }
+        )
     }
 
     /// Whether [`Self::cpp_conversion`] may emit a call to the

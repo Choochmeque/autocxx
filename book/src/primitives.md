@@ -135,3 +135,68 @@ a blank `UniquePtr<CxxString>`.
 
 If all you need is a _reference_ to a `CxxString`, you can alternatively use
 [`cxx::let_cxx_string`](https://docs.rs/cxx/latest/cxx/macro.let_cxx_string.html).
+
+## String views
+
+A function which takes a `std::string_view` accepts anything implementing
+`ffi::AsCppStringView` — a `&str`, a `String`, a `&[u8]`, a `Vec<u8>`, or a
+`&CxxString`. Nothing is copied: the view is built in C++ over the bytes you
+lend, for the duration of the call. A `const std::string_view&` parameter is the
+same thing and takes the same argument — note that this is so even under
+`safety!(unsafe_references_wrapped)`, where other reference parameters become
+`CppRef` wrappers; a wrapper around a type Rust cannot construct would be no use
+to anybody.
+
+The bytes are lent for the call, and nothing promises they outlast it. C++ which
+copies the view somewhere that outlives the call may be left holding a dangling
+one — whether it is depends on what you passed, and passing a borrowed `&[u8]`
+promises nothing beyond the call. It is the same bargain as letting C++ keep the
+`const char*` out of a `const std::string&` parameter, except that `string_view`
+is a type people do store. autocxx cannot see that happen, so it falls under what
+you vouch for with `safety!`. If the C++ keeps what it is lent, give it an owned
+`std::string` parameter instead.
+
+The bytes are bytes. C++ asks nothing about the encoding of a `string_view`
+and neither does this, which is why `&[u8]` is accepted alongside `&str` and
+why a view may contain an interior NUL.
+
+```rust,ignore,autocxx,cpp17
+autocxx_integration_tests::doctest(
+"",
+"#include <string_view>
+#include <cstddef>
+inline size_t take_view(std::string_view v) { return v.size(); }",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("take_view")
+}
+
+fn main() {
+    assert_eq!(ffi::take_view("hello"), 5);
+    assert_eq!(ffi::take_view(&b"ab\0c"[..]), 4);
+}
+}
+)
+```
+
+A `std::string_view` is never handed back the other way — not as a return value,
+not read out of a C++ variable, not as a `unique_ptr` or `shared_ptr` payload.
+Rust has no type which is a `std::string_view`, because a view borrows characters
+something else owns and `autocxx` has nothing to tie that borrow to whose
+lifetime it could check. Every such position is refused with an explanation
+rather than bound unsafely. Hand over an owned `std::string` instead, which
+arrives as a `UniquePtr<CxxString>`.
+
+For the same reason, a `std::string_view` parameter of a `virtual` method can be
+*called* from Rust but not *overridden* from Rust with `subclass!`: the way in
+builds the view, and the way out would have to hand Rust an unchecked borrow.
+
+`std::string_view` is C++17. `autocxx` is told the C++ standard twice — once
+for parsing your headers and once for compiling the code it generates — so
+remember to set it in both places, e.g. `cc::Build::std("c++17")` beside
+`extra_clang_args(["-std=c++17"])`. Generated code which needs C++17 and does
+not get it says so by name.

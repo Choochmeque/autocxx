@@ -42,6 +42,22 @@ enum Behavior {
     CxxContainerSharedPtr,
     CxxContainerVector,
     CxxString,
+    /// `std::string_view`: a borrowed (pointer, length) pair into storage
+    /// somebody else owns.
+    ///
+    /// It is in this database so that autocxx can *build* one, in the C++
+    /// wrapper for a function which takes one as a parameter, out of bytes
+    /// Rust lends for the duration of the call. Rust never receives one: no
+    /// input reference gives the borrow a lifetime anything could check, which
+    /// is why a return is refused - see
+    /// [`ConvertErrorFromCpp::StringViewOutOfCpp`].
+    ///
+    /// This is the shape cxx would obviate by gaining a `string_view` of its
+    /// own; the gate is dtolnay/cxx#734.
+    ///
+    /// [`ConvertErrorFromCpp::StringViewOutOfCpp`]:
+    ///     crate::conversion::ConvertErrorFromCpp::StringViewOutOfCpp
+    CxxStringView,
     RustStr,
     RustString,
     RustByValue,
@@ -79,7 +95,9 @@ impl Behavior {
             | Behavior::CVoid
             | Behavior::RustByValue
             // `rust::Str` is a borrowed (pointer, length) pair.
-            | Behavior::RustStr => true,
+            | Behavior::RustStr
+            // So is `std::string_view`.
+            | Behavior::CxxStringView => true,
             // Each of these owns something it has to give back: a heap
             // allocation, a refcount, or a Rust `Box`.
             Behavior::CxxString
@@ -103,6 +121,7 @@ impl Behavior {
             Behavior::RustString
             | Behavior::RustStr
             | Behavior::CxxString
+            | Behavior::CxxStringView
             | Behavior::CxxContainerUniquePtr
             | Behavior::CxxContainerSharedPtr
             | Behavior::CxxContainerVector
@@ -222,7 +241,7 @@ impl TypeDetails {
     ///
     /// bindgen renames a prelude class to the final segment of the C++ name the
     /// class says it replaces, so the stand-in for `rust::Str` is `Str` and the
-    /// one for `std::string` is `string`. Those eight names are all a bindings
+    /// one for `std::string` is `string`. Those nine names are all a bindings
     /// dump contains for this database - checked, because it is the substitute's
     /// name and not the prelude class's.
     fn substitute_name(&self) -> Option<&str> {
@@ -361,9 +380,13 @@ impl TypeDatabase {
                         | Behavior::CIntegerWrapper
                         | Behavior::CCharacter
                         | Behavior::RustContainerByValueSafe => true,
-                        Behavior::CxxString | Behavior::CxxContainerVector | Behavior::CVoid => {
-                            false
-                        }
+                        // A `string_view` is a borrowed (pointer, length) pair
+                        // into storage C++ owns, and nothing gives that borrow
+                        // a lifetime Rust could check, so Rust never holds one.
+                        Behavior::CxxString
+                        | Behavior::CxxStringView
+                        | Behavior::CxxContainerVector
+                        | Behavior::CVoid => false,
                     },
                 )
             })
@@ -463,7 +486,7 @@ impl TypeDatabase {
     /// substitute. See `test_global_type_named_like_known_type_is_rejected`.
     ///
     /// The price is paid only by the names `bindgen` actually substitutes
-    /// something for, which is the eight with a prelude entry - and not by the
+    /// something for, which is the nine with a prelude entry - and not by the
     /// rest of the database, which is every C++ type autocxx can spell. Asking
     /// about all of them made the user's own `c_u32`, `c_int`, `c_wchar_t` and
     /// the rest of the `autocxx::c_*` family unbindable, none of which
@@ -480,8 +503,8 @@ impl TypeDatabase {
     /// bindgen escapes it to `u32_`, which is the name a `generate!` directive
     /// then has to use.
     ///
-    /// Measured: of those eight substitutes, `bindgen` puts `Str`, `String` and
-    /// `Box` in the root mod and the five `std` ones in `root::std`, so the
+    /// Measured: of those nine substitutes, `bindgen` puts `Str`, `String` and
+    /// `Box` in the root mod and the six `std` ones in `root::std`, so the
     /// namespace test below leaves the latter to
     /// [`Self::is_known_type`], which recognises them by their own names. A
     /// global `struct string` is therefore nobody's substitute either, and is
@@ -707,6 +730,14 @@ impl TypeDatabase {
             .unwrap_or(false)
     }
 
+    /// Whether this is `std::string_view`, which a C++ wrapper builds out of
+    /// bytes Rust lends it. See [`Behavior::CxxStringView`].
+    pub(crate) fn is_string_view(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|x| matches!(x.behavior, Behavior::CxxStringView))
+            .unwrap_or(false)
+    }
+
     /// Records one more name by which a type already in the database may be
     /// known, for the cases `TypeDetails::extra_non_canonical_name` can't
     /// express.
@@ -739,7 +770,11 @@ impl TypeDatabase {
             .filter(|tn| {
                 !matches!(
                     self.get(tn).unwrap().behavior,
-                    Behavior::CxxString | Behavior::CxxContainerVector
+                    // A `string_view` has no Rust spelling at all, so there is
+                    // nothing for placement storage to be a storage *of*. Every
+                    // position which would need one is refused, and this keeps
+                    // the database from saying otherwise in the meantime.
+                    Behavior::CxxString | Behavior::CxxStringView | Behavior::CxxContainerVector
                 )
             })
             .cloned()
@@ -788,6 +823,20 @@ fn create_type_database() -> TypeDatabase {
         true,
         true,
     ));
+    // A `std::string_view` is only ever built, never handed to Rust, so the
+    // Rust name here names nothing in any crate: every position which would
+    // emit it is refused. See [`Behavior::CxxStringView`].
+    db.insert(
+        TypeDetails::new(
+            "autocxx::CppStringView",
+            "std::string_view",
+            Behavior::CxxStringView,
+            None,
+            true,
+            false,
+        )
+        .without_container_glue(),
+    );
     db.insert(TypeDetails::new(
         "str",
         "rust::Str",

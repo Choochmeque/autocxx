@@ -133,11 +133,12 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
                     num_tests,
                     case.location
                 );
-                let err = autocxx_integration_tests::doctest(
+                let err = autocxx_integration_tests::doctest_with_std(
                     &case.cpp,
                     &case.hdr,
                     case.rs,
                     &OsString::from(args.value_of("manifest_dir").unwrap()),
+                    if case.cpp17 { Some("c++17") } else { None },
                 );
                 let desc = match err {
                     Ok(_) => "passed".to_string(),
@@ -261,6 +262,9 @@ struct TestCase {
     hdr: String,
     rs: TokenStream,
     location: MiniSpan,
+    /// Whether the example needs C++17, from a `cpp17` flag on the fence. The
+    /// book is otherwise built at the C++14 floor autocxx generates for.
+    cpp17: bool,
 }
 
 unsafe impl Send for TestCase {}
@@ -343,6 +347,7 @@ fn handle_code_block(
                 .unwrap_or_else(|_| panic!("Unable to parse code at {location}"))
                 .to_token_stream(),
             location,
+            cpp17: flags.contains("cpp17"),
         });
     }
 
