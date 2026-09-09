@@ -14492,14 +14492,15 @@ fn test_string_view_member_does_not_shrink_its_class() {
 /// declared `alignas` more strictly than its class needs is one: the padding
 /// bindgen writes for the gap in front of such a member takes up more room than
 /// the gap, which puts `alignas(16) std::string m` at 64 bytes against C++'s
-/// 48 with no array in sight. A `std::array<std::string, 3>` member is the
-/// other: the element recorded for it is the canonical
-/// `std::basic_string<char, std::allocator>` and not the replaced
-/// `std::string`, so no substitution applies to it to be compensated for.
-/// A third is a *packed* class whose array comes first, which stays short: the
-/// tracker does follow the C++ offset of the member after the array, but a
-/// packed class gets no padding field written for the gap it counted. The same
-/// class with the array last comes out right.
+/// 48 with no array in sight. The other is a *packed* class whose array comes
+/// first, which stays short: the tracker does follow the C++ offset of the
+/// member after the array, but a packed class gets no padding field written for
+/// the gap it counted. The same class with the array last comes out right.
+///
+/// A `std::array<std::string, 3>` member was a third of these until the element
+/// recorded for a lowered `std::array` was resolved through the substitution
+/// rather than canonicalised past it. It is pinned now, by
+/// `test_std_array_of_substituted_type_does_not_shrink_its_class`.
 #[test]
 fn test_array_of_substituted_type_does_not_shrink_its_class() {
     let hdr = indoc! {"
@@ -15108,6 +15109,477 @@ fn test_replaces_cycle_through_a_class_template_is_not_followed_forever() {
         struct fx_Holder { uint32_t n; fx_Real<uint32_t> m; };
     "};
     run_test_expect_fail("", hdr, quote! {}, &["fx_Holder"], &[]);
+}
+
+/// A class holding a `std::array` of a prelude-substituted type is sized in
+/// Rust the way C++ sizes it.
+///
+/// `36-std-array-as-rust-array.patch` lowers a `std::array<T, N>` to `[T; N]`,
+/// and reads the `T` off the specialization's *cursor*, because that is the
+/// only place libclang reports the `N` beside it. The cursor is the
+/// instantiated declaration, so its arguments are canonical - and `std::string`
+/// and `std::string_view` are typedefs, which canonicalisation strips. The
+/// element then named `std::basic_string<char, ...>`, the class the typedef
+/// stands for, and the `replaces=` substitution recorded for the name which was
+/// written was missed: the member came out over a bindgen struct of libc++'s
+/// own internals rather than over the one-pointer stand-in, four bytes wide
+/// where the stand-in is eight, and no padding compensated for either. A
+/// `std::array<std::string, 3>` member put its class at 16 bytes against C++'s
+/// 80 - see `test_std_array_of_substituted_type_is_not_built_past_its_rust_storage`
+/// for what that costs.
+///
+/// One row per route to the layout, in the manner of
+/// `test_array_of_substituted_type_does_not_shrink_its_class`: the array
+/// trailing and leading, a view, a `std::array` of `std::array`s, a typedef to
+/// the substituted type as the element, a typedef to the whole `std::array`, an
+/// alias template over it, and a C array of them - which is
+/// `41-substituted-array-field-layout.patch` measuring an array whose element is
+/// one of these, and an element which is an instantiation of a substituted class
+/// *template*, which is `42-substituted-template-field-layout.patch` doing the
+/// same for one of those - two rows which were already right and are here
+/// because the three rules have to compose. The alias template is the spelling
+/// whose arguments the *type* reports as its own rather than the
+/// specialization's, one of them where the cursor reports two; what the element
+/// lookup does with such a list is pinned by
+/// `test_std_array_element_is_not_taken_from_an_ambiguous_argument`, which is
+/// where that path is the only one available. The last two rows compensate for
+/// nothing and are here so the arithmetic is pinned where it must not move: an
+/// element whose stand-in is exactly as wide as it is, and no substituted type
+/// at all.
+#[test]
+fn test_std_array_of_substituted_type_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstddef>
+        #include <cstdint>
+        #include <memory>
+        #include <string>
+        #include <string_view>
+        #include <vector>
+        // The array last, so only tail padding can make the size right.
+        struct fy_Trailing { uint32_t n; std::array<std::string, 3> m; };
+        // And first, with a member after it to be placed correctly.
+        struct fy_Leading { std::array<std::string, 3> m; uint32_t n; };
+        struct fy_Views { uint32_t n; std::array<std::string_view, 3> m; };
+        struct fy_Nested { uint32_t n; std::array<std::array<std::string, 2>, 3> m; };
+        typedef std::string fy_element_alias;
+        struct fy_AliasedElement { uint32_t n; std::array<fy_element_alias, 3> m; };
+        typedef std::array<std::string, 3> fy_array_alias;
+        struct fy_AliasedArray { uint32_t n; fy_array_alias m; };
+        // An alias template, whose own arguments are what the type reports.
+        template<typename T> using fy_array_template = std::array<T, 3>;
+        struct fy_AliasTemplate { uint32_t n; fy_array_template<std::string> m; };
+        // A C array of them, which is the other array rule measuring one of
+        // these as its element.
+        struct fy_CArrayOf { uint32_t n; std::array<std::string, 3> m[2]; };
+        // An element which is an instantiation of a substituted class
+        // *template*, which is the third array rule measuring one of those.
+        struct fy_Shared { uint32_t n; std::array<std::shared_ptr<uint32_t>, 3> m; };
+        struct fy_Vector { uint32_t n; std::array<std::vector<uint32_t>, 3> m; };
+        // A stand-in as wide as the type it stands in for: nothing to add.
+        struct fy_Same { uint32_t n; std::array<std::unique_ptr<uint32_t>, 3> m; };
+        // No substitution at all: the arithmetic has to leave this alone.
+        struct fy_Plain { uint32_t n; std::array<uint64_t, 3> m; };
+        inline size_t fy_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fy_Trailing);
+                case 1: return sizeof(fy_Leading);
+                case 2: return sizeof(fy_Views);
+                case 3: return sizeof(fy_Nested);
+                case 4: return sizeof(fy_AliasedElement);
+                case 5: return sizeof(fy_AliasedArray);
+                case 6: return sizeof(fy_AliasTemplate);
+                case 7: return sizeof(fy_CArrayOf);
+                case 8: return sizeof(fy_Shared);
+                case 9: return sizeof(fy_Vector);
+                case 10: return sizeof(fy_Same);
+                default: return sizeof(fy_Plain);
+            }
+        }
+        inline size_t fy_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fy_Trailing);
+                case 1: return alignof(fy_Leading);
+                case 2: return alignof(fy_Views);
+                case 3: return alignof(fy_Nested);
+                case 4: return alignof(fy_AliasedElement);
+                case 5: return alignof(fy_AliasedArray);
+                case 6: return alignof(fy_AliasTemplate);
+                case 7: return alignof(fy_CArrayOf);
+                case 8: return alignof(fy_Shared);
+                case 9: return alignof(fy_Vector);
+                case 10: return alignof(fy_Same);
+                default: return alignof(fy_Plain);
+            }
+        }
+    "};
+    let rs = quote! {
+        // Every row reported at once: one short class says little about the
+        // others, and the first assertion to fire would hide them.
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fy_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fy_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fy_Trailing, "a trailing std::array<std::string, 3>");
+        check!(1, ffi::fy_Leading, "a leading std::array<std::string, 3>");
+        check!(2, ffi::fy_Views, "a std::array<std::string_view, 3>");
+        check!(3, ffi::fy_Nested, "a std::array of std::array of std::string");
+        check!(4, ffi::fy_AliasedElement, "a std::array of a typedef to std::string");
+        check!(5, ffi::fy_AliasedArray, "a typedef to a std::array of std::string");
+        check!(6, ffi::fy_AliasTemplate, "an alias template over std::array");
+        check!(7, ffi::fy_CArrayOf, "a C array of std::array<std::string, 3>");
+        check!(8, ffi::fy_Shared, "a std::array<std::shared_ptr<uint32_t>, 3>");
+        check!(9, ffi::fy_Vector, "a std::array<std::vector<uint32_t>, 3>");
+        check!(10, ffi::fy_Same, "a std::array<std::unique_ptr<uint32_t>, 3>");
+        check!(11, ffi::fy_Plain, "a std::array<uint64_t, 3>");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with a std::array member disagrees with C++:{report}"
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "fy_Trailing",
+                "fy_Leading",
+                "fy_Views",
+                "fy_Nested",
+                "fy_AliasedElement",
+                "fy_AliasedArray",
+                "fy_AliasTemplate",
+                "fy_CArrayOf",
+                "fy_Shared",
+                "fy_Vector",
+                "fy_Same",
+                "fy_Plain",
+                "fy_size",
+                "fy_align",
+            ],
+            &[],
+            None,
+        ),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// What a short class costs, for the `std::array` spelling: C++ builds the
+/// object past the end of the storage Rust sized for it, over whatever Rust put
+/// next.
+///
+/// The same statement `test_array_of_substituted_type_is_not_built_past_its_rust_storage`
+/// makes for a C array, and the reason the size agreement above is worth a
+/// test: `new` is placement construction into storage the caller provides,
+/// `moveit` and `within_box` provide it at `size_of`, and a `size_of` short of
+/// `sizeof` is an overrun of exactly the difference. Here the storage is a
+/// field of a `repr(C)` struct, so what follows it is known rather than
+/// whatever the allocator happened to hand out.
+#[test]
+fn test_std_array_of_substituted_type_is_not_built_past_its_rust_storage() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstddef>
+        #include <cstdint>
+        #include <string>
+        struct fy_Guarded {
+            std::array<std::string, 3> m;
+            // Ordinary writes, one per element. Each reaches its own element,
+            // so the later ones land past where a short Rust size would end.
+            void fill() { m[0] = \"a\"; m[1] = \"b\"; m[2] = \"c\"; }
+        };
+        inline size_t fy_guarded_sizeof() { return sizeof(fy_Guarded); }
+    "};
+    let rs = quote! {
+        // Without this the test could pass by the difference reaching past the
+        // canary rather than by there being none.
+        assert!(
+            ffi::fy_guarded_sizeof() <= std::mem::size_of::<Guarded>(),
+            "the canary is too short to cover what C++ would write"
+        );
+        let mut guarded = Guarded {
+            obj: core::mem::MaybeUninit::uninit(),
+            canary: [FY_CANARY; 16],
+        };
+        // SAFETY: `obj` is fresh storage which nothing has pinned, so the
+        // `New` contract holds; `guarded` is never moved after this point, as
+        // the object in it is not trivially relocatable; and the object is
+        // destroyed in place, while initialised, before `guarded` dies.
+        unsafe {
+            ffi::fy_Guarded::new().new(core::pin::Pin::new_unchecked(&mut guarded.obj));
+            let obj = core::pin::Pin::new_unchecked(&mut *guarded.obj.as_mut_ptr());
+            obj.fill();
+            core::ptr::drop_in_place(guarded.obj.as_mut_ptr());
+        }
+        // SAFETY: `canary` is live, initialised and aligned, and every bit
+        // pattern is a valid `[u64; 16]` - including one C++ overwrote.
+        //
+        // Volatile because nothing in Rust's model writes to `canary`, so a
+        // plain read may be folded to the value it was initialised with.
+        let canary = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(guarded.canary)) };
+        assert!(
+            canary.iter().all(|&word| word == FY_CANARY),
+            "C++ built a {} byte object into the {} bytes Rust sized for it, over {:x?}",
+            ffi::fy_guarded_sizeof(),
+            std::mem::size_of::<ffi::fy_Guarded>(),
+            canary
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fy_Guarded", "fy_guarded_sizeof"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            const FY_CANARY: u64 = 0x0123_4567_89ab_cdef;
+
+            /// `fy_Guarded` with Rust's own bytes immediately after it.
+            #[repr(C)]
+            struct Guarded {
+                obj: core::mem::MaybeUninit<ffi::fy_Guarded>,
+                canary: [u64; 16],
+            }
+        }),
+    );
+}
+
+/// The same, for the two cxx vocabulary types C++ sees as classes of its own.
+///
+/// `rust::Str` and `rust::String` are classes rather than typedefs, so
+/// canonicalising the element loses nothing and these were already right. They
+/// are here because they are the rows which say the arithmetic did not move:
+/// two and three pointers wide respectively against the one-pointer stand-in,
+/// so each needs compensating, and each was being compensated before.
+#[test]
+fn test_std_array_of_rust_vocabulary_type_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstddef>
+        #include <cstdint>
+        #include <cxx.h>
+        struct fy_TrailingStr { uint32_t n; std::array<rust::Str, 3> m; };
+        struct fy_LeadingStr { std::array<rust::Str, 3> m; uint32_t n; };
+        struct fy_Strings { uint32_t n; std::array<rust::String, 3> m; };
+        inline size_t fy_vocab_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fy_TrailingStr);
+                case 1: return sizeof(fy_LeadingStr);
+                default: return sizeof(fy_Strings);
+            }
+        }
+        inline size_t fy_vocab_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fy_TrailingStr);
+                case 1: return alignof(fy_LeadingStr);
+                default: return alignof(fy_Strings);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fy_vocab_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fy_vocab_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fy_TrailingStr, "a trailing std::array<rust::Str, 3>");
+        check!(1, ffi::fy_LeadingStr, "a leading std::array<rust::Str, 3>");
+        check!(2, ffi::fy_Strings, "a std::array<rust::String, 3>");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with a std::array member disagrees with C++:{report}"
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fy_TrailingStr",
+            "fy_LeadingStr",
+            "fy_Strings",
+            "fy_vocab_size",
+            "fy_vocab_align",
+        ],
+        &[],
+    );
+}
+
+/// A `std::array<std::string, N>` crossing by value is turned down, and turned
+/// down for the reason it deserves.
+///
+/// The element rule is the one every other `std::array` element is held to -
+/// `test_std_array_of_non_pod_class_refused` is a class of the user's own - and
+/// `std::string` fails it for the same reason: cxx moves the array whole, and
+/// `CxxString` is a type it will not move at all. What resolving the element
+/// through the substitution buys here is the diagnostic. Until it was resolved
+/// the element was an instantiation of libc++'s `basic_string`, and the refusal
+/// came out of the machinery which names a template concretely - "we found an
+/// error handling the template" - which says nothing a reader can act on.
+#[test]
+fn test_std_array_of_substituted_type_by_value_refused() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstddef>
+        #include <string>
+        inline std::array<std::string, 3> fy_get_strings() { return {}; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fy_get_strings"],
+        &[],
+        "has a 'std::array' whose element cannot cross by value",
+    );
+}
+
+/// The same element rule behind a reference, which is the form
+/// `test_std_array_const_reference_param` made bindable. cxx names
+/// `std::array<T, N>` in either position, so an element it will not hold is no
+/// more holdable here - refused for the element, not for the reference.
+#[test]
+fn test_std_array_of_substituted_type_reference_refused() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstddef>
+        #include <string>
+        inline size_t fy_total(const std::array<std::string, 3>& a) {
+            return a[0].size() + a[1].size() + a[2].size();
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fy_total"],
+        &[],
+        "has a 'std::array' whose element cannot cross by value",
+    );
+}
+
+/// Where two of the arguments a type reports name the element, neither is taken
+/// for it.
+///
+/// An alias template in front of a specialization reports its *own* arguments,
+/// so the list the type gives may be shorter than the cursor's, in a different
+/// order, or about something else entirely. Here it is two arguments which are
+/// both the element's type - one of them under an alias of its own - and nothing
+/// in the list says which of the two the element was written as.
+///
+/// Taking the first costs more than a spelling, because a spelling is not all an
+/// alias is to bindgen: an alias named `uint32_t` is written as the Rust
+/// primitive that name implies, whatever it was declared over. So an alias of
+/// that name for a class - which C++ allows, in a namespace of its own - would
+/// put `[u32; 3]` where the array holds three classes, and cxx would spell that
+/// back as a `std::array<uint32_t, 3>` C++ never declared. The layout is
+/// unchanged, so no size assertion sees this; what sees it is the array crossing
+/// by value at all.
+#[test]
+fn test_std_array_element_is_not_taken_from_an_ambiguous_argument() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstdint>
+        struct fy_Elem { uint32_t x; };
+        // A name bindgen writes as a Rust primitive, declared here over a class.
+        namespace fy_decoy { typedef fy_Elem uint32_t; }
+        template<class Decoy, class T> using fy_pair_array = std::array<T, 3>;
+        inline fy_pair_array<fy_decoy::uint32_t, fy_Elem> fy_get_elems() {
+            return {fy_Elem{1}, fy_Elem{2}, fy_Elem{4}};
+        }
+        inline uint32_t fy_sum_elems(fy_pair_array<fy_decoy::uint32_t, fy_Elem> a) {
+            return a[0].x + a[1].x + a[2].x;
+        }
+    "};
+    let rs = quote! {
+        let elems = ffi::fy_get_elems();
+        assert_eq!(elems[1].x, 2);
+        assert_eq!(ffi::fy_sum_elems(elems), 7);
+    };
+    run_test("", hdr, rs, &["fy_get_elems", "fy_sum_elems"], &["fy_Elem"]);
+}
+
+/// A `std::array<std::string, N>` *member* gets no triviality certificate.
+///
+/// The certificate exists because cxx will not write one for an array element
+/// by itself, and it is a by-value declaration of the element type - so it is
+/// only ever right for an element cxx would hold. `CxxString` is not one: it is
+/// an opaque C++ type, never trivially movable, and a by-value declaration of
+/// one is something cxx rejects in its own macro. Nor is one needed, because a
+/// member puts no array in a signature; the only routes that would are refused
+/// outright, by `test_std_array_of_substituted_type_by_value_refused` and by
+/// the reference form beside it.
+///
+/// A guard rather than a proof, in the manner of
+/// `test_std_array_in_uncallable_method_gets_no_witness`: it passed before the
+/// element was resolved through the substitution too, because the element was
+/// then an instantiation of `basic_string` which the collection could not match
+/// as a path at all. What it guards is the collection now that the element *is*
+/// matchable - a certificate written for this one would be a by-value
+/// declaration of `CxxString`, and cxx rejects that in its own macro.
+#[test]
+fn test_std_array_of_substituted_type_member_gets_no_witness() {
+    struct NoWitness;
+    impl CodeCheckerFns for NoWitness {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if text.contains("autocxx_array_element") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "a certificate was written for an element cxx will not hold by value".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstddef>
+        #include <string>
+        class fy_Holder {
+        public:
+            fy_Holder() : m{} {}
+            size_t count() const { return m.size(); }
+        private:
+            std::array<std::string, 3> m;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let holder = ffi::fy_Holder::new().within_unique_ptr();
+            assert_eq!(holder.count(), 3);
+        },
+        directives_from_lists(&["fy_Holder"], &[], None),
+        None,
+        Some(Box::new(NoWitness)),
+        None,
+    );
 }
 
 /// A pointer to a view, and an rvalue reference to one, are both handles to a
