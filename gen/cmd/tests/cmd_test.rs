@@ -37,6 +37,47 @@ static RESERVED_RUST_TYPE_RS: &str = include_str!("data/reserved_rust_type.rs");
 
 const KEEP_TEMPDIRS: bool = true;
 
+/// The fixture for [`test_asan_working_as_expected_for_cpp_from_folder`]: a
+/// header, the translation unit which does the damage, and a `main` which calls
+/// it through autocxx.
+///
+/// The write is in C++, in a file of its own, because that is the half of the
+/// build this canary is about. Both `volatile`s are load-bearing: on the size,
+/// so that the compiler cannot see the access is out of bounds and refuse it at
+/// compile time under `-Werror`; on the pointee, so that a store nothing reads
+/// survives the `opt_level(1)` these fixtures compile at - without it the write
+/// is deleted as dead and the sanitizer has nothing to report, with or without
+/// instrumentation.
+static DOOM_H: &str = "
+#pragma once
+void scribble_past_the_end();
+";
+static DOOM_CC: &str = "
+#include \"input.h\"
+#include <cstddef>
+static volatile std::size_t one = 1;
+void scribble_past_the_end() {
+    volatile char* p = new char[one];
+    p[one] = 'x';
+    delete[] const_cast<char*>(p);
+}
+";
+static DOOM_RS: &str = concat!(
+    "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    safety!(unsafe_ffi)
+    generate!(\"scribble_past_the_end\")
+}
+
+fn main() {
+    ffi::scribble_past_the_end();
+}
+",
+    "#[link(name = \"autocxx-demo\")]\nextern \"C\" {}"
+);
+
 #[test]
 fn test_help() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("autocxx-gen")?;
@@ -126,6 +167,58 @@ fn test_gen() -> Result<(), Box<dyn std::error::Error>> {
         println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
     }
     r.unwrap();
+    Ok(())
+}
+
+/// The canary for the C++ half of `AUTOCXX_ASAN` on this path, which is the one
+/// autocxx's own builder never sees: everything here compiles its C++ with a
+/// `cc::Build` [`build_from_folder`] makes itself, so a fixture's C++ was built
+/// bare while its Rust was instrumented, and corruption like the below was
+/// written and never reported.
+///
+/// A no-op unless `AUTOCXX_ASAN` is set, exactly as the integration suite's two
+/// doom tests are. It insists on a *sanitizer report*, not merely a failure: a
+/// fixture which failed to compile would satisfy the second and prove nothing.
+///
+/// Reading that report needs the `autocxx-trybuild-child` helper, which cargo
+/// builds only for a run that includes the `autocxx-integration-tests` package -
+/// so `cargo test -p autocxx-gen` on its own leaves it on this process's stderr
+/// and fails here saying so.
+#[test]
+fn test_asan_working_as_expected_for_cpp_from_folder() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("AUTOCXX_ASAN").is_none() {
+        return Ok(());
+    }
+    let tmp_dir = tempdir()?;
+    let mut files = HashMap::new();
+    files.insert("input.h", DOOM_H.as_bytes());
+    files.insert("doom.cc", DOOM_CC.as_bytes());
+    files.insert("main.rs", DOOM_RS.as_bytes());
+    base_test_ex(&tmp_dir, RsGenMode::Single, |_| {}, files, vec!["main.rs"])?;
+    let err = build_from_folder(
+        tmp_dir.path(),
+        &tmp_dir.path().join("demo/main.rs"),
+        vec![tmp_dir.path().join("autocxx-ffi-default-gen.rs")],
+        &["gen0.cc", "demo/doom.cc"],
+        RsFindMode::AutocxxRs,
+    )
+    .expect_err("the C++ wrote past the end of a heap allocation and nothing objected");
+    let report = format!("{err:?}");
+    // The first says trybuild built the fixture and went on to run it, which
+    // rules out the whole build-failure path: a C++ compiler's own diagnostics
+    // come back through this same error, and a compiler that was itself
+    // sanitized could otherwise supply the other two words.
+    for expected in [
+        "Test case failed at runtime",
+        "AddressSanitizer",
+        "heap-buffer-overflow",
+    ] {
+        assert!(
+            report.contains(expected),
+            "the fixture failed without mentioning {expected:?}, so this says nothing \
+             about the sanitizer: {report}"
+        );
+    }
     Ok(())
 }
 

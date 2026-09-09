@@ -85,7 +85,8 @@ use crate::vendored_bindgen as bindgen;
 
 #[cfg(any(test, feature = "build"))]
 pub use builder::{
-    Builder, BuilderBuild, BuilderContext, BuilderError, BuilderResult, BuilderSuccess,
+    add_sanitizer_flags, Builder, BuilderBuild, BuilderContext, BuilderError, BuilderResult,
+    BuilderSuccess,
 };
 pub use output_generators::{generate_rs_archive, generate_rs_single, RsOutput};
 pub use parse_file::{parse_file, ParseError, ParsedFile};

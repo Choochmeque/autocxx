@@ -16,7 +16,8 @@ use std::{
 };
 
 use autocxx_engine::{
-    Builder, BuilderBuild, BuilderContext, BuilderError, RebuildDependencyRecorder, HEADER,
+    add_sanitizer_flags, Builder, BuilderBuild, BuilderContext, BuilderError,
+    RebuildDependencyRecorder, HEADER,
 };
 use log::info;
 use once_cell::sync::OnceCell;
@@ -204,6 +205,10 @@ pub fn build_from_folder(
     let target_dir = folder.join("target");
     std::fs::create_dir(&target_dir).unwrap();
     let mut b = BuilderBuild::new();
+    // This builder is made here rather than by the engine, so it is also this
+    // function's job to ask for what the engine's would have added. The Rust
+    // half below is sanitized by `fixture_rustflags` either way.
+    add_sanitizer_flags(&mut b);
     for cpp_file in cpp_files.iter() {
         b.file(folder.join(cpp_file));
     }
@@ -367,8 +372,8 @@ fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
 /// appended (1.0.81 `src/rustflags.rs`) and by writing them into the fixture
 /// crate's `build.rustflags`, and taking the encoded channel makes cargo ignore
 /// both. Restating them keeps what rustc sees identical. The dependency is
-/// pinned to `=1.0.81` - see `Cargo.toml`, which pins it for a second reason -
-/// so that list cannot change underneath this.
+/// pinned to `=1.0.81` - see `Cargo.toml` - so that list cannot change
+/// underneath this.
 ///
 /// `RUSTFLAGS` is cleared from the child rather than left for cargo to ignore,
 /// so that only one answer to the question is present.

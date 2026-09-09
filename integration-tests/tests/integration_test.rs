@@ -4255,6 +4255,59 @@ fn test_asan_working_as_expected_for_rust_allocations() {
     )
 }
 
+/// The same canary for `detect_leaks=1`, which the sanitizer job turns on and
+/// which the two tests above say nothing about: they corrupt memory, which is a
+/// different detector.
+///
+/// The allocation is made in C++, in a translation unit of its own, and the one
+/// reference to it - a global - is cleared, which is what a fixture can do to
+/// leave a block unreachable; LeakSanitizer's scan of registers and stacks is
+/// conservative, so that is an intent rather than a guarantee. It reports at
+/// exit and leaves a non-zero status, which reaches this test as the fixture
+/// failing at runtime. The report itself is asserted on, not merely the failure:
+/// a fixture which failed to build would produce the latter and prove nothing.
+///
+/// `AUTOCXX_ASAN` is documented for Linux (book: contributing), where leak
+/// detection is on by default. A platform whose sanitizer does not implement it
+/// fails this test rather than skipping it, which is the honest answer: the job's
+/// leak coverage really would be absent there.
+#[test]
+fn test_asan_working_as_expected_for_leaks() {
+    if std::env::var_os("AUTOCXX_ASAN").is_none() {
+        return;
+    }
+    let cxx = indoc! {"
+        // Volatile so that the allocation cannot be elided, and cleared so that
+        // the block is unreachable by the time LeakSanitizer looks.
+        static int* volatile sink;
+        void leak_an_int() {
+            sink = new int(1);
+            sink = nullptr;
+        }
+    "};
+    let hdr = indoc! {"
+        void leak_an_int();
+    "};
+    let rs = quote! {
+        ffi::leak_an_int();
+    };
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["leak_an_int"],
+        &[],
+        // The first is printed once trybuild has built the fixture and gone on
+        // to run it, so it also says the generated Rust compiled. The second is
+        // the report itself, spelled in full: LeakSanitizer names itself when it
+        // dies of its own internal errors too, and that must not count.
+        &[
+            "Test case failed at runtime",
+            "LeakSanitizer: detected memory leaks",
+        ],
+    );
+}
+
 #[test]
 fn test_inline_method() {
     let hdr = indoc! {"
