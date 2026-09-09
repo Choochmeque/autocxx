@@ -16,6 +16,7 @@ mod enum_style;
 pub mod file_locations;
 mod multi_bindings;
 mod path;
+mod stable_hash;
 mod subclass_attrs;
 
 pub use config::{
@@ -28,6 +29,7 @@ use file_locations::FileLocationStrategy;
 pub use multi_bindings::{ConflictingBindingsErr, MultiBindings, MultiBindingsErr};
 pub use path::RustPath;
 use proc_macro2::TokenStream as TokenStream2;
+pub use stable_hash::stable_hash;
 pub use subclass_attrs::SubclassAttrs;
 use syn::Result as ParseResult;
 use syn::{

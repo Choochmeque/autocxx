@@ -9,8 +9,7 @@
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 use itertools::Itertools;
 use proc_macro2::Span;
@@ -27,6 +26,7 @@ use thiserror::Error;
 
 use crate::derives::DeriveMap;
 use crate::enum_style::{EnumStyle, EnumStyleMap};
+use crate::stable_hash::stable_hash;
 use crate::{directives::get_directives, RustPath};
 
 use quote::quote;
@@ -525,9 +525,7 @@ impl IncludeCppConfig {
     /// Only an archive key while the block is still as the user wrote it - see
     /// [`ConfigHash`].
     pub fn get_hash(&self) -> ConfigHash {
-        let mut s = DefaultHasher::new();
-        self.hash(&mut s);
-        ConfigHash(s.finish())
+        ConfigHash(stable_hash(self))
     }
 
     /// In case there are multiple sets of ffi mods in a single binary,
@@ -629,7 +627,7 @@ impl ToTokens for IncludeCppConfig {
 #[cfg(test)]
 mod parse_tests {
     use crate::config::UnsafePolicy;
-    use crate::{EnumStyle, IncludeCppConfig};
+    use crate::{ConfigHash, EnumStyle, IncludeCppConfig};
     use syn::parse_quote;
 
     #[test]
@@ -864,5 +862,57 @@ mod parse_tests {
     fn test_safety_safe() {
         let us: UnsafePolicy = parse_quote! {};
         assert_eq!(us, UnsafePolicy::AllFunctionsUnsafe)
+    }
+
+    /// The archive key crosses a process boundary - `autocxx-gen` writes it and
+    /// a separately compiled proc macro looks it up - and hash-derived
+    /// identifiers cross into generated Rust and C++, where a build system
+    /// caching on file contents notices every change. Neither can afford a hash
+    /// which moves on its own, so the values are pinned here.
+    ///
+    /// Two configs, because the hash is only as fixed as the least fixed thing
+    /// fed to it: the plain one covers the strings and the `Allowlist`
+    /// discriminant every block has, and the second reaches the `syn` types -
+    /// `Ident`, `TypePath`, `Signature` - whose `Hash` impls are the part
+    /// `stable_hash` cannot promise anything about.
+    ///
+    /// Nothing about a failure here is safe to settle by updating the literal
+    /// without knowing why it moved. If this crate deliberately changed what
+    /// goes into the hash, then archives already on disk are unreadable to
+    /// macros built from this code and the hash-derived symbols in generated
+    /// output have moved with them, so both have to be regenerated together and
+    /// it needs a release note. If instead a compiler or dependency upgrade
+    /// moved it, then `stable_hash`'s promise has a hole in it - the
+    /// `#[derive(Hash)]` input stream, most likely - and the fix belongs there.
+    ///
+    /// Two configs are two values, not a proof: a change reaching only fields
+    /// neither of them exercises moves neither literal.
+    #[test]
+    fn test_config_hash_is_pinned() {
+        let hexathorpe = syn::token::Pound(proc_macro2::Span::call_site());
+        let plain: IncludeCppConfig = parse_quote! {
+            #hexathorpe include "a.h"
+            generate!("Foo")
+        };
+        assert_eq!(plain.get_hash(), ConfigHash(0xb03cf0e02f64c740));
+
+        let with_syn_types: IncludeCppConfig = parse_quote! {
+            #hexathorpe include "a.h"
+            name!(ffi2)
+            generate_pod!("Foo")
+            subclass!("Base", MySub)
+            concrete!("Templated<int>", TemplatedInt)
+            extern_cpp_opaque_type!("Opaque", crate::Opaque)
+            extern_rust_type!(MyType)
+            extern_rust_function!(some_mod::called_from_cpp, fn called_from_cpp(a: u32) -> bool)
+            derive!("Foo", "Clone")
+            enum_style!(BitfieldEnum, "Flags")
+        };
+        assert_eq!(with_syn_types.get_hash(), ConfigHash(0x809f6210a5e1f8fe));
+        // The point of the second config is the `syn` types, so it is worth
+        // knowing they are in there rather than silently dropped.
+        assert!(!with_syn_types.extern_rust_funs.is_empty());
+        assert!(!with_syn_types.rust_types.is_empty());
+        assert!(with_syn_types.mod_name.is_some());
     }
 }
