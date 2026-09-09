@@ -36684,3 +36684,114 @@ fn test_noexcept_virtual_method_call_unaffected() {
     };
     run_test("", hdr, rs, &["A", "make_a"], &[]);
 }
+
+/// The one fixture in this suite which builds with warnings denied, so that a
+/// lint newly firing on *generated* code turns a leg red instead of scrolling
+/// past - an attribute the generator emits which a future rustc stops accepting
+/// being the case to catch.
+///
+/// The deny is a crate-level attribute on this fixture alone, through
+/// `do_run_test`'s module attributes, rather than a rustc flag. It reaches the
+/// generated code because `include_cpp!` expands to an `include!` of it into this
+/// same crate, and reaches nothing else, because lint levels do not cross a crate
+/// boundary: no dependency is held to it, and no rustflag varies - which
+/// `fixture_rustflags` explains is what would otherwise rebuild every fixture's
+/// dependencies. Nothing else in the suite checks this, since the `test` job
+/// removes its own `-Dwarnings` before running it on the grounds that fixtures
+/// are not warning-clean (`.github/workflows/ci.yml`). The `examples` job does
+/// keep `-Dwarnings` over generated code, but only over the shapes its handful of
+/// examples happen to use. `test_generated_reexports_do_not_warn_as_unused` and
+/// `test_generated_code_wraps_unsafe_ops_in_unsafe_fns` deny named lints; this is
+/// the open-ended one.
+///
+/// The header is a representative slice rather than a minimal one, because each
+/// shape brings different generated code: a POD passed and returned by value, a
+/// non-POD with a constructor and methods behind `UniquePtr`, a `std::string`
+/// crossing in both directions, and a `subclass!` with its peer and its
+/// `_methods` trait.
+///
+/// MAINTENANCE CONTRACT. A crate-level attribute holds the Rust written here to
+/// the same standard as the Rust autocxx generates, so when this fails, read
+/// which file the diagnostic names. The generated one: the generator is what to
+/// change. This fixture's own code: fix the code - not an `allow`, and not a
+/// narrowing of the deny to a list of lints, which would turn the suite's one
+/// open-ended check back into a closed one. Keep this fixture's Rust plain for
+/// that reason.
+///
+/// Out of scope: lints that are allow-by-default, lints the generated code
+/// allows for itself, and `dead_code`, which `fixture_rustflags` allows by name
+/// for every fixture. `warnings` raises only those lints which would otherwise
+/// warn, so - unlike `deny(unused)`, which does override such an allow - it
+/// leaves that one alone; checked against rustc 1.98. Generated bindings
+/// legitimately hold items a given fixture never calls, so for `dead_code` that
+/// is the behaviour to want.
+#[test]
+fn test_generated_code_is_warning_free() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+
+        struct Point {
+            uint32_t x;
+            uint32_t y;
+        };
+        inline Point shift(Point p) { p.x += 1; return p; }
+
+        class Greeter {
+        public:
+            explicit Greeter(uint32_t count) : times_(count) {}
+            std::string greet(const std::string& name) const { return name + \"!\"; }
+            uint32_t times() const { return times_; }
+        private:
+            uint32_t times_;
+        };
+
+        class Observer {
+        public:
+            Observer() {}
+            virtual uint32_t value() const = 0;
+            virtual ~Observer() {}
+        };
+        inline uint32_t ask(const Observer& o) { return o.value(); }
+    "};
+    do_run_test(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::shift(ffi::Point { x: 1, y: 2 });
+            assert_eq!(p.x, 2);
+            let g = ffi::Greeter::new(3).within_unique_ptr();
+            assert_eq!(g.times(), 3);
+            autocxx::cxx::let_cxx_string!(name = "hi");
+            assert_eq!(g.greet(&name).to_str().unwrap(), "hi!");
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::ask(o.borrow().as_ref()), 7);
+        },
+        quote! {
+            generate_pod!("Point")
+            generate!("shift")
+            generate!("Greeter")
+            generate!("ask")
+            subclass!("Observer", MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn value(&self) -> u32 {
+                    7
+                }
+            }
+        }),
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(warnings)]
+        }),
+    )
+    .unwrap()
+}
