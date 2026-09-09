@@ -9,7 +9,7 @@
 fn main() -> miette::Result<()> {
     let path = std::path::PathBuf::from("steam/src");
     let mut b = autocxx_build::Builder::new("src/main.rs", &[&path]).build()?;
-    b.flag_if_supported("-std=c++14")
+    b.std("c++14")
         .file("steam/src/steam.cc")
         .compile("autocxx-steam-example");
     println!("cargo:rerun-if-changed=src/main.rs");

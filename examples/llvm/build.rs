@@ -40,19 +40,32 @@ fn candidates() -> Vec<String> {
 /// Extra `-I` directories and the `-std=` the installed LLVM wants. Its
 /// headers stopped building as C++14 several releases ago, so taking the
 /// standard from `llvm-config` rather than guessing is worth the parsing.
+/// The include directories and the C++ standard this LLVM was built with.
+///
+/// The standard comes back as the bare name - `c++17` - not as a flag, because
+/// the two halves of the build spell it differently: `cc::Build::std` wants the
+/// name and picks the separator off the compiler it chose, while the clang
+/// arguments bindgen parses with only ever take `-std=`.
+///
+/// Only the `-std=` spelling is read. An LLVM built with MSVC reports `-std:` or
+/// `/std:` instead, and those go unnoticed here, so such a build gets the C++17
+/// default below rather than the standard LLVM was built with. Reading them is not
+/// just a matter of accepting the prefix: MSVC's own names include `c++latest`,
+/// which no `-std=` accepts, so the clang half would be handed an option it stops
+/// on - worse than the default it falls back to now.
 fn cxxflags(binary: &str) -> (Vec<PathBuf>, Option<String>) {
     let mut includes = Vec::new();
-    let mut std_flag = None;
+    let mut cpp_std = None;
     if let Some(flags) = llvm_config(binary, "--cxxflags") {
         for flag in flags.split_whitespace() {
             if let Some(dir) = flag.strip_prefix("-I") {
                 includes.push(PathBuf::from(dir));
-            } else if flag.starts_with("-std=") {
-                std_flag = Some(flag.to_owned());
+            } else if let Some(name) = flag.strip_prefix("-std=") {
+                cpp_std = Some(name.to_owned());
             }
         }
     }
-    (includes, std_flag)
+    (includes, cpp_std)
 }
 
 fn main() -> miette::Result<()> {
@@ -97,18 +110,19 @@ fn main() -> miette::Result<()> {
         }
     };
 
-    let (extra_includes, std_flag) = cxxflags(&binary);
+    let (extra_includes, cpp_std) = cxxflags(&binary);
     let mut includes = vec![includedir];
     includes.extend(extra_includes);
-    let std_flag = std_flag.unwrap_or_else(|| "-std=c++17".to_owned());
+    let cpp_std = cpp_std.unwrap_or_else(|| "c++17".to_owned());
 
     // bindgen parses the headers separately from the compiler that later
     // builds the generated code, and it has to be told the same standard:
     // LLVM's headers are full of C++17 that a C++14 parse turns into a wall of
     // errors about std::optional not existing.
+    let clang_std_arg = format!("-std={cpp_std}");
     let mut b = autocxx_build::Builder::new("src/lib.rs", &includes)
-        .extra_clang_args(&[&std_flag])
+        .extra_clang_args(&[&clang_std_arg])
         .build()?;
-    b.flag_if_supported(&std_flag).compile("llvm");
+    b.std(&cpp_std).compile("llvm");
     Ok(())
 }

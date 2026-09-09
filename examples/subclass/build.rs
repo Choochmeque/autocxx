@@ -11,7 +11,7 @@ fn main() -> miette::Result<()> {
     let mut b = autocxx_build::Builder::new("src/main.rs", &[&path])
         .auto_allowlist(true)
         .build()?;
-    b.flag_if_supported("-std=c++17")
+    b.std("c++17")
         .file("src/messages.cc")
         .compile("autocxx-subclass-example");
     println!("cargo:rerun-if-changed=src/main.rs");

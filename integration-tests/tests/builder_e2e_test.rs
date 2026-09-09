@@ -58,7 +58,7 @@ autocxx-build = {{ path = "{ws}/gen/build" }}
         {custom_gendir_line}
         .build()
         .unwrap();
-    b.flag_if_supported("-std=c++14").compile("gendir-fixture-{test_name}");
+    b.std("c++14").compile("gendir-fixture-{test_name}");
     println!("cargo:rerun-if-changed=src/main.rs");
 }}
 "#
