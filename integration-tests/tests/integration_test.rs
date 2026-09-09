@@ -6897,9 +6897,9 @@ fn test_class_static_const_int() {
 
 /// google/autocxx#94, the "much harder" follow-up to google/autocxx#93.
 /// `test_pod_constant` covers the POD case; a variable of non-POD type used to
-/// fail the type gate with `StaticDataOfNonPodType`, because we exposed a
-/// variable by re-exporting `bindgen`'s declaration of it and our output mod
-/// shows a non-POD type as an opaque wrapper rather than as `bindgen` wrote it.
+/// fail the type gate outright, because we exposed a variable by re-exporting
+/// `bindgen`'s declaration of it and our output mod shows a non-POD type as an
+/// opaque wrapper rather than as `bindgen` wrote it.
 ///
 /// It now gets a getter instead, which hands back an opaque holder standing
 /// for a `const` reference to the variable. Nothing is copied - see

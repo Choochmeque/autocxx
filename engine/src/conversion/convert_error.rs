@@ -84,8 +84,6 @@ pub enum ConvertErrorFromCpp {
     StaticDataOfUnsupportedType,
     #[error("The C++ variable {0} has internal linkage, so there is no symbol for Rust to link against. (A namespace-scope variable declared `static`, or declared `const` without `extern`, or declared in an anonymous namespace, exists separately in each translation unit which includes the header.) Declare it `extern` and define it in exactly one C++ file if you want to use it from Rust.")]
     StaticDataWithInternalLinkage(String),
-    #[error("Encountered static data of type {}, which autocxx does not expose as something Rust can hold by value. A C++ variable can only be re-exported if its type is POD; try generate_pod! if that type really is trivial.", .0.to_cpp_name())]
-    StaticDataOfNonPodType(QualifiedName),
     #[error("The public C++ data member {0} is {1}, so autocxx generates no accessor for it. Add a C++ member function which returns something autocxx can express, and use that instead.")]
     UnrepresentableDataMember(String, UnrepresentableMember),
     #[error("The public C++ data member {0} is of type {}, which is not on the allowlist, so autocxx generates no accessor for it. autocxx generates no methods for a type it was not asked for, and hands out no references to one either; name it in a generate! or generate_pod! directive if you want to read this member.", .1.to_cpp_name())]
