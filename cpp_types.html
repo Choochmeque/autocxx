@@ -392,10 +392,25 @@ fn main() {
 }
 </code></pre>
 <h2 id="stdarray"><a class="header" href="#stdarray"><code>std::array</code></a></h2>
-<p>A <code>std::array&lt;T, N&gt;</code> crosses as a Rust <code>[T; N]</code>, by value, in either direction:
-<code>cxx</code> spells a Rust array as <code>std::array&lt;T, N&gt;</code>, so what the bridge declares is
-the type the header was written with, and there is no wrapper in between.</p>
-<p>The element can be any type which crosses by value itself:</p>
+<p>A <code>std::array&lt;T, N&gt;</code> crosses as a Rust <code>[T; N]</code>: <code>cxx</code> spells a Rust array as
+<code>std::array&lt;T, N&gt;</code>, so what the bridge declares is the type the header was
+written with, and there is no wrapper in between.</p>
+<p>By value it crosses in either direction, as a copy. Behind a reference it
+crosses as the array itself, <code>const std::array&lt;T, N&gt;&amp;</code> arriving as <code>&amp;[T; N]</code>
+and <code>std::array&lt;T, N&gt;&amp;</code> as <code>Pin&lt;&amp;mut [T; N]&gt;</code> - the same spellings every other
+C++ reference gets - so what C++ writes through one is what Rust reads back.
+Returning a reference works the same way, with the lifetime taken from the
+receiver as usual.</p>
+<pre><code class="language-cpp">uint32_t sum(const std::array&lt;uint8_t, 4&gt;&amp; a);
+void bump(std::array&lt;uint8_t, 4&gt;&amp; a);
+</code></pre>
+<pre><code class="language-rust ignore">let a = [1u8, 2, 3, 4];
+assert_eq!(ffi::sum(&amp;a), 5);
+let mut b = [10u8, 20, 30, 40];
+ffi::bump(std::pin::Pin::new(&amp;mut b));
+assert_eq!(b, [11u8, 21, 31, 41]);</code></pre>
+<p>The element can be any type which crosses by value itself, and the rule is the
+same by value and behind a reference:</p>
 <ul>
 <li>one of <code>cxx</code>'s own atoms - <code>uint8_t</code> or <code>int8_t</code>, a <code>float</code> or a <code>double</code>, a
 <code>bool</code>, a <code>char</code>;</li>
@@ -406,17 +421,19 @@ matching <code>autocxx::c_*</code> newtype, so <code>std::array&lt;uint32_t, 4&g
 <li>a class or enum <code>autocxx</code> passes by value, which for a class means one
 <code>generate_pod!</code> accepts.</li>
 </ul>
-<p>Two things do not cross:</p>
+<p>Three things do not cross:</p>
 <ul>
 <li>An element <code>autocxx</code> will not pass by value, which is a class it can hold
 only behind a pointer. An array of those is not a run of bytes to be moved
 whole.</li>
-<li>A <code>std::array</code> behind a reference or a pointer. <code>const T (&amp;)[N]</code> and <code>const std::array&lt;T, N&gt;&amp;</code> reach <code>autocxx</code> as the same Rust type, and <code>cxx</code> writes
-the second for either, so binding one would silently be binding the other.
-By value there is no such pair: no C++ function takes or returns a plain
-array that way.</li>
+<li>A reference to a C array - <code>const T (&amp;)[N]</code> rather than <code>const std::array&lt;T, N&gt;&amp;</code>. Both reach <code>autocxx</code> as <code>&amp;[T; N]</code>, but they are different
+C++ types and <code>cxx</code> writes the <code>std::array</code> for either, so only the
+<code>std::array</code> is bound. An array parameter written without a reference is
+unaffected: C++ decays it to a pointer before <code>autocxx</code> sees it, and it is
+bound as that pointer.</li>
+<li>Either of them behind a pointer.</li>
 </ul>
-<p>Both get a refusal which says so. <code>std::array&lt;T, 0&gt;</code> gets one too: C++ gives
+<p>Each gets a refusal which says so. <code>std::array&lt;T, 0&gt;</code> gets one too: C++ gives
 the empty array a size and Rust's <code>[T; 0]</code> has none, so they are not the same
 object.</p>
 <h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
