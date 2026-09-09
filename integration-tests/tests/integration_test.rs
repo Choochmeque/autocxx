@@ -13854,12 +13854,15 @@ fn test_error_generated_for_array_dependent_function() {
         rs,
         quote! { generate! ("take_func")},
         None,
-        // Which opaque blob bindgen substituted for the std::function, and how
-        // wide it is, differs by standard library; the refusal does not.
+        // Which route the refusal takes differs by standard library: bindgen
+        // substitutes an opaque blob for the std::function under libc++ and
+        // libstdc++, and names it under MSVC's, so one arrives against the
+        // argument and the other against the dependent type. Both append the
+        // same advice.
         &[
             "take_func",
             "did not result in any usable code being generated",
-            "Problem handling function argument",
+            "std::function is not supported by bindgen or cxx",
         ],
     );
 }
