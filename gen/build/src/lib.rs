@@ -22,19 +22,25 @@ pub type Builder = autocxx_engine::Builder<'static, CargoBuilderContext>;
 ///
 /// Cargo's own variables (`TARGET`, `OUT_DIR`, the `CARGO_CFG_*` set) are
 /// absent: cargo keys the build directory on them and reruns build scripts
-/// itself when they change. `PATH` is absent deliberately, though clang-sys
-/// searches it for a clang to ask about include directories: it differs
-/// between one shell and the next and between CI steps, so watching it would
-/// regenerate bindings constantly and teach people to ignore the rebuild.
+/// itself when they change. `PATH` is absent deliberately: clang-sys does
+/// search it for the `llvm-config` and the clang it asks about include
+/// directories, so a toolchain switched only by reordering `PATH` will not
+/// invalidate bindings and has to be rebuilt by hand. It differs between one
+/// shell and the next and between CI steps, and autocxx regenerating every
+/// binding on that is a cost paid on nearly every build for a case which is
+/// rare and visible when it happens.
 const CODEGEN_ENV_VARS: &[&str] = &[
     // engine::get_clang_path
     "CLANG_PATH",
     "CXX",
-    // Which libclang clang-sys loads. Loaded at runtime by default
-    // (engine's `runtime` feature), so this is decided in the build script
-    // and not when the engine was compiled. Same list as engine/build.rs.
+    // Which libclang clang-sys loads, and where it looks for it. Loaded at
+    // runtime by default (engine's `runtime` feature), so this is decided in
+    // the build script and not when the engine was compiled.
+    // `LIBCLANG_STATIC_PATH` is not here: it is read only when linking
+    // statically, which is settled when the engine itself is built, and
+    // engine/build.rs watches it there.
     "LIBCLANG_PATH",
-    "LIBCLANG_STATIC_PATH",
+    "LD_LIBRARY_PATH",
     "LLVM_CONFIG_PATH",
     // engine::clang_target::bindgen_extra_clang_args
     "BINDGEN_EXTRA_CLANG_ARGS",
@@ -133,7 +139,8 @@ impl RebuildDependencyRecorder for CargoRebuildDependencyRecorder {
 ///
 /// The build these tests drive stops after codegen - `build_listing_files`
 /// returns a [`cc::Build`] which nothing here calls `compile` on - so no C++
-/// compiler is involved, only libclang. What they therefore do *not* cover:
+/// is compiled, though clang-sys may run a clang to ask it where the system
+/// headers are. What they therefore do *not* cover:
 /// that cargo acts on the lines (its own contract), that a second build reuses
 /// or regenerates anything, and the directives reaching real stdout, which the
 /// functions producing them are tested for instead.
@@ -247,7 +254,7 @@ fn main() {
             "CLANG_PATH",
             "CXX",
             "LIBCLANG_PATH",
-            "LIBCLANG_STATIC_PATH",
+            "LD_LIBRARY_PATH",
             "LLVM_CONFIG_PATH",
             "BINDGEN_EXTRA_CLANG_ARGS",
             "BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin",

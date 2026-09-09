@@ -86,10 +86,13 @@ impl Depfile {
                 .map(|c| utf8(c.as_os_str()))
                 .collect::<Vec<_>>()
                 .join("/"),
-            // Make and ninja both take an absolute dependency, so a path with
-            // no relative form is written whole rather than the depfile being
-            // abandoned. Its root, and on Windows its drive prefix, is not
-            // something the component join could put back together.
+            // Make and ninja both take an ordinary absolute dependency, so a
+            // path with no relative form is written whole rather than the
+            // depfile being abandoned. Its root, and on Windows its drive
+            // prefix, is not something the component join could put back
+            // together. A Windows extended-length prefix would survive into
+            // the depfile as `//?/C:/...`, which is better than the panic this
+            // replaces without being a spelling every consumer parses.
             None => utf8(path.as_os_str()).replace('\\', "/"),
         }
     }

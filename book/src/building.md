@@ -28,10 +28,10 @@ name any of those yourself. Do name anything else your build script reads: the
 `.cc` files you hand to `cc`, and any file you generate from.
 
 Cargo stops scanning your package directory as a whole once a build script
-names a single file, so a change to a file which neither you nor
-`autocxx-build` names will not, by itself, rerun your build script. Cargo
-still recompiles your Rust when your Rust changes; it is the C++ side of the
-build which would go stale.
+names a single file. Your build script's own sources are still tracked, but
+any other file it reads and nobody names is one that can change without
+rerunning it - leaving both the generated Rust bindings and the C++ built
+from them as they were.
 
 ## Keeping `cxx` and `cxx-gen` level
 
