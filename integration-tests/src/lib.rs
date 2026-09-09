@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs::File,
     io::{Read, Write},
     panic::AssertUnwindSafe,
@@ -73,13 +73,17 @@ fn init_logging() {
 
 /// API to run a documentation test. Panics if the test fails.
 /// Guarantees not to emit anything to stdout and so can be run in an mdbook context.
-pub fn doctest(
-    cxx_code: &str,
-    header_code: &str,
-    rust_code: TokenStream,
-    manifest_dir: &OsStr,
-) -> Result<(), TestError> {
-    doctest_with_std(cxx_code, header_code, rust_code, manifest_dir, None)
+///
+/// Neither this nor [`doctest_with_std`] takes the directory of the package to
+/// build against any more, and neither writes `CARGO_MANIFEST_DIR` or
+/// `CARGO_PKG_NAME` into this process. Nothing read either: the package a
+/// fixture is built against is the one named by this crate's
+/// `FIXTURE_PACKAGE_DIR`, whoever is calling. Nor may they still write that
+/// variable - the mdbook preprocessor calls these from several threads at once,
+/// so a writer here would be racing the one in `build_in_process`, and a doctest
+/// could be built against the wrong package's dependencies.
+pub fn doctest(cxx_code: &str, header_code: &str, rust_code: TokenStream) -> Result<(), TestError> {
+    doctest_with_std(cxx_code, header_code, rust_code, None)
 }
 
 /// As [`doctest`], for an example which needs a C++ standard other than the
@@ -90,11 +94,8 @@ pub fn doctest_with_std(
     cxx_code: &str,
     header_code: &str,
     rust_code: TokenStream,
-    manifest_dir: &OsStr,
     cpp_std: Option<&'static str>,
 ) -> Result<(), TestError> {
-    std::env::set_var("CARGO_PKG_NAME", "autocxx-integration-tests");
-    std::env::set_var("CARGO_MANIFEST_DIR", manifest_dir);
     do_run_test_manual(
         cxx_code,
         header_code,
@@ -471,6 +472,26 @@ const TRYBUILD_CHILD_BIN_NAME: &str = "autocxx-trybuild-child";
 /// child binary into build mode.
 const TRYBUILD_CHILD_RS_PATH: &str = "AUTOCXX_TRYBUILD_CHILD_RS_PATH";
 
+/// The package whose `[dependencies]` become every fixture's.
+///
+/// trybuild builds a fixture as a crate of its own, and composes that crate's
+/// manifest out of the dependencies of the package `CARGO_MANIFEST_DIR` names.
+/// Unset, that is whichever package is running the test - this harness, or
+/// `autocxx-gen`, or the mdbook preprocessor - so each fixture was built
+/// against that package's entire dependency set. For this harness that meant
+/// the engine and the bindgen vendored into it, `syn`, `cc`, `tempfile`,
+/// `env_logger`; for `autocxx-gen`, `clap` and `miette`. No fixture names any
+/// of them, and each caller paid for its own copy in its own trybuild project
+/// directory.
+///
+/// `autocxx-fixture-deps` lists what a fixture does name, so pointing every
+/// caller at it both shrinks that build and makes it one build rather than
+/// three.
+///
+/// Taken from this crate's manifest directory at compile time. The runtime
+/// value cannot be used: it belongs to whoever is running.
+const FIXTURE_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixture-deps");
+
 /// Printed by the child the moment it enters build mode, so that the parent can
 /// tell "the build ran and succeeded" apart from "whatever ran under that name
 /// was not the child, and did nothing at all". Without it a missing or wrong
@@ -540,6 +561,7 @@ fn run_trybuild(
     };
     let mut cmd = std::process::Command::new(child_bin);
     cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
+        .env("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR)
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags))
         .env_remove("RUSTFLAGS")
         .stdin(std::process::Stdio::null())
@@ -686,19 +708,22 @@ fn build_in_process(
     });
     // Unlike the child, this has to go through the process environment. Callers
     // hold the builder mutex, so two of these cannot overlap, but the variables
-    // are visible to the rest of the process for as long as this takes - so both
-    // rustflags variables are put back afterwards, on the panicking path too.
-    // Leaving `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving
-    // `RUSTFLAGS` behind, which is what this used to do: it outranks `RUSTFLAGS`,
-    // so a later unrelated build that set its own would silently keep getting
-    // these instead.
-    let restore_rustflags = [
+    // are visible to the rest of the process for as long as this takes - so each
+    // is put back afterwards, on the panicking path too. Leaving
+    // `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving `RUSTFLAGS`
+    // behind, which is what this used to do: it outranks `RUSTFLAGS`, so a later
+    // unrelated build that set its own would silently keep getting these
+    // instead. `CARGO_MANIFEST_DIR` is on the list for the same reason - it is
+    // what the rest of this process is told its own package is.
+    let restore_env = [
         (
             "CARGO_ENCODED_RUSTFLAGS",
             std::env::var_os("CARGO_ENCODED_RUSTFLAGS"),
         ),
         ("RUSTFLAGS", std::env::var_os("RUSTFLAGS")),
+        ("CARGO_MANIFEST_DIR", std::env::var_os("CARGO_MANIFEST_DIR")),
     ];
+    std::env::set_var("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR);
     std::env::set_var("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags));
     std::env::remove_var("RUSTFLAGS");
     for key in RS_FIND_KEYS {
@@ -713,7 +738,7 @@ fn build_in_process(
         let test_cases = trybuild::TestCases::new();
         test_cases.pass(rs_path);
     }));
-    for (key, value) in restore_rustflags {
+    for (key, value) in restore_env {
         match value {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
