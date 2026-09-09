@@ -1074,7 +1074,7 @@ fn create_type_database() -> TypeDatabase {
     // MSVC has neither type.
     //
     // A bare `u128` means `unsigned __int128` and nothing else only because
-    // `34-float128-newtype-marker.patch` marks the other claimant on that
+    // `35-float128-newtype-marker.patch` marks the other claimant on that
     // token; see the note at the end of this function.
     for (rs_name, cpp_name, bindgen_name) in [
         ("autocxx::c_i128", "__int128", "i128"),
@@ -1175,7 +1175,7 @@ fn create_type_database() -> TypeDatabase {
     // Linux. Rust has no type for the last two, and for the first it has one
     // which is the wrong C++ type - which cxx catches, because it checks a
     // function's exact type. So the answer is a refusal rather than a newtype,
-    // and `25-long-double-newtype-marker.patch` is what makes the refusal
+    // and `26-long-double-newtype-marker.patch` is what makes the refusal
     // possible: it marks the type so that `type_converter` can name what it is
     // turning down instead of seeing bindgen's same-sized substitute. See
     // `ConvertErrorFromCpp::LongDouble`.
@@ -1189,8 +1189,8 @@ fn create_type_database() -> TypeDatabase {
     // another: they are a different register class and a different value.
     //
     // Both of the other two are marked now -
-    // `25-long-double-newtype-marker.patch` and
-    // `34-float128-newtype-marker.patch` - and refused by name of their own,
+    // `26-long-double-newtype-marker.patch` and
+    // `35-float128-newtype-marker.patch` - and refused by name of their own,
     // which leaves the bare token meaning `unsigned __int128` and nothing
     // else. So it is registered above, beside `__int128`, which never had the
     // problem.

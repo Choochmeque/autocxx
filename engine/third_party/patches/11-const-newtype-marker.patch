@@ -33,7 +33,7 @@ One known gap, where an existing resolution step erases the qualifier before
 the wrap site sees it, and not addressed here: an alias's target is resolved
 `through_type_refs()` before `pub type`/`pub use` is emitted for it, so
 `typedef const E CE` over an enum loses it. A template argument had the same
-problem when the argument was a record; `18-const-template-argument.patch`
+problem when the argument was a record; `19-const-template-argument.patch`
 fixes that one, the same way the pointer arm here already does.
 
 --- a/options/mod.rs
