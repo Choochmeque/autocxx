@@ -4213,12 +4213,15 @@ fn test_method_pass_pod_by_value() {
     run_test(cxx, hdr, rs, &[], &["Bob", "Anna"]);
 }
 
+/// Corrupts memory on purpose and insists the sanitizer reports it, which is
+/// what says the sanitizer job would catch a real mistake.
+///
+/// A no-op unless `AUTOCXX_ASAN` is set, as every canary here is: there is no
+/// report to insist on without the instrumentation.
 fn perform_asan_doom_test(into_raw: TokenStream, box_type: TokenStream) {
     if std::env::var_os("AUTOCXX_ASAN").is_none() {
         return;
     }
-    // Testing that we get an asan fail when it's enabled.
-    // Really just testing our CI is working to spot ASAN mistakes.
     let hdr = indoc! {"
         #include <cstddef>
         struct A {
@@ -4238,7 +4241,22 @@ fn perform_asan_doom_test(into_raw: TokenStream, box_type: TokenStream) {
             #box_type::from_raw(a_raw); // to delete. If we haven't yet crashed.
         }
     };
-    run_test_expect_fail("", hdr, rs, &["A", "how_big_is_a"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["A", "how_big_is_a"],
+        &[],
+        // The report, not merely a failure: a fixture which failed to build
+        // fails this test too and says nothing about the sanitizer. The first
+        // string is trybuild's, printed only once it has run the fixture, so it
+        // also says the generated Rust compiled; the second is the detector a
+        // write beyond the allocation trips, for either allocator.
+        &[
+            "Test case failed at runtime",
+            "AddressSanitizer: heap-buffer-overflow",
+        ],
+    );
 }
 
 #[test]
