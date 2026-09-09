@@ -1,0 +1,356 @@
+Subject: Size a field from the class template a `replaces=` stood in for it
+
+`<div rustbindgen replaces="X"></div>` binds `X` as some other type the header
+declares, and that other type is usually a different size: the annotation
+exists to substitute a Rust-shaped stand-in for a C++ type Rust cannot express.
+bindgen keeps a struct holding such a field honest by measuring the field as
+the type it is *written* as - resolved through the `ResolvedTypeRef` the
+replacement is recorded as - and padding the struct out to the size clang
+reported for it.
+
+A class template is replaced the same way. A member which is an instantiation
+of one is not covered.
+
+    template <typename T> struct Real { T* a; T* b; T* c; };
+    /** <div rustbindgen replaces="Real"></div> */
+    template <typename T> struct Stand { T* p; };
+    struct A { Real<int> m; };
+    struct B { Real<int>* m; };
+
+The annotation names `Real`, so the `ResolvedTypeRef` is recorded on `Real`.
+`Real<int>` is an item of its own, carrying the layout clang measured for the
+three pointers, and resolving *it* through type refs finds nothing to follow:
+it is an instantiation, not a reference. So the field is written as
+`Stand<int>`, eight bytes, while the tracker was handed twenty-four. It
+concluded the field filled the struct and emitted no padding, and `A` is a
+third of the width of the object C++ hands it. Every `A` crossing the boundary
+is truncated, and a caller who asks C++ to construct one in storage Rust sized
+gets it built past the end. `B` is a pointer either way and was always right.
+
+What the field is written as is the instantiation's *definition*, resolved
+through type refs, instantiated with the same arguments. So resolve that, and
+where it lands on another item take the layout of what it landed on. The
+annotation is not what keys this: a definition reached through a type ref
+resolved for any other reason - a template forward-declared where it is used,
+say - is equally the one codegen writes, and equally the layout to take.
+
+Nothing instantiates a substitute, though - the header declares it to be given
+to Rust in place of the name its annotation points at - so clang usually never
+laid it out and it has no layout of its own. Every instantiation bindgen writes
+for it does have the same one, since a member sized by a template parameter has
+no layout to read either. So lay its members out the way `repr(C)` will, guarded
+on the members being the whole of what the struct holds: a base class, a vtable
+pointer, a bitfield allocation unit and the address byte an empty class is given
+are each something else in it; a packed class is not laid out this way at all; a
+flexible array member becomes a type parameter of its own under
+`--flexarray-dst`; a member aligned more strictly than bindgen promises can be
+preceded by padding written as a blob of that promised alignment, wider than the
+gap it was asked to fill, and every such member is declined rather than only the
+ones so preceded; and a vector member is written as the array of its elements,
+whose alignment is the element's rather than the vector's. A union is declined
+before the layout question is asked at all, because `CompInfo::layout` answers it
+for one by taking the widest member without rounding up to the alignment, which
+is not the size Rust gives it.
+
+An instantiation whose definition resolves to itself keeps the layout clang
+measured, and so do the two this reaches but codegen writes as a blob of that
+layout anyway: one bindgen was told to keep opaque, and one whose substitute has
+no parameters to take the arguments.
+
+Every one of those declines leaves the field measured as the type C++ declared,
+which is what it was measured as before any of this. Where the substitute is the
+narrower of the two - which is what a substitute usually is, and why the
+annotation exists - that leaves the enclosing struct short of the object C++
+builds in it, exactly as short as it already was. The declines say this
+arithmetic has no answer, not that the answer does not matter; what those shapes
+need is a field *written* as a blob of the layout clang measured, which is a
+change to what codegen emits rather than to how it is measured.
+
+This is the walk an array field already goes through, so the two compose in
+both directions: an array of instantiations of a replaced template is `N` of
+the substitute, and a substitute holding an array of one is measured as such.
+The walk now carries the items it is in the middle of measuring rather than the
+ones it has finished with, dropping each on the way back out, because a
+struct's members are siblings where an array's elements were a chain.
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -1738,54 +1738,195 @@ fn field_representation<'a>(ctx: &'a BindgenContext, ty: TypeId) -> &'a Item {
+     item
+ }
+ 
+-/// The layout of the Rust type written for a field of type `ty`.
++/// The layout of the Rust type written for a field which resolved to `item`.
+ ///
+-/// For anything but an array that is the layout of what `field_representation`
+-/// named, because what codegen writes for the field is that item's type. An
+-/// array is the exception. `[T; N]` is written by converting the element and
+-/// repeating it, so its size is `N` times the size of the type the *element* is
+-/// written as - and a substituted element does not share a size with the
+-/// element C++ declared, which is the size clang measured for the array. So ask
+-/// for the element's representation in turn, which also makes an array of
+-/// arrays compose.
++/// Usually that is the layout of what `field_representation` named, because what
++/// codegen writes for the field is that item's type. Two shapes are written as
++/// something else. `[T; N]` is written by converting the element and repeating
++/// it, so its size is `N` times the size of the type the *element* is written
++/// as - and a substituted element does not share a size with the element C++
++/// declared, which is the size clang measured for the array. An instantiation
++/// of a class template a `replaces=` annotation substituted another template
++/// for is written as an instantiation of the substitute, whose size is the
++/// substitute's and not the one clang measured for the template it stands in
++/// for.
+ fn field_representation_layout(
+     ctx: &BindgenContext,
++    item: &Item,
++) -> Option<Layout> {
++    representation_layout(ctx, item, &mut HashSet::default())
++}
++
++/// The recursion behind `field_representation_layout`, carrying the items it is
++/// in the middle of measuring.
++///
++/// Every stop leaves the type sized as clang measured it, which is what it was
++/// sized as before any of this. An item already on the way down is one: C++ has
++/// no type which contains itself, but `replaces=` declarations that are each
++/// fine on their own can build one between them - an array whose element is an
++/// array of itself, or a substitute holding an instantiation of the template it
++/// substitutes for - and a walk with no memory would not come back.
++fn representation_layout(
++    ctx: &BindgenContext,
++    item: &Item,
++    measuring: &mut HashSet<ItemId>,
++) -> Option<Layout> {
++    let ty = item.as_type()?;
++    if !measuring.insert(item.id()) {
++        return ty.layout(ctx);
++    }
++    let written = written_layout(ctx, item, ty, measuring);
++    measuring.remove(&item.id());
++    written.or_else(|| ty.layout(ctx))
++}
++
++/// The layout of what codegen writes for `item` where that is not the layout
++/// clang measured, and `None` to leave it as clang measured it.
++fn written_layout(
++    ctx: &BindgenContext,
++    item: &Item,
+     ty: &Type,
++    measuring: &mut HashSet<ItemId>,
+ ) -> Option<Layout> {
+-    array_representation_layout(ctx, ty, &mut HashSet::default())
++    match *ty.kind() {
++        TypeKind::Array(element, len) => {
++            let element = field_representation(ctx, element);
++            let element = representation_layout(ctx, element, measuring)?;
++            // A product no `usize` holds is not a size, and a substitute wider
++            // than what it stands in for can reach one from a declaration clang
++            // accepted.
++            let stride = checked_align_to(element.size, element.align)?;
++            Some(Layout::new(stride.checked_mul(len)?, element.align))
++        }
++        TypeKind::TemplateInstantiation(ref inst) => {
++            substitute_layout(ctx, item, inst, measuring)
++        }
++        _ => None,
++    }
+ }
+ 
+-/// The recursion behind `field_representation_layout`, carrying the elements it
+-/// has already measured.
++/// The layout of the Rust type written for an instantiation of a class template
++/// which a `replaces=` annotation substituted another template for.
+ ///
+-/// Each stop leaves the array sized as clang measured it, which is what it was
+-/// sized as before any of this. There are three. An element with no layout has
+-/// no size to multiply. A product no `usize` holds is not a size either, and a
+-/// replacement wider than what it replaces can reach one from a declaration
+-/// clang accepted. And an element already on the way down is a cycle: C++ has
+-/// no array whose element is itself, but a `replaces=` annotation naming an
+-/// array of the type it replaces builds one out of two declarations that are
+-/// each fine on their own, and a walk with no memory would not come back.
+-fn array_representation_layout(
++/// The annotation is recorded against the item the replaced name resolves to,
++/// which for a class template is the template itself. An instantiation of it is
++/// an item of its own, carrying the layout clang measured for the type C++
++/// declared, and resolving *it* through type refs finds no substitution at all.
++/// Its template definition is where the substitution sits, and what codegen
++/// writes for the field is the substitute instantiated with these same
++/// arguments, so the substitute's layout is the one the tracker wants.
++///
++/// What keys this is the definition codegen writes, not the annotation: a
++/// definition reached through a type ref resolved for any other reason - a
++/// template forward-declared where it is used, say - is equally the one written,
++/// and is equally the layout to take.
++///
++/// `None` where codegen writes something else: an instantiation bindgen was told
++/// to keep opaque is a blob of the layout clang measured, and so is one whose
++/// substitute has no parameters to take the arguments. `None` is also the answer
++/// wherever the substitute's layout cannot be established; the field is then
++/// measured as the type C++ declared, as it was before any of this, which leaves
++/// its struct short wherever the substitute is the narrower of the two.
++fn substitute_layout(
+     ctx: &BindgenContext,
++    item: &Item,
++    inst: &TemplateInstantiation,
++    measuring: &mut HashSet<ItemId>,
++) -> Option<Layout> {
++    let declared = ctx.resolve_item(inst.template_definition());
++    let written = inst
++        .template_definition()
++        .into_resolver()
++        .through_type_refs()
++        .resolve(ctx);
++    if written.id() == declared.id() ||
++        written.self_template_params(ctx).is_empty() ||
++        item.is_opaque(ctx, &())
++    {
++        return None;
++    }
++    template_pattern_layout(ctx, written, written.as_type()?, measuring)
++}
++
++/// The layout of the Rust struct bindgen writes for a class template.
++///
++/// clang lays a class template out only where something instantiates it, and
++/// nothing instantiates a substitute: the header declares it to be given to Rust
++/// in place of the name its annotation points at. Where clang did measure one,
++/// codegen pads the struct out to that measurement and it is the answer.
++/// Otherwise the members are, since a member sized by a template parameter has
++/// no layout to read here and stops this.
++///
++/// So lay the members out the way `repr(C)` will, guarded on the members being
++/// the whole of what the struct holds. A base class, a vtable pointer, a
++/// bitfield allocation unit and the address byte an empty class is given are
++/// each something else in it; a packed class is not laid out this way at all; a
++/// flexible array member becomes a type parameter of its own under
++/// `--flexarray-dst`; a member aligned more strictly than bindgen promises can be
++/// preceded by padding written as a blob of that promised alignment, wider than
++/// the gap it was asked to fill, and every such member is declined rather than
++/// only the ones so preceded; and a vector member is written as the array of its
++/// elements, whose alignment is the element's rather than the vector's.
++///
++/// A union is declined before the layout question is even asked, because
++/// `CompInfo::layout` answers it for one by taking the widest member without
++/// rounding up to the alignment, which is not the size Rust gives it.
++fn template_pattern_layout(
++    ctx: &BindgenContext,
++    item: &Item,
+     ty: &Type,
+-    measured: &mut HashSet<ItemId>,
++    measuring: &mut HashSet<ItemId>,
+ ) -> Option<Layout> {
+-    if let TypeKind::Array(element, len) = *ty.kind() {
+-        let element = field_representation(ctx, element);
+-        if measured.insert(element.id()) {
+-            if let Some(layout) = element.as_type().and_then(|element| {
+-                array_representation_layout(ctx, element, measured)
+-            }) {
+-                let stride =
+-                    struct_layout::align_to(layout.size, layout.align);
+-                if let Some(size) = stride.checked_mul(len) {
+-                    return Some(Layout::new(size, layout.align));
+-                }
+-            }
++    let TypeKind::Comp(ref comp) = *ty.kind() else {
++        return None;
++    };
++    if comp.kind() != CompKind::Struct {
++        return None;
++    }
++    if let Some(layout) = ty.layout(ctx) {
++        return Some(layout);
++    }
++    if comp.fields().is_empty() ||
++        comp.is_packed(ctx, None) ||
++        !comp.base_members().is_empty() ||
++        item.has_vtable_ptr(ctx) ||
++        (ctx.options().flexarray_dst &&
++            comp.flex_array_member(ctx).is_some())
++    {
++        return None;
++    }
++    let mut size: usize = 0;
++    let mut align: usize = 1;
++    for field in comp.fields() {
++        let Field::DataMember(field) = field else {
++            return None;
++        };
++        let field = field_representation(ctx, field.ty());
++        // A vector is written as the array of its elements, whose alignment is
++        // the element's and not the vector's, so the layout clang reported for
++        // it is not the one the emitted member has.
++        if matches!(*field.as_type()?.kind(), TypeKind::Vector(..)) {
++            return None;
++        }
++        let layout = representation_layout(ctx, field, measuring)?;
++        if layout.align == 0 ||
++            layout.align > struct_layout::MAX_GUARANTEED_ALIGN
++        {
++            return None;
+         }
++        size =
++            checked_align_to(size, layout.align)?.checked_add(layout.size)?;
++        align = align.max(layout.align);
++    }
++    Some(Layout::new(checked_align_to(size, align)?, align))
++}
++
++/// `struct_layout::align_to`, declining the wrap it does not check for.
++fn checked_align_to(size: usize, align: usize) -> Option<usize> {
++    match size.checked_rem(align) {
++        None | Some(0) => Some(size),
++        Some(rem) => size.checked_add(align - rem),
+     }
+-    ty.layout(ctx)
+ }
+ 
+ impl FieldCodegen<'_> for FieldData {
+@@ -1891,7 +2032,7 @@ impl FieldCodegen<'_> for FieldData {
+ 
+         if let Some(padding_field) = struct_layout.saw_field(
+             field_name,
+-            field_representation(ctx, self.ty()).expect_type(),
++            field_representation(ctx, self.ty()),
+             self.offset(),
+         ) {
+             fields.extend(Some(padding_field));
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -4,13 +4,14 @@ use super::helpers;
+ 
+ use crate::ir::comp::CompInfo;
+ use crate::ir::context::BindgenContext;
++use crate::ir::item::Item;
+ use crate::ir::layout::Layout;
+ use crate::ir::ty::{Type, TypeKind};
+ use crate::FieldVisibilityKind;
+ use proc_macro2::{Ident, Span};
+ use std::cmp;
+ 
+-const MAX_GUARANTEED_ALIGN: usize = 8;
++pub(crate) const MAX_GUARANTEED_ALIGN: usize = 8;
+ 
+ /// Trace the layout of struct.
+ #[derive(Clone, Debug)]
+@@ -155,16 +156,17 @@ impl<'a> StructLayoutTracker<'a> {
+     pub(crate) fn saw_field(
+         &mut self,
+         field_name: &str,
+-        field_ty: &Type,
++        field_item: &Item,
+         field_offset: Option<usize>,
+     ) -> Option<proc_macro2::TokenStream> {
+         // The size the *emitted* field has, which is the size clang measured
+-        // for all but an array of a substituted element.
++        // for all but an array of a substituted element and an instantiation of
++        // a substituted class template.
+         let mut field_layout =
+-            super::field_representation_layout(self.ctx, field_ty)?;
++            super::field_representation_layout(self.ctx, field_item)?;
+ 
+         if matches!(
+-            *field_ty.canonical_type(self.ctx).kind(),
++            *field_item.expect_type().canonical_type(self.ctx).kind(),
+             TypeKind::Array(..)
+         ) && field_layout.align > MAX_GUARANTEED_ALIGN
+         {
