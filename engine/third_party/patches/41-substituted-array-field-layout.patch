@@ -1,0 +1,146 @@
+Subject: Size an array field from the type its elements are written as
+
+`<div rustbindgen replaces="X"></div>` binds `X` as some other type the header
+declares, and that other type is usually a different size: the annotation
+exists to substitute a Rust-shaped stand-in for a C++ type Rust cannot express.
+bindgen keeps the layout of a struct with such a field honest by asking
+`StructLayoutTracker` about the type the field is *written* as - resolved
+through the `ResolvedTypeRef` the replacement is recorded as - and padding the
+struct out to the size clang reported for it.
+
+An array of that field is not covered.
+
+    struct Real { unsigned long a; unsigned long b; unsigned long c; };
+    /** <div rustbindgen replaces="Real"></div> */
+    struct Stand { void* p; };
+    struct A { Real a[3]; };
+    struct B { Real a; };
+
+`B` pads: its one field is written as `Stand`, eight bytes, and sixteen bytes
+of padding follow it. `A`'s field is written as `[Stand; 3]`, twenty-four bytes,
+but the layout handed to the tracker is the one clang measured for the array -
+three `Real`s, seventy-two bytes. The tracker concludes the field filled the
+struct and emits no padding at all, so `A` is a third of the width of the
+object C++ hands it. Every `A` crossing the boundary is truncated, and a caller
+who asks C++ to construct one in storage Rust sized gets it built past the end.
+
+So size an array field the way every other field is already sized: from the
+type its elements are written as. The element goes through the same walk the
+scalar case uses, which is what makes the substitution visible, and the walk
+repeats down each array so that an array of arrays composes. The size is
+`N * align_to(element.size, element.align)` - the formula the
+over-aligned-element correction below already used, which now reads the one
+layout both want.
+
+Where the element is written as the type it was declared with, this is the
+layout clang reported: `sizeof(T[N])` is `N * sizeof(T)`, `sizeof(T)` is
+already a multiple of `alignof(T)`, and `alignof(T[N])` is `alignof(T)`. For
+those arrays the computed size and alignment are unchanged. The exception is an element the
+walk resolves *through* to something of a different alignment - a typedef
+carrying a reduced `aligned` attribute is one - which is the walk's existing
+behaviour rather than this arm's, and which the emitted alias already did not
+carry.
+
+The over-aligned-element correction keeps its own job, clamping an alignment
+bindgen cannot promise, and now reads that alignment out of the field's layout
+rather than resolving the element a second time. The two agree for an array
+written as one. They part where the walk stopped short of the array - at an
+opaque alias over one - and there the field is written as a blob of the alias's
+own layout, which is the layout the clamp is then handed.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -1736,6 +1736,56 @@
+         item = next;
+     }
+     item
++}
++
++/// The layout of the Rust type written for a field of type `ty`.
++///
++/// For anything but an array that is the layout of what `field_representation`
++/// named, because what codegen writes for the field is that item's type. An
++/// array is the exception. `[T; N]` is written by converting the element and
++/// repeating it, so its size is `N` times the size of the type the *element* is
++/// written as - and a substituted element does not share a size with the
++/// element C++ declared, which is the size clang measured for the array. So ask
++/// for the element's representation in turn, which also makes an array of
++/// arrays compose.
++fn field_representation_layout(
++    ctx: &BindgenContext,
++    ty: &Type,
++) -> Option<Layout> {
++    array_representation_layout(ctx, ty, &mut HashSet::default())
++}
++
++/// The recursion behind `field_representation_layout`, carrying the elements it
++/// has already measured.
++///
++/// Each stop leaves the array sized as clang measured it, which is what it was
++/// sized as before any of this. There are three. An element with no layout has
++/// no size to multiply. A product no `usize` holds is not a size either, and a
++/// replacement wider than what it replaces can reach one from a declaration
++/// clang accepted. And an element already on the way down is a cycle: C++ has
++/// no array whose element is itself, but a `replaces=` annotation naming an
++/// array of the type it replaces builds one out of two declarations that are
++/// each fine on their own, and a walk with no memory would not come back.
++fn array_representation_layout(
++    ctx: &BindgenContext,
++    ty: &Type,
++    measured: &mut HashSet<ItemId>,
++) -> Option<Layout> {
++    if let TypeKind::Array(element, len) = *ty.kind() {
++        let element = field_representation(ctx, element);
++        if measured.insert(element.id()) {
++            if let Some(layout) = element.as_type().and_then(|element| {
++                array_representation_layout(ctx, element, measured)
++            }) {
++                let stride =
++                    struct_layout::align_to(layout.size, layout.align);
++                if let Some(size) = stride.checked_mul(len) {
++                    return Some(Layout::new(size, layout.align));
++                }
++            }
++        }
++    }
++    ty.layout(ctx)
+ }
+ 
+ impl FieldCodegen<'_> for FieldData {
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -158,10 +158,15 @@
+         field_ty: &Type,
+         field_offset: Option<usize>,
+     ) -> Option<proc_macro2::TokenStream> {
+-        let mut field_layout = field_ty.layout(self.ctx)?;
++        // The size the *emitted* field has, which is the size clang measured
++        // for all but an array of a substituted element.
++        let mut field_layout =
++            super::field_representation_layout(self.ctx, field_ty)?;
+ 
+-        if let TypeKind::Array(inner, len) =
+-            *field_ty.canonical_type(self.ctx).kind()
++        if matches!(
++            *field_ty.canonical_type(self.ctx).kind(),
++            TypeKind::Array(..)
++        ) && field_layout.align > MAX_GUARANTEED_ALIGN
+         {
+             // FIXME(emilio): As an _ultra_ hack, we correct the layout returned
+             // by arrays of structs that have a bigger alignment than what we
+@@ -170,14 +175,7 @@
+             // This means that the structs in the array are super-unsafe to
+             // access, since they won't be properly aligned, but there's not too
+             // much we can do about it.
+-            if let Some(layout) = self.ctx.resolve_type(inner).layout(self.ctx)
+-            {
+-                if layout.align > MAX_GUARANTEED_ALIGN {
+-                    field_layout.size =
+-                        align_to(layout.size, layout.align) * len;
+-                    field_layout.align = MAX_GUARANTEED_ALIGN;
+-                }
+-            }
++            field_layout.align = MAX_GUARANTEED_ALIGN;
+         }
+         self.saw_field_with_layout(field_name, field_layout, field_offset)
+     }
