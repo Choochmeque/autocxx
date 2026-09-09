@@ -73,8 +73,7 @@ pub unsafe trait ValueParam<T> {
     /// otherwise `()`.
     #[doc(hidden)]
     type StackStorage;
-    /// Populate the stack storage given as a parameter. Only called if you
-    /// return `true` from `needs_stack_space`.
+    /// Populate the stack storage given as a parameter.
     ///
     /// # Safety
     ///
@@ -85,14 +84,27 @@ pub unsafe trait ValueParam<T> {
     /// Retrieve the pointer to the underlying item, to be passed to C++.
     /// Note that on the C++ side this is currently passed to `std::move`
     /// and therefore may be mutated.
+    ///
+    /// # Safety
+    ///
+    /// The storage must hold a value and must not have moved since it was
+    /// built: for the `MaybeUninit` implementations that means
+    /// `populate_stack_space` returned and nothing has since destroyed or
+    /// replaced what it left there.
     #[doc(hidden)]
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T;
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T;
     #[doc(hidden)]
     /// Any special drop steps required for the stack storage. This is not
     /// necessary if the `StackStorage` type is something self-dropping
     /// such as `UniquePtr`; it's only necessary if it's something where
     /// manual management is required such as `MaybeUninit`.
-    fn do_drop(_stack: Pin<&mut Self::StackStorage>) {}
+    ///
+    /// # Safety
+    ///
+    /// As for `get_ptr`, and this must be the only such call: an
+    /// implementation which needs one destroys the value in place, so nothing
+    /// may touch the storage afterwards.
+    unsafe fn do_drop(_stack: Pin<&mut Self::StackStorage>) {}
 }
 
 unsafe impl<T> ValueParam<T> for &T
@@ -110,14 +122,14 @@ where
         // promised not to move it.
         unsafe { crate::moveit::new::copy(self).new(Pin::new_unchecked(slot.as_mut().unwrap())) }
     }
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: it's OK to (briefly) create a reference to the T because we
         // populated it within `populate_stack_space`. It's OK to unpack the pin
         // because we're not going to move the contents.
         unsafe { Pin::into_inner_unchecked(stack).assume_init_mut() as *mut T }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
         // Switch to MaybeUninit::assume_init_drop when stabilized
         // Safety: per caller guarantees of populate_stack_space, we know this hasn't moved.
         unsafe { std::ptr::drop_in_place(Pin::into_inner_unchecked(stack).assume_init_mut()) };
@@ -132,7 +144,7 @@ unsafe impl<T> ValueParam<T> for CppPin<T> {
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin. The
         // pointer is to the `T` inside the `CppPin`'s own `Box`, which we now
         // own and keep alive until after the call, so it's non-null, aligned
@@ -157,7 +169,7 @@ where
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin, nor of the
         // type stored within the UniquePtr, which we own and keep alive until
         // after the call. Here the cached `CppMutRef` is the pointer to use:
@@ -198,7 +210,7 @@ where
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin, nor of the
         // type stored within the UniquePtr.
         unsafe {
@@ -219,7 +231,7 @@ unsafe impl<T> ValueParam<T> for Pin<Box<T>> {
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin, nor of the
         // type stored within the UniquePtr.
         unsafe {
@@ -243,12 +255,14 @@ where
         }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
-        <&'a T as ValueParam<T>>::get_ptr(stack)
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::get_ptr(stack) }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
-        <&'a T as ValueParam<T>>::do_drop(stack)
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::do_drop(stack) }
     }
 }
 
@@ -263,12 +277,14 @@ where
         unsafe { self.as_ref().get_ref().populate_stack_space(stack) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
-        <&'a T as ValueParam<T>>::get_ptr(stack)
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::get_ptr(stack) }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
-        <&'a T as ValueParam<T>>::do_drop(stack)
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::do_drop(stack) }
     }
 }
 
@@ -309,14 +325,14 @@ unsafe impl<N: New> ValueParam<N::Output> for ByNew<N> {
         // promised not to move it.
         unsafe { self.0.new(Pin::new_unchecked(slot.as_mut().unwrap())) }
     }
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut N::Output {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut N::Output {
         // Safety: it's OK to (briefly) create a reference to the N::Output because we
         // populated it within `populate_stack_space`. It's OK to unpack the pin
         // because we're not going to move the contents.
         unsafe { Pin::into_inner_unchecked(stack).assume_init_mut() as *mut N::Output }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
         // Switch to MaybeUninit::assume_init_drop when stabilized
         // Safety: per caller guarantees of populate_stack_space, we know this hasn't moved.
         unsafe { std::ptr::drop_in_place(Pin::into_inner_unchecked(stack).assume_init_mut()) };
@@ -333,6 +349,9 @@ pub struct ValueParamHandler<T, VP: ValueParam<T>> {
     // We can't populate this on 'new' because the object may move.
     // Hence this is an Option - it's None until populate is called.
     space: Option<VP::StackStorage>,
+    // `space` being `Some` records that storage was reserved; this records
+    // that a value was built in it. The two differ when a constructor unwinds.
+    populated: bool,
     _pinned: PhantomPinned,
 }
 
@@ -342,14 +361,19 @@ impl<T, VP: ValueParam<T>> ValueParamHandler<T, VP> {
     ///
     /// # Safety
     ///
-    /// Callers must call [`populate`] exactly once prior to calling [`get_ptr`].
+    /// Callers must call [`populate`] exactly once prior to calling
+    /// [`get_ptr`], and it must have returned: [`get_ptr`] must not be called
+    /// after a constructor unwound.
     pub unsafe fn populate(self: Pin<&mut Self>, param: VP) {
         // Safety: `space` is pinned structurally, as documented in
         // [`std::pin`] - this type is `PhantomPinned`, nothing here moves the
         // field after it is populated, and `do_drop` drops it in place - which
         // is the promise `populate_stack_space` asks of us. Being called exactly
         // once is the caller's promise above.
-        unsafe { param.populate_stack_space(self.map_unchecked_mut(|s| &mut s.space)) }
+        let this = unsafe { self.get_unchecked_mut() };
+        unsafe { param.populate_stack_space(Pin::new_unchecked(&mut this.space)) };
+        // Not reached if the constructor unwound.
+        this.populated = true;
     }
 
     /// Return a pointer to the underlying value which can be passed to C++.
@@ -359,6 +383,9 @@ impl<T, VP: ValueParam<T>> ValueParamHandler<T, VP> {
     pub fn get_ptr(self: Pin<&mut Self>) -> *mut T {
         // Structural pinning, as documented in [`std::pin`]. `map_unchecked_mut` doesn't play
         // nicely with `unwrap`, so we have to do it manually.
+        // Safety: `VP::get_ptr` asks that `populate_stack_space` returned for
+        // this storage and that it hasn't moved since; both are the promise
+        // made by whoever called the unsafe `populate` above.
         unsafe {
             VP::get_ptr(Pin::new_unchecked(
                 self.get_unchecked_mut().space.as_mut().unwrap(),
@@ -371,6 +398,7 @@ impl<T, VP: ValueParam<T>> Default for ValueParamHandler<T, VP> {
     fn default() -> Self {
         Self {
             space: None,
+            populated: false,
             _pinned: PhantomPinned,
         }
     }
@@ -378,13 +406,22 @@ impl<T, VP: ValueParam<T>> Default for ValueParamHandler<T, VP> {
 
 impl<T, VP: ValueParam<T>> Drop for ValueParamHandler<T, VP> {
     fn drop(&mut self) {
-        // `space` holding `Some` records that storage was reserved, not that a
-        // value was built in it: the `MaybeUninit` impls of
-        // `populate_stack_space` reserve first and construct second, so a
-        // constructor which unwinds leaves `Some` over uninitialized storage
-        // and the `do_drop` below drops it as if it were a value.
-        if let Some(space) = self.space.as_mut() {
-            unsafe { VP::do_drop(Pin::new_unchecked(space)) }
+        // `do_drop` is the hand-written destruction of a `MaybeUninit`
+        // storage, so it may only run over a value that was built.
+        // `populate_stack_space` reserves first and constructs second, and
+        // `New::new` promises initialization only when it returns: from out
+        // here a `New` which constructed and then unwound - `New::with`'s
+        // callback panicking, say - cannot be told from one which never
+        // constructed at all. Abandoning the storage loses that object's
+        // destructor, which a self-registering C++ object needs; destroying it
+        // unconditionally runs a destructor over uninitialized storage on the
+        // crate's own null-`UniquePtr` panic, which ordinary safe code
+        // reaches. We abandon. The self-dropping storages are freed by the
+        // field's own drop glue either way.
+        if self.populated {
+            if let Some(space) = self.space.as_mut() {
+                unsafe { VP::do_drop(Pin::new_unchecked(space)) }
+            }
         }
     }
 }
@@ -407,5 +444,77 @@ mod tests {
         let mut handler = unsafe { Pin::new_unchecked(&mut handler) };
         unsafe { handler.as_mut().populate(pin) };
         let _ = handler.get_ptr();
+    }
+
+    /// Drive a handler exactly as generated code does - a local, pinned in
+    /// place and then shadowed, so an unwind out of `populate` drops it - and
+    /// report whether the constructor unwound.
+    fn populate_and_drop<T, VP: ValueParam<T>>(param: VP) -> std::thread::Result<()> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut handler = ValueParamHandler::<T, VP>::default();
+            // Safety: the handler is a local which nothing moves hereafter,
+            // and `populate` is called exactly once.
+            let handler = unsafe { Pin::new_unchecked(&mut handler) };
+            unsafe { handler.populate(param) };
+        }))
+    }
+
+    static BY_NEW_DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Zero-sized, so a destructor run over storage which was never
+    /// constructed reads nothing and the miscount is the only symptom.
+    struct CountsItsDrops;
+
+    impl Drop for CountsItsDrops {
+        fn drop(&mut self) {
+            BY_NEW_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    static COPY_DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// As above, with a copy constructor which fails the way a C++ one would.
+    struct FailsToCopy;
+
+    impl Drop for FailsToCopy {
+        fn drop(&mut self) {
+            COPY_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    unsafe impl CopyNew for FailsToCopy {
+        unsafe fn copy_new(_src: &Self, _this: Pin<&mut MaybeUninit<Self>>) {
+            panic!("copy constructor failed")
+        }
+    }
+
+    /// A constructor which unwinds leaves the reserved stack storage empty, so
+    /// the handler must not destroy what was never built.
+    #[test]
+    fn unwinding_new_leaves_nothing_to_destroy() {
+        BY_NEW_DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let outcome = populate_and_drop::<CountsItsDrops, _>(ByNew(crate::moveit::new::by(
+            || -> CountsItsDrops { panic!("constructor failed") },
+        )));
+        assert!(outcome.is_err());
+        assert_eq!(
+            BY_NEW_DROPS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "destructor ran over storage which was reserved but never constructed"
+        );
+    }
+
+    /// The same for the copy-constructing implementation for `&T`.
+    #[test]
+    fn unwinding_copy_leaves_nothing_to_destroy() {
+        COPY_DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let src = FailsToCopy;
+        let outcome = populate_and_drop::<FailsToCopy, &FailsToCopy>(&src);
+        assert!(outcome.is_err());
+        assert_eq!(
+            COPY_DROPS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "destructor ran over storage which was reserved but never constructed"
+        );
     }
 }

@@ -23635,6 +23635,50 @@ fn test_pass_by_reference_to_value_param() {
     run_test("", hdr, rs, &["A", "take_a", "report_on_a"], &[]);
 }
 
+/// A constructor's own value parameters are evaluated inside the `New` it
+/// returns, so a null `UniquePtr` handed to one panics while the outer value
+/// parameter's stack storage is reserved but not yet constructed. Nothing may
+/// be destroyed on the way out.
+#[test]
+fn test_unwinding_constructor_does_not_destroy_value_param() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    #include <string>
+    struct Bob {
+        Bob() {}
+        Bob(const Bob&) {}
+        ~Bob() {}
+        std::string so_we_are_non_trivial;
+    };
+    inline uint32_t& holder_destructions() {
+        static uint32_t count = 0;
+        return count;
+    }
+    // No members, so the destructor which must not run has nothing to read
+    // and the count is what this test observes.
+    struct Holder {
+        Holder(Bob) {}
+        ~Holder() { holder_destructions()++; }
+    };
+    inline void take_holder(Holder) {}
+    inline uint32_t report_holder_destructions() { return holder_destructions(); }
+    "};
+    let rs = quote! {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ffi::take_holder(as_new(ffi::Holder::new(cxx::UniquePtr::<ffi::Bob>::null())));
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(ffi::report_holder_destructions(), 0);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["Bob", "Holder", "take_holder", "report_holder_destructions"],
+        &[],
+    );
+}
+
 #[test]
 fn test_explicit_everything() {
     let hdr = indoc! {"
