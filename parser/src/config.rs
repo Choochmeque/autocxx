@@ -260,6 +260,21 @@ impl std::hash::Hash for ConcretesMap {
     }
 }
 
+/// The key an `include_cpp!` block's generated bindings are filed under in a
+/// JSON archive (see [`crate::MultiBindings`]).
+///
+/// The codegen phase and the macro phase are separate processes which never
+/// share a config: the codegen augments its copy - `confirm_complete`, plus
+/// every subclass, `extern_rust_function` and `--auto-allowlist` use it
+/// discovers in the file - while the macro sees only what the user wrote.
+/// Both must therefore key on the block *as written*, so the hash is taken
+/// when the block is parsed, before anything can augment it, and carried from
+/// there: `IncludeCpp::config_hash` on the macro side and
+/// `IncludeCppEngine::config_hash` on the codegen side. Hashing a config after
+/// something has augmented it gives a key nothing looks up.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ConfigHash(pub(crate) u64);
+
 #[derive(Debug, Default, Hash)]
 pub struct IncludeCppConfig {
     pub inclusions: Vec<String>,
@@ -505,18 +520,21 @@ impl IncludeCppConfig {
         self.concretes.0.values().any(|val| *val == cpp_name)
     }
 
-    /// Get a hash of the contents of this `include_cpp!` block.
-    pub fn get_hash(&self) -> u64 {
+    /// Get a hash of the contents of this `include_cpp!` block *as it stands*.
+    ///
+    /// Only an archive key while the block is still as the user wrote it - see
+    /// [`ConfigHash`].
+    pub fn get_hash(&self) -> ConfigHash {
         let mut s = DefaultHasher::new();
         self.hash(&mut s);
-        s.finish()
+        ConfigHash(s.finish())
     }
 
     /// In case there are multiple sets of ffi mods in a single binary,
     /// endeavor to return a name which can be used to make symbols
     /// unique.
     pub fn uniquify_name_per_mod(&self, name: &str) -> String {
-        format!("{}_{:#x}", name, self.get_hash())
+        format!("{}_{:#x}", name, self.get_hash().0)
     }
 
     pub fn get_makestring_name(&self) -> String {

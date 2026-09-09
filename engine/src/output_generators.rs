@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use autocxx_parser::{IncludeCppConfig, MultiBindings};
+use autocxx_parser::{ConfigHash, ConflictingBindingsErr, IncludeCppConfig, MultiBindings};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::ItemMod;
@@ -16,6 +16,11 @@ use syn::ItemMod;
 /// either [`generate_rs_single`] or [`generate_rs_archive`].
 pub struct RsOutput<'a> {
     pub(crate) config: &'a IncludeCppConfig,
+    /// The key to file these bindings under in an archive. Not
+    /// `config.get_hash()`: by this point `config` has been augmented with
+    /// everything the codegen discovered, and the macro looking these bindings
+    /// up has only the block as written. See [`ConfigHash`].
+    pub(crate) config_hash: ConfigHash,
     /// The generated mod, or `None` for a `parse_only!` invocation which
     /// generates nothing.
     pub(crate) rs: Option<&'a ItemMod>,
@@ -37,12 +42,17 @@ impl RsOutput<'_> {
 /// for multiple `include_cpp` macros. If you use this, you will want to tell
 /// `autocxx_macro` how to find this file using the `AUTOCXX_RS_JSON_ARCHIVE`
 /// environment variable.
-pub fn generate_rs_archive<'a>(rs_outputs: impl Iterator<Item = RsOutput<'a>>) -> String {
+///
+/// Fails where two blocks would claim one entry with different bindings; see
+/// [`MultiBindings::insert`].
+pub fn generate_rs_archive<'a>(
+    rs_outputs: impl Iterator<Item = RsOutput<'a>>,
+) -> Result<String, ConflictingBindingsErr> {
     let mut multi_bindings = MultiBindings::default();
     for rs in rs_outputs {
-        multi_bindings.insert(rs.config, rs.to_token_stream());
+        multi_bindings.insert(rs.config_hash, rs.to_token_stream())?;
     }
-    serde_json::to_string(&multi_bindings).expect("Unable to encode JSON archive")
+    Ok(serde_json::to_string(&multi_bindings).expect("Unable to encode JSON archive"))
 }
 
 /// A single Rust file to be written to disk.

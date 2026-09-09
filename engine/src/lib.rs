@@ -51,7 +51,7 @@ mod cxx_version_parity;
 // `autocxx_bindgen::BindgenError`; `vendored_bindgen` is private, so autocxx
 // re-exports the one type of bindgen's that reaches its own API.
 pub use crate::vendored_bindgen::BindgenError;
-use autocxx_parser::{EnumStyle, IncludeCppConfig, UnsafePolicy};
+use autocxx_parser::{ConfigHash, EnumStyle, IncludeCppConfig, UnsafePolicy};
 use conversion::BridgeConverter;
 use miette::{SourceOffset, SourceSpan};
 use parse_callbacks::{AutocxxParseCallbacks, ParseCallbackResults, UnindexedParseCallbackResults};
@@ -362,6 +362,11 @@ pub trait RebuildDependencyRecorder: std::fmt::Debug {
 /// codegen.
 pub struct IncludeCppEngine {
     config: IncludeCppConfig,
+    /// Taken here, at the parse, because `config` is augmented afterwards -
+    /// `confirm_complete`, discovered subclasses, `extern_rust_*` items and
+    /// auto-allowlist entries - and the macro which looks these bindings up in
+    /// a JSON archive sees only the block as written. See [`ConfigHash`].
+    config_hash: ConfigHash,
     state: State,
     source_code: Option<Rc<String>>, // so we can create diagnostics
 }
@@ -374,8 +379,10 @@ impl Parse for IncludeCppEngine {
         } else {
             State::NotGenerated
         };
+        let config_hash = config.get_hash();
         Ok(Self {
             config,
+            config_hash,
             state,
             source_code: None,
         })
@@ -394,11 +401,23 @@ impl IncludeCppEngine {
     /// Used if we find that we're asked to auto-discover extern_rust_type and similar
     /// but didn't have any include_cpp macro at all.
     pub fn new_for_autodiscover() -> Self {
+        let config = IncludeCppConfig::default();
+        let config_hash = config.get_hash();
         Self {
-            config: IncludeCppConfig::default(),
+            config,
+            config_hash,
             state: State::NotGenerated,
             source_code: None,
         }
+    }
+
+    /// The key this block's bindings are filed under in a JSON archive.
+    pub fn config_hash(&self) -> ConfigHash {
+        self.config_hash
+    }
+
+    pub fn get_config(&self) -> &IncludeCppConfig {
+        &self.config
     }
 
     pub fn config_mut(&mut self) -> &mut IncludeCppConfig {
@@ -684,6 +703,7 @@ impl IncludeCppEngine {
     pub fn get_rs_output(&self) -> RsOutput<'_> {
         RsOutput {
             config: &self.config,
+            config_hash: self.config_hash,
             rs: match &self.state {
                 State::NotGenerated => panic!("Generate first"),
                 State::Generated(gen_results) => Some(&gen_results.item_mod),

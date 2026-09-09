@@ -19,13 +19,13 @@ mod path;
 mod subclass_attrs;
 
 pub use config::{
-    name_matches_directive, AllowlistEntry, ExternCppType, IncludeCppConfig, RustFun, Subclass,
-    UnsafePolicy,
+    name_matches_directive, AllowlistEntry, ConfigHash, ExternCppType, IncludeCppConfig, RustFun,
+    Subclass, UnsafePolicy,
 };
 pub use derives::DeriveMap;
 pub use enum_style::EnumStyle;
 use file_locations::FileLocationStrategy;
-pub use multi_bindings::{MultiBindings, MultiBindingsErr};
+pub use multi_bindings::{ConflictingBindingsErr, MultiBindings, MultiBindingsErr};
 pub use path::RustPath;
 use proc_macro2::TokenStream as TokenStream2;
 pub use subclass_attrs::SubclassAttrs;
@@ -48,12 +48,20 @@ pub mod directive_names {
 /// on how this works.
 pub struct IncludeCpp {
     config: IncludeCppConfig,
+    /// Taken here, at the parse, so that it is the hash of the block as the
+    /// user wrote it - the same point the codegen takes its own. See
+    /// [`ConfigHash`].
+    config_hash: ConfigHash,
 }
 
 impl Parse for IncludeCpp {
     fn parse(input: ParseStream) -> ParseResult<Self> {
         let config = input.parse::<IncludeCppConfig>()?;
-        Ok(Self { config })
+        let config_hash = config.get_hash();
+        Ok(Self {
+            config,
+            config_hash,
+        })
     }
 }
 
@@ -67,11 +75,16 @@ impl IncludeCpp {
         if self.config.parse_only {
             return TokenStream2::new();
         }
-        FileLocationStrategy::new().make_include(&self.config)
+        FileLocationStrategy::new().make_include(self)
     }
 
     pub fn get_config(&self) -> &IncludeCppConfig {
         &self.config
+    }
+
+    /// The key this block's bindings are filed under in a JSON archive.
+    pub fn config_hash(&self) -> ConfigHash {
+        self.config_hash
     }
 }
 

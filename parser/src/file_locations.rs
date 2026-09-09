@@ -10,7 +10,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use std::{fs::File, path::PathBuf};
 
-use crate::{multi_bindings::MultiBindings, IncludeCppConfig};
+use crate::{multi_bindings::MultiBindings, multi_bindings::MultiBindingsErr, IncludeCpp};
 
 /// The strategy used to generate, and to find generated, files.
 /// As standard, these are based off the OUT_DIR set by Cargo,
@@ -65,7 +65,11 @@ impl FileLocationStrategy {
     /// Make a macro to include a given generated Rust file name.
     /// This can't simply be calculated from `get_rs_dir` because
     /// of limitations in rust-analyzer.
-    pub fn make_include(&self, config: &IncludeCppConfig) -> TokenStream {
+    ///
+    /// Takes the whole [`IncludeCpp`] rather than its parts so that the name
+    /// and the archive key cannot come from two different blocks.
+    pub fn make_include(&self, include_cpp: &IncludeCpp) -> TokenStream {
+        let config = include_cpp.get_config();
         match self {
             FileLocationStrategy::FromAutocxxRs(custom_dir) => {
                 let fname = config.get_rs_filename();
@@ -96,12 +100,32 @@ impl FileLocationStrategy {
                 }
             }
             FileLocationStrategy::FromAutocxxRsJsonArchive(fnames) => {
-                let archive = std::env::split_paths(fnames).flat_map(File::open).next().unwrap_or_else(|| panic!("Unable to open any of the paths listed in {}. This may mean you didn't run the codegen tool (autocxx_gen) before building the Rust code.", fnames.to_string_lossy()));
+                // The first of the listed paths which opens is the archive;
+                // the rest are not consulted, so a diagnostic about a missing
+                // entry has to name this one and not the list.
+                let (archive_name, archive) = std::env::split_paths(fnames)
+                    .find_map(|path| File::open(&path).ok().map(|file| (path, file)))
+                    .unwrap_or_else(|| panic!("Unable to open any of the paths listed in {}. This may mean you didn't run the codegen tool (autocxx_gen) before building the Rust code.", fnames.to_string_lossy()));
                 let multi_bindings: MultiBindings = serde_json::from_reader(archive)
-                    .unwrap_or_else(|_| {
-                        panic!("Unable to interpret {} as JSON", fnames.to_string_lossy())
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "Unable to read {} as an archive of Rust bindings: {}",
+                            archive_name.to_string_lossy(),
+                            err
+                        )
                     });
-                multi_bindings.get(config).unwrap_or_else(|err| panic!("Unable to find a suitable set of bindings within the JSON archive {} ({}). This likely means that the codegen tool hasn't been rerun since some changes in your include_cpp! macro.", fnames.to_string_lossy(), err))
+                multi_bindings
+                    .get(include_cpp.config_hash())
+                    .unwrap_or_else(|err| match err {
+                        MultiBindingsErr::MissingBindings => panic!(
+                            "No entry in the JSON archive {} is keyed for this include_cpp! block. The key is a hash of the block, so either the codegen tool (autocxx_gen) was not given this source file in the version being compiled now, or this is not the archive it wrote, or it and this macro come from autocxx versions which compute the key differently.",
+                            archive_name.to_string_lossy()
+                        ),
+                        MultiBindingsErr::BindingsNotParseable => panic!(
+                            "The bindings filed under this include_cpp! block in the JSON archive {} are not valid Rust tokens.",
+                            archive_name.to_string_lossy()
+                        ),
+                    })
             }
         }
     }
