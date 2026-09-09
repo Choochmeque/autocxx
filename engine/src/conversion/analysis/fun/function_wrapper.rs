@@ -106,6 +106,25 @@ pub(crate) enum PointerCppConversion {
     /// so these two carry it instead.
     FromPointerToRValueReference,
     FromRValueReferenceToPointer,
+    /// `const_cast<T*>(p)`: C++ returned a `volatile T*` and the bridge carries
+    /// the unqualified pointer. The qualifier cannot be dropped implicitly, and
+    /// the bridge has no way to spell it, so the wrapper casts it away and the
+    /// Rust side restores the discipline by handing over an
+    /// `autocxx::VolatilePtr<T>` rather than a raw pointer.
+    FromVolatilePointerToPointer,
+    /// The same for a `volatile T&` return, which reaches the bridge as the
+    /// pointer standing for it: `const_cast<T*>(::std::addressof(r))`.
+    FromVolatileReferenceToPointer,
+    /// `static_cast<volatile T*>(p)`, for a parameter. The qualifier would be
+    /// added back implicitly by the call, but only *after* overload resolution
+    /// has chosen which function to call - so where a name has both a
+    /// `volatile`-pointee overload and a plain one, the unqualified argument
+    /// picks the plain one and the binding for the other silently calls it. The
+    /// cast makes the choice before resolution sees it.
+    FromPointerToVolatilePointer,
+    /// The same for a `volatile T&` parameter:
+    /// `static_cast<volatile T&>(*p)`.
+    FromPointerToVolatileReference,
 }
 
 impl PointerCppConversion {
@@ -128,6 +147,15 @@ impl PointerCppConversion {
             // C++. Neither describes a change of type which the way back could
             // undo, and neither has ever been asked to.
             Self::FromPtrToMove | Self::IgnoredPlacementPtrParameter => return Option::None,
+            // Casting a qualifier away has no opposite a wrapper could
+            // perform: putting `volatile` back would be inventing a promise
+            // about storage rather than restoring one. Asking yields
+            // `NonInvertibleConversion`, which is the honest answer for a
+            // subclass peer overriding such a method.
+            Self::FromVolatilePointerToPointer
+            | Self::FromVolatileReferenceToPointer
+            | Self::FromPointerToVolatilePointer
+            | Self::FromPointerToVolatileReference => return Option::None,
         })
     }
 }
@@ -148,6 +176,13 @@ pub(crate) enum PointerRustConversion {
     FromPlacementParamToNewReturn,
     FromReferenceWrapperToPointer,
     FromPointerToReferenceWrapper,
+    /// `autocxx::VolatilePtr<T>` in the wrapper's signature, the bare pointer
+    /// on the bridge. C++ wrote `volatile` on what this points at, and Rust
+    /// states volatility in the access rather than in a type, so an ordinary
+    /// `*mut T` here would be read with an ordinary load. These two carry the
+    /// handle which only reads and writes volatilely.
+    FromVolatilePtrToPointer,
+    FromPointerToVolatilePtr,
 }
 
 /// A Rust-side conversion which the caller of `convert_fn_arg` insists on for
@@ -431,6 +466,21 @@ impl TypeConversionPolicy {
     /// [`WholeCppConversion::MoveOrCopy`] is not: it changes no type, so cxx
     /// can hand the parameter over by itself perfectly well. It only has
     /// something to say once a wrapper exists for some other reason.
+    /// Whether this parameter is an address whose pointee C++ qualified
+    /// `volatile`. Such a parameter needs the C++ wrapper even though its own
+    /// conversion is Rust-side only: without one, cxx takes the address of the
+    /// C++ function against a bridge signature which cannot spell the
+    /// qualifier.
+    pub(crate) fn pointee_was_volatile(&self) -> bool {
+        matches!(
+            self,
+            Self::Pointer {
+                rust: PointerRustConversion::FromVolatilePtrToPointer,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn cpp_work_needed(&self) -> bool {
         match self {
             Self::Pointer { cpp, .. } => !matches!(cpp, PointerCppConversion::None),

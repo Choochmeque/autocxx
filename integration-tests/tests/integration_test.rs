@@ -11028,6 +11028,361 @@ fn test_const_volatile_return_binds_through_a_wrapper() {
     run_test("", hdr, rs, &["give"], &[]);
 }
 
+// The `volatile` *pointee* tests below - a pointer or reference to something
+// `volatile`, which is the position real memory-mapped-register code is
+// written in. The positions above are ones C++ performs the access in, or has
+// finished with; this is the one where Rust performs it, so what Rust is
+// handed decides whether the promise survives. It is handed an
+// `autocxx::VolatilePtr<T>`, whose `read` and `write` are `read_volatile` and
+// `write_volatile` - the same LLVM `load volatile`/`store volatile` a C++
+// access through the qualifier emits.
+
+/// The parameter direction. C++ performs this access, so what crosses is only
+/// an address - but it must not cross as an ordinary `*mut T`, or the value
+/// returned by the direction below could not be passed straight back.
+///
+/// Nothing in the bridge can spell the qualifier, so without a wrapper of
+/// autocxx's own cxx initializes a `void (*)(::std::uint32_t*)` from a `void
+/// (volatile ::std::uint32_t*)` and the generated C++ does not compile. The
+/// wrapper's own parameter is unqualified and the call adds the qualifier back,
+/// `T*` converting to `volatile T*`.
+#[test]
+fn test_volatile_pointer_parameter_takes_a_volatile_handle() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void poke(volatile uint32_t* reg) { *reg = 1; }
+    "};
+    let rs = quote! {
+        let mut cell: u32 = 0;
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut u32);
+        unsafe { ffi::poke(p) };
+        assert_eq!(cell, 1);
+    };
+    run_test("", hdr, rs, &["poke"], &[]);
+}
+
+/// The same for a reference, which is the position where handing over the
+/// obvious Rust type would be worse than lossy. A `volatile uint32_t&` would
+/// otherwise become a Rust reference, and a Rust shared reference promises the
+/// referent does not change while it lives - which is the one thing a hardware
+/// register is guaranteed to do.
+#[test]
+fn test_volatile_reference_parameter_takes_a_volatile_handle() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void poke_ref(volatile uint32_t& reg) { reg = 7; }
+    "};
+    let rs = quote! {
+        let mut cell: u32 = 0;
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut u32);
+        unsafe { ffi::poke_ref(p) };
+        assert_eq!(cell, 7);
+    };
+    run_test("", hdr, rs, &["poke_ref"], &[]);
+}
+
+/// The return direction, and the one which earns the type: C++ hands back the
+/// address of storage it qualified `volatile`, and every access from here on is
+/// Rust's. `read` and `write` are those accesses.
+///
+/// The qualifier cannot be dropped implicitly on the way out, so the wrapper
+/// casts it off with `const_cast` - which changes no address and reads nothing.
+/// The storage stays as volatile as C++ declared it; what changes is that Rust
+/// now has a type which says so.
+#[test]
+fn test_volatile_pointer_return_gives_a_volatile_handle() {
+    let cxx = indoc! {"
+        uint32_t storage = 5;
+        volatile uint32_t* fetch() { return &storage; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        volatile uint32_t* fetch();
+    "};
+    let rs = quote! {
+        let p = unsafe { ffi::fetch() };
+        assert_eq!(unsafe { p.read() }, 5);
+        unsafe { p.write(9) };
+        assert_eq!(unsafe { p.read() }, 9);
+    };
+    run_test(cxx, hdr, rs, &["fetch"], &[]);
+}
+
+/// A `volatile T&` return, which reaches the bridge as the pointer standing for
+/// it and so needs the address taken before the same cast.
+#[test]
+fn test_volatile_reference_return_gives_a_volatile_handle() {
+    let cxx = indoc! {"
+        uint32_t storage = 4;
+        volatile uint32_t& reg() { return storage; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        volatile uint32_t& reg();
+    "};
+    let rs = quote! {
+        let p = unsafe { ffi::reg() };
+        assert_eq!(unsafe { p.read() }, 4);
+        unsafe { p.write(11) };
+        assert_eq!(unsafe { p.read() }, 11);
+    };
+    run_test(cxx, hdr, rs, &["reg"], &[]);
+}
+
+/// `const volatile` is how a status register the program may read but not write
+/// is declared, and it gets a handle with no `write`: writing through a pointer
+/// to a `const` object is undefined however the write is performed.
+#[test]
+fn test_const_volatile_pointer_return_gives_a_read_only_handle() {
+    let cxx = indoc! {"
+        uint32_t storage = 3;
+        const volatile uint32_t* status() { return &storage; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        const volatile uint32_t* status();
+    "};
+    let rs = quote! {
+        let p: autocxx::VolatileConstPtr<u32> = unsafe { ffi::status() };
+        assert_eq!(unsafe { p.read() }, 3);
+    };
+    run_test(cxx, hdr, rs, &["status"], &[]);
+}
+
+/// A `const volatile` *reference*, which is the other way the read-only handle
+/// is reached: the mutability comes from the converted type, and a const
+/// reference never becomes the `Pin<&mut T>` shape the writable handle is
+/// derived from. The annotation is the assertion - `VolatilePtr` would not
+/// compile here, and it is the one that has `write`.
+#[test]
+fn test_const_volatile_reference_gives_a_read_only_handle() {
+    let cxx = indoc! {"
+        uint32_t storage = 12;
+        const volatile uint32_t& status_ref() { return storage; }
+        uint32_t read_it(const volatile uint32_t& r) { return r; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        const volatile uint32_t& status_ref();
+        uint32_t read_it(const volatile uint32_t& r);
+    "};
+    let rs = quote! {
+        let p: autocxx::VolatileConstPtr<u32> = unsafe { ffi::status_ref() };
+        assert_eq!(unsafe { p.read() }, 12);
+        assert_eq!(unsafe { ffi::read_it(p) }, 12);
+    };
+    run_test(cxx, hdr, rs, &["status_ref", "read_it"], &[]);
+}
+
+/// The whole idiom end to end: ask C++ for a register's address, then read and
+/// write it from Rust, then hand the same address back to C++. The handle is
+/// the currency in both directions, so the value a function returns goes
+/// straight into one which takes it.
+#[test]
+fn test_volatile_handle_round_trips_between_return_and_parameter() {
+    let cxx = indoc! {"
+        uint32_t reg_storage = 0;
+        volatile uint32_t* reg() { return &reg_storage; }
+        void set_from_cpp(volatile uint32_t* r) { *r = 42; }
+        uint32_t peek() { return reg_storage; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        volatile uint32_t* reg();
+        void set_from_cpp(volatile uint32_t* r);
+        uint32_t peek();
+    "};
+    let rs = quote! {
+        let r = unsafe { ffi::reg() };
+        unsafe { r.write(17) };
+        assert_eq!(ffi::peek(), 17);
+        unsafe { ffi::set_from_cpp(r) };
+        assert_eq!(unsafe { r.read() }, 42);
+    };
+    run_test(cxx, hdr, rs, &["reg", "set_from_cpp", "peek"], &[]);
+}
+
+/// The qualifier has to go back on *before* overload resolution, not be left to
+/// the implicit conversion the call would perform. C++ lets one name have both
+/// a `volatile`-pointee overload and a plain one; the wrapper's own parameter
+/// is unqualified, so passing it straight through resolved to the plain
+/// overload and the binding which claimed to be the volatile one silently
+/// called the other. The wrapper casts, which settles it before resolution.
+#[test]
+fn test_volatile_pointer_overload_is_not_confused_with_its_plain_sibling() {
+    let cxx = indoc! {"
+        uint32_t which_called = 0;
+        void f(uint32_t* p) { which_called = 1; *p = 1; }
+        void f(volatile uint32_t* p) { which_called = 2; *p = 2; }
+        uint32_t which() { return which_called; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        void f(uint32_t* p);
+        void f(volatile uint32_t* p);
+        uint32_t which();
+    "};
+    let rs = quote! {
+        let mut cell: u32 = 0;
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut u32);
+        unsafe { ffi::f1(p) };
+        assert_eq!(ffi::which(), 2, "the volatile overload was not the one called");
+        assert_eq!(cell, 2);
+    };
+    run_test(cxx, hdr, rs, &["f", "which"], &[]);
+}
+
+/// A method's parameter takes the same route as a free function's. Nothing in
+/// the receiver is involved: the qualifier is on what a parameter points at.
+#[test]
+fn test_volatile_pointer_parameter_of_a_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Dev {
+            Dev() {}
+            void poke(volatile uint32_t* r) const { *r = 21; }
+        };
+    "};
+    let rs = quote! {
+        let dev = ffi::Dev::new().within_unique_ptr();
+        let mut cell: u32 = 0;
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut u32);
+        unsafe { dev.poke(p) };
+        assert_eq!(cell, 21);
+    };
+    run_test("", hdr, rs, &["Dev"], &[]);
+}
+
+/// And a static method, which already took a wrapper for its own reasons - so
+/// this is the case where the wrapper the qualifier needs was going to exist
+/// either way.
+#[test]
+fn test_volatile_pointer_parameter_of_a_static_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Dev {
+            static void spoke(volatile uint32_t* r) { *r = 33; }
+        };
+    "};
+    let rs = quote! {
+        let mut cell: u32 = 0;
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut u32);
+        unsafe { ffi::Dev::spoke(p) };
+        assert_eq!(cell, 33);
+    };
+    run_test("", hdr, rs, &["Dev"], &[]);
+}
+
+/// A pointee autocxx does not read - a class, an enumeration, a pointer - is
+/// left exactly as it was. The handle is for the position where *Rust* performs
+/// the access; where C++ does, passing the address is already right, and a
+/// `const volatile T&` copy constructor has to stay bindable. Such a signature
+/// is otherwise unchanged by any of this, including where it did not build
+/// before.
+#[test]
+fn test_volatile_class_pointee_is_left_alone() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        struct Q {
+            Q() {}
+            Q(const volatile Q& o) : s(const_cast<const Q&>(o).s) {}
+            std::string s;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Q: moveit::CopyNew);
+        let _ = ffi::Q::new().within_unique_ptr();
+    };
+    run_test("", hdr, rs, &["Q"], &[]);
+}
+
+/// An rvalue reference to something `volatile` is refused in both directions.
+/// Conversion makes a `T&&` the same pointer a `T&` becomes, so the handle
+/// could not say which it was, and what distinguishes an rvalue reference -
+/// that it may be moved out of - is not something `volatile` storage offers.
+/// Binding such a parameter previously dropped the qualifier silently.
+#[test]
+fn test_volatile_rvalue_reference_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void take_rv(volatile uint32_t&& r) { (void)r; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take_rv"],
+        &[],
+        "rvalue reference to something `volatile`",
+    );
+}
+
+/// The return direction of the same, which previously failed inside generated
+/// C++ naming neither `volatile` nor the function.
+#[test]
+fn test_volatile_rvalue_reference_return_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        volatile uint32_t&& give_rv();
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["give_rv"],
+        &[],
+        "rvalue reference to something `volatile`",
+    );
+}
+
+/// A `volatile` pointee and a plain one in the same header. The qualifier is
+/// recorded on the converted type as the marker is peeled, so this is the guard
+/// that the fact belongs to the type which had it rather than leaking into the
+/// next conversion.
+#[test]
+fn test_volatile_and_plain_pointers_side_by_side() {
+    let cxx = indoc! {"
+        uint32_t a = 1; uint32_t b = 2;
+        volatile uint32_t* vol() { return &a; }
+        uint32_t* plain() { return &b; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        volatile uint32_t* vol();
+        uint32_t* plain();
+    "};
+    let rs = quote! {
+        let v = unsafe { ffi::vol() };
+        assert_eq!(unsafe { v.read() }, 1);
+        // The plain one is an ordinary raw pointer, not a handle.
+        let p = unsafe { ffi::plain() };
+        assert_eq!(unsafe { *p }, 2);
+    };
+    run_test(cxx, hdr, rs, &["vol", "plain"], &[]);
+}
+
+/// The same signatures without the qualifier are untouched, which is what makes
+/// the handle above about `volatile` rather than about pointers.
+#[test]
+fn test_non_volatile_pointer_and_reference_unaffected() {
+    let cxx = indoc! {"
+        uint32_t storage = 2;
+        uint32_t* plain() { return &storage; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        uint32_t* plain();
+        inline void take(uint32_t* p) { *p = 3; }
+    "};
+    let rs = quote! {
+        let p = unsafe { ffi::plain() };
+        unsafe { ffi::take(p) };
+        assert_eq!(unsafe { *p }, 3);
+    };
+    run_test(cxx, hdr, rs, &["plain", "take"], &[]);
+}
+
 /// A concrete instantiation autocxx names in C++ by writing its arguments out
 /// again is refused where one of them is an array, because `std::array<T, N>`
 /// is what the writing produces and a `T[N]` argument would be renamed into a

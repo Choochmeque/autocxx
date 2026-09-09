@@ -15,10 +15,10 @@ use crate::{
         apivec::ApiVec,
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
-            extract_pinned_mutable_reference_type, mentions_cpp_array, mentions_float128,
-            mentions_long_double, mentions_volatile, unwrap_bitfield, unwrap_const,
-            unwrap_float128, unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double,
-            unwrap_reference, unwrap_volatile,
+            extract_pinned_mutable_reference_type, is_volatile_qualified, mentions_cpp_array,
+            mentions_float128, mentions_long_double, mentions_volatile, unwrap_bitfield,
+            unwrap_const, unwrap_float128, unwrap_function_pointer, unwrap_has_opaque,
+            unwrap_long_double, unwrap_reference, unwrap_volatile,
         },
         ConvertErrorFromCpp,
     },
@@ -82,6 +82,12 @@ pub(crate) struct Annotated<T> {
     /// Constness of a *pointee* is not this; that is in `ty` already, as
     /// `*const T`.
     pub(crate) is_const: bool,
+    /// Whether C++ qualified what this points or refers to `volatile` -
+    /// `volatile T*`, `volatile T&`. Kept beside the type for the same reason
+    /// `is_const` is, and more so: `*const T` carries a pointee's constness,
+    /// and there is no Rust pointer type which carries the other qualifier, so
+    /// conversion is where the fact would otherwise be lost for good.
+    pub(crate) has_volatile_pointee: bool,
 }
 
 impl<T> Annotated<T> {
@@ -97,7 +103,15 @@ impl<T> Annotated<T> {
             extra_apis,
             kind,
             is_const: false,
+            has_volatile_pointee: false,
         }
+    }
+
+    /// Records that C++ qualified this type's pointee `volatile`. See
+    /// [`Self::has_volatile_pointee`].
+    fn marked_volatile_pointee_if(mut self, has_volatile_pointee: bool) -> Self {
+        self.has_volatile_pointee = has_volatile_pointee;
+        self
     }
 
     /// Records that C++ qualified this `const`. See [`Self::is_const`].
@@ -122,6 +136,10 @@ impl<T> Annotated<T> {
             extra_apis: self.extra_apis,
             kind: self.kind,
             is_const: self.is_const,
+            // Carried over, because the one use of this which does not merely
+            // re-box - the lvalue reference below - overwrites it with the
+            // answer for the type it built.
+            has_volatile_pointee: self.has_volatile_pointee,
         }
     }
 }
@@ -595,6 +613,8 @@ impl<'a> TypeConverter<'a> {
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // LValue reference
         let mutability = ptr.mutability;
+        // Read before conversion, which peels the marker off the referent.
+        let referent_is_volatile = is_volatile_qualified(&ptr.elem);
         let elem = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
         // A `rust::Str` referent has already been turned into `&str` by the
         // `should_dereference_in_cpp` branch below, so a C++ `rust::Str&`
@@ -664,6 +684,7 @@ impl<'a> TypeConverter<'a> {
         } else {
             TypeKind::Reference
         };
+        outer.has_volatile_pointee = referent_is_volatile;
         Ok(outer)
     }
 
@@ -683,6 +704,7 @@ impl<'a> TypeConverter<'a> {
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // RValue reference
         Self::ensure_pointee_is_valid(ptr, ctx)?;
+        let pointee_is_volatile = is_volatile_qualified(&ptr.elem);
         let innerty = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
         let mut ptr = ptr.clone();
         ptr.elem = innerty.ty;
@@ -691,7 +713,8 @@ impl<'a> TypeConverter<'a> {
             innerty.types_encountered,
             innerty.extra_apis,
             TypeKind::RValueReference,
-        ))
+        )
+        .marked_volatile_pointee_if(pointee_is_volatile))
     }
 
     /// The plain-path case of [`Self::convert_type_path`].
@@ -1200,6 +1223,8 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         Self::ensure_pointee_is_valid(&ptr, ctx)?;
+        // Read before conversion, which peels the marker off the pointee.
+        let pointee_is_volatile = is_volatile_qualified(&ptr.elem);
         let innerty = self.convert_boxed_type(ptr.elem, ns, &ctx.behind_reference())?;
         ptr.elem = innerty.ty;
         Ok(Annotated::new(
@@ -1207,7 +1232,8 @@ impl<'a> TypeConverter<'a> {
             innerty.types_encountered,
             innerty.extra_apis,
             TypeKind::Pointer,
-        ))
+        )
+        .marked_volatile_pointee_if(pointee_is_volatile))
     }
 
     fn ensure_pointee_is_valid(

@@ -184,6 +184,52 @@ impl TypeConversionPolicy {
                 cpp: PointerCppConversion::FromReferenceToPointer,
                 ..
             } => Some(format!("::std::addressof({var_name})")),
+            // `const_cast` is the only cast which removes `volatile`, and the
+            // bridge has no way to spell the qualifier, so the wrapper drops it
+            // here and Rust is handed an `autocxx::VolatilePtr<T>` which puts
+            // the discipline back. The cast changes no address and reads
+            // nothing; the storage stays as volatile as C++ declared it.
+            //
+            // Its target is the bridge's own pointer type rather than one
+            // assembled from the pointee and a `*`, because assembling puts a
+            // qualifier at the wrong level as soon as the pointee is itself a
+            // pointer: `T* const*` is what `T* const volatile*` wants, and
+            // prepending `const` to `T**` says `const T**`.
+            Self::Pointer {
+                cpp: PointerCppConversion::FromVolatilePointerToPointer,
+                ..
+            } => Some(format!(
+                "const_cast<{}>({var_name})",
+                self.unwrapped_type_as_string(cpp_name_map)?
+            )),
+            // The same, for a `volatile T&` return: the address first, by the
+            // same `addressof` reasoning as above, then the cast.
+            Self::Pointer {
+                cpp: PointerCppConversion::FromVolatileReferenceToPointer,
+                ..
+            } => Some(format!(
+                "const_cast<{}>(::std::addressof({var_name}))",
+                self.unwrapped_type_as_string(cpp_name_map)?
+            )),
+            // Going the other way, the qualifier has to be put back *before*
+            // the call, or overload resolution never sees it - see
+            // `PointerCppConversion::FromPointerToVolatilePointer`.
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromPointerToVolatilePointer,
+                ..
+            } => Some(format!(
+                "static_cast<{}>({var_name})",
+                volatile_pointee_type(pointer, cpp_name_map, "*")?
+            )),
+            Self::Pointer {
+                pointer,
+                cpp: PointerCppConversion::FromPointerToVolatileReference,
+                ..
+            } => Some(format!(
+                "static_cast<{}>(*{var_name})",
+                volatile_pointee_type(pointer, cpp_name_map, "&")?
+            )),
             // The rvalue counterpart of `FromPointerToReference`'s `(*var)`.
             // `static_cast` rather than `std::move` because that is precisely
             // what this is - the two are the same operation, and the cast
@@ -268,6 +314,28 @@ fn rvalue_reference_type(
     cpp_name_map: &CppNameMap,
 ) -> Result<String, ConvertErrorFromCpp> {
     pointee_type(pointer, cpp_name_map, "&&")
+}
+
+/// What `pointer` points at with `volatile` put back on it, plus its constness,
+/// and `suffix` - `*` or `&` - appended. This is the type the C++ function was
+/// declared with, which the call has to name to be resolved against it.
+///
+/// Prepending the qualifiers is only correct because a pointee here is never
+/// itself a pointer - `readable_by_rust_out_of_volatile` admits only the
+/// built-in scalars - since a qualifier written on a pointer binds to the
+/// declarator instead.
+fn volatile_pointee_type(
+    pointer: &BridgePointer,
+    cpp_name_map: &CppNameMap,
+    suffix: &str,
+) -> Result<String, ConvertErrorFromCpp> {
+    let const_string = if pointer.is_mut() { "" } else { "const " };
+    Ok(format!(
+        "{}volatile {}{}",
+        const_string,
+        cpp_name_map.type_to_cpp(pointer.pointee())?,
+        suffix
+    ))
 }
 
 /// What `pointer` points at, with its constness restored and `suffix` - `*` or

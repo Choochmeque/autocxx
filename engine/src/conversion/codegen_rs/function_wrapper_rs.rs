@@ -11,7 +11,7 @@ use syn::{Expr, Ident, Path, Type};
 
 use crate::{
     conversion::analysis::fun::function_wrapper::{
-        PointerRustConversion, TypeConversionPolicy, WholeRustConversion,
+        BridgePointer, PointerRustConversion, TypeConversionPolicy, WholeRustConversion,
     },
     types::make_ident,
 };
@@ -290,6 +290,45 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: false,
                 }
             }
+            // Handing the address back to C++, which qualified what it points
+            // at `volatile` and will do the access itself. Unwrapping is all
+            // that is needed, and it reads nothing.
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromVolatilePtrToPointer,
+                ..
+            } => RustParamConversion::Param {
+                ty: volatile_handle_type(pointer),
+                local_variables: Vec::new(),
+                conversion: quote! {
+                    #var .as_raw()
+                },
+                conversion_requires_unsafe: false,
+            },
+            // The other direction: C++ produced the address of storage it
+            // qualified `volatile`, and Rust is the one which will perform the
+            // accesses. Wrapping it is what stops those being ordinary loads.
+            Self::Pointer {
+                pointer,
+                rust: PointerRustConversion::FromPointerToVolatilePtr,
+                ..
+            } => {
+                // The bare path, not the type: `VolatilePtr<T>::new` is not an
+                // expression, and the pointee follows from the argument.
+                let handle_name = make_ident(if pointer.is_mut() {
+                    "VolatilePtr"
+                } else {
+                    "VolatileConstPtr"
+                });
+                RustParamConversion::Param {
+                    ty: volatile_handle_type(pointer),
+                    local_variables: Vec::new(),
+                    conversion: quote! {
+                        autocxx::#handle_name::new(#var)
+                    },
+                    conversion_requires_unsafe: false,
+                }
+            }
         }
     }
 
@@ -334,5 +373,17 @@ impl TypeConversionPolicy {
             },
             conversion_requires_unsafe: false,
         }
+    }
+}
+
+/// The handle autocxx hands over for an address whose pointee C++ qualified
+/// `volatile`. A `const volatile` pointee gets the read-only one: writing
+/// through a pointer to a `const` object is undefined however it is written.
+fn volatile_handle_type(pointer: &BridgePointer) -> Type {
+    let ty = pointer.pointee();
+    if pointer.is_mut() {
+        parse_quote! { autocxx::VolatilePtr<#ty> }
+    } else {
+        parse_quote! { autocxx::VolatileConstPtr<#ty> }
     }
 }

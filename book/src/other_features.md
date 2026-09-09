@@ -104,7 +104,9 @@ type loses it: `autocxx` would have to generate a volatile *access*, and where
 it cannot, the binding does not keep what the qualifier says.
 
 The dividing line is *where the read happens*. C++ performing the access keeps
-the promise; an ordinary Rust load of a plainly mapped type does not.
+the promise; an ordinary Rust load of a plainly mapped type does not. Rust can
+keep it too, but only through a type which says so - which is what the handle
+below is for, in the one position where Rust is the side doing the reading.
 
 **Refused, by name.** A `volatile` variable, a field of a `generate_pod!`
 struct, and a template argument. In each of these Rust would end up doing the
@@ -156,16 +158,77 @@ one function.
 A struct with a `volatile` member is still usable, whichever of these applies;
 it simply cannot be `generate_pod!`.
 
-**Not yet handled.** A pointer or reference *to* something `volatile` -
-`volatile int*`, `volatile int&` - which is the position `volatile` is most
-often used in real headers. A refusal is not the right answer for it; what it
-needs is a generated wrapper performing the access through
-`read_volatile`/`write_volatile`, and that does not exist yet. Until it does,
-such a signature fails to build inside generated C++ rather than being reported
-against the function you asked for. A volatile-qualified *method*
-(`void f() volatile`) is likewise unhandled, and worse: `libclang` exposes no
-way to ask, so where a class has both a plain and a volatile-qualified overload
-of one name, both bind to the plain one.
+**Bound through a handle - a pointer or reference *to* something `volatile`.**
+`volatile int*` and `volatile int&` are where the qualifier is most often used
+in real headers, and they are the one position in which *Rust* performs the
+access. There is no Rust pointer type which carries the promise, so `autocxx`
+hands over one which does: `autocxx::VolatilePtr<T>`, whose `read` and `write`
+are `read_volatile` and `write_volatile`.
+
+```cpp
+volatile uint32_t* uart_status();
+void configure(volatile uint32_t* reg);
+```
+
+```rust,ignore
+let reg = unsafe { ffi::uart_status() };
+let flags = unsafe { reg.read() };
+unsafe { reg.write(flags | 1) };
+unsafe { ffi::configure(reg) };
+```
+
+The handle is the currency in both directions, so what one function returns
+goes straight into another which takes it. `autocxx::VolatilePtr::new` makes
+one from an address Rust already knows - `0x4000_0000 as *mut u32` - and
+`as_raw` gets the address back out.
+
+A `const volatile` pointee - how a status register the program may read but not
+write is declared - becomes `autocxx::VolatileConstPtr<T>`, which has no
+`write`.
+
+Three things are worth knowing about the handle. It is deliberately not `&T`:
+a Rust shared reference promises the referent does not change while it lives,
+which is the one thing a hardware register is guaranteed to do, so a reference
+here would be a false statement to the compiler rather than merely a lost
+guarantee. `read` and `write` are `unsafe`, because whether the address is
+valid is C++'s business and `autocxx` cannot check it. And a volatile access is
+*not* an atomic one and carries no ordering relative to anything but other
+volatile accesses: concurrent access from another thread is a data race exactly
+as it would be otherwise, and
+[`core::sync::atomic`](https://doc.rust-lang.org/core/sync/atomic/) is what to
+reach for when synchronization is what you want.
+
+The handle appears only where the pointee is of built-in type, because that is
+where Rust is the side reading it. `read` is a `read_volatile`, which needs a
+`Copy` type: a class is not, and neither is a C++ enumeration, whose generated
+Rust counterpart does not implement `Copy`. (A `volatile` enumeration *member*
+is bound, because there C++ does the copying.) A pointer-valued pointee is left
+out for a second reason - a qualifier written on a pointer binds to the
+declarator rather than reading left to right, so `T* const volatile` is not
+`const volatile T*`, and the generated C++ cannot name it by putting the
+qualifiers in front.
+
+Any other pointee is left exactly as it was rather than turned down, because
+where C++ performs the access, handing it the address is already right - a copy
+constructor taking `const volatile T&` binds as it always did.
+
+**Not yet handled.** A volatile-qualified *method* (`void f() volatile`).
+`libclang` exposes no way to ask, so where a class has both a plain and a
+volatile-qualified overload of one name, both bind to the plain one.
+
+A qualifier which reaches a signature through a type alias - `typedef volatile
+uint32_t vu32;`, or `using P = volatile uint32_t*;` - is also not seen.
+`bindgen` resolves an alias to its target before recording the qualifier, so
+nothing downstream knows the type was `volatile`, and the same is true of
+`const`. Such a signature fails to build inside the generated C++ rather than
+being reported against the function you asked for; it is never bound as though
+the qualifier were absent. Writing the qualifier at the point of use rather
+than in the alias is the way round it.
+
+`volatile` nested deeper than the immediately pointed-at type - `volatile
+uint32_t*&`, a reference to a pointer to something volatile - is likewise not
+handled, and fails the same loud way. The handle covers one level, which is the
+level register code is written at.
 
 ## String constants
 

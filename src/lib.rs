@@ -22,11 +22,13 @@ mod reference_wrapper;
 mod rvalue_param;
 pub mod subclass;
 mod value_param;
+mod volatile;
 
 pub use fallible::{StackSlot, TryWithinBox, TryWithinUniquePtr};
 pub use reference_wrapper::{
     AsCppMutRef, AsCppRef, CppLtRef, CppMutLtRef, CppMutRef, CppPin, CppRef, CppUniquePtrPin,
 };
+pub use volatile::{VolatileConstPtr, VolatilePtr};
 
 /// Include some C++ headers in your Rust project.
 ///
@@ -1198,6 +1200,8 @@ pub mod prelude {
     pub use crate::TryWithinBox;
     pub use crate::TryWithinUniquePtr;
     pub use crate::ValueParam;
+    pub use crate::VolatileConstPtr;
+    pub use crate::VolatilePtr;
     pub use crate::WithinBox;
     pub use crate::WithinBoxTrivial;
     pub use crate::WithinUniquePtr;
