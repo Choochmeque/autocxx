@@ -7421,6 +7421,37 @@ fn test_dependent_qualified_type_named_only_by_an_inner_type() {
     run_test("", hdr, rs, &["take_holder2"], &[]);
 }
 
+// A class template whose inner type is its own parameter - `typedef R rep;` -
+// instantiated and then projected through: `Uses<Dur<int>>` asks `Dur<int>` for
+// its `rep`. The impl saying it has one assigns that bare parameter, which
+// satisfies nothing the trait asks of its associated type, so the impl carries
+// what the trait asks as a bound of its own and holds for the arguments which
+// meet it. MSVC's `std::chrono::duration` declares `rep` this way and its
+// standard library projects it over `duration<long long>`.
+#[test]
+fn test_dependent_qualified_type_inner_type_is_the_parameter() {
+    let hdr = indoc! {"
+        struct ArgR { typedef int rep; };
+
+        template <class R> struct Dur {
+            typedef R rep;
+            R value;
+        };
+
+        template <class D> struct Uses {
+            typename D::rep field;
+        };
+
+        typedef Uses<ArgR> ConcreteUses;
+        typedef Uses<Dur<int> > NestedUses;
+
+        inline void take_uses(const ConcreteUses&) {}
+        inline void take_nested(const NestedUses&) {}
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_uses", "take_nested"], &[]);
+}
+
 // The class autocxx gives bindgen in place of `std::string` declares the inner
 // types whose definition the C++ standard fixes and no others, so a member
 // spelled through any other one still has no type. What autocxx says about it
