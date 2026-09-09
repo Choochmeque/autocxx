@@ -1001,7 +1001,11 @@ fn test_negative_take_as_pod_with_destructor() {
         &["Bob"],
         // autocxx writes this static_assert itself, so the text is a C++ string
         // literal every compiler echoes back; only the framing around it differs.
-        &["CppBuild", "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+        &[
+            "CppBuild",
+            "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            "in C++ to be used as an argument of `take_bob` in Rust",
+        ],
     );
 }
 
@@ -1032,7 +1036,11 @@ fn test_negative_take_as_pod_with_move_constructor() {
         rs,
         &["take_bob"],
         &["Bob"],
-        &["CppBuild", "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+        &[
+            "CppBuild",
+            "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            "in C++ to be used as an argument of `take_bob` in Rust",
+        ],
     );
 }
 
@@ -13898,7 +13906,11 @@ fn test_error_generated_for_pod_with_nontrivial_destructor() {
         rs,
         &["take_a"],
         &["A"],
-        &["CppBuild", "type A should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+        &[
+            "CppBuild",
+            "type A should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            "in C++ to be used as an argument of `take_a` in Rust",
+        ],
     );
 }
 
@@ -13946,7 +13958,11 @@ fn test_error_generated_for_pod_with_nontrivial_move_constructor() {
         rs,
         &["take_a"],
         &["A"],
-        &["CppBuild", "type A should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+        &[
+            "CppBuild",
+            "type A should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            "in C++ to be used as an argument of `take_a` in Rust",
+        ],
     );
 }
 
@@ -19703,8 +19719,7 @@ fn test_pv_subclass_not_pub() {
                 }
             }
         }),
-        // Stops short of the last word, which the message misspells.
-        &["Rust subclasses of C++ types must"],
+        &["Rust subclasses of C++ types must be public"],
     );
 }
 
@@ -28013,11 +28028,7 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
-        &[
-            "E0624",
-            "associated function `new` is private",
-            "autocxx::prelude::New",
-        ],
+        &["E0624", "associated function `new` is private", "E0277"],
     );
 }
 
