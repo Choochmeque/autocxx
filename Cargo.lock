@@ -243,6 +243,7 @@ dependencies = [
  "quote",
  "rust_info",
  "rustversion",
+ "serde_json",
  "static_assertions",
  "syn 1.0.109",
  "tempfile",

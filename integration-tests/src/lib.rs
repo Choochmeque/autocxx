@@ -12,7 +12,7 @@ use std::{
     io::{Read, Write},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{Condvar, Mutex, PoisonError},
 };
 
 use autocxx_engine::{
@@ -255,7 +255,7 @@ pub fn build_from_folder(
         .include(folder.join("demo"));
     build_cpp(b, "autocxx-demo").map_err(TestError::CppBuild)?;
     // use the trybuild crate to build the Rust file.
-    lock_builder()
+    acquire_lane()
         .build(
             &target_dir,
             "autocxx-demo",
@@ -269,24 +269,98 @@ pub fn build_from_folder(
     Ok(())
 }
 
-/// The shared builder, locked, recovering a poisoned guard rather than
-/// propagating it.
+/// How many fixture builds may be under way at once.
 ///
-/// No Rust state is at stake: `LinkableTryBuilder` holds a `TempDir` and no
-/// method mutates it. The directory is: staging deletes an entry before writing
-/// its replacement, so a panic can leave one missing, or half-copied under
-/// `KEEP_TEMPDIRS`. What makes that recoverable is that every build re-stages
-/// the entries it needs by name before using them. An entry can still go stale
-/// when nothing produces that filename - but staging is silent about that
-/// whether the preceding test panicked or passed, so the poison is not what was
-/// guarding against it. Propagating it only replaces one real failure with a
-/// `PoisonError` from every test that follows.
-fn lock_builder() -> MutexGuard<'static, LinkableTryBuilder> {
-    static INSTANCE: OnceCell<Mutex<LinkableTryBuilder>> = OnceCell::new();
-    INSTANCE
-        .get_or_init(|| Mutex::new(LinkableTryBuilder::new()))
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+/// Not the thread count, because a lane is not free: it is a cargo build
+/// directory of its own, holding its own copy of the fixture dependencies. Two
+/// lanes cannot share one, for two independent reasons - cargo takes an
+/// exclusive lock on a build directory, so the second build would wait rather
+/// than overlap, and trybuild runs `cargo clean --package` before each fixture,
+/// which in a shared directory would delete a build another lane was in the
+/// middle of.
+///
+/// Four is a compromise between the two costs, capped at the number of threads
+/// there are to use them, and [`LANES_VAR`] overrides it for anyone whose
+/// machine has a different one.
+const DEFAULT_LANES: usize = 4;
+
+/// Overrides [`DEFAULT_LANES`]. `1` restores the single serialized builder this
+/// harness had before lanes existed, which is the first thing to try if a
+/// fixture build ever looks like it is interfering with another.
+const LANES_VAR: &str = "AUTOCXX_FIXTURE_LANES";
+
+/// The lanes not currently building something, and whoever is waiting for one.
+struct LanePool {
+    free: Mutex<Vec<LinkableTryBuilder>>,
+    freed: Condvar,
+}
+
+/// Takes a lane, waiting for one if all of them are busy.
+///
+/// Poisoning is recovered rather than propagated, as it was when this was a
+/// single mutex around the one builder. Nothing that panics leaves a lane in a
+/// state the next build minds. This mutex guards a `Vec` which is only ever
+/// pushed and popped, so it cannot be torn; the lane itself is put back by
+/// [`Lane`]'s `Drop`, which runs while the panic unwinds. What a panic can
+/// leave behind is in the lane's staging directory - staging deletes an entry
+/// before writing its replacement, so one can go missing, or be half-copied
+/// under `KEEP_TEMPDIRS` - and that is recoverable because every build re-stages
+/// the entries it needs, by name, before using them. An entry can still go
+/// stale when nothing produces that filename, but staging is equally silent
+/// about that whether the preceding test panicked or passed, so the poison was
+/// never what guarded against it. Propagating it only replaces one real failure
+/// with a `PoisonError` from every test that follows.
+fn acquire_lane() -> Lane {
+    static POOL: OnceCell<LanePool> = OnceCell::new();
+    let pool = POOL.get_or_init(|| LanePool {
+        free: Mutex::new(LinkableTryBuilder::lanes()),
+        freed: Condvar::new(),
+    });
+    let mut free = pool.free.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        if let Some(builder) = free.pop() {
+            return Lane {
+                pool,
+                builder: Some(builder),
+            };
+        }
+        free = pool
+            .freed
+            .wait(free)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+/// One lane, held for the length of one fixture build.
+///
+/// Returned to the pool when dropped, so a test whose build panics gives its
+/// lane back rather than retiring it.
+struct Lane {
+    pool: &'static LanePool,
+    /// Taken out only by `Drop`, which is the one place it may be `None`.
+    builder: Option<LinkableTryBuilder>,
+}
+
+impl std::ops::Deref for Lane {
+    type Target = LinkableTryBuilder;
+    fn deref(&self) -> &LinkableTryBuilder {
+        self.builder
+            .as_ref()
+            .expect("a lane leaves its guard only as the guard is dropped")
+    }
+}
+
+impl Drop for Lane {
+    fn drop(&mut self) {
+        if let Some(builder) = self.builder.take() {
+            self.pool
+                .free
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(builder);
+            self.pool.freed.notify_one();
+        }
+    }
 }
 
 /// Holds the directory a fixture's library, headers and generated bindings are
@@ -303,13 +377,57 @@ fn lock_builder() -> MutexGuard<'static, LinkableTryBuilder> {
 struct LinkableTryBuilder {
     /// Directory in which we'll keep any linkable libraries
     temp_dir: TempDir,
+    /// The cargo build directory this lane's fixtures are built in, which is
+    /// this lane's alone. See [`DEFAULT_LANES`].
+    build_dir: PathBuf,
 }
 
 impl LinkableTryBuilder {
-    fn new() -> Self {
-        LinkableTryBuilder {
-            temp_dir: tempdir().unwrap(),
-        }
+    /// The lanes, built once for the process.
+    ///
+    /// The directories are named by number, not after the process, so that a
+    /// second test binary reuses what the first one built - which is the point,
+    /// since what is in them is the fixture dependencies.
+    ///
+    /// Two suite processes running at the same time against one target directory
+    /// therefore share a lane's trybuild project, where each fixture starts with
+    /// a `cargo clean --package`. Within one `cargo test` invocation that cannot
+    /// happen: cargo runs test binaries one after another, so this suite, the
+    /// `builder_e2e_test` binary and `autocxx-gen`'s `cmd_test` never overlap.
+    /// Independent invocations - two `cargo test`s at once, or a suite alongside
+    /// the mdbook preprocessor - are not covered by that, and fall back on
+    /// trybuild's own lock on the project directory (`Lock::acquire` in its
+    /// `run.rs`), held across the whole run. That lock is best-effort: a lock
+    /// file with a heartbeat, broken by anyone who finds it 1.5 seconds stale,
+    /// and skipped entirely where the filesystem will not support it
+    /// (`flock.rs`). So two suites at once against one target directory is
+    /// unsupported here rather than merely slow.
+    fn lanes() -> Vec<LinkableTryBuilder> {
+        let count = match std::env::var(LANES_VAR) {
+            Ok(count) => count
+                .parse()
+                .unwrap_or_else(|err| panic!("{LANES_VAR} is not a number of lanes: {err}")),
+            Err(_) => DEFAULT_LANES.min(
+                std::thread::available_parallelism()
+                    .map(|threads| threads.get())
+                    .unwrap_or(1),
+            ),
+        };
+        assert!(count > 0, "{LANES_VAR} has to leave at least one lane");
+        // Beside the fixture project trybuild will create, so that emptying the
+        // suite's `tests` directory - which is what anyone short of disk space
+        // does - empties these too.
+        let lanes = workspace_target_dir().join("tests").join("fixture-lanes");
+        (0..count)
+            .map(|lane| {
+                let build_dir = lanes.join(lane.to_string());
+                std::fs::create_dir_all(&build_dir).unwrap();
+                LinkableTryBuilder {
+                    temp_dir: tempdir().unwrap(),
+                    build_dir,
+                }
+            })
+            .collect()
     }
 
     fn move_items_into_temp_dir<P1: AsRef<Path>>(&self, src_path: &P1, pattern: &str) {
@@ -361,9 +479,51 @@ impl LinkableTryBuilder {
             rs_path,
             &fixture_rustflags(asan),
             self.temp_dir.path(),
+            &self.build_dir,
             &rs_find_env(rs_find_mode, self.temp_dir.path()),
         )
     }
+}
+
+/// Where cargo puts this workspace's build output.
+///
+/// Asked of cargo rather than worked out from `CARGO_TARGET_DIR` and the
+/// workspace root, because those two are not the whole answer - `build.target-dir`
+/// in a cargo config is a third - and because this is the same question trybuild
+/// asks, the same way, so the lane directories land beside the fixture project
+/// rather than somewhere cargo has been configured out of.
+///
+/// Asked from the fixture package's directory, not this process's, because the
+/// harness is also run from the mdbook preprocessor, whose working directory is
+/// wherever the book is being built.
+fn workspace_target_dir() -> &'static Path {
+    static TARGET_DIR: OnceCell<PathBuf> = OnceCell::new();
+    TARGET_DIR.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let output = std::process::Command::new(&cargo)
+            .args(["metadata", "--no-deps", "--format-version=1"])
+            .current_dir(FIXTURE_PACKAGE_DIR)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "the fixtures need a build directory of their own, and {cargo:?} could \
+                     not be run in {FIXTURE_PACKAGE_DIR} to find out where it goes: {err}"
+                )
+            });
+        assert!(
+            output.status.success(),
+            "the fixtures need a build directory of their own, and `cargo metadata` in \
+             {FIXTURE_PACKAGE_DIR} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|err| panic!("`cargo metadata` was not readable JSON: {err}"));
+        match metadata["target_directory"].as_str() {
+            Some(dir) => PathBuf::from(dir),
+            None => panic!("`cargo metadata` named no target_directory"),
+        }
+    })
 }
 
 /// The rustc flags a fixture builds with, one command-line argument per
@@ -582,18 +742,30 @@ fn run_trybuild(
     rs_path: &Path,
     rustflags: &[OsString],
     link_search: &Path,
+    build_dir: &Path,
     rs_find_env: &[(String, OsString)],
 ) -> Result<(), String> {
     let child_bin = match find_trybuild_child_bin() {
         Ok(child_bin) => child_bin,
         Err(reason) => {
-            return build_in_process(rs_path, rustflags, link_search, rs_find_env, &reason)
+            return build_in_process(
+                rs_path,
+                rustflags,
+                link_search,
+                build_dir,
+                rs_find_env,
+                &reason,
+            )
         }
     };
     let mut cmd = std::process::Command::new(child_bin);
     cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
         .env("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR)
         .env(FIXTURE_LINK_SEARCH_VAR, link_search)
+        // What makes this lane's builds independent of the others': trybuild
+        // takes its project directory, and the build directory under it, from
+        // what cargo reports here.
+        .env("CARGO_TARGET_DIR", build_dir)
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags))
         .env_remove("RUSTFLAGS")
         .stdin(std::process::Stdio::null())
@@ -614,6 +786,7 @@ fn run_trybuild(
                 rs_path,
                 rustflags,
                 link_search,
+                build_dir,
                 rs_find_env,
                 &format!("the `{TRYBUILD_CHILD_BIN_NAME}` helper could not be run ({err})"),
             )
@@ -628,6 +801,7 @@ fn run_trybuild(
             rs_path,
             rustflags,
             link_search,
+            build_dir,
             rs_find_env,
             &format!(
                 "the executable found as `{TRYBUILD_CHILD_BIN_NAME}` did not announce \
@@ -719,6 +893,7 @@ fn build_in_process(
     rs_path: &Path,
     rustflags: &[OsString],
     link_search: &Path,
+    build_dir: &Path,
     rs_find_env: &[(String, OsString)],
     reason: &str,
 ) -> Result<(), String> {
@@ -741,10 +916,17 @@ fn build_in_process(
              the compiler's diagnostics, because {reason}."
         );
     });
-    // Unlike the child, this has to go through the process environment. Callers
-    // hold the builder mutex, so two of these cannot overlap, but the variables
-    // are visible to the rest of the process for as long as this takes - so each
-    // is put back afterwards, on the panicking path too. Leaving
+    // Unlike the child, this has to go through the process environment, which
+    // there is only one of - so this path takes a lock of its own. Holding a
+    // lane is not enough: lanes are what let two fixture builds overlap, and two
+    // of these overlapping would each see the other's variables.
+    static IN_PROCESS: OnceCell<Mutex<()>> = OnceCell::new();
+    let _serialized = IN_PROCESS
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // The variables are visible to the rest of the process for as long as this
+    // takes, so each is put back afterwards, on the panicking path too. Leaving
     // `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving `RUSTFLAGS`
     // behind, which is what this used to do: it outranks `RUSTFLAGS`, so a later
     // unrelated build that set its own would silently keep getting these
@@ -761,9 +943,11 @@ fn build_in_process(
             FIXTURE_LINK_SEARCH_VAR,
             std::env::var_os(FIXTURE_LINK_SEARCH_VAR),
         ),
+        ("CARGO_TARGET_DIR", std::env::var_os("CARGO_TARGET_DIR")),
     ];
     std::env::set_var("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR);
     std::env::set_var(FIXTURE_LINK_SEARCH_VAR, link_search);
+    std::env::set_var("CARGO_TARGET_DIR", build_dir);
     std::env::set_var("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags));
     std::env::remove_var("RUSTFLAGS");
     for key in RS_FIND_KEYS {
@@ -1404,7 +1588,7 @@ pub fn do_run_test_manual(
         println!("Generated .rs files: {generated_rs_files:?}");
     }
     // Step 8: use the trybuild crate to build the Rust file.
-    let r = lock_builder().build(
+    let r = acquire_lane().build(
         &target_dir,
         "autocxx-demo",
         &tdir.path(),
