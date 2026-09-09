@@ -1025,6 +1025,53 @@ mod tests {
         );
     }
 
+    /// A field of `std::array<std::array<T, N>, M>`, whose marker bindgen puts
+    /// on each layer: the inner one sits between two array layers, where
+    /// `unqualified_array_element_type` peels it alongside the `const` marker.
+    #[test]
+    fn test_nested_std_array_field_is_pod() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                rows: __bindgen_marker_StdArray<[__bindgen_marker_StdArray<[u32; 2usize]>; 3usize]>,
+                tail: u32,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        bvc.satisfy_requests(vec![t_id.clone()]).unwrap();
+        assert!(bvc.is_pod(&t_id));
+    }
+
+    /// The same field with an element which cannot be POD, which is what tells
+    /// the peeling apart from its absence: the element refuses the struct, where
+    /// the unpeeled marker refuses it for naming a type this knows nothing
+    /// about. Both are refusals, so only the reason distinguishes them.
+    #[test]
+    fn test_nested_std_array_field_of_cxxstring_is_refused_for_its_element() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                rows: __bindgen_marker_StdArray<
+                    [__bindgen_marker_StdArray<[cxx::CxxString; 2usize]>; 3usize],
+                >,
+                tail: u32,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("isn't safe to be POD"),
+            "should be refused for its element, not for naming the marker, was: {err}"
+        );
+        assert!(
+            !err.contains("__bindgen_marker_StdArray"),
+            "the marker should have been peeled off rather than read as the element \
+             type, was: {err}"
+        );
+    }
+
     /// The element type of an array is a dependency for ordering purposes too,
     /// so a struct holding an array of one defined after it still has to be
     /// ingested second.

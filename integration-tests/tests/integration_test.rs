@@ -4213,12 +4213,15 @@ fn test_method_pass_pod_by_value() {
     run_test(cxx, hdr, rs, &[], &["Bob", "Anna"]);
 }
 
+/// Corrupts memory on purpose and insists the sanitizer reports it, which is
+/// what says the sanitizer job would catch a real mistake.
+///
+/// A no-op unless `AUTOCXX_ASAN` is set, as every canary here is: there is no
+/// report to insist on without the instrumentation.
 fn perform_asan_doom_test(into_raw: TokenStream, box_type: TokenStream) {
     if std::env::var_os("AUTOCXX_ASAN").is_none() {
         return;
     }
-    // Testing that we get an asan fail when it's enabled.
-    // Really just testing our CI is working to spot ASAN mistakes.
     let hdr = indoc! {"
         #include <cstddef>
         struct A {
@@ -4238,7 +4241,22 @@ fn perform_asan_doom_test(into_raw: TokenStream, box_type: TokenStream) {
             #box_type::from_raw(a_raw); // to delete. If we haven't yet crashed.
         }
     };
-    run_test_expect_fail("", hdr, rs, &["A", "how_big_is_a"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["A", "how_big_is_a"],
+        &[],
+        // The report, not merely a failure: a fixture which failed to build
+        // fails this test too and says nothing about the sanitizer. The first
+        // string is trybuild's, printed only once it has run the fixture, so it
+        // also says the generated Rust compiled; the second is the detector a
+        // write beyond the allocation trips, for either allocator.
+        &[
+            "Test case failed at runtime",
+            "AddressSanitizer: heap-buffer-overflow",
+        ],
+    );
 }
 
 #[test]
@@ -6897,9 +6915,9 @@ fn test_class_static_const_int() {
 
 /// google/autocxx#94, the "much harder" follow-up to google/autocxx#93.
 /// `test_pod_constant` covers the POD case; a variable of non-POD type used to
-/// fail the type gate with `StaticDataOfNonPodType`, because we exposed a
-/// variable by re-exporting `bindgen`'s declaration of it and our output mod
-/// shows a non-POD type as an opaque wrapper rather than as `bindgen` wrote it.
+/// fail the type gate outright, because we exposed a variable by re-exporting
+/// `bindgen`'s declaration of it and our output mod shows a non-POD type as an
+/// opaque wrapper rather than as `bindgen` wrote it.
 ///
 /// It now gets a getter instead, which hands back an opaque holder standing
 /// for a `const` reference to the variable. Nothing is copied - see
@@ -11627,6 +11645,40 @@ fn test_std_array_field_in_pod_struct() {
         assert_eq!(ffi::read_body(ffi::Packet { tag: 0, body: [0, 5, 0, 0] }), 5);
     };
     run_test("", hdr, rs, &["make_packet", "read_body"], &["Packet"]);
+}
+
+/// The same field nested, which is the shape `unqualified_array_element_type`
+/// has to peel a marker out of the middle of: a `std::array` of `std::array`s
+/// carries one on each layer. What this pins is the round trip;
+/// `test_nested_std_array_field_of_cxxstring_is_refused_for_its_element` is
+/// where the peeling itself is told apart from its absence.
+#[test]
+fn test_nested_std_array_field_in_pod_struct() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Matrix { std::array<std::array<uint32_t, 2>, 3> rows; };
+    inline Matrix make_matrix() {
+        Matrix m{};
+        m.rows[0][0] = 1;
+        m.rows[0][1] = 2;
+        m.rows[1][0] = 3;
+        m.rows[1][1] = 4;
+        m.rows[2][0] = 5;
+        m.rows[2][1] = 6;
+        return m;
+    }
+    inline uint32_t read_cell(Matrix m) { return m.rows[2][1]; }
+    "};
+    let rs = quote! {
+        let m = ffi::make_matrix();
+        assert_eq!(m.rows, [[1u32, 2], [3, 4], [5, 6]]);
+        assert_eq!(
+            ffi::read_cell(ffi::Matrix { rows: [[0, 0], [0, 0], [0, 9]] }),
+            9
+        );
+    };
+    run_test("", hdr, rs, &["make_matrix", "read_cell"], &["Matrix"]);
 }
 
 /// A `std::array` alongside the container holders, to show the lowering does
