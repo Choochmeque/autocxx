@@ -136,7 +136,7 @@ pub(crate) fn analyze_pod_apis(
     // C++ gives it; see google/autocxx#1422.
     let nested_cpp_names = NestedCppNames::new(config, apis.iter().map(|api| api.name_info()));
     let mut extra_apis = ApiVec::new();
-    let mut type_converter = TypeConverter::new(config, &apis);
+    let mut type_converter = TypeConverter::new(config, &apis, parse_callback_results);
     let mut results = ApiVec::new();
     convert_apis(
         apis,

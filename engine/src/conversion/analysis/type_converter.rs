@@ -16,14 +16,17 @@ use crate::{
         codegen_cpp::type_to_cpp::CppNameMap,
         type_helpers::{
             extract_pinned_mutable_reference_type, is_volatile_qualified, mentions_cpp_array,
-            mentions_float128, mentions_long_double, mentions_volatile, unwrap_bitfield,
-            unwrap_const, unwrap_float128, unwrap_function_pointer, unwrap_has_opaque,
-            unwrap_long_double, unwrap_reference, unwrap_volatile,
+            mentions_float128, mentions_long_double, mentions_volatile,
+            unqualified_array_element_type, unwrap_bitfield, unwrap_const, unwrap_float128,
+            unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double, unwrap_reference,
+            unwrap_volatile,
         },
         ConvertErrorFromCpp,
     },
     known_types::{known_types, CxxGenericType},
+    parse_callbacks::ParseCallbackResults,
     types::{make_ident, Namespace, QualifiedName},
+    vendored_bindgen::callbacks::SpecialMemberKind,
 };
 use autocxx_parser::IncludeCppConfig;
 use indexmap::map::IndexMap as HashMap;
@@ -244,6 +247,14 @@ pub(crate) struct TypeConverter<'a> {
     /// have only a stand-in for, mapped to that argument. See
     /// [`ConvertErrorFromCpp::InstantiationOnIncompleteType`].
     instantiations_on_incomplete_types: HashMap<QualifiedName, QualifiedName>,
+    /// Classes whose destructor C++ would have to write in this translation
+    /// unit, and which hold by value something that destructor could not
+    /// destroy. See [`ConvertErrorFromCpp::MemberOfInstantiationOnIncompleteType`].
+    classes_we_may_not_destroy: HashMap<QualifiedName, UndestroyableMember>,
+    /// Every concrete template instantiation, mapped to what it was built
+    /// from. The synthesized name is flat - `au_Owner_AutocxxConcrete` says
+    /// nothing about `Owner` - so this is the only way back to its arguments.
+    concrete_definitions: HashMap<QualifiedName, Type>,
     /// Every alias, mapped to the target bindgen wrote for it.
     ///
     /// Not `typedefs`, which is the *analysed* target and so is empty in the
@@ -260,6 +271,17 @@ pub(crate) struct TypeConverter<'a> {
     original_name_map: CppNameMap,
 }
 
+/// Why a class may not be destroyed here: the member which cannot be
+/// destroyed, and the incomplete type its destruction would have needed.
+#[derive(Clone, Debug)]
+pub(crate) struct UndestroyableMember {
+    /// What the class holds that cannot be destroyed, as a phrase naming it:
+    /// a member or a base.
+    pub(crate) held: String,
+    /// The type nothing in this header defines.
+    pub(crate) argument: QualifiedName,
+}
+
 /// What resolving a typedef left [`TypeConverter::resolve_typedef_target`]
 /// with: the path to carry on converting, or a type it converted outright.
 enum ResolvedTypedef {
@@ -271,22 +293,258 @@ enum ResolvedTypedef {
 }
 
 impl<'a> TypeConverter<'a> {
-    pub(crate) fn new<A: AnalysisPhase>(config: &'a IncludeCppConfig, apis: &ApiVec<A>) -> Self
+    pub(crate) fn new<A: AnalysisPhase>(
+        config: &'a IncludeCppConfig,
+        apis: &ApiVec<A>,
+        parse_callback_results: &ParseCallbackResults,
+    ) -> Self
     where
         A::TypedefAnalysis: TypedefTarget,
     {
-        Self {
+        let mut me = Self {
             types_found: find_types(apis),
             typedefs: Self::find_typedefs(apis),
             concrete_templates: Self::find_concrete_templates(apis),
             forward_declarations: Self::find_incomplete_types(apis),
             instantiations_on_incomplete_types: Self::find_instantiations_on_incomplete_types(apis),
+            concrete_definitions: Self::find_concrete_definitions(apis),
+            classes_we_may_not_destroy: HashMap::new(),
             alias_targets: Self::find_alias_targets(apis),
             ignored_types: Self::find_ignored_types(apis),
             deferred_surfaces: HashMap::new(),
             config,
             original_name_map: CppNameMap::new_for_analysis(apis),
+        };
+        // Last, because it reads the maps above.
+        me.classes_we_may_not_destroy =
+            me.find_classes_we_may_not_destroy(apis, parse_callback_results);
+        me
+    }
+
+    /// The classes destroying which would make a C++ compiler destroy
+    /// something it may not.
+    ///
+    /// A class holding one of
+    /// [`Self::instantiations_on_incomplete_types`] by value is fine as long
+    /// as C++ never writes its destructor here: a destructor the class
+    /// declares itself is either defined in this translation unit - in which
+    /// case the compiler already destroyed that member and accepted it - or
+    /// defined in another one, in which case destroying an object here is a
+    /// call and instantiates nothing. What is not fine is a destructor C++
+    /// writes on first use, which is what an implicitly declared one and an
+    /// `= default`ed one both are: writing it destroys the member, and that
+    /// is the ill-formed part. C++ calls the difference *user-provided*.
+    ///
+    /// The relation closes over itself, because a class holding one of
+    /// *these* by value - or inheriting from one - is in exactly the same
+    /// position.
+    ///
+    /// What it takes on trust is that a user-provided destructor destroys its
+    /// members without needing them complete *here*. A template whose
+    /// destructor's exception specification names `sizeof` breaks that, as
+    /// does one whose destructor body does and which a by-value copy
+    /// instantiates; both are ill-formed today, with or without this rule, and
+    /// deciding them needs a fact about the template rather than about the
+    /// class holding it.
+    ///
+    /// A *concrete instantiation* built on one of the classes found here -
+    /// `au<Owner>` - keeps its own smart-pointer support, so owning one of
+    /// those still reaches the C++ this refuses. Codegen reads
+    /// [`Api::ConcreteType::incomplete_argument`] for that, which is settled
+    /// when the instantiation is manufactured, before any class is known
+    /// undestroyable. Equally ill-formed before this rule and after it.
+    fn find_classes_we_may_not_destroy<A: AnalysisPhase>(
+        &self,
+        apis: &ApiVec<A>,
+        parse_callback_results: &ParseCallbackResults,
+    ) -> HashMap<QualifiedName, UndestroyableMember> {
+        let user_provided_destructors: HashSet<QualifiedName> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Function { fun, .. }
+                    if matches!(fun.special_member, Some(SpecialMemberKind::Destructor))
+                        && fun.is_deleted.is_none() =>
+                {
+                    fun.self_ty.clone()
+                }
+                _ => None,
+            })
+            .collect();
+        let mut found: HashMap<QualifiedName, UndestroyableMember> = HashMap::new();
+        loop {
+            let mut added = false;
+            for api in apis.iter() {
+                let Api::Struct { name, details, .. } = api else {
+                    continue;
+                };
+                let name = &name.name;
+                if user_provided_destructors.contains(name) || found.contains_key(name) {
+                    continue;
+                }
+                let culprit = details
+                    .item
+                    .fields
+                    .iter()
+                    .find_map(|field| {
+                        let argument = self.destruction_blocked_by(
+                            &field.ty,
+                            &found,
+                            &mut HashSet::new(),
+                            true,
+                        )?;
+                        Some(UndestroyableMember {
+                            held: match &field.ident {
+                                Some(id) => format!("its member `{id}`"),
+                                None => "an unnamed member of it".to_string(),
+                            },
+                            argument,
+                        })
+                    })
+                    .or_else(|| {
+                        // A base is destroyed by the derived class's
+                        // destructor exactly as a member is. bindgen writes
+                        // most bases as a field, which the loop above already
+                        // saw, but emits no storage at all for a virtual one.
+                        //
+                        // Read through the same traversal as a member rather
+                        // than looking the name up directly, because a base
+                        // may be written under an alias. A base bindgen could
+                        // not name - which is what it reports for a template
+                        // instantiation - is not here to read, so a class
+                        // deriving virtually from one keeps its ownership
+                        // surface.
+                        parse_callback_results
+                            .get_bases(name)?
+                            .named
+                            .iter()
+                            .find_map(|base| {
+                                let argument = self.destruction_blocked_by(
+                                    &Type::Path(base.name.to_type_path()),
+                                    &found,
+                                    &mut HashSet::new(),
+                                    true,
+                                )?;
+                                Some(UndestroyableMember {
+                                    held: format!("its base class `{}`", base.name.to_cpp_name()),
+                                    argument,
+                                })
+                            })
+                    });
+                if let Some(culprit) = culprit {
+                    found.insert(name.clone(), culprit);
+                    added = true;
+                }
+            }
+            if !added {
+                return found;
+            }
         }
+    }
+
+    /// The incomplete type destroying something of type `ty` would need, if
+    /// there is one: an instantiation built on such a type, or a class already
+    /// found undestroyable, reached through any number of arrays and aliases.
+    ///
+    /// One traversal rather than two, because the wrappers interleave: a
+    /// `typedef au<bb> Array[2]` is an alias to an array to an instantiation,
+    /// and each step has to re-ask both questions.
+    ///
+    /// `seen` bars an alias already being expanded, so that a chain of them
+    /// cannot walk in a circle.
+    fn destruction_blocked_by(
+        &self,
+        ty: &Type,
+        found: &HashMap<QualifiedName, UndestroyableMember>,
+        seen: &mut HashSet<QualifiedName>,
+        outermost: bool,
+    ) -> Option<QualifiedName> {
+        // Destroying an array destroys each element, and a `const` or
+        // `volatile` member is destroyed exactly as a plain one is. The array
+        // layers and the `const` markers interleave, so those are peeled
+        // together; `volatile` is peeled by the recursion below, before
+        // anything reads the type, or the marker's own argument list would be
+        // read as the type's.
+        let ty = unqualified_array_element_type(ty);
+        let Type::Path(typ) = ty else {
+            // A pointer or a reference to one of these destroys nothing.
+            return None;
+        };
+        if let Some(inner) = unwrap_volatile(typ) {
+            return self.destruction_blocked_by(inner, found, seen, outermost);
+        }
+        let qn = QualifiedName::from_type_path(typ);
+        // A type we have only a stand-in for says nothing about the member
+        // itself: C++ forbids a by-value member of an incomplete type
+        // outright, so a member whose own type we call incomplete is one we
+        // merely failed to understand - an opaque typedef standing in for a
+        // perfectly destructible instantiation - and refusing those would
+        // withdraw ownership from classes which work. As a template
+        // *argument* it is exactly the signal this rule is built on.
+        if !outermost && self.forward_declarations.contains_key(&qn) {
+            return Some(qn);
+        }
+        if let Some(argument) = self.instantiations_on_incomplete_types.get(&qn) {
+            return Some(argument.clone());
+        }
+        if let Some(member) = found.get(&qn) {
+            return Some(member.argument.clone());
+        }
+        // The arguments, which are never the outermost type - `au<Owner>`
+        // holds an `Owner` by value and so cannot be destroyed either.
+        let blocked_argument = typ
+            .path
+            .segments
+            .iter()
+            .filter_map(|seg| match &seg.arguments {
+                PathArguments::AngleBracketed(ab) => Some(ab.args.iter()),
+                _ => None,
+            })
+            .flatten()
+            .find_map(|arg| match arg {
+                GenericArgument::Type(inner) => {
+                    self.destruction_blocked_by(inner, found, &mut HashSet::new(), false)
+                }
+                _ => None,
+            });
+        if blocked_argument.is_some() {
+            return blocked_argument;
+        }
+        if !seen.insert(qn.clone()) {
+            return None;
+        }
+        // A concrete instantiation's name carries none of its arguments, so
+        // read what it was built from.
+        if let Some(definition) = self.concrete_definitions.get(&qn) {
+            if let Some(argument) = self.destruction_blocked_by(definition, found, seen, outermost)
+            {
+                return Some(argument);
+            }
+        }
+        // An alias for the member's own type is still the member's own type.
+        self.alias_targets
+            .get(&qn)
+            .and_then(|target| self.destruction_blocked_by(target, found, seen, outermost))
+    }
+
+    /// Why `qn` may not be destroyed here, if it may not be: it holds by value
+    /// something this translation unit could not destroy.
+    fn undestroyable_member_error(&self, qn: &QualifiedName) -> Option<ConvertErrorFromCpp> {
+        self.classes_we_may_not_destroy.get(qn).map(|member| {
+            ConvertErrorFromCpp::MemberOfInstantiationOnIncompleteType {
+                class: qn.clone(),
+                held: member.held.clone(),
+                argument: member.argument.clone(),
+            }
+        })
+    }
+
+    /// Whether destroying one of these here is C++ we may not write. Read by
+    /// the function analysis, which puts it on the class it belongs to.
+    pub(crate) fn undestroyable_member_of(
+        &self,
+        qn: &QualifiedName,
+    ) -> Option<UndestroyableMember> {
+        self.classes_we_may_not_destroy.get(qn).cloned()
     }
 
     pub(crate) fn convert_boxed_type(
@@ -752,6 +1010,14 @@ impl<'a> TypeConverter<'a> {
                 // constructors the class has.
                 if !ctx.within_struct_field() {
                     if let Some(err) = self.instantiation_on_incomplete_type_error(&qn) {
+                        return Err(err);
+                    }
+                    // The class holding such a member, where destroying one
+                    // is what makes C++ write the destructor which destroys
+                    // it. Refused in the same positions and let through in
+                    // the same ones: naming it, and holding a reference or a
+                    // pointer to it, destroy nothing.
+                    if let Some(err) = self.undestroyable_member_error(&qn) {
                         return Err(err);
                     }
                 }
@@ -1749,14 +2015,11 @@ impl<'a> TypeConverter<'a> {
     /// reasons of its own. It is the shape which matters in practice and the
     /// most that can be decided from a template's arguments alone.
     ///
-    /// What it does *not* decide is whether some other type may hold one of
-    /// these by value: a class with such a member is generated as it always
-    /// was, and asking cxx to own one of *those* reaches the same C++.
-    /// Deciding that needs to know whether the enclosing class's destructor is
-    /// defined in this translation unit, which nothing here records - a class
-    /// whose destructor is defined out of line is fine - and turning the
-    /// member down instead would only hide it from the analysis which works
-    /// out what constructors the enclosing class has.
+    /// A class which holds one of these by value keeps the member either way:
+    /// turning it down would only hide it from the analysis which works out
+    /// what constructors that class has. Whether the class itself may be
+    /// destroyed is decided separately, by
+    /// [`Self::find_classes_we_may_not_destroy`].
     fn incomplete_argument_of(&self, rs_definition: &Type) -> Option<QualifiedName> {
         self.incomplete_argument_within(rs_definition, &mut HashSet::new())
     }
@@ -1847,6 +2110,9 @@ impl<'a> TypeConverter<'a> {
                             return Err(self.incomplete_type_error(inner_qn));
                         }
                         if let Some(err) = self.instantiation_on_incomplete_type_error(&inner_qn) {
+                            return Err(err);
+                        }
+                        if let Some(err) = self.undestroyable_member_error(&inner_qn) {
                             return Err(err);
                         }
                     }
@@ -1985,6 +2251,22 @@ impl<'a> TypeConverter<'a> {
                     incomplete_argument: Some(argument),
                     ..
                 } => Some((api.name().clone(), argument.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What each concrete template instantiation was built from, so that its
+    /// arguments can be read back from its flat synthesized name.
+    fn find_concrete_definitions<A: AnalysisPhase>(
+        apis: &ApiVec<A>,
+    ) -> HashMap<QualifiedName, Type> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::ConcreteType {
+                    rs_definition: Some(rs_definition),
+                    ..
+                } => Some((api.name().clone(), (**rs_definition).clone().into())),
                 _ => None,
             })
             .collect()

@@ -156,6 +156,20 @@ pub enum ConvertErrorFromCpp {
         instantiation: QualifiedName,
         argument: QualifiedName,
     },
+    /// A class C++ writes the destructor for in this translation unit, holding
+    /// something that destructor cannot destroy. A class which provides its
+    /// own destructor is not this: the compiler either wrote it where the
+    /// header did, and accepted it, or writes it in another translation unit
+    /// and destroying one here is a call. `= default` is, because C++ defers
+    /// writing that to the first use, which is here.
+    #[error("Found an attempt at using {}. C++ writes {}'s destructor in this translation unit, because {} provides none of its own - writing no destructor and defaulting one come to the same thing here - and writing it destroys {}, which needs {} to be complete. {} is a type this header only declares. Naming this class is fine, and so is holding a reference or a pointer to one. Define {} where autocxx can see it, or give {} a destructor of its own with a body, if you need this position.", .class.to_cpp_name(), .class.to_cpp_name(), .class.to_cpp_name(), .held, .argument.to_cpp_name(), .argument.to_cpp_name(), .argument.to_cpp_name(), .class.to_cpp_name())]
+    MemberOfInstantiationOnIncompleteType {
+        class: QualifiedName,
+        /// What it holds that cannot be destroyed, as a phrase: `its member
+        /// \`value\`` or `its base class \`Owner\``.
+        held: String,
+        argument: QualifiedName,
+    },
     #[error("Found an attempt at using a type marked as blocked! ({})", .0.to_cpp_name())]
     Blocked(QualifiedName),
     #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]

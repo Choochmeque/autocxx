@@ -72,7 +72,7 @@ pub(crate) fn convert_typedef_targets(
     apis: ApiVec<NullPhase>,
     parse_callback_results: &ParseCallbackResults,
 ) -> ApiVec<TypedefPhase> {
-    let mut type_converter = TypeConverter::new(config, &apis);
+    let mut type_converter = TypeConverter::new(config, &apis, parse_callback_results);
     let mut extra_apis = ApiVec::new();
     let mut results = ApiVec::new();
     convert_apis(
