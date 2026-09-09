@@ -158,9 +158,11 @@ impl<'frame, T> StackSlot<'frame, T> {
     ///
     /// A *panic* part-way through construction - as distinct from a returned
     /// `Err` - still leaves the drop flag raised and so aborts the process,
-    /// exactly as it does with `moveit`'s own `Slot`. Nothing autocxx generates
-    /// panics here: a C++ exception is caught on the C++ side of the boundary
-    /// and arrives as an `Err`.
+    /// exactly as it does with `moveit`'s own `Slot`. A C++ exception cannot
+    /// cause that: it is caught on the C++ side of the boundary and arrives as
+    /// an `Err`. A generated constructor's own value parameters are evaluated
+    /// inside the recipe it hands back, though, so a null `UniquePtr` passed
+    /// to one panics here and does abort.
     pub fn try_emplace<N: TryNew<Output = T>>(
         self,
         new: N,
