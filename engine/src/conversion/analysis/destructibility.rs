@@ -28,8 +28,14 @@
 //! leave everything else - methods, static factories, casts - alone, so that
 //! the common `flatbuffers::Table`-style pattern of borrowing a pointer
 //! handed out by C++ keeps working.
+//!
+//! The same withdrawal serves the other reason a compiler will not destroy
+//! one: the class holds by value a template instantiation built on a type
+//! nothing defines, and declares no destructor of its own, so destroying one
+//! is where C++ writes the destructor which destroys that member. Each class
+//! carries its own reason, because they read differently to whoever hits one.
 
-use indexmap::set::IndexSet as HashSet;
+use indexmap::map::IndexMap as HashMap;
 
 use crate::{
     conversion::{
@@ -45,7 +51,7 @@ use crate::{
 };
 
 /// Removes the APIs by which Rust could come to own a C++ object whose
-/// destructor is inaccessible.
+/// destructor nobody here may run.
 ///
 /// This runs after [`super::fun::FnAnalyzer::analyze_functions`], because
 /// that's where `ItemsFound::destructor` - the C++ rules for which special
@@ -56,7 +62,7 @@ use crate::{
 pub(crate) fn remove_ownership_of_non_destructible_types(
     apis: ApiVec<FnPrePhase3>,
 ) -> ApiVec<FnPrePhase3> {
-    let non_destructible: HashSet<QualifiedName> = apis
+    let non_destructible: HashMap<QualifiedName, ConvertErrorFromCpp> = apis
         .iter()
         .filter_map(|api| match api {
             Api::Struct {
@@ -67,14 +73,38 @@ pub(crate) fn remove_ownership_of_non_destructible_types(
                         ..
                     },
                 ..
-            } if fun_constructors.destructor_inaccessible => Some(name.name.clone()),
+            } => {
+                if fun_constructors.destructor_inaccessible {
+                    Some((
+                        name.name.clone(),
+                        ConvertErrorFromCpp::DestructorInaccessible,
+                    ))
+                } else {
+                    // The other reason nobody may destroy one: C++ would have
+                    // to write this class's destructor here, and writing it
+                    // destroys a member it may not.
+                    fun_constructors
+                        .undestroyable_member
+                        .as_ref()
+                        .map(|member| {
+                            (
+                                name.name.clone(),
+                                ConvertErrorFromCpp::MemberOfInstantiationOnIncompleteType {
+                                    class: name.name.clone(),
+                                    held: member.held.clone(),
+                                    argument: member.argument.clone(),
+                                },
+                            )
+                        })
+                }
+            }
             _ => None,
         })
         .collect();
     if non_destructible.is_empty() {
         return apis;
     }
-    log::info!("Types with inaccessible destructors: {non_destructible:?}");
+    log::info!("Types Rust may not own, and why: {non_destructible:?}");
 
     apis.into_iter()
         .map(|mut api| {
@@ -98,13 +128,13 @@ pub(crate) fn remove_ownership_of_non_destructible_types(
                         impl_for,
                         method_kind: MethodKind::Constructor { .. },
                         ..
-                    } if non_destructible.contains(impl_for) => {
+                    } if non_destructible.contains_key(impl_for) => {
                         let ctx = ErrorContext::new_for_method(
                             impl_for.get_final_ident(),
                             make_ident(&analysis.rust_name),
                         );
                         analysis.ignore_reason = Err(ConvertErrorWithContext(
-                            ConvertErrorFromCpp::DestructorInaccessible,
+                            non_destructible.get(impl_for).unwrap().clone(),
                             Some(ctx),
                         ));
                     }
@@ -120,12 +150,18 @@ pub(crate) fn remove_ownership_of_non_destructible_types(
                             TraitMethodKind::CopyConstructor
                             | TraitMethodKind::MoveConstructor
                             | TraitMethodKind::Alloc
-                            | TraitMethodKind::Dealloc,
+                            | TraitMethodKind::Dealloc
+                            // The destructor autocxx synthesizes for a class
+                            // C++ never declared one for. Its C++ body names
+                            // `~T()`, which is the very thing a compiler
+                            // cannot write here. A class whose destructor is
+                            // merely inaccessible never had one synthesized.
+                            | TraitMethodKind::Destructor,
                         impl_for,
                         ..
-                    } if non_destructible.contains(impl_for) => {
+                    } if non_destructible.contains_key(impl_for) => {
                         analysis.ignore_reason = Err(ConvertErrorWithContext(
-                            ConvertErrorFromCpp::DestructorInaccessible,
+                            non_destructible.get(impl_for).unwrap().clone(),
                             None,
                         ));
                     }

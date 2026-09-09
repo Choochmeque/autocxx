@@ -686,9 +686,31 @@ impl<'a> RsCodeGenerator<'a> {
                         }
                     }
                 }
+                if let Some(member) = &constructors.undestroyable_member {
+                    // Same withdrawal as the abstract case above, for the
+                    // other reason a compiler refuses to destroy one of
+                    // these. Every position which would destroy one in the
+                    // generated C++ is refused during analysis; this is the
+                    // one autocxx adds of its own accord.
+                    doc_attrs.extend(make_doc_attrs(format!(
+                        "autocxx has not added its usual `UniquePtr`, `SharedPtr`, `WeakPtr` and \
+                         `CxxVector` support for this type, because C++ writes its destructor in \
+                         this translation unit - it provides none of its own, and defaulting one \
+                         comes to the same thing - and writing it destroys {}, which needs `{}` \
+                         to be complete. `{}` is a type this header only declares. You can still \
+                         reach one through a reference or a pointer obtained from C++. Define \
+                         `{}` where autocxx can see it, or give this class a destructor of its \
+                         own with a body, if you need to own one.",
+                        member.held,
+                        member.argument.to_cpp_name(),
+                        member.argument.to_cpp_name(),
+                        member.argument.to_cpp_name(),
+                    )));
+                }
                 // `destroyable` is the smart-pointer trio and `movable` the
                 // vector; the note above says why both go.
-                let deletable = !constructors.abstract_without_virtual_destructor;
+                let deletable = !constructors.abstract_without_virtual_destructor
+                    && constructors.undestroyable_member.is_none();
                 self.generate_type(
                     &name,
                     bridge_id,

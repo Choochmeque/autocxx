@@ -22,7 +22,7 @@ use crate::{
             fun::function_wrapper::{BridgePointer, CppFunctionKind},
             type_converter::{
                 self, add_analysis, attach_deferred_holder_surfaces, TypeConversionContext,
-                TypeConverter,
+                TypeConverter, UndestroyableMember,
             },
         },
         api::{
@@ -364,10 +364,21 @@ pub(crate) struct PublicConstructors {
     /// which is where abstractness and destructor virtualness are both worked
     /// out; `from_items_found` leaves it `false`.
     pub(crate) abstract_without_virtual_destructor: bool,
+    /// Set where destroying one of these is C++ a compiler will not accept:
+    /// the class holds by value a template instantiation built on a type
+    /// nothing defines, and declares no destructor of its own, so destroying
+    /// one is where C++ writes the destructor which destroys that member. See
+    /// [`ConvertErrorFromCpp::MemberOfInstantiationOnIncompleteType`], which
+    /// is what the positions refusing it say.
+    pub(crate) undestroyable_member: Option<UndestroyableMember>,
 }
 
 impl PublicConstructors {
-    fn from_items_found(items_found: &ItemsFound, destructor_omitted_as_trivial: bool) -> Self {
+    fn from_items_found(
+        items_found: &ItemsFound,
+        destructor_omitted_as_trivial: bool,
+        undestroyable_member: Option<UndestroyableMember>,
+    ) -> Self {
         Self {
             move_constructor: items_found.move_constructor.callable_any(),
             destructor: items_found.destructor.callable_any(),
@@ -375,6 +386,7 @@ impl PublicConstructors {
             why_no_constructors: items_found.why_no_constructors.clone(),
             destructor_omitted_as_trivial,
             abstract_without_virtual_destructor: false,
+            undestroyable_member,
         }
     }
 }
@@ -511,7 +523,7 @@ impl<'a> FnAnalyzer<'a> {
         let mut me = Self {
             unsafe_policy,
             extra_apis: ApiVec::new(),
-            type_converter: TypeConverter::new(config, &apis),
+            type_converter: TypeConverter::new(config, &apis, parse_callback_results),
             bridge_name_tracker: BridgeNameTracker::new(),
             config,
             overload_trackers_by_mod: HashMap::new(),
@@ -4061,6 +4073,7 @@ impl<'a> FnAnalyzer<'a> {
                 let items_found = all_items_found.get(&name.name);
                 let destructor_omitted_as_trivial =
                     destructors_omitted_as_trivial.contains(&name.name);
+                let undestroyable_member = self.type_converter.undestroyable_member_of(&name.name);
                 Ok(Box::new(std::iter::once(Api::Struct {
                     name,
                     details,
@@ -4070,6 +4083,7 @@ impl<'a> FnAnalyzer<'a> {
                             PublicConstructors::from_items_found(
                                 items_found,
                                 destructor_omitted_as_trivial,
+                                undestroyable_member,
                             )
                         } else {
                             PublicConstructors::default()
