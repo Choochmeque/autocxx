@@ -13888,26 +13888,437 @@ fn test_ref_qualified_virtual_method() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
+// A `std::string_view` parameter is built in C++ out of bytes Rust lends for
+// the call; handing one the other way is refused, Rust having no type which is
+// a view for it to arrive as. The tests below cover the two halves
+// separately, where this one test used to assert that neither worked. It
+// named a parameter and a return together and expected the whole
+// `include_cpp!` to fail, which stopped being the truth once parameters
+// started working - the parameter half is now `test_string_view_param`.
 #[test]
 fn test_stringview() {
-    // Test that APIs using std::string_view are handled gracefully. We can't
-    // generate them, and here they're requested by name, so we report that
-    // rather than generating nothing - google/autocxx#1269.
     let hdr = indoc! {"
         #include <string_view>
         #include <string>
-        void take_string_view(std::string_view) {}
-        std::string_view return_string_view(const std::string& a) { return std::string_view(a); }
+        inline size_t take_string_view(std::string_view v) { return v.size(); }
     "};
-    let rs = quote! {};
-    run_test_expect_fail_ex(
+    let rs = quote! {
+        assert_eq!(ffi::take_string_view("hello"), 5);
+    };
+    run_test_ex(
         "",
         hdr,
         rs,
-        directives_from_lists(&["take_string_view", "return_string_view"], &[], None),
+        directives_from_lists(&["take_string_view"], &[], None),
         make_cpp17_adder(),
         None,
         None,
+    );
+}
+
+/// Everything `AsCppStringView` is implemented for reaches the same C++ view,
+/// and the view sees the bytes as they were - not as a NUL-terminated C
+/// string, and with no encoding demanded of them.
+#[test]
+fn test_string_view_param() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <string>
+        #include <cstdint>
+        inline size_t sv_size(std::string_view v) { return v.size(); }
+        inline uint8_t sv_byte(std::string_view v, size_t i) { return (uint8_t)v[i]; }
+        // Binds to the temporary the wrapper builds, for the length of the call.
+        inline size_t sv_size_cref(const std::string_view& v) { return v.size(); }
+    "};
+    let rs = quote! {
+        // A &str, and a String and &String by way of the owned impls.
+        assert_eq!(ffi::sv_size("hello"), 5);
+        assert_eq!(ffi::sv_size(String::from("hello")), 5);
+        assert_eq!(ffi::sv_size(&String::from("hello")), 5);
+        // A byte slice, which is what a string_view actually is: these bytes
+        // are not valid UTF-8 and contain an interior NUL, and all of them
+        // arrive.
+        let bytes: &[u8] = &[0xffu8, 0x00, 0x41, 0xfe];
+        assert_eq!(ffi::sv_size(bytes), 4);
+        assert_eq!(ffi::sv_byte(bytes, 0), 0xff);
+        assert_eq!(ffi::sv_byte(bytes, 1), 0x00);
+        assert_eq!(ffi::sv_byte(bytes, 3), 0xfe);
+        assert_eq!(ffi::sv_size(vec![1u8, 2, 3]), 3);
+        // An empty view. An empty Rust slice need not point at anything -
+        // `Vec::new()` carries a dangling pointer - and `string_view(p, 0)`
+        // wants `[p, p + 0)` to be a valid range, so the wrapper spells the
+        // empty case as an empty view instead of one over that address.
+        let empty: &[u8] = &[];
+        assert_eq!(ffi::sv_size(empty), 0);
+        assert_eq!(ffi::sv_size(""), 0);
+        assert_eq!(ffi::sv_size(Vec::new()), 0);
+        assert_eq!(ffi::sv_size(String::new()), 0);
+        // A C++ string lends its own bytes without a copy.
+        let cpp_string = ffi::make_string("hello");
+        assert_eq!(ffi::sv_size(cpp_string.as_ref().unwrap()), 5);
+        assert_eq!(ffi::sv_size_cref("hello"), 5);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["sv_size", "sv_byte", "sv_size_cref"], &[], None),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// A returned view borrows characters C++ owns, and a return has no input
+/// reference from which to give that borrow a lifetime. Refused by name, with
+/// the way out in the message, rather than handed over unchecked.
+#[test]
+fn test_string_view_return_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <string>
+        inline std::string_view give_view(const std::string& a) { return std::string_view(a); }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["give_view"], &[], None),
+        make_cpp17_adder(),
+        "would have to be handed to Rust here",
+    );
+}
+
+/// The same refusal for a view returned inside something else, which is no
+/// safer for being wrapped.
+#[test]
+fn test_string_view_return_by_reference_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        struct Holder { std::string_view v; };
+        inline const std::string_view& give_view_ref(const Holder& h) { return h.v; }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["give_view_ref"], &[], None),
+        make_cpp17_adder(),
+        "would have to be handed to Rust here",
+    );
+}
+
+/// A mutable `std::string_view&` parameter is an out-parameter, and Rust never
+/// holds a `std::string_view` to receive one into.
+#[test]
+fn test_string_view_mutable_ref_param_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <string>
+        inline void set_view(std::string_view& v, const std::string& a) { v = std::string_view(a); }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["set_view"], &[], None),
+        make_cpp17_adder(),
+        "A mutable C++ reference to std::string_view appears in a parameter here",
+    );
+}
+
+/// A class with a scalar `std::string_view` member is sized in Rust the way C++
+/// sizes it, trailing member and all.
+///
+/// This is worth pinning because of how the type gets into the bindings at all.
+/// `std::string_view` reaches bindgen as a one-pointer stand-in out of the
+/// `replaces=` prelude, while the real thing is bigger, and a non-POD struct's
+/// Rust representation is `#[repr(transparent)]` around bindgen's struct - so
+/// if bindgen took the stand-in's size for the member's, Rust's idea of the
+/// class would be short, and `within_box` would have C++ construct the object
+/// in storage too small for it. bindgen does not: it measures the real member
+/// and pads, including at the tail, where there is no following member to force
+/// it. Asserted here rather than reasoned about, since nothing in autocxx gets
+/// to choose it.
+///
+/// Scalar members only, which is what bindgen compensates for. An *array* of a
+/// prelude-substituted type gets no such padding, so a class with one is short
+/// in Rust: `[std::string; 3]` is three stand-ins, 24 bytes against the real 72.
+/// That is not this feature's doing and not specific to views. It is how every
+/// substituted type has always behaved, `std::string` included, and fixing it
+/// belongs to bindgen's array layout rather than here.
+#[test]
+fn test_string_view_member_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <cstddef>
+        #include <cstdint>
+        // The view last, so only tail padding can make the size right.
+        struct TrailingView { uint32_t n; std::string_view v; };
+        // And first, with a member after it to be placed correctly.
+        struct LeadingView { std::string_view v; uint32_t n; };
+        inline size_t sizeof_trailing() { return sizeof(TrailingView); }
+        inline size_t sizeof_leading() { return sizeof(LeadingView); }
+        inline size_t offsetof_n() { return offsetof(LeadingView, n); }
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::TrailingView>(),
+            ffi::sizeof_trailing(),
+            "Rust's idea of a class with a trailing string_view member disagrees with C++"
+        );
+        assert_eq!(
+            std::mem::size_of::<ffi::LeadingView>(),
+            ffi::sizeof_leading(),
+            "Rust's idea of a class with a leading string_view member disagrees with C++"
+        );
+        // C++ puts the member after the view past the whole view, which is the
+        // size the Rust side had to agree with above. (Rust's own offset for it
+        // is not observable from here - the class is opaque and its fields are
+        // not nameable - so this says what C++ does, and the size assertions
+        // say that Rust matched it.)
+        assert!(ffi::offsetof_n() >= std::mem::size_of::<*const u8>() * 2);
+        // Placement construction into Rust-provided storage of that size.
+        let _ = ffi::LeadingView::new().within_box();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "TrailingView",
+                "LeadingView",
+                "sizeof_trailing",
+                "sizeof_leading",
+                "offsetof_n",
+            ],
+            &[],
+            None,
+        ),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// A pointer to a view, and an rvalue reference to one, are both handles to a
+/// view that already exists. Refusing them is not a matter of taste the way it
+/// is for the `rust::Str*` they resemble: `rust::Str` is `&str`, a type Rust
+/// has, whereas `std::string_view` has no Rust spelling, so a parameter which
+/// kept one would put a name nothing defines into the bridge and cxx would
+/// report it as a bug in autocxx.
+#[test]
+fn test_string_view_pointer_param_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        inline size_t sv_size_ptr(const std::string_view* v) { return v ? v->size() : 0; }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["sv_size_ptr"], &[], None),
+        make_cpp17_adder(),
+        "A pointer to, or an rvalue reference to, a std::string_view",
+    );
+}
+
+/// See [`test_string_view_pointer_param_refused`] - an rvalue reference
+/// reaches the same place as the same pointer.
+#[test]
+fn test_string_view_rvalue_ref_param_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        inline size_t sv_size_rvalue(std::string_view&& v) { return v.size(); }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["sv_size_rvalue"], &[], None),
+        make_cpp17_adder(),
+        "A pointer to, or an rvalue reference to, a std::string_view",
+    );
+}
+
+/// A view parameter of a method, which takes a different route through the
+/// analysis than a free function's does - the receiver comes first.
+#[test]
+fn test_string_view_method_param() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <cstddef>
+        class Counter {
+        public:
+            size_t measure(std::string_view v) const { return v.size(); }
+            virtual size_t measure_virtual(std::string_view v) const { return v.size() * 2; }
+            virtual ~Counter() {}
+        };
+    "};
+    let rs = quote! {
+        let counter = ffi::Counter::new().within_unique_ptr();
+        assert_eq!(counter.measure("hello"), 5);
+        assert_eq!(counter.measure_virtual(&b"ab"[..]), 4);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Counter"], &[], None),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// autocxx is told the C++ standard twice - once for parsing headers, once
+/// for compiling - and nothing makes the two agree. A build whose headers
+/// parsed as C++17 but whose compiler is older says so, in one line naming
+/// the standard and the two places to set it, instead of reporting
+/// `std::string_view` as an unknown identifier in generated code the user
+/// never wrote.
+#[test]
+fn test_string_view_needs_cpp17_from_the_compiler_too() {
+    let hdr = indoc! {"
+        #include <string_view>
+        inline size_t sv_size(std::string_view v) { return v.size(); }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["sv_size"], &[], None),
+        // C++17 for the header parse only: the C++ compiler stays at the
+        // C++14 the harness sets.
+        make_bindgen_only_clang_arg_adder(&["-std=c++17"]),
+        "which needs C++17",
+    );
+}
+
+/// A C++ variable of view type is the return case by another name: reading it
+/// would hand Rust a view. Refused where it would otherwise have been given an
+/// opaque holder whose accessors name a Rust type there is none of.
+#[test]
+fn test_string_view_static_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        extern const std::string_view kView;
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["kView"], &[], None),
+        make_cpp17_adder(),
+        "would have to be handed to Rust here",
+    );
+}
+
+/// And a view as a container payload, including the `const` payloads which take
+/// the opaque-holder route rather than the plain one - the holder's accessors
+/// are what would have to name the view.
+#[test]
+fn test_string_view_container_payloads_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <memory>
+        #include <vector>
+        inline std::shared_ptr<const std::string_view> csp() { return nullptr; }
+        inline std::unique_ptr<const std::string_view> cup() { return nullptr; }
+        inline std::unique_ptr<std::string_view> up() { return nullptr; }
+        inline size_t vec(const std::vector<std::string_view>& v) { return v.size(); }
+    "};
+    for directive in ["csp", "cup", "up", "vec"] {
+        run_test_expect_fail_with_error_modified(
+            "",
+            hdr,
+            quote! {},
+            directives_from_lists(&[directive], &[], None),
+            make_cpp17_adder(),
+            "would have to be handed to Rust here",
+        );
+    }
+}
+
+/// A `using` alias for the view is the same type, and has to be refused in the
+/// same places. The name the header wrote is not the name the type database
+/// knows, so each of these asks the question after the alias is resolved rather
+/// than before.
+#[test]
+fn test_string_view_behind_an_alias_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <memory>
+        #include <vector>
+        #include <cstddef>
+        using SV = std::string_view;
+        struct Owner { std::string_view v; };
+        using ViewRef = const std::string_view&;
+        inline std::shared_ptr<const SV> alias_csp() { return nullptr; }
+        inline size_t alias_vecptr(const std::vector<SV*>& v) { return v.size(); }
+        inline ViewRef alias_ref(const Owner& x) { return x.v; }
+        inline std::unique_ptr<SV> alias_up() { return nullptr; }
+    "};
+    for directive in ["alias_csp", "alias_vecptr", "alias_ref", "alias_up"] {
+        run_test_expect_fail_with_error_modified(
+            "",
+            hdr,
+            quote! {},
+            directives_from_lists(&[directive], &[], None),
+            make_cpp17_adder(),
+            "would have to be handed to Rust here",
+        );
+    }
+}
+
+/// A view nested inside somebody else's template is that template's business.
+/// Such an instantiation becomes an opaque holder whose accessors hand back the
+/// holder, never the view, so the container guard must not reach into it and
+/// turn down a shape which works.
+#[test]
+fn test_string_view_inside_an_opaque_template_still_works() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <memory>
+        template <class T> struct Wrapper { T* p; };
+        inline std::unique_ptr<Wrapper<std::string_view>> wrapped() {
+            return std::make_unique<Wrapper<std::string_view>>();
+        }
+    "};
+    let rs = quote! {
+        let w = ffi::wrapped();
+        assert!(!w.is_null());
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["wrapped"], &[], None),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// The trait a `string_view` parameter takes is generated with the string
+/// utilities, so `exclude_utilities!` says so rather than failing to compile.
+#[test]
+fn test_string_view_param_without_utilities_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        inline size_t sv_size(std::string_view v) { return v.size(); }
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            exclude_utilities!()
+            generate!("sv_size")
+        },
+        make_cpp17_adder(),
+        "exclude_utilities",
     );
 }
 

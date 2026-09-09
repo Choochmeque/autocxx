@@ -150,6 +150,15 @@ impl TypeConversionPolicy {
                 conversion_requires_unsafe: false,
             },
             Self::Whole {
+                rust: WholeRustConversion::FromBytes,
+                ..
+            } => RustParamConversion::Param {
+                ty: parse_quote! { impl AsCppStringView },
+                local_variables: Vec::new(),
+                conversion: quote! ( #var .as_string_view_bytes() ),
+                conversion_requires_unsafe: false,
+            },
+            Self::Whole {
                 rust: WholeRustConversion::ToBoxedUpHolder(sub),
                 ..
             } => {

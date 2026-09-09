@@ -196,6 +196,78 @@ fn get_string_items() -> Vec<Item> {
                 }
             }
         }),
+        Item::Trait(parse_quote! {
+            /// A trait implemented by anything a C++ `std::string_view`
+            /// parameter can be built over.
+            ///
+            /// A `string_view` is a borrowed (pointer, length) pair, so what
+            /// crosses is the bytes, lent for the duration of the one call.
+            /// Nothing here copies: the view is built in C++ over the caller's
+            /// own bytes.
+            ///
+            /// Which is as long as the bytes are promised for. C++ which
+            /// copies the view somewhere outliving the call - into a member,
+            /// into a global - is left holding a dangling one, exactly as it
+            /// would be if it kept the `const char*` out of a
+            /// `const std::string&` parameter. autocxx cannot see that
+            /// happen, so it is part of what the caller vouches for in
+            /// `safety!`; a function which keeps what it is lent wants an
+            /// owned `std::string` parameter instead.
+            ///
+            /// The bytes are bytes, not text. C++ puts no encoding
+            /// requirement on a `string_view` and neither does this, which is
+            /// why `&[u8]` is implemented alongside `&str`.
+            pub trait AsCppStringView {
+                /// The bytes the C++ `std::string_view` will be built over.
+                fn as_string_view_bytes(&self) -> &[u8];
+            }
+        }),
+        // As with `ToCppString` above, a blanket impl over `AsRef<[u8]>` would
+        // forbid the inherent ones the compiler cannot yet rule out.
+        Item::Impl(parse_quote! {
+            impl AsCppStringView for &str {
+                fn as_string_view_bytes(&self) -> &[u8] {
+                    str::as_bytes(self)
+                }
+            }
+        }),
+        Item::Impl(parse_quote! {
+            impl AsCppStringView for String {
+                fn as_string_view_bytes(&self) -> &[u8] {
+                    str::as_bytes(self)
+                }
+            }
+        }),
+        Item::Impl(parse_quote! {
+            impl AsCppStringView for &String {
+                fn as_string_view_bytes(&self) -> &[u8] {
+                    str::as_bytes(self)
+                }
+            }
+        }),
+        Item::Impl(parse_quote! {
+            impl AsCppStringView for &[u8] {
+                fn as_string_view_bytes(&self) -> &[u8] {
+                    self
+                }
+            }
+        }),
+        Item::Impl(parse_quote! {
+            impl AsCppStringView for Vec<u8> {
+                fn as_string_view_bytes(&self) -> &[u8] {
+                    self
+                }
+            }
+        }),
+        // A C++ string lends its own bytes, so passing one to a `string_view`
+        // parameter needs no copy and no round trip through Rust.
+        Item::Impl(parse_quote! {
+            impl AsCppStringView for &cxx::CxxString {
+                fn as_string_view_bytes(&self) -> &[u8] {
+                    cxx::CxxString::as_bytes(self)
+                }
+            }
+        }),
     ]
     .to_vec()
 }
@@ -514,7 +586,7 @@ impl<'a> RsCodeGenerator<'a> {
                 parse_quote!(
                     pub mod #child_id {
                         #[allow(unused_imports)]
-                        use super::{cxxbridge, output, bindgen, ToCppString};
+                        use super::{cxxbridge, output, bindgen, ToCppString, AsCppStringView};
                     }
                 )
             } else {

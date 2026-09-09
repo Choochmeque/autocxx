@@ -3538,6 +3538,43 @@ impl<'a> FnAnalyzer<'a> {
         // cxx unconverted - which is where a `std::array` parameter goes, cxx
         // spelling it back as the `std::array` it came from.
         self.check_signature_array(ty)?;
+        // A `std::string_view` parameter, in any of the spellings C++ has for
+        // one. The view is built in the C++ wrapper over bytes Rust lends for
+        // the call - see `WholeCppConversion::FromRustBytesToStringView` - so
+        // this is decided here, ahead of the reference handling below, which
+        // would otherwise hand out a `&`/`CppRef` to a type Rust has no way to
+        // make one of.
+        //
+        // A `const&` binds to that temporary for the duration of the call,
+        // which is as long as the view's own characters are guaranteed to be
+        // there anyway. A *mutable* reference is an out-parameter: C++ would
+        // write a view of its own into the slot, over storage whose lifetime
+        // nothing has checked, and there is nothing for Rust to receive it
+        // into.
+        //
+        // Every other shape is refused, and refusing is not optional here the
+        // way it is for the `rust::Str*` this resembles. `rust::Str` is `&str`,
+        // a type Rust has, so a pointer to one is a pointer to something;
+        // `std::string_view` has no Rust spelling at all, and a parameter
+        // which kept one would put a name nothing defines into the bridge, for
+        // cxx to report as a bug in autocxx.
+        if let Some(sv) = string_view_parameter(ty) {
+            return match sv {
+                StringViewParameter::Buildable(ty) => {
+                    if self.config.exclude_utilities() {
+                        Err(ConvertErrorFromCpp::StringViewWithoutUtilities)
+                    } else {
+                        Ok(TypeConversionPolicy::whole(
+                            ty.clone(),
+                            WholeCppConversion::FromRustBytesToStringView,
+                            WholeRustConversion::FromBytes,
+                        ))
+                    }
+                }
+                StringViewParameter::Mutable => Err(ConvertErrorFromCpp::MutableStringViewRef),
+                StringViewParameter::Indirect => Err(ConvertErrorFromCpp::IndirectStringView),
+            };
+        }
         if let Some(holder_id) = is_subclass_holder {
             let subclass = SubclassName::from_holder_name(holder_id);
             return Ok({
@@ -3779,6 +3816,26 @@ impl<'a> FnAnalyzer<'a> {
                 }
                 // As for a parameter.
                 self.check_signature_array(ty)?;
+                // No return position works: Rust has no type which is a view,
+                // so there is nothing for one to arrive as. Asked of the
+                // converted type as well as of the names met on the way to it,
+                // because the two miss different things: a typedef to a
+                // reference resolves to a type mentioning the view while
+                // recording only the alias among its dependencies, and a
+                // container records the payload without the converted type
+                // naming it.
+                //
+                // Ahead of the `volatile` pointee branch below, which answers
+                // with a conversion rather than a refusal: a view is turned
+                // down whatever else is true of the return.
+                if mentions_string_view(ty)
+                    || annotated_type
+                        .types_encountered
+                        .iter()
+                        .any(|tn| known_types().is_string_view(tn))
+                {
+                    return Err(ConvertErrorFromCpp::StringViewOutOfCpp);
+                }
                 // C++ handed back the address of storage it qualified
                 // `volatile`, so Rust is the side which will perform the
                 // accesses. Answered before the branches below, which would
@@ -4738,6 +4795,66 @@ impl Api<FnPhase> {
                     ..
                 }
         )
+    }
+}
+
+/// What a `std::string_view` parameter turned out to be.
+enum StringViewParameter<'a> {
+    /// A view the C++ wrapper can build: one taken by value, or by `const&`,
+    /// which binds to the wrapper's temporary. Carries the `string_view` type
+    /// itself, which is what the wrapper's call has to be spelt in terms of.
+    Buildable(&'a Type),
+    /// A mutable `std::string_view&`, which is an out-parameter.
+    Mutable,
+    /// A `std::string_view*`, or a `std::string_view&&`, which reaches here as
+    /// the same pointer. Either way it is a handle to a view which must
+    /// already exist, and Rust has none to point at.
+    Indirect,
+}
+
+/// Whether `ty` - a type the converter has finished with, so aliases are
+/// already resolved - names `std::string_view` anywhere a generated signature
+/// would have to spell it.
+fn mentions_string_view(ty: &Type) -> bool {
+    match ty {
+        Type::Path(p) => {
+            known_types().is_string_view(&QualifiedName::from_type_path(p))
+                || matches!(p.path.segments.last().map(|seg| &seg.arguments),
+                    Some(syn::PathArguments::AngleBracketed(args))
+                        if args.args.iter().any(|arg| matches!(arg,
+                            syn::GenericArgument::Type(inner) if mentions_string_view(inner))))
+        }
+        Type::Ptr(p) => mentions_string_view(&p.elem),
+        Type::Reference(r) => mentions_string_view(&r.elem),
+        _ => false,
+    }
+}
+
+/// Whether `ty` - a parameter as the type converter left it - is a
+/// `std::string_view`, and in which of the shapes autocxx does something
+/// about. `None` for everything else.
+fn string_view_parameter(ty: &Type) -> Option<StringViewParameter<'_>> {
+    let is_string_view = |ty: &Type| {
+        matches!(ty, Type::Path(p)
+            if known_types().is_string_view(&QualifiedName::from_type_path(p)))
+    };
+    match ty {
+        Type::Path(p) => {
+            // `Pin<&mut std::string_view>` is what a mutable reference has
+            // become by now; anything else which is a path is the view itself.
+            match extract_pinned_mutable_reference_type(p) {
+                Some(inner) => is_string_view(inner).then_some(StringViewParameter::Mutable),
+                None => is_string_view(ty).then_some(StringViewParameter::Buildable(ty)),
+            }
+        }
+        Type::Reference(r) if is_string_view(&r.elem) => Some(match r.mutability {
+            Some(_) => StringViewParameter::Mutable,
+            None => StringViewParameter::Buildable(&r.elem),
+        }),
+        // A `std::string_view*`, and a `std::string_view&&`, which the type
+        // converter has made the same pointer of by now.
+        Type::Ptr(p) if is_string_view(&p.elem) => Some(StringViewParameter::Indirect),
+        _ => None,
     }
 }
 

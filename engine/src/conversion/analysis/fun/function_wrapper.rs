@@ -243,6 +243,19 @@ pub(crate) enum WholeCppConversion {
     FromPtrToValue,
     FromValueToUniquePtr,
     FromReturnValueToPlacementPtr,
+    /// Build a `std::string_view` over bytes Rust lent for this call, which
+    /// the bridge carries as the `rust::Slice<const uint8_t>` cxx spells a
+    /// `&[u8]` as.
+    ///
+    /// The view borrows the caller's storage and is destroyed with the
+    /// wrapper's own parameter, so it is only ever the argument of the call
+    /// the wrapper makes. Parameters only: see
+    /// [`ConvertErrorFromCpp::StringViewOutOfCpp`] for why nothing goes the
+    /// other way.
+    ///
+    /// [`ConvertErrorFromCpp::StringViewOutOfCpp`]:
+    ///     crate::conversion::ConvertErrorFromCpp::StringViewOutOfCpp
+    FromRustBytesToStringView,
 }
 
 impl WholeCppConversion {
@@ -276,6 +289,13 @@ impl WholeCppConversion {
             // pointer the caller supplied, which is a shape the way back does
             // not have: a subclass peer's override returns its value.
             Self::FromReturnValueToPlacementPtr => return Option::None,
+            // The way back would hand Rust a `&[u8]` over characters C++ owns,
+            // for as long as Rust cared to keep it - the borrow this direction
+            // is safe precisely because it does not outlive the call. A
+            // subclass whose override takes a `std::string_view` is therefore
+            // turned down rather than given one, by the same reasoning which
+            // refuses a `string_view` return.
+            Self::FromRustBytesToStringView => return Option::None,
         })
     }
 }
@@ -285,6 +305,10 @@ impl WholeCppConversion {
 pub(crate) enum WholeRustConversion {
     None,
     FromStr,
+    /// Lend the bytes of whatever the caller passed - a `&str`, a `&[u8]`, a
+    /// C++ string - to the `std::string_view` the C++ wrapper builds. Pairs
+    /// with [`WholeCppConversion::FromRustBytesToStringView`].
+    FromBytes,
     ToBoxedUpHolder(SubclassName),
     FromValueParamToPtr,
     FromRValueParamToPtr,
@@ -509,6 +533,11 @@ impl TypeConversionPolicy {
                 cpp: WholeCppConversion::FromUniquePtrToValue,
                 ..
             } => unique_ptr_of(ty),
+            // The bridge carries the bytes, not the view built from them.
+            Self::Whole {
+                cpp: WholeCppConversion::FromRustBytesToStringView,
+                ..
+            } => parse_quote! { &[u8] },
             Self::Whole {
                 ty,
                 cpp: WholeCppConversion::FromPtrToValue,
@@ -922,6 +951,12 @@ mod tests {
             ),
             // A return which is emplaced into a caller's pointer instead.
             TypeConversionPolicy::new_for_placement_return(ty("Bob")),
+            // A std::string_view parameter, built in C++ over bytes Rust lends.
+            TypeConversionPolicy::whole(
+                ty("autocxx::CppStringView"),
+                WholeCppConversion::FromRustBytesToStringView,
+                WholeRustConversion::FromBytes,
+            ),
         ]
     }
 
@@ -988,6 +1023,9 @@ mod tests {
                 "FromUniquePtrToValue",
                 "FromUniquePtrToValue",
                 "-",
+                // The string_view parameter, whose opposite would hand Rust a
+                // borrow of C++'s characters for as long as it liked.
+                "-",
             ]
         );
     }
@@ -1011,7 +1049,7 @@ mod tests {
     /// The conversions with no opposite, named. A subclass peer built from one
     /// of these is what the callers of `inverse` refuse.
     #[test]
-    fn the_conversions_without_an_opposite_are_the_expected_three() {
+    fn the_conversions_without_an_opposite_are_the_expected_ones() {
         let without: Vec<String> = pointer_policies()
             .into_iter()
             .chain(whole_policies())
@@ -1027,6 +1065,7 @@ mod tests {
                 "FromPtrToMove",
                 "IgnoredPlacementPtrParameter",
                 "FromReturnValueToPlacementPtr",
+                "FromRustBytesToStringView",
             ]
         );
     }
