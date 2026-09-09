@@ -19,7 +19,8 @@ mod path;
 mod subclass_attrs;
 
 pub use config::{
-    AllowlistEntry, ExternCppType, IncludeCppConfig, RustFun, Subclass, UnsafePolicy,
+    name_matches_directive, AllowlistEntry, ExternCppType, IncludeCppConfig, RustFun, Subclass,
+    UnsafePolicy,
 };
 pub use derives::DeriveMap;
 pub use enum_style::EnumStyle;

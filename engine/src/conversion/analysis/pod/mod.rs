@@ -17,7 +17,10 @@ use syn::{ItemStruct, Type, Visibility};
 
 use crate::{
     conversion::{
-        analysis::type_converter::{self, add_analysis, TypeConversionContext, TypeConverter},
+        analysis::type_converter::{
+            self, add_analysis, attach_deferred_holder_surfaces, TypeConversionContext,
+            TypeConverter,
+        },
         api::{AnalysisPhase, Api, ApiName, NestedCppNames, NullPhase, StructDetails, TypeKind},
         apivec::ApiVec,
         check_for_fatal_attrs,
@@ -178,7 +181,13 @@ pub(crate) fn analyze_pod_apis(
         Api::subclass_unchanged,
     );
     assert!(more_extra_apis.is_empty());
-    Ok(results)
+    // As in `convert_typedef_targets`: a surface this phase's conversions
+    // worked out for a holder which already existed goes on it before this
+    // converter is discarded.
+    Ok(attach_deferred_holder_surfaces(
+        &mut type_converter,
+        results,
+    ))
 }
 
 /// The types Rust may hold, and hand to and from C++, by value: the ones this

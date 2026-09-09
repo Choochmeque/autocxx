@@ -94,6 +94,25 @@ pub(crate) enum HolderSurface {
         element: Box<Type>,
         deps: HashSet<QualifiedName>,
     },
+    /// An instantiation of a class template a `smart_pointer!` directive says
+    /// points at its first argument. Carries that argument as the `cxx::bridge`
+    /// spells it, for the accessor, and as C++ spells it, for the shim which
+    /// has to name the pointer type C++ hands back. See google/autocxx#670.
+    CustomPtr {
+        payload: Box<Type>,
+        /// The argument as C++ wrote it, unconverted, for the shim which has to
+        /// name the pointer type C++ hands back. Kept as a type rather than as
+        /// the C++ spelling of one, because the spelling is the code
+        /// generator's to make: only it knows the aliases which stand in for
+        /// type names a function or variable of the same name hides.
+        payload_cpp: Box<Type>,
+        /// Whether C++ qualified the argument `const`, which is what decides
+        /// whether Rust is handed a `*const T` or a `*mut T`: the shim returns
+        /// what the C++ member function returns, and for `MyPtr<const T>` that
+        /// is a `const T*`.
+        payload_is_const: bool,
+        deps: HashSet<QualifiedName>,
+    },
     /// A `const` reference to an object autocxx did not create and does not
     /// own - the C++ variable an `Api::Static` of non-POD type stands for. It
     /// is spelled in C++ as a `std::reference_wrapper<const T>`, which is a
@@ -125,6 +144,7 @@ impl HolderSurface {
             | Self::UniquePtr { deps, .. }
             | Self::WeakPtr { deps, .. }
             | Self::VectorOfPointers { deps, .. }
+            | Self::CustomPtr { deps, .. }
             | Self::ConstRef { deps, .. } => deps.iter(),
         }
     }
@@ -225,6 +245,50 @@ impl UniquePtrShim {
         match self {
             Self::Get => "get",
             Self::PayloadIsNull => "payload_is_null",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName) -> String {
+        shim_cpp_name(holder, self.rust_name())
+    }
+}
+
+/// The one C++ helper function autocxx generates beside the opaque holder it
+/// lowers an instantiation of a user's smart pointer template to.
+///
+/// autocxx knows nothing about such a template beyond what `smart_pointer!`
+/// claims, so this is the whole of that claim: `get()` on a `const` one yields
+/// a pointer to the first template argument. Copying, emptiness and reference
+/// counts are things a particular smart pointer may or may not have, and none
+/// of them has one spelling across the smart pointers people write; whether the
+/// pointer `get` answers with is null is the emptiness question a caller can
+/// already ask. See google/autocxx#670.
+#[derive(Copy, Clone)]
+pub(crate) enum CustomPtrShim {
+    /// The template's `get`, as a raw pointer. Raw rather than a reference for
+    /// the reason every other holder's `get` is: the smart pointer may hold
+    /// nothing, and nothing here knows how long what it points at lives.
+    Get,
+}
+
+impl CustomPtrShim {
+    pub(crate) const ALL: [Self; 1] = [Self::Get];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+        }
+    }
+
+    /// The C++ member function this calls. The same word as the Rust method's
+    /// name, and not by coincidence: `get` is what the directive claims the
+    /// template calls it.
+    pub(crate) fn cpp_member_name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
         }
     }
 

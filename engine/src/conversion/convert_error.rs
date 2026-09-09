@@ -118,6 +118,12 @@ pub enum ConvertErrorFromCpp {
     DidNotGenerateAnythingUsable(String, Box<ConvertErrorFromCpp>),
     #[error("The 'derive' directive for '{0}' matched nothing autocxx generated. Perhaps this was mis-spelled, or you didn't qualify the name with any namespaces, or there is no 'generate' directive for it?")]
     DeriveDirectiveMatchedNothing(String),
+    #[error("The 'smart_pointer' directive for '{0}' matched no template instantiation. Name the class template - 'smart_pointer!(\"MyPtr\")', not 'MyPtr<Widget>' - and check that something autocxx generates uses an instantiation of it; a directive which matches nothing would leave you without the accessor you asked for.")]
+    SmartPointerDirectiveMatchedNothing(String),
+    #[error("The 'smart_pointer' directive names {}, and this instantiation of it has no type as its first template argument, so there is nothing for 'get' to point at.", .0.to_cpp_name())]
+    SmartPointerWithoutTypeArgument(QualifiedName),
+    #[error("The 'smart_pointer' directive names {}, and the first template argument of this instantiation ({}) is not a named type. autocxx writes the accessor's return type as a pointer to that argument, and it has no C++ name to write.", .0.to_cpp_name(), .1)]
+    SmartPointerPayloadNotANamedType(QualifiedName, String),
     #[error("The 'derive' directive for '{0}' names a type autocxx does not hold by value, so there is no Rust definition of it for the traits to go on. autocxx emits an opaque type with no fields for such a type; use 'generate_pod' if it is safe to hold by value.")]
     DeriveOnTypeWithNoRustDefinition(String),
     #[error("The 'derive' directive asks '{0}' to derive Default, and it is an enum. Nothing makes one enumerator of a C++ enum the default, so Rust would refuse to derive it.")]

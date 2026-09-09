@@ -20,7 +20,10 @@ use crate::{
     conversion::{
         analysis::{
             fun::function_wrapper::{BridgePointer, CppFunctionKind},
-            type_converter::{self, add_analysis, TypeConversionContext, TypeConverter},
+            type_converter::{
+                self, add_analysis, attach_deferred_holder_surfaces, TypeConversionContext,
+                TypeConverter,
+            },
         },
         api::{
             ApiName, CastMutability, FuncToConvert, NestedCppNames, NullPhase, Provenance,
@@ -553,6 +556,13 @@ impl<'a> FnAnalyzer<'a> {
             Api::typedef_unchanged,
             Api::subclass_unchanged,
         );
+        // Before the passes below, which decide what else to put on a concrete
+        // type by asking whether it has a surface: one worked out for a type
+        // which already existed is not on it yet, and a holder which acquired
+        // its `get` afterwards would have been given the template's own `get`
+        // as well - two methods of one name, in generated Rust which does not
+        // compile.
+        let results = attach_deferred_holder_surfaces(&mut me.type_converter, results);
         let results = me.add_using_declaration_imports(results);
         let results = me.add_inherited_member_imports(results);
         let results = me.add_template_instantiation_members(results);
@@ -560,7 +570,9 @@ impl<'a> FnAnalyzer<'a> {
         let results = me.add_constructors_present(results);
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
-        results
+        // Again, because the passes above convert types of their own and may
+        // have worked out a surface for a holder since.
+        attach_deferred_holder_surfaces(&mut me.type_converter, results)
     }
 
     /// The C++ names of every virtual method we've been given.
@@ -4151,7 +4163,7 @@ fn look_up_member(
 /// not `Outer`'s and would not compile called on it. So such an expression
 /// counts only where the `>` closing the first `<` is the end of it -
 /// `A<uint32_t>` - and anything else answers `None`.
-fn instantiated_template(
+pub(crate) fn instantiated_template(
     rs_definition: Option<&crate::minisyn::Type>,
     cpp_definition: &str,
 ) -> Option<QualifiedName> {
