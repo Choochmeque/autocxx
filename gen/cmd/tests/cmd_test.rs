@@ -712,3 +712,26 @@ fn assert_contains(outdir: &TempDir, fname: &str, pattern: &str) {
     eprintln!("content = {content}");
     assert!(content.contains(pattern));
 }
+
+/// The `.rs` file autocxx-gen parsed is a dependency of everything it wrote,
+/// alongside the headers the preprocessor opened. A depfile which names only
+/// the headers describes a rule which an edit to `include_cpp!` leaves stale
+/// while the build system believes it is up to date.
+#[test]
+fn test_depfile_names_the_rust_input() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let depfile = tmp_dir.path().join("test.d");
+    base_test(&tmp_dir, RsGenMode::Single, |cmd| {
+        cmd.arg("--depfile").arg(&depfile);
+    })?;
+    let contents = std::fs::read_to_string(&depfile)?;
+    assert!(
+        contents.contains("demo/main.rs"),
+        "the parsed .rs input is not a dependency; depfile reads:\n{contents}"
+    );
+    assert!(
+        contents.contains("demo/input.h"),
+        "the parsed header is not a dependency; depfile reads:\n{contents}"
+    );
+    Ok(())
+}
