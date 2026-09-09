@@ -4203,7 +4203,14 @@ fn test_negative_rs_nonsense() {
     let rs = quote! {
         foo bar
     };
-    run_test_expect_fail(cxx, hdr, rs, &["BOB"], &[]);
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        rs,
+        &["BOB"],
+        &[],
+        "syntax error interpreting Rust code",
+    );
 }
 
 #[test]
@@ -4218,7 +4225,17 @@ fn test_negative_cpp_nonsense() {
     let rs = quote! {
         assert_eq!(ffi::BOB, 3);
     };
-    run_test_expect_fail(cxx, hdr, rs, &["BOB"], &[]);
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["BOB"],
+        &[],
+        // autocxx parses the header with libclang on every platform, so the
+        // stage is fixed wherever this runs; the wording of the diagnostic is
+        // clang's to change between versions, the name it complains about is not.
+        &["ClangDiagnostic", "CAT"],
+    );
 }
 
 #[test]
@@ -4251,9 +4268,35 @@ fn test_negative_make_nonpod() {
     let rs3 = quote! {
         ffi::Bob { do_not_attempt_to_allocate_nonpod_types: [] };
     };
-    run_test_expect_fail(cxx, hdr, rs, &["take_bob", "Bob", "make_bob"], &[]);
-    run_test_expect_fail(cxx, hdr, rs2, &["take_bob", "Bob", "make_bob"], &[]);
-    run_test_expect_fail(cxx, hdr, rs3, &["take_bob", "Bob", "make_bob"], &[]);
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob", "Bob", "make_bob"],
+        &[],
+        "cannot construct `ffi::Bob` with struct literal syntax due to private fields",
+    );
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs2,
+        &["take_bob", "Bob", "make_bob"],
+        &[],
+        &["E0560", "has no field named `a`"],
+    );
+    // autocxx emits no field of this name any more, so this snippet now says
+    // only that an invented field name is rejected.
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs3,
+        &["take_bob", "Bob", "make_bob"],
+        &[],
+        &[
+            "E0560",
+            "has no field named `do_not_attempt_to_allocate_nonpod_types`",
+        ],
+    );
 }
 
 #[test]
@@ -25471,12 +25514,13 @@ fn test_ctype_wrapper_name_collision_is_refused() {
             return std::unique_ptr<uint32_t>(new uint32_t(7));
         }
     "};
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {},
         &["fx_read_colliding", "fx_make_u32"],
         &["c_u32"],
+        &["InvalidCxx", "unsupported type: c_u32"],
     );
 }
 
