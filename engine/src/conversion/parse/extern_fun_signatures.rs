@@ -214,32 +214,102 @@ mod tests {
         assert_eq!(expected_as_set, actual_as_set);
     }
 
-    fn run_test_expect_fail(sig: Signature) {
-        assert!(assemble_extern_fun_deps(&sig, "").is_err())
+    /// Asserts which of `ConvertErrorFromRust`'s reasons refused the signature,
+    /// not merely that one of them did. Every signature below is refused, so a
+    /// bug which refused them all for a single wrong reason would otherwise pass.
+    fn run_test_expect_fail(sig: Signature, expected: ConvertErrorFromRust) {
+        let err = assemble_extern_fun_deps(&sig, "").expect_err("unexpected success");
+        let reported = format!("{err:?}");
+        let expected = format!("{expected:?}");
+        assert!(
+            reported.contains(&expected),
+            "expected {expected} for `{}`, got {reported}",
+            quote::quote!(#sig)
+        );
     }
 
     #[test]
     fn test_assemble_extern_fun_deps() {
-        run_test_expect_fail(parse_quote! { fn function(self: A::B)});
-        run_test_expect_fail(parse_quote! { fn function(self: Self)});
-        run_test_expect_fail(parse_quote! { fn function(self: Self)});
-        run_test_expect_fail(parse_quote! { fn function(self)});
-        run_test_expect_fail(parse_quote! { fn function(&self)});
-        run_test_expect_fail(parse_quote! { fn function(&mut self)});
-        run_test_expect_fail(parse_quote! { fn function(self: Pin<&mut Self>)});
-        run_test_expect_fail(parse_quote! { fn function(self: Pin<&mut A::B>)});
-        run_test_expect_fail(parse_quote! { fn function(a: Pin<A>)});
-        run_test_expect_fail(parse_quote! { fn function(a: Pin<A::B>)});
-        run_test_expect_fail(parse_quote! { fn function(a: A::B)});
-        run_test_expect_fail(parse_quote! { fn function(a: &mut A)});
-        run_test_expect_fail(parse_quote! { fn function() -> A::B});
-        run_test_expect_fail(parse_quote! { fn function() -> &A::B});
-        run_test_expect_fail(parse_quote! { fn function(a: ())});
-        run_test_expect_fail(parse_quote! { fn function(a: &[A])});
-        run_test_expect_fail(parse_quote! { fn function(a: Bob<A>)});
-        run_test_expect_fail(parse_quote! { fn function(a: Box<A, B>)});
-        run_test_expect_fail(parse_quote! { fn function(a: a::Pin<&mut A>)});
-        run_test_expect_fail(parse_quote! { fn function(a: Pin<&A>)});
+        run_test_expect_fail(
+            parse_quote! { fn function(self: A::B)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(self: Self)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(self: Self)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(self)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(&self)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(&mut self)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(self: Pin<&mut Self>)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(self: Pin<&mut A::B>)},
+            ConvertErrorFromRust::ExternRustFunRequiresFullyQualifiedReceiver,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: Pin<A>)},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: Pin<A::B>)},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: A::B)},
+            ConvertErrorFromRust::NamespacesNotSupportedForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: &mut A)},
+            ConvertErrorFromRust::PinnedReferencesRequiredForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function() -> A::B},
+            ConvertErrorFromRust::NamespacesNotSupportedForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function() -> &A::B},
+            ConvertErrorFromRust::NamespacesNotSupportedForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: ())},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: &[A])},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: Bob<A>)},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: Box<A, B>)},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: a::Pin<&mut A>)},
+            ConvertErrorFromRust::NamespacesNotSupportedForExternFun,
+        );
+        run_test_expect_fail(
+            parse_quote! { fn function(a: Pin<&A>)},
+            ConvertErrorFromRust::UnsupportedTypeForExternFun,
+        );
         run_test_expect_ok(parse_quote! { fn function(a: A, b: B)}, &["A", "B"]);
         run_test_expect_ok(parse_quote! { fn function(a: Box<A>)}, &["A"]);
         run_test_expect_ok(parse_quote! { fn function(a: Vec<A>)}, &["A"]);
