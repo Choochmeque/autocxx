@@ -73,9 +73,10 @@ impl BuilderModifierFns for UnsignedCharAdder {
 /// Both modifiers, applied in order. For a test which needs, say, a C++
 /// standard *and* a warning scoped off.
 ///
-/// `Builder::extra_clang_args` assigns rather than appends, so of two modifiers
-/// which both give clang arguments only the second's survive. No pair used here
-/// does; a pair that did would have to combine the lists itself.
+/// Two modifiers which both give clang arguments keep both sets:
+/// `Builder::extra_clang_args` appends, in the order this applies them. What a
+/// repeated option then means is clang's to decide; of two `-std=` it takes the
+/// second modifier's.
 pub(crate) fn combine_modifiers(
     a: Option<BuilderModifier>,
     b: Option<BuilderModifier>,

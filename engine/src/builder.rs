@@ -239,8 +239,15 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
     /// Specify extra arguments for clang. These are used when parsing
     /// C++ headers. For example, you might want to provide
     /// `-std=c++17` to specify C++17.
+    ///
+    /// Calls accumulate: each one appends to the arguments already given, in
+    /// call order, so a builder assembled out of several pieces - a helper which
+    /// knows the C++ standard, another which knows the `-D`s - keeps every
+    /// piece's flags. What a repeated option then means is clang's to decide; it
+    /// takes the last `-std=`.
     pub fn extra_clang_args(mut self, extra_clang_args: &[&str]) -> Self {
-        self.extra_clang_args = extra_clang_args.iter().map(|s| s.to_string()).collect();
+        self.extra_clang_args
+            .extend(extra_clang_args.iter().map(|s| s.to_string()));
         self
     }
 
@@ -559,5 +566,32 @@ mod flag_tests {
         // of a file to compile.
         assert!(msvc_flags(false).is_empty());
         assert!(sanitizer_flags(false).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod clang_arg_tests {
+    use super::{Builder, BuilderContext, RebuildDependencyRecorder};
+
+    struct TestContext;
+
+    impl BuilderContext for TestContext {
+        fn get_dependency_recorder() -> Option<Box<dyn RebuildDependencyRecorder>> {
+            None
+        }
+    }
+
+    /// [`Builder::extra_clang_args`] appends, so a builder configured by more
+    /// than one helper keeps every helper's flags rather than only the last
+    /// helper's, in call order.
+    #[test]
+    fn extra_clang_args_accumulate() {
+        let builder = Builder::<TestContext>::new("unused.rs", ["unused"])
+            .extra_clang_args(&["-DFIRST", "-std=c++14"])
+            .extra_clang_args(&["-DSECOND", "-std=c++17"]);
+        assert_eq!(
+            builder.extra_clang_args,
+            ["-DFIRST", "-std=c++14", "-DSECOND", "-std=c++17"]
+        );
     }
 }

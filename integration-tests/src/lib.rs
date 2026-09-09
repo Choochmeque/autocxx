@@ -712,6 +712,13 @@ fn workspace_target_dir() -> &'static Path {
 ///
 /// `--cfg trybuild -A dead_code` is trybuild's own contribution, restated here
 /// for the reason given in [`encoded_rustflags`].
+///
+/// No `-Dwarnings`: fixtures are not warning-clean and are not meant to be. The
+/// one fixture which holds the code autocxx *generates* to that standard asks for
+/// it with a crate-level attribute instead, which leaves these flags - and so
+/// every fixture's dependencies - alone. See
+/// `test_generated_code_is_warning_free`, which records what the `dead_code`
+/// allow above does to it.
 fn fixture_rustflags(asan: bool) -> Vec<OsString> {
     let mut flags = vec![OsString::from("-Cdebuginfo=1")];
     if asan {
