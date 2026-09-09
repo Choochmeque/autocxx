@@ -13,7 +13,7 @@ use crate::{
         analysis::tdef::TypedefPhase,
         api::{Api, TypedefKind},
         type_helpers::{
-            is_pointer_like, strip_const_markers, unqualified_array_element_type, unwrap_bitfield,
+            is_pointer_like, strip_layout_markers, unqualified_array_element_type, unwrap_bitfield,
             unwrap_function_pointer, unwrap_has_opaque,
         },
     },
@@ -558,9 +558,11 @@ impl ByValueChecker {
             // field can be POD exactly as it would for a plain field of it -
             // with one exception, below.
             // A `const` field is laid out exactly as the type it qualifies,
-            // so bindgen's marker for it decides nothing here; what it wraps
-            // does.
-            let field_ty = strip_const_markers(&f.ty);
+            // and so is the array a `std::array` was lowered to, so bindgen's
+            // markers for them decide nothing here; what they wrap does. The
+            // array one has to come off before `field_is_array` below, or a
+            // `std::array` field stops being an array to this walk.
+            let field_ty = strip_layout_markers(&f.ty);
             let field_is_array = matches!(field_ty, Type::Array(_));
             match unqualified_array_element_type(field_ty) {
                 Type::Path(p) => {

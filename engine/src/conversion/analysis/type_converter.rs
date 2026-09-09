@@ -19,7 +19,7 @@ use crate::{
             mentions_float128, mentions_long_double, mentions_volatile,
             unqualified_array_element_type, unwrap_bitfield, unwrap_const, unwrap_float128,
             unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double, unwrap_reference,
-            unwrap_volatile,
+            unwrap_std_array, unwrap_volatile,
         },
         ConvertErrorFromCpp,
     },
@@ -69,6 +69,22 @@ pub(crate) struct TypedefTargetInfo {
     /// Whether C++ qualified the target `const` in its own right. Same reason
     /// it is kept on the analysis: the converted type cannot say it.
     is_const: bool,
+    /// Whether the target is the array a `std::array<T, N>` was lowered to.
+    /// Same reason again: the converted type is a bare `[T; N]`, which is what
+    /// a C array is written as too.
+    is_std_array: bool,
+}
+
+/// What a typedef's target was, beyond what its converted type can say.
+///
+/// Both facts are lost by converting - Rust cannot spell a top-level `const`,
+/// and `[T; N]` is written for a `std::array<T, N>` and a C array alike - so
+/// they are read from the typedef's own analysis and applied to each use of
+/// the alias. See [`TypedefAnalysis::target_is_const`].
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TargetFacts {
+    is_const: bool,
+    is_std_array: bool,
 }
 
 /// Results of some type conversion, annotated with a list of every type encountered,
@@ -91,6 +107,13 @@ pub(crate) struct Annotated<T> {
     /// and there is no Rust pointer type which carries the other qualifier, so
     /// conversion is where the fact would otherwise be lost for good.
     pub(crate) has_volatile_pointee: bool,
+    /// Whether this type is the array a C++ `std::array<T, N>` was lowered to.
+    /// Kept beside the type for the reason [`Self::is_const`] is: `ty` is the
+    /// bare `[T; N]`, and bindgen writes the C array `T[N]` as that too, so the
+    /// type no longer says which of the two C++ wrote. What reads it is
+    /// [`TypeConverter::convert_lvalue_reference`], a reference being where the
+    /// two are different C++ types.
+    pub(crate) is_std_array: bool,
 }
 
 impl<T> Annotated<T> {
@@ -107,6 +130,7 @@ impl<T> Annotated<T> {
             kind,
             is_const: false,
             has_volatile_pointee: false,
+            is_std_array: false,
         }
     }
 
@@ -132,6 +156,28 @@ impl<T> Annotated<T> {
         }
     }
 
+    /// Records that this array is what a `std::array` was lowered to. See
+    /// [`Self::is_std_array`].
+    fn marked_std_array(mut self) -> Self {
+        self.is_std_array = true;
+        self
+    }
+
+    /// [`Self::marked_std_array`], for a fact which is only sometimes there.
+    fn marked_std_array_if(self, is_std_array: bool) -> Self {
+        if is_std_array {
+            self.marked_std_array()
+        } else {
+            self
+        }
+    }
+
+    /// Applies what a typedef's target carried for it. See [`TargetFacts`].
+    fn marked_from(self, facts: TargetFacts) -> Self {
+        self.marked_const_if(facts.is_const)
+            .marked_std_array_if(facts.is_std_array)
+    }
+
     fn map<T2, F: FnOnce(T) -> T2>(self, fun: F) -> Annotated<T2> {
         Annotated {
             ty: fun(self.ty),
@@ -143,6 +189,7 @@ impl<T> Annotated<T> {
             // re-box - the lvalue reference below - overwrites it with the
             // answer for the type it built.
             has_volatile_pointee: self.has_volatile_pointee,
+            is_std_array: self.is_std_array,
         }
     }
 }
@@ -682,6 +729,14 @@ impl<'a> TypeConverter<'a> {
             // anyway, since its name contains `__` - so pretend the field is
             // just that storage.
             self.convert_type(ty.clone(), ns, ctx)
+        } else if let Some(ty) = unwrap_std_array(&typ) {
+            // The array a `std::array<T, N>` was lowered to. The type is that
+            // array - cxx spells a Rust `[T; N]` as `std::array<T, N>`, so the
+            // bridge names the class the header was written with - and the
+            // marker only says which of the two C++ array types produced it.
+            // That fact travels alongside on the `Annotated`, for
+            // `convert_lvalue_reference`, which is where the two differ.
+            Ok(self.convert_type(ty.clone(), ns, ctx)?.marked_std_array())
         } else if let Some(ptr) = unwrap_reference(&typ, false) {
             self.convert_lvalue_reference(ptr, ns, ctx)
         } else if let Some(ptr) = unwrap_reference(&typ, true) {
@@ -708,7 +763,7 @@ impl<'a> TypeConverter<'a> {
         ns: &Namespace,
         ctx: &TypeConversionContext,
         deps: &mut HashSet<QualifiedName>,
-        target_is_const: bool,
+        target: TargetFacts,
     ) -> Result<ResolvedTypedef, ConvertErrorFromCpp> {
         let resolved = match self.resolve_typedef(&original_tn)? {
             None => ResolvedTypedef::Path(typ, original_tn),
@@ -725,7 +780,7 @@ impl<'a> TypeConverter<'a> {
                     return result
                         .map(|mut annotated| {
                             annotated.types_encountered.extend(std::mem::take(deps));
-                            annotated.marked_const_if(target_is_const)
+                            annotated.marked_const_if(target.is_const)
                         })
                         .map(Box::new)
                         .map(ResolvedTypedef::Converted);
@@ -775,7 +830,7 @@ impl<'a> TypeConverter<'a> {
                     annotated.kind = TypeKind::RValueReference;
                 }
                 return Ok(ResolvedTypedef::Converted(Box::new(
-                    annotated.marked_const_if(target_is_const),
+                    annotated.marked_const_if(target.is_const),
                 )));
             }
             Some(TypedefTargetInfo { ty: other, .. }) => {
@@ -797,8 +852,13 @@ impl<'a> TypeConverter<'a> {
                     _ => TypeKind::Regular,
                 };
                 return Ok(ResolvedTypedef::Converted(Box::new(
+                    // `typedef std::array<T, N> A` lands here, the target
+                    // having been converted to the bare `[T; N]` when the
+                    // typedef was analysed. Nothing in that says which of the
+                    // two C++ array types it was, so the alias carries the
+                    // answer for it.
                     Annotated::new(other.clone(), std::mem::take(deps), ApiVec::new(), kind)
-                        .marked_const_if(target_is_const),
+                        .marked_from(target),
                 )));
             }
         };
@@ -820,6 +880,9 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         let innerty = self.convert_boxed_type(r.elem, ns, &ctx.behind_reference())?;
+        // As for the reference bindgen writes with a marker; see
+        // `check_array_referent`.
+        Self::check_array_referent(&innerty, ctx)?;
         r.elem = innerty.ty;
         Ok(Annotated::new(
             Type::Reference(r),
@@ -933,6 +996,7 @@ impl<'a> TypeConverter<'a> {
         {
             return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
         }
+        Self::check_array_referent(&elem, ctx)?;
         let mut outer = elem.map(|elem| match mutability {
             Some(_) => Type::Path(parse_quote! {
                 ::core::pin::Pin < & #mutability #elem >
@@ -947,7 +1011,36 @@ impl<'a> TypeConverter<'a> {
             TypeKind::Reference
         };
         outer.has_volatile_pointee = referent_is_volatile;
+        // A reference to a `std::array` is not itself one.
+        outer.is_std_array = false;
         Ok(outer)
+    }
+
+    /// Turn down a reference to an array C++ wrote as `T[N]`.
+    ///
+    /// `const T (&)[N]` and `const std::array<T, N>&` are different C++ types
+    /// which reach autocxx as the same `&[T; N]`, bindgen writing `[T; N]` for
+    /// the class and for the C array alike. cxx spells that back as
+    /// `std::array<T, N>`, so it is the class the bridge would name, and only
+    /// one of the two is therefore bindable. Which one this is, the type no
+    /// longer says; [`Annotated::is_std_array`] does, carrying the marker
+    /// `36-std-array-marker.patch` puts on the class.
+    ///
+    /// A struct field is exempt. No reference reaches Rust from one - a struct
+    /// with a reference member is never POD, so it is opaque and its fields are
+    /// bytes nobody names - and refusing the field would instead lose autocxx
+    /// the knowledge that the member is there, which is what tells it C++ has
+    /// deleted the default constructor.
+    fn check_array_referent(
+        elem: &Annotated<Box<Type>>,
+        ctx: &TypeConversionContext,
+    ) -> Result<(), ConvertErrorFromCpp> {
+        if matches!(*elem.ty, Type::Array(_)) && !elem.is_std_array && !ctx.within_struct_field() {
+            return Err(ConvertErrorFromCpp::CppArrayReferenceInSignature(
+                elem.ty.to_token_stream().to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// The `T&&` case of [`Self::convert_type_path`].
@@ -1106,21 +1199,19 @@ impl<'a> TypeConverter<'a> {
         // it, so the constness of what we are about to resolve has to come
         // from the typedef's own analysis. Read before the match below, which
         // has several exits and would have to carry it through all of them.
-        let target_is_const = self
+        let target = self
             .resolve_typedef(&original_tn)?
-            .is_some_and(|target| target.is_const);
+            .map(|target| TargetFacts {
+                is_const: target.is_const,
+                is_std_array: target.is_std_array,
+            })
+            .unwrap_or_default();
         // First let's see if this is a typedef.
-        let (mut typ, tn) = match self.resolve_typedef_target(
-            typ,
-            original_tn,
-            ns,
-            ctx,
-            &mut deps,
-            target_is_const,
-        )? {
-            ResolvedTypedef::Path(typ, tn) => (typ, tn),
-            ResolvedTypedef::Converted(annotated) => return Ok(*annotated),
-        };
+        let (mut typ, tn) =
+            match self.resolve_typedef_target(typ, original_tn, ns, ctx, &mut deps, target)? {
+                ResolvedTypedef::Path(typ, tn) => (typ, tn),
+                ResolvedTypedef::Converted(annotated) => return Ok(*annotated),
+            };
 
         // A cxx smart pointer whose payload C++ qualified `const` -
         // `std::shared_ptr<const T>` - has no cxx spelling: `SharedPtr<T>`
@@ -1203,7 +1294,7 @@ impl<'a> TypeConverter<'a> {
         {
             let mut extra_apis = ApiVec::new();
             let surface = self.const_smart_pointer_surface(&tn, &typ, ns, &mut extra_apis)?;
-            return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
+            return self.lower_to_holder(typ, surface, deps, extra_apis, target.is_const);
         }
 
         // A `std::vector` of pointers has no cxx spelling either.
@@ -1233,7 +1324,7 @@ impl<'a> TypeConverter<'a> {
                     element: Box::new(element.ty.into()),
                     deps: element.types_encountered,
                 });
-                return self.lower_to_holder(typ, surface, deps, extra_apis, target_is_const);
+                return self.lower_to_holder(typ, surface, deps, extra_apis, target.is_const);
             }
         }
 
@@ -1401,7 +1492,7 @@ impl<'a> TypeConverter<'a> {
                         Some(surface),
                         deps,
                         extra_apis,
-                        target_is_const,
+                        target.is_const,
                     );
                 }
                 let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
@@ -1414,10 +1505,7 @@ impl<'a> TypeConverter<'a> {
                 deps.insert(new_tn);
             }
         }
-        Ok(
-            Annotated::new(Type::Path(typ), deps, extra_apis, kind)
-                .marked_const_if(target_is_const),
-        )
+        Ok(Annotated::new(Type::Path(typ), deps, extra_apis, kind).marked_from(target))
     }
 
     fn get_generic_args(typ: &mut TypePath) -> Option<&mut PathSegment> {
@@ -2474,6 +2562,7 @@ impl TypedefTarget for TypedefAnalysis {
             },
             kind: self.target_kind.clone(),
             is_const: self.target_is_const,
+            is_std_array: self.target_is_std_array,
         })
     }
 }

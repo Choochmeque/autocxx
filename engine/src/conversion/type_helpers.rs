@@ -230,6 +230,17 @@ fn mentions_marker(ty: &Type, marker: &str) -> bool {
     }
 }
 
+/// If `ty` is the array a C++ `std::array<T, N>` was lowered to, return the
+/// `[T; N]` itself.
+///
+/// bindgen writes `[T; N]` for the class and for the C array `T[N]` alike, and
+/// the marker is the only thing which says which of the two a type was. What
+/// needs to know is a reference: `const T (&)[N]` and `const std::array<T, N>&`
+/// are different C++ types, and cxx writes the second for either.
+pub(crate) fn unwrap_std_array(ty: &TypePath) -> Option<&syn::Type> {
+    unwrap_bindgen_marker(ty, "__bindgen_marker_StdArray")
+}
+
 /// Peels bindgen's `const` markers off `ty`, for the walks which care what a
 /// type is laid out as rather than whether C++ let anyone write to it. A
 /// `const T` occupies exactly what a `T` does.
@@ -243,17 +254,35 @@ pub(crate) fn strip_const_markers(mut ty: &Type) -> &Type {
     ty
 }
 
-/// [`array_element_type`], for output which may have `const` markers in it.
+/// Peels the markers which say something about a type without changing what it
+/// is laid out as: the `const` qualifier, and the `std::array` a `[T; N]` came
+/// from. Both wrap the type they describe, and both are transparent.
 ///
-/// The two have to be peeled together rather than one after the other: bindgen
-/// folds a `const` element type into the array's own constness as well as
-/// leaving it on the element (`ir/ty.rs`'s `from_clang_ty`), so
-/// `const int a[2][3]` arrives as markers and array layers alternating all the
-/// way down, and stopping at the first of either finds nothing useful.
+/// For the walks which read a struct's fields straight off bindgen's output,
+/// before the type converter has unwrapped anything for them.
+pub(crate) fn strip_layout_markers(mut ty: &Type) -> &Type {
+    loop {
+        let Type::Path(typ) = ty else { return ty };
+        match unwrap_const(typ).or_else(|| unwrap_std_array(typ)) {
+            Some(inner) => ty = inner,
+            None => return ty,
+        }
+    }
+}
+
+/// [`array_element_type`], for output which may have markers in it.
+///
+/// Markers and array layers have to be peeled together rather than one after
+/// the other: bindgen folds a `const` element type into the array's own
+/// constness as well as leaving it on the element (`ir/ty.rs`'s
+/// `from_clang_ty`), so `const int a[2][3]` arrives as markers and array layers
+/// alternating all the way down, and stopping at the first of either finds
+/// nothing useful. A `std::array` of `std::array`s alternates the same way, its
+/// marker sitting on each layer.
 pub(crate) fn unqualified_array_element_type(ty: &Type) -> &Type {
-    let mut ty = strip_const_markers(ty);
+    let mut ty = strip_layout_markers(ty);
     while let Type::Array(arr) = ty {
-        ty = strip_const_markers(&arr.elem);
+        ty = strip_layout_markers(&arr.elem);
     }
     ty
 }
@@ -320,38 +349,50 @@ pub(crate) fn mentions_cpp_array(ty: &Type) -> bool {
     }
 }
 
-/// The element of an array standing on its own, looking through the nesting
-/// where an array holds arrays, or `None` where `ty` is not one.
+/// The element of an array a signature carries, looking through the nesting
+/// where an array holds arrays, or `None` where `ty` holds no array.
 ///
-/// What stands on its own in a signature is a `std::array`; see
-/// [`denotes_indirect_cpp_array`].
+/// Every array a signature is allowed to carry is a `std::array`, whether it
+/// stands on its own or is reached through the reference the two other arms
+/// here are: a C array standing alone cannot be written in either position, and
+/// one behind a reference is refused while the marker saying which it is can
+/// still be read. cxx has the same rule about the element in each case, moving
+/// the array whole when it is passed and naming the same C++ type when it is
+/// not.
 pub(crate) fn cpp_array_element(ty: &Type) -> Option<&Type> {
     match ty {
         Type::Array(arr) => Some(cpp_array_element(&arr.elem).unwrap_or(&arr.elem)),
+        Type::Reference(TypeReference { elem, .. }) => cpp_array_element(elem),
+        Type::Path(typ) => {
+            extract_pinned_mutable_reference_type(typ).and_then(|inner| cpp_array_element(inner))
+        }
         _ => None,
     }
 }
 
-/// Whether `ty` reaches a C++ array through a reference or a pointer.
+/// Whether `ty` reaches a C++ array through a pointer.
 ///
-/// The part of [`denotes_cpp_array`] a signature has to turn down. What is
-/// left out is the array standing alone, and what that means is not an array
-/// at all: no C++ function takes or returns one by value - a parameter decays
-/// and a return is ill-formed - so a signature which arrives holding one holds
-/// a class bindgen lowered to the array it is laid out as, which is
-/// `std::array<T, N>`. cxx spells that back as `std::array<T, N>`, so the
-/// bridge names the type the function was declared with.
+/// The part of [`denotes_cpp_array`] a signature still has to turn down, which
+/// is neither of the two a signature keeps.
 ///
-/// Reaching one through an indirection is still refused, because there the two
-/// spellings do differ: `const T (&)[N]` and `const std::array<T, N>&` are
-/// different C++ types, and only the second is what cxx would write.
-pub(crate) fn denotes_indirect_cpp_array(ty: &Type) -> bool {
+/// The array standing alone is not an array at all: no C++ function takes or
+/// returns one by value - a parameter decays and a return is ill-formed - so a
+/// signature holding one holds a class bindgen lowered to the array it is laid
+/// out as, which is `std::array<T, N>`. cxx spells that back the same way, so
+/// the bridge names the type the function was declared with.
+///
+/// A reference is decided earlier, by
+/// [`TypeConverter::check_array_referent`](crate::conversion::analysis::type_converter): both C++ types
+/// exist there, and telling them apart needs the marker, which is gone by the
+/// time a converted signature is being read.
+///
+/// A pointer is left. `ensure_pointee_is_valid` turns down one written as
+/// `T (*)[N]`, but an alias hides the array behind a path until it is
+/// resolved, as in `using A = T[N]; void f(A*)`. No `std::array` reaches here
+/// that way, pointers to one not being bound at all.
+pub(crate) fn denotes_cpp_array_behind_pointer(ty: &Type) -> bool {
     match ty {
-        Type::Reference(TypeReference { elem, .. }) => denotes_cpp_array(elem),
         Type::Ptr(TypePtr { elem, .. }) => denotes_cpp_array(elem),
-        Type::Path(typ) => {
-            matches!(extract_pinned_mutable_reference_type(typ), Some(inner) if denotes_cpp_array(inner))
-        }
         _ => false,
     }
 }

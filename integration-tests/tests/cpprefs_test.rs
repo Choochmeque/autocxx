@@ -1303,3 +1303,49 @@ fn test_smart_pointer_get_cpprefs() {
         None,
     );
 }
+
+/// A `std::array` reference under this policy, which turns every C++ reference
+/// into a pointer the shim dereferences. The array is the pointee, so the
+/// wrapper's parameter is written `const std::array<uint8_t, 4>*` and given
+/// back to C++ as the reference the function asked for.
+#[test]
+fn test_std_array_const_reference_param_cpprefs() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstdint>
+        inline uint32_t fx_sum(const std::array<uint8_t, 4>& a) { return a[0] + a[3]; }
+    "};
+    let rs = quote! {
+        let a = CppPin::new([1u8, 2, 3, 4]);
+        assert_eq!(ffi::fx_sum(a.as_cpp_ref()), 5);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_sum"], &[]);
+}
+
+/// An element which needs the relocatability certificate by value, behind a
+/// reference, under this policy - and which needs none here, which is what
+/// this pins. The policy rewrites the reference into a bridge pointer, and cxx
+/// never moves what a pointer points at, so it asks nothing of the element and
+/// no certificate is emitted. Under the default policy the same signature
+/// keeps the reference and does get one; `test_std_array_reference_of_pod_class`
+/// is that side. `test_std_array_const_reference_param_cpprefs` cannot stand in
+/// for this one: `uint8_t` is one of cxx's own atoms and needs no certificate
+/// in either policy.
+#[test]
+fn test_std_array_certificate_element_reference_cpprefs() {
+    let hdr = indoc! {"
+        #include <array>
+        inline int fx_total(const std::array<int, 3>& a) {
+            return a[0] + a[1] + a[2];
+        }
+    "};
+    let rs = quote! {
+        let a = CppPin::new([
+            autocxx::c_int(1),
+            autocxx::c_int(2),
+            autocxx::c_int(4),
+        ]);
+        assert_eq!(ffi::fx_total(a.as_cpp_ref()), autocxx::c_int(7));
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_total"], &[]);
+}
