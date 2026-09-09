@@ -45,6 +45,21 @@ pub enum BuilderError {
 #[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
 pub type BuilderBuild = cc::Build;
 
+/// The C++ flags the `AUTOCXX_ASAN` build mode asks for, and none when it is
+/// off.
+///
+/// Split from [`add_sanitizer_flags`] so the decision can be tested without a
+/// test reaching into the process environment.
+fn sanitizer_flags(asan: bool) -> &'static [&'static str] {
+    if asan {
+        // gcc, clang and clang-cl's spelling; cl.exe takes `-` for `/` and has
+        // had `/fsanitize=address` since VS 16.9.
+        &["-fsanitize=address"]
+    } else {
+        &[]
+    }
+}
+
 /// Adds to `builder` the C++ flags the `AUTOCXX_ASAN` build mode asks for, and
 /// nothing when it is unset.
 ///
@@ -52,10 +67,28 @@ pub type BuilderBuild = cc::Build;
 /// builders - this crate's, and the one the integration harness makes for
 /// already-generated files - and instrumenting the Rust half alone leaves every
 /// access the C++ makes itself unchecked.
+///
+/// `flag`, not `flag_if_supported`: instrumentation is the only thing this mode
+/// is for, so a compiler which will not instrument has to say so rather than
+/// hand back a build which checks nothing. `flag_if_supported` resolves a flag by
+/// running a probe compile of its own and reads any failure to *run* that probe -
+/// a spawn lost to a concurrent suite, a probe which merely printed something on
+/// stderr - as "unsupported", dropping the flag and naming nothing in the log
+/// (cc's `is_flag_supported_inner(..).unwrap_or(false)`).
+///
+/// Nothing else would notice. Each `cc::Build` carries its own probe cache, so
+/// every fixture probes on its own account and a canary elsewhere has no way to
+/// observe a flag this build dropped; an `Err` is not even cached, so the loss can
+/// be as small as a single translation unit which a later one silently retries.
+/// The C++ comes out unchecked and the job reports success.
 #[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
 pub fn add_sanitizer_flags(builder: &mut BuilderBuild) {
-    if std::env::var_os("AUTOCXX_ASAN").is_some() {
-        builder.flag_if_supported("-fsanitize=address");
+    apply_sanitizer_flags(builder, std::env::var_os("AUTOCXX_ASAN").is_some());
+}
+
+fn apply_sanitizer_flags(builder: &mut BuilderBuild, asan: bool) {
+    for flag in sanitizer_flags(asan) {
+        builder.flag(flag);
     }
 }
 
@@ -387,5 +420,68 @@ fn cxx_version_check() -> Result<(), BuilderError> {
             cxx_version: skew.cxx_version,
             cxx_gen_mangling: skew.cxx_gen_mangling,
         }),
+    }
+}
+
+/// Tests for the flags this crate puts on the [`cc::Build`] it hands back. They
+/// are decided here, so nothing downstream can assert them.
+///
+/// What these pin is the *delivery*: that a flag which is required arrives
+/// without a probe compile having to succeed first, which is the regression that
+/// matters and the one `flag_if_supported` caused.
+#[cfg(test)]
+mod flag_tests {
+    use super::{apply_sanitizer_flags, sanitizer_flags, BuilderBuild};
+
+    /// The arguments a build ends up giving the compiler, for a `cc::Build` which
+    /// cannot run a probe compile at all - there is no such compiler. That is the
+    /// strongest form of the failure `flag_if_supported` reads as "unsupported",
+    /// and the one it leaves no trace of.
+    fn args_with_no_compiler_to_probe_with(
+        target: &str,
+        apply: impl FnOnce(&mut BuilderBuild),
+    ) -> Vec<String> {
+        let mut b = BuilderBuild::new();
+        b.cpp(true)
+            .cargo_metadata(false)
+            // cc reads these from the environment a build script runs in, and
+            // this is a test binary.
+            .opt_level(1)
+            .target(target)
+            .host(target)
+            .compiler("/no-such-directory-for-this-test/c++");
+        apply(&mut b);
+        b.try_get_compiler()
+            .expect("cc could not describe the compiler")
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Instrumentation is the only thing `AUTOCXX_ASAN` is for, so it arrives on
+    /// the same terms: a build whose C++ went uninstrumented has to fail rather
+    /// than pass having checked nothing.
+    ///
+    /// Spelled out, as above.
+    #[test]
+    fn the_sanitizer_flag_arrives_with_no_compiler_to_probe_with() {
+        let args = args_with_no_compiler_to_probe_with("x86_64-unknown-linux-gnu", |b| {
+            apply_sanitizer_flags(b, true)
+        });
+        assert!(
+            args.iter().any(|a| a == "-fsanitize=address"),
+            "-fsanitize=address missing from {args:?}"
+        );
+    }
+
+    /// Which flags the condition selects, as literals, so that the test above
+    /// and the build itself cannot drift together into agreeing about nothing.
+    #[test]
+    fn the_mode_selects_exactly_its_own_flags() {
+        assert_eq!(sanitizer_flags(true), ["-fsanitize=address"]);
+        // A build which did not ask for the sanitizer is not instrumented
+        // behind the caller's back.
+        assert!(sanitizer_flags(false).is_empty());
     }
 }
