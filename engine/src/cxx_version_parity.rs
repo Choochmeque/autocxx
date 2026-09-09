@@ -8,16 +8,18 @@
 
 //! Detection of a `cxx`/`cxx-gen` symbol naming mismatch.
 //!
-//! Since cxx 1.0.189, every symbol a `#[cxx::bridge]` produces carries the
-//! patch level of the crate which produced it - `cxxbridge1$199$my_function` -
-//! from `const CXXVERSION: &str = env!("CARGO_PKG_VERSION_PATCH")` in cxx's own
-//! `syntax::mangle`. Before that release the same symbol was plain
-//! `cxxbridge1$my_function`. The Rust half of each of those symbols is emitted
-//! by the `cxx` crate the crate under construction links against; the C++ half
-//! is emitted by the `cxx-gen` that `autocxx-engine` was built with. If the two
-//! disagree - on the number, or on whether there is a number at all - every
-//! generated function is a link error naming a symbol which appears in nobody's
-//! source.
+//! Since cxx 1.0.189, every symbol for a function declared in a
+//! `#[cxx::bridge]` carries the patch level of the crate which produced it -
+//! `cxxbridge1$199$my_function` - from `const CXXVERSION: &str =
+//! env!("CARGO_PKG_VERSION_PATCH")` in cxx's own `syntax::mangle`. Before that
+//! release the same symbol was plain `cxxbridge1$my_function`. The behaviours of
+//! cxx's own container bindings (`cxxbridge1$unique_ptr$std$string$null`) are
+//! mangled without it in every release, so a straddle cannot be seen in them.
+//! The Rust half of each versioned symbol is emitted by the `cxx` crate the
+//! crate under construction links against; the C++ half is emitted by the
+//! `cxx-gen` that `autocxx-engine` was built with. If the two disagree - on the
+//! number, or on whether there is a number at all - each call of a declared
+//! function is left referring to a symbol which appears in nobody's source.
 //!
 //! Cargo resolves the two independently, and no manifest can require them to
 //! match: "the same patch level as that other crate" is not something a version
@@ -36,8 +38,8 @@ use quote::quote;
 
 /// The cxx release which began putting the patch level into symbol names, and
 /// so the point either side of which two cxx-shaped crates cannot link
-/// together. Our declared floors are far below it (`cxx = "1.0.136"`,
-/// `cxx-gen = "0.7.136"`), so a build straddling this line is reachable.
+/// together. Our declared floors are far below it (`cxx = "1.0.161"`,
+/// `cxx-gen = "0.7.161"`), so a build straddling this line is reachable.
 const FIRST_VERSIONED_MANGLING_PATCH: u32 = 189;
 
 /// How a given cxx-shaped crate names the symbols it generates.
@@ -206,7 +208,7 @@ mod tests {
                 patch.parse::<u32>().is_ok(),
                 "mangled patch level {patch:?} is not a number"
             ),
-            // Reachable in principle - our floor is cxx-gen 0.7.136 - but not
+            // Reachable in principle - our floor is cxx-gen 0.7.161 - but not
             // with any cxx-gen this repo has ever locked.
             Mangling::Unversioned => {
                 panic!("cxx-gen unexpectedly generated pre-1.0.189 symbol names")
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn a_generator_predating_symbol_versioning_is_a_skew_against_a_modern_cxx() {
-        // The case with no numbers to compare: cxx-gen 0.7.136 writes
+        // The case with no numbers to compare: cxx-gen 0.7.161 writes
         // `cxxbridge1$f` while cxx 1.0.189 looks for `cxxbridge1$189$f`.
         let skew = skew_between("/x/cxx-1.0.189/include/cxx.h", &Mangling::Unversioned)
             .expect("an unversioned generator cannot link against cxx 1.0.189");

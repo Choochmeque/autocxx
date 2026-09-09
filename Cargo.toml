@@ -47,26 +47,33 @@ c-type-vectors = ["dep:cxx-build"]
 
 [dependencies]
 autocxx-macro = { path="macro", version="0.30.0" }
-# The floor is what `reference_wrapper.rs` needs: `UniquePtr::as_ptr` and
-# `as_mut_ptr` both first appear in cxx 1.0.136 (1.0.135 has neither), so a
-# `-Z minimal-versions` resolve below that picks a cxx this crate cannot build
-# against.
+# Two things set the floor. `reference_wrapper.rs` needs `UniquePtr::as_ptr` and
+# `as_mut_ptr`, which both first appear in cxx 1.0.136 (1.0.135 has neither). The
+# binding one is 1.0.161, which deleted `#[automatically_derived]` from the impl
+# blocks `cxxbridge-macro` emits which are not trait impls: the inherent one
+# carrying a bridge type's methods, and the one carrying a shared enum's
+# variants. Every release from 1.0.136 to 1.0.160 emits both, and rustc reports
+# them as `unused_attributes` - "will become a hard error in a future release" -
+# against the span of the bridge we generated rather than against anything in
+# cxx. So a `-Z minimal-versions` resolve below either point picks a cxx this
+# crate cannot build against, or one which deprecates our own output.
 #
-# Whatever version is resolved has to match, patch level and all, the cxx-gen
-# that autocxx-engine generates C++ with: since cxx 1.0.189 the patch level is
-# part of every symbol a bridge produces (`cxxbridge1$199$f`), so a mismatch
-# means every generated function fails to link against a symbol that appears in
-# nobody's source. No version requirement can ask for that - only an exact pin
+# Once either side is 1.0.189 or newer, whatever version is resolved has to
+# agree on the patch level with the cxx-gen that autocxx-engine generates C++
+# with: from that release the patch level is part of the symbol of every
+# function a bridge declares (`cxxbridge1$199$f`), so a mismatch leaves every
+# call of one referring to a symbol that appears in nobody's source. Two
+# versions from before it name those functions `cxxbridge1$f` and agree. No version requirement can ask for that - only an exact pin
 # would, and that would stop downstream crates choosing any other cxx - so
 # `autocxx-build` checks it at build time instead. See
 # `engine/src/cxx_version_parity.rs`.
-cxx = "1.0.136" # ... also needed because expansion of type_id refers to ::cxx
+cxx = "1.0.161" # ... also needed because expansion of type_id refers to ::cxx
 moveit = { version = "0.6", features = [ "cxx" ] }
 
 [build-dependencies]
 # Compiles the `std::vector` glue for the `c_*` newtypes - see `build.rs`.
 # Optional so that `--no-default-features` leaves this a pure-Rust crate.
-cxx-build = { version = "1.0.136", optional = true }
+cxx-build = { version = "1.0.161", optional = true }
 
 [workspace]
 members = ["parser", "engine", "gen/cmd", "gen/build", "macro", "demo", "tools/reduce", "tools/mdbook-preprocessor", "tools/patch-check", "integration-tests", "integration-tests/fixture-deps"]

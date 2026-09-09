@@ -28,7 +28,7 @@ serde = "1.0"
 serde_derive = "1.0"
 syn = "2.0.1"
 quote = "1.0"
-cxx-gen = "0.7.136"
+cxx-gen = "0.7.161"
 regex = "1.5"
 indexmap = "1.8"
 
