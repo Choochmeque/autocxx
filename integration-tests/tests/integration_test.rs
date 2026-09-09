@@ -39462,3 +39462,78 @@ fn test_emplace_of_over_aligned_type_uses_its_aligned_allocator_pair() {
         None,
     );
 }
+
+/// The allocator prelude's helpers are named from the global namespace,
+/// because the type being allocated brings its own namespace into every
+/// unqualified call which takes a pointer to it.
+#[test]
+fn test_allocator_prelude_helpers_are_not_reached_by_adl() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <type_traits>
+        namespace app {
+        inline uint32_t& fx_decoys() { static uint32_t n = 0; return n; }
+        inline uint32_t& fx_frees() { static uint32_t n = 0; return n; }
+        struct Item {
+            Item() {}
+            static void* operator new(::std::size_t n) { return ::operator new(n); }
+            static void operator delete(void* p) noexcept {
+                fx_frees()++;
+                ::operator delete(p);
+            }
+            uint32_t a;
+        };
+        // Ordinary functions of the prelude's own helper names, in the
+        // namespace argument-dependent lookup searches for an `Item*`. Each
+        // is a better match than the template it would shadow, so an
+        // unqualified call inside the prelude reaches one of these and frees
+        // nothing at all.
+        inline void delete_imp(Item*, int) { fx_decoys()++; }
+        inline void autocxx_delete_imp(Item*) { fx_decoys()++; }
+        // A type with no allocation functions of its own, whose storage the
+        // prelude hands to the global pair through a second helper - which
+        // takes a `Plain*` and so is looked up in here as well.
+        struct Plain {
+            Plain() {}
+            uint32_t a;
+        };
+        inline void autocxx_delete_globally(Plain*, ::std::false_type) { fx_decoys()++; }
+        inline uint32_t fx_read_decoys() { return fx_decoys(); }
+        inline uint32_t fx_read_frees() { return fx_frees(); }
+        }
+    "};
+    let rs = quote! {
+        use autocxx::moveit::AsMove;
+        let obj = ffi::app::Item::new().within_unique_ptr();
+        {
+            autocxx::moveit::slot!(#[dropping] storage);
+            drop(obj.as_move(storage));
+        }
+        assert_eq!(ffi::app::fx_read_frees(), 1);
+        let plain = ffi::app::Plain::new().within_unique_ptr();
+        {
+            autocxx::moveit::slot!(#[dropping] storage);
+            drop(plain.as_move(storage));
+        }
+        assert_eq!(ffi::app::fx_read_decoys(), 0);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "app::Item",
+                "app::Plain",
+                "app::fx_read_decoys",
+                "app::fx_read_frees",
+            ],
+            &[],
+            None,
+        ),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}

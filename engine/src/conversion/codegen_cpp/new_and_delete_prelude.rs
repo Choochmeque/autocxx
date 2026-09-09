@@ -276,7 +276,9 @@ pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
     }
     #endif
 
-    // One of these is enabled for any T, and never more than one.
+    // One of these is enabled for any T, and never more than one. Every call
+    // below names them from the global namespace, or the argument's own
+    // namespaces could offer a better-matching function of that name.
     //
     // Each deallocation function is reached through the pointer its probe
     // formed rather than by writing the call again: a second overload can
@@ -285,14 +287,14 @@ pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
     #if defined(__cpp_aligned_new)
     template <typename T>
     typename ::std::enable_if<autocxx_deletes_via_class_aligned<T>::value>::type
-    delete_imp(T *ptr) {
+    autocxx_delete_imp(T *ptr) {
       static_cast<void (*)(void *, ::std::align_val_t)>(&T::operator delete)(
           ptr, ::std::align_val_t(alignof(T)));
     }
     template <typename T>
     typename ::std::enable_if<
         autocxx_deletes_via_class_sized_aligned<T>::value>::type
-    delete_imp(T *ptr) {
+    autocxx_delete_imp(T *ptr) {
       static_cast<void (*)(void *, ::std::size_t, ::std::align_val_t)>(
           &T::operator delete)(ptr, sizeof(T),
                                ::std::align_val_t(alignof(T)));
@@ -300,20 +302,20 @@ pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
     #endif
     template <typename T>
     typename ::std::enable_if<autocxx_deletes_via_class_plain<T>::value>::type
-    delete_imp(T *ptr) {
+    autocxx_delete_imp(T *ptr) {
       T::operator delete(ptr);
     }
     template <typename T>
     typename ::std::enable_if<autocxx_deletes_via_class_sized<T>::value>::type
-    delete_imp(T *ptr) {
+    autocxx_delete_imp(T *ptr) {
       static_cast<void (*)(void *, ::std::size_t)>(&T::operator delete)(
           ptr, sizeof(T));
     }
     template <typename T>
     typename ::std::enable_if<autocxx_deletes_globally<T>::value>::type
-    delete_imp(T *ptr) {
+    autocxx_delete_imp(T *ptr) {
     #if defined(__cpp_aligned_new)
-      autocxx_delete_globally(ptr, typename autocxx_uses_aligned_global<T>::type{});
+      ::autocxx_delete_globally(ptr, typename autocxx_uses_aligned_global<T>::type{});
     #else
       ::operator delete(ptr);
     #endif
@@ -333,25 +335,25 @@ pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
                     \"to free one without an operator new to match - give the \"
                     \"class an operator new(std::size_t) as well\");
     #endif
-      delete_imp(obj);
+      ::autocxx_delete_imp(obj);
     }
 
     #if defined(__cpp_aligned_new)
     template <typename T>
     typename ::std::enable_if<autocxx_news_via_class_aligned<T>::value,
                               void *>::type
-    new_imp(::std::size_t count) {
+    autocxx_new_imp(::std::size_t count) {
       return T::operator new(count, ::std::align_val_t(alignof(T)));
     }
     #endif
     template <typename T>
     typename ::std::enable_if<autocxx_news_via_class_plain<T>::value, void *>::type
-    new_imp(::std::size_t count) {
+    autocxx_new_imp(::std::size_t count) {
       return T::operator new(count);
     }
     template <typename T>
     typename ::std::enable_if<autocxx_news_globally<T>::value, void *>::type
-    new_imp(::std::size_t count) {
+    autocxx_new_imp(::std::size_t count) {
     #if defined(__cpp_aligned_new)
       // Reached with an aligned operator new only where the type is not
       // over-aligned, so a new-expression passes no alignment - and clang and
@@ -361,7 +363,7 @@ pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
                     \"and none taking a size alone, and autocxx cannot tell \"
                     \"which operator delete would match it - give the class an \"
                     \"operator new(std::size_t)\");
-      return autocxx_new_globally<T>(
+      return ::autocxx_new_globally<T>(
           count, typename autocxx_uses_aligned_global<T>::type{});
     #else
       // Before C++17 there is no aligned `::operator new` to reach for, and
@@ -379,7 +381,7 @@ pub(super) static NEW_AND_DELETE_PRELUDE: &str = indoc! {"
     }
 
     template <typename T> T *new_appropriately() {
-      void *storage = new_imp<T>(sizeof(T));
+      void *storage = ::autocxx_new_imp<T>(sizeof(T));
       // A class may declare a `noexcept` operator new, which reports failure
       // by returning null. `new T` would then construct nothing; this has no
       // way to say so - its caller turns the pointer straight into a Rust

@@ -840,16 +840,22 @@ impl<'a> CppCodeGenerator<'a> {
                 )
             }
             CppFunctionBody::ConstructSuperclass(_) => ("".to_string(), arg_list, false),
+            // Named from the global namespace, or the type's own namespaces
+            // could offer a template of that name, which explicit template
+            // arguments leave to compete.
             CppFunctionBody::AllocUninitialized(ty) => {
                 let namespaced_ty = self.namespaced_name(ty);
                 (
-                    format!("new_appropriately<{namespaced_ty}>();",),
+                    format!("::new_appropriately<{namespaced_ty}>();",),
                     "".to_string(),
                     true,
                 )
             }
             CppFunctionBody::FreeUninitialized(ty) => (
-                format!("delete_appropriately<{}>(arg0);", self.namespaced_name(ty)),
+                format!(
+                    "::delete_appropriately<{}>(arg0);",
+                    self.namespaced_name(ty)
+                ),
                 "".to_string(),
                 true,
             ),
