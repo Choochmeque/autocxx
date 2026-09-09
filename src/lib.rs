@@ -2,6 +2,11 @@
 #![cfg_attr(nightly, feature(unsize))]
 #![cfg_attr(nightly, feature(dispatch_from_dyn))]
 #![cfg_attr(nightly, feature(arbitrary_self_types))]
+// An `unsafe fn` body is not an unsafe block: each operation in one states which
+// of the function's own promises it is relying on, rather than all of them at
+// once. Rust 2024 warns about the absence; this crate refuses it, because most
+// of what is here is exactly such a function.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 // Copyright 2020 Google LLC
 //

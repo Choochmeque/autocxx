@@ -109,7 +109,9 @@ impl<T, RVP: RValueParam<T>> RValueParamHandler<T, RVP> {
     pub unsafe fn populate(self: Pin<&mut Self>, param: RVP) {
         // Structural pinning, as documented in [`std::pin`].
         // Safety: we will not move the contents of the pin.
-        *Pin::into_inner_unchecked(self.map_unchecked_mut(|s| &mut s.space)) = Some(param)
+        unsafe {
+            *Pin::into_inner_unchecked(self.map_unchecked_mut(|s| &mut s.space)) = Some(param)
+        }
     }
 
     /// Return a pointer to the underlying value which can be passed to C++.
