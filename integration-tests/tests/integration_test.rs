@@ -19,7 +19,7 @@ use crate::{
 };
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, make_msvc_warning_scope,
-    run_generate_all_test, run_test, run_test_ex, run_test_expect_fail, run_test_expect_fail_ex,
+    run_generate_all_test, run_test, run_test_ex, run_test_expect_fail,
     run_test_expect_fail_with_error, run_test_expect_fail_with_error_ex,
     run_test_expect_fail_with_error_modified, run_test_expect_fail_with_errors,
     run_test_expect_fail_with_errors_ex, BuilderModifier, CodeCheckerFns, TestError,

@@ -1540,29 +1540,6 @@ fn assert_error_mentions(err: &TestError, expected: &[&str]) {
     }
 }
 
-pub fn run_test_expect_fail_ex(
-    cxx_code: &str,
-    header_code: &str,
-    rust_code: TokenStream,
-    directives: TokenStream,
-    builder_modifier: Option<BuilderModifier>,
-    code_checker: Option<CodeChecker>,
-    extra_rust: Option<TokenStream>,
-) {
-    do_run_test(
-        cxx_code,
-        header_code,
-        rust_code,
-        directives,
-        builder_modifier,
-        code_checker,
-        extra_rust,
-        "unsafe_ffi",
-        None,
-    )
-    .expect_err("Unexpected success");
-}
-
 /// In the future maybe the tests will distinguish the exact type of failure expected.
 pub enum TestError {
     AutoCxx(BuilderError),
