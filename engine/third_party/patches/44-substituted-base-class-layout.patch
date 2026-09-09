@@ -1,0 +1,250 @@
+Subject: Size a base class as the type it is written as
+
+`<div rustbindgen replaces="X"></div>` tells bindgen to bind `X` as some other
+type the header declares, and that other type is usually a different size: the
+annotation exists to substitute a Rust-shaped stand-in for a C++ type Rust
+cannot express. A struct holding such a type as a *member* is kept honest.
+`FieldData::codegen` measures the field as the type it is written as - resolved
+through the `ResolvedTypeRef` the replacement is recorded as, through a typedef
+in front of it, through the class template it is an instantiation of - and the
+struct is padded out to the size clang reported. A struct *deriving* from one
+was not.
+
+A base class is written as a field of the base's own type, and that field goes
+through the same substitution: `to_rust_ty_or_opaque` follows the
+`ResolvedTypeRef` like any other. The measurement did not follow it.
+`StructLayoutTracker::saw_base` was handed the type the class was declared to
+derive from, and that type goes on carrying the layout clang gave it, so
+
+    struct Real { unsigned long long a, b, c; };
+    /** <div rustbindgen replaces="Real"></div> */
+    struct Stand { void* p; };
+    struct Derived : Real { unsigned n; };
+
+came out as `struct Derived { _base: Stand, n: c_uint }` - twelve bytes of
+content, rounded to sixteen by the pointer's alignment - for a class an LP64
+target lays out at thirty-two. The tracker believed the base had filled the
+twenty-four bytes the target gave it, so no padding was written in front of `n`
+and `pad_struct` had nothing left to add. The class is half the width of the
+object C++ builds in it, its own member is at the wrong offset, and every object
+crossing the boundary is truncated. A caller who asks C++ to construct one in
+storage sized from the Rust type gets it built past the end.
+
+Measure the base the way a field of the same type is measured, through
+`field_representation` and `field_representation_layout`. Every route a member
+takes to a substitution a base takes as well, and they are the same routes, so
+the two now agree by construction rather than by two implementations of the walk
+agreeing. Where the field is written as the type the class was declared to
+derive from, the walk lands back on it and the measurement is what it was.
+
+The probe deciding whether the bases have to become one opaque field is measured
+the same way, for the same reason: what it compares against the offset of the
+first member is where the fields written for the bases end, and those fields are
+the stand-ins. A class whose base fields are written as the types it was
+declared to derive from decides exactly as it did before, and one whose
+substitute is *wider* than what it stands in for - which overruns the room the
+target gave the bases, and was written out at that width anyway - now reaches
+the arm which was written for exactly that overrun.
+
+That leaves the other direction, which no base could take before this: fields
+written for the bases which end *before* the bytes the target gave them. The
+difference is a run of bytes no field covers, and something has to cover it or
+every member after the bases is early. `saw_field` does close such a gap in
+front of a member, from the member's own offset, but not always as itself and
+not always at all: the blob it asks for is a whole number of units of the
+member's alignment, which is longer than the run wherever the two do not divide;
+a packed class has that padding suppressed, being a class whose fields are not
+aligned; and a bitfield allocation unit is laid out from where the tracker has
+reached rather than from an offset of its own, so nothing is written in front of
+one. Write the run out where the bases end instead, in bytes, so that it is the
+number of bytes it is.
+
+Which classes those are is asked directly, by measuring the bases a second time
+as the types the class was declared to derive from. A base written as the type
+it was declared as is as wide as the room the target gave it, so the gap it
+leaves in front of the first member is the slack that member's own alignment
+takes up and is left exactly where it was; the two measurements part company
+only where the field is written as something else. A `replaces=` substitute is
+the shape this is about, and an alias carrying an `aligned` attribute of its own
+is the other: the walk follows the alias to the type it names, whose alignment
+is the smaller of the two, and such a class is written with typed bases and this
+run of bytes where it used to have its bases collapsed to opaque ones. Which
+fields carry the layout differs; the offsets both are built from are the ones
+the target reported.
+
+Both ends count a base at its size rounded up to its own alignment, which is the
+width of a Rust type of that layout. A layout whose size is not a whole number
+of its alignment is not one any type has - only an `aligned` attribute on a
+typedef of a narrower type reaches one - and what `helpers::blob` writes for it
+agrees above four-byte alignment and is shorter below, where it hands back whole
+units of the alignment and drops the remainder. Those classes come out short by
+the bytes it dropped, which is fewer than they were short of before. Counting
+the size clang measured instead makes the first of the two twice the width C++
+gives it, the bytes between the two ends being counted once by the field and
+again by the run.
+
+What this does not reach is a substituted base followed by *another* base. The
+field written for that second base still starts where the first one's stand-in
+ends rather than where the target puts it. The class reaches the size the target
+gave it and every member the class declares itself is at the offset it reported,
+because the run of bytes above is measured from where the emitted bases end; a
+field written for a later base is not. That is the shape the `members_start`
+comment below already records as out of reach: catching it takes the offset of
+each base, which libclang has reported only since 20.0, through
+`clang_getOffsetOfBase`.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2829,14 +2829,26 @@
+             // reported, which is the whole of what the layout has to get
+             // right. See https://github.com/rust-lang/rust-bindgen/issues/380.
+             let bases_start = struct_layout.latest_offset();
+-            let bases_end = {
++            // Where the fields written for the bases end, beside where they
++            // would end if each were a field of the type the class was
++            // declared to derive from. The two differ where a base field is
++            // written as something else: the substitute a `replaces=`
++            // annotation named, or the type an alias stands for where the
++            // alias carried an alignment of its own.
++            let (bases_end, declared_bases_end) = {
+                 let mut probe = struct_layout.clone();
++                let mut declared = struct_layout.clone();
+                 for base in self.base_members() {
+                     if base.requires_storage(ctx) {
+-                        probe.saw_base(ctx.resolve_item(base.ty).expect_type());
++                        probe.saw_base(field_representation(ctx, base.ty));
++                        if let Some(layout) =
++                            ctx.resolve_item(base.ty).expect_type().layout(ctx)
++                        {
++                            declared.saw_base_with_layout(layout);
++                        }
+                     }
+                 }
+-                probe.latest_offset()
++                (probe.latest_offset(), declared.latest_offset())
+             };
+             // Only the first member is asked about, and a class with no
+             // members of its own is measured against its own size instead, so
+@@ -2907,6 +2919,29 @@
+                     }
+                 }
+                 _ => None,
++            };
++
++            // The other direction, which a base field narrower than the type
++            // the class was declared to derive from reaches: fields written
++            // for the bases which end *before* the bytes the target gave
++            // them. The difference is a run
++            // of bytes no field covers, and it is written out where the bases
++            // end rather than left to the member after them. `saw_field` does
++            // close such a gap in front of an ordinary member, but at that
++            // member's alignment rather than in bytes, so a run which is not a
++            // whole number of them comes back longer than itself; a packed
++            // class has that padding suppressed altogether; and a bitfield
++            // allocation unit is laid out from where the tracker has reached
++            // rather than from an offset of its own, so nothing is written in
++            // front of one at all.
++            let bases_padding = if opaque_bases.is_none() &&
++                bases_end < declared_bases_end
++            {
++                members_start
++                    .and_then(|start| start.checked_sub(bases_end))
++                    .filter(|bytes| *bytes > 0)
++            } else {
++                None
+             };
+ 
+             for base in self.base_members() {
+@@ -2951,7 +2986,7 @@
+                     .with_implicit_template_params(ctx, inner_item);
+                 let field_name = ctx.rust_ident(&base.field_name);
+ 
+-                struct_layout.saw_base(inner_item.expect_type());
++                struct_layout.saw_base(field_representation(ctx, base.ty));
+ 
+                 let visibility = match (
+                     base.is_public(),
+@@ -2980,6 +3015,23 @@
+                 fields.push(quote! {
+                     #access_spec __bindgen_bases: #ty,
+                 });
++            } else if let Some(bytes) = bases_padding {
++                // Bytes, so that the run comes back as itself: `blob` hands
++                // back whole units of the alignment it is asked for, and this
++                // run need not be a whole number of any wider one.
++                let padding_layout = Layout::new(bytes, 1);
++                // No offset: the run starts where the tracker has reached,
++                // which is what it is measured from.
++                struct_layout.saw_field_with_layout(
++                    "__bindgen_padding_bases",
++                    padding_layout,
++                    None,
++                );
++                let ty = helpers::blob(ctx, padding_layout, false);
++                let access_spec = access_specifier(visibility);
++                fields.push(quote! {
++                    #access_spec __bindgen_padding_bases: #ty,
++                });
+             }
+         }
+ 
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -112,25 +112,40 @@
+         self.max_field_align = ptr_size;
+     }
+ 
+-    pub(crate) fn saw_base(&mut self, base_ty: &Type) {
++    /// The bytes the field written for a base class takes up, which is the
++    /// size of the type that field is *written* as: the substitute, where a
++    /// `replaces=` annotation stood one in for the type the class was declared
++    /// to derive from, and that declared type otherwise.
++    pub(crate) fn saw_base(&mut self, base_item: &Item) {
++        if let Some(layout) =
++            super::field_representation_layout(self.ctx, base_item)
++        {
++            self.saw_base_with_layout(layout);
++        }
++    }
++
++    /// As `saw_base`, for a caller which has measured the base itself.
++    pub(crate) fn saw_base_with_layout(&mut self, layout: Layout) {
+         debug!("saw base for {}", self.name);
+-        if let Some(layout) = base_ty.layout(self.ctx) {
+-            self.align_to_latest_field(layout);
++        self.align_to_latest_field(layout);
+ 
+-            // A packed struct does not align its bases any more than it aligns
+-            // its fields, which is what `align_to_latest_field` returns early
+-            // for; the offset would otherwise run past where the target puts
+-            // them and past where `#[repr(packed)]` puts the fields written
+-            // here.
+-            let padding = if self.is_packed {
+-                0
+-            } else {
+-                self.padding_bytes(layout)
+-            };
+-            self.latest_offset += padding + layout.size;
+-            self.latest_field_layout = Some(layout);
+-            self.max_field_align = cmp::max(self.max_field_align, layout.align);
+-        }
++        // A packed struct does not align its bases any more than it aligns
++        // its fields, which is what `align_to_latest_field` returns early
++        // for; the offset would otherwise run past where the target puts
++        // them and past where `#[repr(packed)]` puts the fields written
++        // here.
++        let padding = if self.is_packed {
++            0
++        } else {
++            self.padding_bytes(layout)
++        };
++        // The field written for the base is a Rust type of this layout, and a
++        // Rust type is a whole number of its own alignment wide even where
++        // clang's measurement of what it stands for is not - which an
++        // `aligned` attribute on a typedef makes it.
++        self.latest_offset += padding + align_to(layout.size, layout.align);
++        self.latest_field_layout = Some(layout);
++        self.max_field_align = cmp::max(self.max_field_align, layout.align);
+     }
+ 
+     pub(crate) fn saw_bitfield_unit(&mut self, layout: Layout) {
