@@ -23,6 +23,14 @@ fn main() {
 /// declares for the `autocxx::c_*` newtypes. See that module for why this
 /// crate, rather than each generated bridge, is the one that has to do it.
 /// See google/autocxx#422.
+/// This C++ is not instrumented by the `AUTOCXX_ASAN` mode, so the sanitizer
+/// job checks the accesses these shims make no more than it checks any other
+/// uninstrumented C++. The decision lives in one place on purpose
+/// (`autocxx_engine::add_sanitizer_flags`), and reaching it from here would mean
+/// taking autocxx-engine, and so the vendored bindgen, as a build dependency of
+/// this crate. cc does not carry `-Zsanitizer` over from `RUSTFLAGS` either -
+/// its `inherit_rustflags` translates a fixed list of codegen flags and ignores
+/// the rest.
 #[cfg(feature = "c-type-vectors")]
 fn build_c_type_vector_glue() {
     println!("cargo:rerun-if-changed=src/c_type_vectors.rs");

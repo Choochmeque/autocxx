@@ -35,7 +35,7 @@ fn main() -> miette::Result<()> {
 
     // This assumes all your C++ bindings are in main.rs
     let mut b = autocxx_build::Builder::new("src/main.rs", &[&include_path]).build()?;
-    b.flag_if_supported("-std=c++14")
+    b.std("c++14")
      .compile("autocxx-demo"); // arbitrary library name, pick anything
     println!("cargo:rerun-if-changed=src/main.rs");
 
