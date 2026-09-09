@@ -19597,7 +19597,7 @@ fn test_pv_subclass_calls_impossible() {
     };
     inline void bar() {}
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -19607,8 +19607,6 @@ fn test_pv_subclass_calls_impossible() {
             generate!("bar")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use autocxx::subclass::CppSubclass;
             use ffi::Observer_methods;
@@ -19623,6 +19621,7 @@ fn test_pv_subclass_calls_impossible() {
                 }
             }
         }),
+        &["Observer_supers", "E0599", "foo_super"],
     );
 }
 
@@ -19639,7 +19638,7 @@ fn test_pv_subclass_not_pub() {
     };
     inline void bar() {}
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -19649,8 +19648,6 @@ fn test_pv_subclass_not_pub() {
             generate!("bar")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use autocxx::subclass::CppSubclass;
             use ffi::Observer_methods;
@@ -19663,6 +19660,8 @@ fn test_pv_subclass_not_pub() {
                 }
             }
         }),
+        // Stops short of the last word, which the message misspells.
+        &["Rust subclasses of C++ types must"],
     );
 }
 
@@ -21480,7 +21479,7 @@ fn test_pv_subclass_fancy_constructor() {
     };
     inline void take_observer(const Observer&) {}
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -21491,8 +21490,6 @@ fn test_pv_subclass_fancy_constructor() {
             generate!("take_observer")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use autocxx::subclass::CppSubclass;
             use ffi::Observer_methods;
@@ -21506,6 +21503,7 @@ fn test_pv_subclass_fancy_constructor() {
                 }
             }
         }),
+        &["E0277", "CppPeerConstructor"],
     );
 }
 
