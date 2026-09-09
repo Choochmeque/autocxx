@@ -7452,6 +7452,36 @@ fn test_dependent_qualified_type_inner_type_is_the_parameter() {
     run_test("", hdr, rs, &["take_uses", "take_nested"], &[]);
 }
 
+// A class whose parameter nothing but an inner typedef names, projected over:
+// `UsesP<Dur2<ArgP>>` asks `Dur2<ArgP>` for its `period`. The class has to be
+// rendered with that parameter for the impl to name it, and the bound belongs on
+// the impl rather than on the class - `Dur2` holds nothing of the projected
+// type, so bounding the class would stop it being instantiated over an argument
+// which cannot answer the projection. MSVC's `std::chrono` is this shape twice
+// over: `duration` holds only its `rep` while declaring `period` through its
+// parameter, and `time_point` projects both off `duration`.
+#[test]
+fn test_dependent_qualified_type_parameter_named_only_by_an_inner_typedef() {
+    let hdr = indoc! {"
+        struct ArgP { typedef int type; };
+
+        template <class P> struct Dur2 {
+            typedef typename P::type period;
+            long rep_;
+        };
+
+        template <class D> struct UsesP {
+            typename D::period field;
+        };
+
+        typedef UsesP<Dur2<ArgP> > NestedP;
+
+        inline void take_nested_p(const NestedP&) {}
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_nested_p"], &[]);
+}
+
 // The class autocxx gives bindgen in place of `std::string` declares the inner
 // types whose definition the C++ standard fixes and no others, so a member
 // spelled through any other one still has no type. What autocxx says about it
