@@ -7376,6 +7376,51 @@ fn test_associated_type_templated_typedef_by_value_regular() {
     );
 }
 
+// A class can name `typename T::Inner` in an inner type of its own rather than
+// in any field. Where a field uses the parameter too, the class is rendered
+// with it and the bound has to be there: the impl saying the class has that
+// inner type assigns a projection through that parameter, and without the
+// bound that impl does not compile.
+#[test]
+fn test_dependent_qualified_type_named_by_an_inner_type() {
+    let hdr = indoc! {"
+        struct Params { typedef long difference_type; };
+
+        template <typename P> struct Holder {
+            typedef typename P::difference_type difference_type;
+            P p;
+        };
+
+        typedef Holder<Params> ConcreteHolder;
+
+        inline long take_holder(const ConcreteHolder&) { return 0; }
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_holder"], &[]);
+}
+
+// The same, but nothing else uses the parameter, so the class is rendered
+// without it. The inner type is still spelled in terms of that parameter, so
+// there is no impl this class could carry saying it has it, and bindgen says
+// nothing rather than naming a parameter which is not in scope.
+#[test]
+fn test_dependent_qualified_type_named_only_by_an_inner_type() {
+    let hdr = indoc! {"
+        struct Params2 { typedef long difference_type; };
+
+        template <typename P> struct Holder2 {
+            typedef typename P::difference_type difference_type;
+            long unrelated;
+        };
+
+        typedef Holder2<Params2> ConcreteHolder2;
+
+        inline long take_holder2(const ConcreteHolder2& h) { return h.unrelated; }
+    "};
+    let rs = quote! {};
+    run_test("", hdr, rs, &["take_holder2"], &[]);
+}
+
 // The class autocxx gives bindgen in place of `std::string` declares the inner
 // types whose definition the C++ standard fixes and no others, so a member
 // spelled through any other one still has no type. What autocxx says about it
