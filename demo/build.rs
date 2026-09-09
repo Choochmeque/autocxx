@@ -11,7 +11,6 @@ fn main() -> miette::Result<()> {
     let mut b = autocxx_build::Builder::new("src/main.rs", [&path]).build()?;
     b.std("c++14").compile("autocxx-demo");
 
-    println!("cargo:rerun-if-changed=src/main.rs");
     println!("cargo:rerun-if-changed=src/input.h");
     Ok(())
 }

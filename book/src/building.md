@@ -15,10 +15,21 @@ fn main() {
         .unwrap();
     b.std("c++17") // cc picks the separator per compiler: `-std=c++17`, or `-std:c++17` for cl
         .compile("autocxx-demo"); // arbitrary library name, pick anything
-    println!("cargo:rerun-if-changed=src/main.rs");
     // Add instructions to link to any C++ libraries you need.
 }
 ```
+
+## Rebuilding
+
+`autocxx-build` tells cargo to rerun your build script when the `.rs` file it
+parsed changes, and when any header the C++ preprocessor opened while reading
+it changes - which includes headers reached indirectly. You do not need to
+name any of those yourself. Do name anything else your build script reads: the
+`.cc` files you hand to `cc`, and any file you generate from.
+
+Cargo stops watching your package directory as a whole once a build script
+names a single file, so a file which neither you nor `autocxx-build` names is
+one nothing watches.
 
 ## Keeping `cxx` and `cxx-gen` level
 
