@@ -19075,7 +19075,17 @@ fn test_issue_1366_reference_field_still_has_no_default_ctor() {
             let mut _stack_obj = ffi::A::new();
         }
     };
-    run_test_expect_fail("", hdr, rs, &["A"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["A"],
+        &[],
+        &[
+            "E0599",
+            "no associated function or constant named `new` found",
+        ],
+    );
 }
 
 #[test]
@@ -20636,7 +20646,7 @@ fn test_subclass_superclass_protected_destructor_still_unownable() {
         virtual ~Observer() {}
     };
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -20646,8 +20656,6 @@ fn test_subclass_superclass_protected_destructor_still_unownable() {
             generate!("Observer")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use ffi::Observer_methods;
             #[autocxx::subclass::subclass]
@@ -20657,6 +20665,11 @@ fn test_subclass_superclass_protected_destructor_still_unownable() {
             impl Observer_methods for MyObserver {
             }
         }),
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_box",
+        ],
     );
 }
 
@@ -27920,7 +27933,7 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
     );
     // Constructing one and letting Rust own it used to compile, then free the
     // memory without ever running the C++ destructor.
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {
@@ -27928,9 +27941,14 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_box",
+        ],
     );
     // Nor may it be owned via a UniquePtr...
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {
@@ -27938,9 +27956,14 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_unique_ptr",
+        ],
     );
     // ...nor on the Rust stack.
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {
@@ -27948,6 +27971,11 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "autocxx::prelude::New",
+        ],
     );
 }
 
@@ -29703,7 +29731,20 @@ fn test_pure_virtual_destructor_no_make_unique() {
     let rs = quote! {
         let _ = ffi::PureDtorNoNew::new().within_unique_ptr();
     };
-    run_test_expect_fail("", hdr, rs, &["PureDtorNoNew"], &[]);
+    // Not the private `new` the inaccessible-destructor tests get: here there
+    // is no `new` at all.
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["PureDtorNoNew"],
+        &[],
+        &[
+            "E0599",
+            "no associated function or constant named `new` found",
+            "PureDtorNoNew",
+        ],
+    );
 }
 
 #[test]
@@ -32406,7 +32447,7 @@ fn test_opaque_type_with_inaccessible_destructor_is_not_owned() {
         None,
     );
     // Owning one does not.
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -32414,8 +32455,11 @@ fn test_opaque_type_with_inaccessible_destructor_is_not_owned() {
         },
         directives,
         None,
-        None,
-        None,
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_unique_ptr",
+        ],
     );
 }
 
