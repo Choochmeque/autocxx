@@ -290,6 +290,61 @@ pre-existing C++ API, call <code>ffi::make_string("")</code> which will return
 a blank <code>UniquePtr&lt;CxxString&gt;</code>.</p>
 <p>If all you need is a <em>reference</em> to a <code>CxxString</code>, you can alternatively use
 <a href="https://docs.rs/cxx/latest/cxx/macro.let_cxx_string.html"><code>cxx::let_cxx_string</code></a>.</p>
+<h2 id="string-views"><a class="header" href="#string-views">String views</a></h2>
+<p>A function which takes a <code>std::string_view</code> accepts anything implementing
+<code>ffi::AsCppStringView</code> — a <code>&amp;str</code>, a <code>String</code>, a <code>&amp;[u8]</code>, a <code>Vec&lt;u8&gt;</code>, or a
+<code>&amp;CxxString</code>. Nothing is copied: the view is built in C++ over the bytes you
+lend, for the duration of the call. A <code>const std::string_view&amp;</code> parameter is the
+same thing and takes the same argument — note that this is so even under
+<code>safety!(unsafe_references_wrapped)</code>, where other reference parameters become
+<code>CppRef</code> wrappers; a wrapper around a type Rust cannot construct would be no use
+to anybody.</p>
+<p>The bytes are lent for the call, and nothing promises they outlast it. C++ which
+copies the view somewhere that outlives the call may be left holding a dangling
+one — whether it is depends on what you passed, and passing a borrowed <code>&amp;[u8]</code>
+promises nothing beyond the call. It is the same bargain as letting C++ keep the
+<code>const char*</code> out of a <code>const std::string&amp;</code> parameter, except that <code>string_view</code>
+is a type people do store. autocxx cannot see that happen, so it falls under what
+you vouch for with <code>safety!</code>. If the C++ keeps what it is lent, give it an owned
+<code>std::string</code> parameter instead.</p>
+<p>The bytes are bytes. C++ asks nothing about the encoding of a <code>string_view</code>
+and neither does this, which is why <code>&amp;[u8]</code> is accepted alongside <code>&amp;str</code> and
+why a view may contain an interior NUL.</p>
+<h4 id="c-header-2"><a class="header" href="#c-header-2">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;string_view&gt;
+#include &lt;cstddef&gt;
+inline size_t take_view(std::string_view v) { return v.size(); }
+</code></pre>
+<h4 id="rust-2"><a class="header" href="#rust-2">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("take_view")
+}
+
+fn main() {
+    assert_eq!(ffi::take_view("hello"), 5);
+    assert_eq!(ffi::take_view(&amp;b"ab\0c"[..]), 4);
+}
+</code></pre>
+<p>A <code>std::string_view</code> is never handed back the other way — not as a return value,
+not read out of a C++ variable, not as a <code>unique_ptr</code> or <code>shared_ptr</code> payload.
+Rust has no type which is a <code>std::string_view</code>, because a view borrows characters
+something else owns and <code>autocxx</code> has nothing to tie that borrow to whose
+lifetime it could check. Every such position is refused with an explanation
+rather than bound unsafely. Hand over an owned <code>std::string</code> instead, which
+arrives as a <code>UniquePtr&lt;CxxString&gt;</code>.</p>
+<p>For the same reason, a <code>std::string_view</code> parameter of a <code>virtual</code> method can be
+<em>called</em> from Rust but not <em>overridden</em> from Rust with <code>subclass!</code>: the way in
+builds the view, and the way out would have to hand Rust an unchecked borrow.</p>
+<p><code>std::string_view</code> is C++17. <code>autocxx</code> is told the C++ standard twice — once
+for parsing your headers and once for compiling the code it generates — so
+remember to set it in both places, e.g. <code>cc::Build::std("c++17")</code> beside
+<code>extra_clang_args(["-std=c++17"])</code>. Generated code which needs C++17 and does
+not get it says so by name.</p>
 
                     </main>
 

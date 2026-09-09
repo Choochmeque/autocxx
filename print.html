@@ -1237,13 +1237,68 @@ pre-existing C++ API, call <code>ffi::make_string("")</code> which will return
 a blank <code>UniquePtr&lt;CxxString&gt;</code>.</p>
 <p>If all you need is a <em>reference</em> to a <code>CxxString</code>, you can alternatively use
 <a href="https://docs.rs/cxx/latest/cxx/macro.let_cxx_string.html"><code>cxx::let_cxx_string</code></a>.</p>
+<h2 id="string-views"><a class="header" href="#string-views">String views</a></h2>
+<p>A function which takes a <code>std::string_view</code> accepts anything implementing
+<code>ffi::AsCppStringView</code> — a <code>&amp;str</code>, a <code>String</code>, a <code>&amp;[u8]</code>, a <code>Vec&lt;u8&gt;</code>, or a
+<code>&amp;CxxString</code>. Nothing is copied: the view is built in C++ over the bytes you
+lend, for the duration of the call. A <code>const std::string_view&amp;</code> parameter is the
+same thing and takes the same argument — note that this is so even under
+<code>safety!(unsafe_references_wrapped)</code>, where other reference parameters become
+<code>CppRef</code> wrappers; a wrapper around a type Rust cannot construct would be no use
+to anybody.</p>
+<p>The bytes are lent for the call, and nothing promises they outlast it. C++ which
+copies the view somewhere that outlives the call may be left holding a dangling
+one — whether it is depends on what you passed, and passing a borrowed <code>&amp;[u8]</code>
+promises nothing beyond the call. It is the same bargain as letting C++ keep the
+<code>const char*</code> out of a <code>const std::string&amp;</code> parameter, except that <code>string_view</code>
+is a type people do store. autocxx cannot see that happen, so it falls under what
+you vouch for with <code>safety!</code>. If the C++ keeps what it is lent, give it an owned
+<code>std::string</code> parameter instead.</p>
+<p>The bytes are bytes. C++ asks nothing about the encoding of a <code>string_view</code>
+and neither does this, which is why <code>&amp;[u8]</code> is accepted alongside <code>&amp;str</code> and
+why a view may contain an interior NUL.</p>
+<h4 id="c-header-9"><a class="header" href="#c-header-9">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;string_view&gt;
+#include &lt;cstddef&gt;
+inline size_t take_view(std::string_view v) { return v.size(); }
+</code></pre>
+<h4 id="rust-9"><a class="header" href="#rust-9">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("take_view")
+}
+
+fn main() {
+    assert_eq!(ffi::take_view("hello"), 5);
+    assert_eq!(ffi::take_view(&amp;b"ab\0c"[..]), 4);
+}
+</code></pre>
+<p>A <code>std::string_view</code> is never handed back the other way — not as a return value,
+not read out of a C++ variable, not as a <code>unique_ptr</code> or <code>shared_ptr</code> payload.
+Rust has no type which is a <code>std::string_view</code>, because a view borrows characters
+something else owns and <code>autocxx</code> has nothing to tie that borrow to whose
+lifetime it could check. Every such position is refused with an explanation
+rather than bound unsafely. Hand over an owned <code>std::string</code> instead, which
+arrives as a <code>UniquePtr&lt;CxxString&gt;</code>.</p>
+<p>For the same reason, a <code>std::string_view</code> parameter of a <code>virtual</code> method can be
+<em>called</em> from Rust but not <em>overridden</em> from Rust with <code>subclass!</code>: the way in
+builds the view, and the way out would have to hand Rust an unchecked borrow.</p>
+<p><code>std::string_view</code> is C++17. <code>autocxx</code> is told the C++ standard twice — once
+for parsing your headers and once for compiling the code it generates — so
+remember to set it in both places, e.g. <code>cc::Build::std("c++17")</code> beside
+<code>extra_clang_args(["-std=c++17"])</code>. Generated code which needs C++17 and does
+not get it says so by name.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="naming"><a class="header" href="#naming">Naming</a></h1>
 <h2 id="namespaces"><a class="header" href="#namespaces">Namespaces</a></h2>
 <p>The C++ namespace structure is reflected in mods within the generated
 ffi mod. However, at present there is an internal limitation that
 autocxx can't handle multiple types with the same identifier, even
 if they're in different namespaces. This will be fixed in future.</p>
-<h4 id="c-header-9"><a class="header" href="#c-header-9">C++ header:</a></h4>
+<h4 id="c-header-10"><a class="header" href="#c-header-10">C++ header:</a></h4>
 <pre><code class="language-cpp">
 namespace generations {
   void hey_boomer();
@@ -1253,7 +1308,7 @@ namespace submarines {
 }
 
 </code></pre>
-<h4 id="rust-9"><a class="header" href="#rust-9">Rust:</a></h4>
+<h4 id="rust-10"><a class="header" href="#rust-10">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1273,7 +1328,7 @@ fn main() {
 <p>There is support for generating bindings of nested types, with some
 restrictions. Currently the C++ type <code>A::B</code> will be given the Rust name
 <code>A_B</code> in the same module as its enclosing namespace.</p>
-<h4 id="c-header-10"><a class="header" href="#c-header-10">C++ header:</a></h4>
+<h4 id="c-header-11"><a class="header" href="#c-header-11">C++ header:</a></h4>
 <pre><code class="language-cpp">
 struct Turkey {
     struct Duck {
@@ -1284,7 +1339,7 @@ struct Turkey {
 };
 
 </code></pre>
-<h4 id="rust-10"><a class="header" href="#rust-10">Rust:</a></h4>
+<h4 id="rust-11"><a class="header" href="#rust-11">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1306,7 +1361,7 @@ fn main() {
 <p>Functions taking <a href="cpp_types.html">non-POD</a> value parameters can take a <code>cxx::UniquePtr&lt;T&gt;</code>
 or a <code>&amp;T</code>. This gives you the choice of Rust semantics - where a parameter
 is absorbed and destroyed - or C++ semantics where the parameter is copied.</p>
-<h4 id="c-header-11"><a class="header" href="#c-header-11">C++ header:</a></h4>
+<h4 id="c-header-12"><a class="header" href="#c-header-12">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Goat {
@@ -1317,7 +1372,7 @@ struct Goat {
 void feed_goat(Goat g); // takes goat by value
 
 </code></pre>
-<h4 id="rust-11"><a class="header" href="#rust-11">Rust:</a></h4>
+<h4 id="rust-12"><a class="header" href="#rust-12">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1342,7 +1397,7 @@ fn main() {
 </code></pre>
 <p>Specifically, you can pass anything which implements <a href="https://docs.rs/autocxx/latest/autocxx/trait.ValueParam.html"><code>ValueParam&lt;T&gt;</code></a>.</p>
 <p>If you're keeping non-POD values on the Rust stack, you need to explicitly use <a href="https://docs.rs/autocxx/latest/autocxx/prelude/fn.as_mov.html"><code>as_mov</code></a> to indicate that you want to consume the object using move semantics:</p>
-<h4 id="c-header-12"><a class="header" href="#c-header-12">C++ header:</a></h4>
+<h4 id="c-header-13"><a class="header" href="#c-header-13">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Blimp {
@@ -1354,7 +1409,7 @@ void burst(Blimp b); // consumes blimp,
     // but because C++ is amazing, may copy the blimp first.
 
 </code></pre>
-<h4 id="rust-12"><a class="header" href="#rust-12">Rust:</a></h4>
+<h4 id="rust-13"><a class="header" href="#rust-13">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1376,7 +1431,7 @@ fn main() {
 </code></pre>
 <p>RValue parameters are a little simpler, because (as you'd hope) they consume
 the object you're passing in.</p>
-<h4 id="c-header-13"><a class="header" href="#c-header-13">C++ header:</a></h4>
+<h4 id="c-header-14"><a class="header" href="#c-header-14">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Cake {
@@ -1387,7 +1442,7 @@ struct Cake {
 void eat(Cake&amp;&amp; c); // consumes the cake. You can't have your cake and eat it.
 
 </code></pre>
-<h4 id="rust-13"><a class="header" href="#rust-13">Rust:</a></h4>
+<h4 id="rust-14"><a class="header" href="#rust-14">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1424,7 +1479,7 @@ for how to turn this opaque object into something useful (spoiler: just append <
 of <code>bindgen</code> here and generating overloads as <code>func</code>, <code>func1</code>, <code>func2</code> etc.
 This is essentially awful without <code>rust-analyzer</code> IDE support - see the
 <a href="workflow.html">workflows chapter</a> for why you should be using an IDE.</p>
-<h4 id="c-header-14"><a class="header" href="#c-header-14">C++ header:</a></h4>
+<h4 id="c-header-15"><a class="header" href="#c-header-15">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;string&gt;
 struct View {
@@ -1439,7 +1494,7 @@ void saw(const View&amp;);
 void saw(const Tree&amp;);
 
 </code></pre>
-<h4 id="rust-14"><a class="header" href="#rust-14">Rust:</a></h4>
+<h4 id="rust-15"><a class="header" href="#rust-15">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1465,7 +1520,7 @@ we can pass tuples of different parameter types into a single function
 implementation.</p>
 <h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
 <p>Calling a <em>const</em> method is simple:</p>
-<h4 id="c-header-15"><a class="header" href="#c-header-15">C++ header:</a></h4>
+<h4 id="c-header-16"><a class="header" href="#c-header-16">C++ header:</a></h4>
 <pre><code class="language-cpp">
 class Sloth {
 public:
@@ -1473,7 +1528,7 @@ public:
 };
 
 </code></pre>
-<h4 id="rust-15"><a class="header" href="#rust-15">Rust:</a></h4>
+<h4 id="rust-16"><a class="header" href="#rust-16">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1493,7 +1548,7 @@ fn main() {
 references to C++ objects must be <a href="https://doc.rust-lang.org/std/pin/">pinned</a>.
 In practice, this means you must call <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html#method.pin_mut"><code>.pin_mut()</code></a>
 every time you call a method:</p>
-<h4 id="c-header-16"><a class="header" href="#c-header-16">C++ header:</a></h4>
+<h4 id="c-header-17"><a class="header" href="#c-header-17">C++ header:</a></h4>
 <pre><code class="language-cpp">
 class Sloth {
 public:
@@ -1502,7 +1557,7 @@ public:
 };
 
 </code></pre>
-<h4 id="rust-16"><a class="header" href="#rust-16">Rust:</a></h4>
+<h4 id="rust-17"><a class="header" href="#rust-17">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1522,7 +1577,7 @@ fn main() {
 <p>A method qualified with <code>&amp;</code> is called just like any other method - autocxx
 always has an lvalue to call it on, so the qualifier makes no difference to
 how you use it.</p>
-<h4 id="c-header-17"><a class="header" href="#c-header-17">C++ header:</a></h4>
+<h4 id="c-header-18"><a class="header" href="#c-header-18">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;cstdint&gt;
 class Sloth {
@@ -1531,7 +1586,7 @@ public:
 };
 
 </code></pre>
-<h4 id="rust-17"><a class="header" href="#rust-17">Rust:</a></h4>
+<h4 id="rust-18"><a class="header" href="#rust-18">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1589,13 +1644,13 @@ allowing you to handle C++ exceptions that propagate across the FFI boundary.
 Constructors take a slightly different shape, for reasons the
 <a href="exceptions.html#constructors">Constructors</a> section explains.</p>
 <h2 id="basic-usage"><a class="header" href="#basic-usage">Basic usage</a></h2>
-<h4 id="c-header-18"><a class="header" href="#c-header-18">C++ header:</a></h4>
+<h4 id="c-header-19"><a class="header" href="#c-header-19">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 void do_risky_thing();
 
 </code></pre>
-<h4 id="rust-18"><a class="header" href="#rust-18">Rust:</a></h4>
+<h4 id="rust-19"><a class="header" href="#rust-19">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1616,14 +1671,14 @@ fn main() {
 <h2 id="functions-with-return-values"><a class="header" href="#functions-with-return-values">Functions with return values</a></h2>
 <p>Functions that return values work the same way - the return type becomes
 <code>Result&lt;T, cxx::Exception&gt;</code>:</p>
-<h4 id="c-header-19"><a class="header" href="#c-header-19">C++ header:</a></h4>
+<h4 id="c-header-20"><a class="header" href="#c-header-20">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 #include &lt;cstdint&gt;
 uint32_t parse_number(const char* s);
 
 </code></pre>
-<h4 id="rust-19"><a class="header" href="#rust-19">Rust:</a></h4>
+<h4 id="rust-20"><a class="header" href="#rust-20">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1663,7 +1718,7 @@ autocxx knows it by, exactly as in <code>generate!</code>.</p>
 <p>Partial matching is supported: a shorter pattern will match functions in any
 namespace. For example, <code>throws!("do_something")</code> will match both a top-level
 <code>do_something</code> and <code>my_namespace::do_something</code>.</p>
-<h4 id="c-header-20"><a class="header" href="#c-header-20">C++ header:</a></h4>
+<h4 id="c-header-21"><a class="header" href="#c-header-21">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 namespace utils {
@@ -1671,7 +1726,7 @@ namespace utils {
 }
 
 </code></pre>
-<h4 id="rust-20"><a class="header" href="#rust-20">Rust:</a></h4>
+<h4 id="rust-21"><a class="header" href="#rust-21">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1689,7 +1744,7 @@ fn main() {
 </code></pre>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <p>A constructor is named in <code>throws!</code> the way C++ names it - <code>Class::Class</code>:</p>
-<h4 id="c-header-21"><a class="header" href="#c-header-21">C++ header:</a></h4>
+<h4 id="c-header-22"><a class="header" href="#c-header-22">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 #include &lt;cstdint&gt;
@@ -1705,7 +1760,7 @@ private:
 };
 
 </code></pre>
-<h4 id="rust-21"><a class="header" href="#rust-21">Rust:</a></h4>
+<h4 id="rust-22"><a class="header" href="#rust-22">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1745,7 +1800,7 @@ names differ rather than just the return types.</p>
 which leaves nowhere for a failure to go. So the two halves are written
 separately, and the half which can fail is an ordinary expression which takes
 <code>?</code>:</p>
-<h4 id="c-header-22"><a class="header" href="#c-header-22">C++ header:</a></h4>
+<h4 id="c-header-23"><a class="header" href="#c-header-23">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 #include &lt;cstdint&gt;
@@ -1761,7 +1816,7 @@ private:
 };
 
 </code></pre>
-<h4 id="rust-22"><a class="header" href="#rust-22">Rust:</a></h4>
+<h4 id="rust-23"><a class="header" href="#rust-23">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1906,7 +1961,7 @@ C++ classes. (Yes, even more experimental than all the rest of this!)
 See <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppSubclass.html"><code>subclass::CppSubclass</code></a> for information about how you do this.
 This is useful primarily if you want to listen out for messages broadcast
 using the C++ observer/listener pattern.</p>
-<h4 id="c-header-23"><a class="header" href="#c-header-23">C++ header:</a></h4>
+<h4 id="c-header-24"><a class="header" href="#c-header-24">C++ header:</a></h4>
 <pre><code class="language-cpp">class GoatObserver {
 public:
     virtual void goat_full() const = 0;
@@ -1918,7 +1973,7 @@ void deregister_observer();
 void feed_goat();
 
 </code></pre>
-<h4 id="rust-23"><a class="header" href="#rust-23">Rust:</a></h4>
+<h4 id="rust-24"><a class="header" href="#rust-24">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 use autocxx::subclass::*;
@@ -2008,7 +2063,7 @@ Only C++ can allocate a peer.</p>
 <p>Each subclass also implements a trait called <code>&lt;superclass name&gt;_supers</code> which
 includes all superclass methods. You can call methods on that, and if you
 don't implement a particular method, that will be used as the default.</p>
-<h4 id="c-header-24"><a class="header" href="#c-header-24">C++ header:</a></h4>
+<h4 id="c-header-25"><a class="header" href="#c-header-25">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;iostream&gt;
 class Dinosaur {
@@ -2022,7 +2077,7 @@ public:
 
 
 </code></pre>
-<h4 id="rust-24"><a class="header" href="#rust-24">Rust:</a></h4>
+<h4 id="rust-25"><a class="header" href="#rust-25">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 use autocxx::subclass::*;
@@ -2088,7 +2143,7 @@ appears as a Rust <code>const</code>, so you can use it anywhere.</p>
 <p>A variable which instead lives at some address, such as one of
 <a href="cpp_types.html">POD</a> struct type, appears as a Rust <code>static</code>. Reading it is
 <code>unsafe</code>, because C++ may be changing it at the same time:</p>
-<h4 id="c-header-25"><a class="header" href="#c-header-25">C++ header:</a></h4>
+<h4 id="c-header-26"><a class="header" href="#c-header-26">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Point {
@@ -2099,7 +2154,7 @@ struct Point {
 extern const Point ORIGIN;
 
 </code></pre>
-<h4 id="rust-25"><a class="header" href="#rust-25">Rust:</a></h4>
+<h4 id="rust-26"><a class="header" href="#rust-26">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2306,11 +2361,11 @@ explanation.</p>
 <p>See <a href="https://docs.rs/autocxx/latest/autocxx/macro.safety.html"><code>safety!</code></a> in the documentation for more details.</p>
 <h2 id="examples-with-and-without-safetyunsafe"><a class="header" href="#examples-with-and-without-safetyunsafe">Examples with and without <code>safety!(unsafe)</code></a></h2>
 <p>Without a <code>safety!</code> directive:</p>
-<h4 id="c-header-26"><a class="header" href="#c-header-26">C++ header:</a></h4>
+<h4 id="c-header-27"><a class="header" href="#c-header-27">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
 </code></pre>
-<h4 id="rust-26"><a class="header" href="#rust-26">Rust:</a></h4>
+<h4 id="rust-27"><a class="header" href="#rust-27">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2324,11 +2379,11 @@ fn main() {
 }
 </code></pre>
 <p>With a <code>safety!</code> directive:</p>
-<h4 id="c-header-27"><a class="header" href="#c-header-27">C++ header:</a></h4>
+<h4 id="c-header-28"><a class="header" href="#c-header-28">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
 </code></pre>
-<h4 id="rust-27"><a class="header" href="#rust-27">Rust:</a></h4>
+<h4 id="rust-28"><a class="header" href="#rust-28">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2419,7 +2474,7 @@ impl SendMyType {
 <div style="break-before: page; page-break-before: always;"></div><h1 id="structuring-a-large-codebase"><a class="header" href="#structuring-a-large-codebase">Structuring a large codebase</a></h1>
 <p>If you have multiple modules, it may be inconvenient to generate all bindings in one <code>include_cpp!</code> invocation.
 There is <em>limited</em> support to refer from one set of bindings to another, using the <code>extern_cpp_type!</code> directive.</p>
-<h4 id="c-header-28"><a class="header" href="#c-header-28">C++ header:</a></h4>
+<h4 id="c-header-29"><a class="header" href="#c-header-29">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 struct A {
     A() : a(0) {}
@@ -2432,7 +2487,7 @@ void handle_a(const A&amp; a);
 A create_a(B);
 
 </code></pre>
-<h4 id="rust-28"><a class="header" href="#rust-28">Rust:</a></h4>
+<h4 id="rust-29"><a class="header" href="#rust-29">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
