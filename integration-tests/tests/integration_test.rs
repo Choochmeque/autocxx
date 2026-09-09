@@ -993,7 +993,16 @@ fn test_negative_take_as_pod_with_destructor() {
         let a = ffi::Bob { a: 12, b: 13 };
         assert_eq!(ffi::take_bob(a), 12);
     };
-    run_test_expect_fail(cxx, hdr, rs, &["take_bob"], &["Bob"]);
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob"],
+        &["Bob"],
+        // autocxx writes this static_assert itself, so the text is a C++ string
+        // literal every compiler echoes back; only the framing around it differs.
+        &["CppBuild", "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+    );
 }
 
 #[test]
@@ -1017,7 +1026,14 @@ fn test_negative_take_as_pod_with_move_constructor() {
         let a = ffi::Bob { a: 12, b: 13 };
         assert_eq!(ffi::take_bob(a), 12);
     };
-    run_test_expect_fail(cxx, hdr, rs, &["take_bob"], &["Bob"]);
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob"],
+        &["Bob"],
+        &["CppBuild", "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+    );
 }
 
 #[test]
@@ -6312,7 +6328,17 @@ fn test_typedef_to_nonpod_struct_field_rejected() {
         };
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &[], &["Outer"]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &[],
+        &["Outer"],
+        &[
+            "InnerAlias could not be POD because it is a typedef to Inner",
+            "std::string isn't safe to be POD",
+        ],
+    );
 }
 
 #[test]
@@ -12123,7 +12149,14 @@ fn test_union_pod() {
     };
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &[], &["A"]);
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        rs,
+        &[],
+        &["A"],
+        "Type A could not be POD because it is a union",
+    );
 }
 
 #[test]
@@ -13776,7 +13809,14 @@ fn test_error_generated_for_pod_with_nontrivial_destructor() {
         inline void take_a(A) {}
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["take_a"], &["A"]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_a"],
+        &["A"],
+        &["CppBuild", "type A should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+    );
 }
 
 #[test]
@@ -13806,7 +13846,14 @@ fn test_error_generated_for_pod_with_nontrivial_move_constructor() {
         inline void take_a(A) {}
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["take_a"], &["A"]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_a"],
+        &["A"],
+        &["CppBuild", "type A should be trivially move constructible and trivially destructible to be used with generate_pod!"],
+    );
 }
 
 #[test]
@@ -27722,7 +27769,16 @@ fn test_cpp_union_pod() {
         } CorrelationId_t;
     "};
     run_test("", hdr, quote! {}, &["CorrelationId_t_"], &[]);
-    run_test_expect_fail("", hdr, quote! {}, &[], &["CorrelationId_t_"]);
+    // The reason names bindgen's own spelling of the anonymous union, which is
+    // not ours to rely on; the classification and the subject are.
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["CorrelationId_t_"],
+        &["UnsafePodType", "CorrelationId_t_ could not be POD"],
+    );
 }
 
 /// The shape of a class which C++ deliberately forbids anyone else from
