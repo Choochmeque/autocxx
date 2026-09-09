@@ -189,10 +189,32 @@ pub struct CodegenOptions<'a> {
 /// operand resolved; see [`cpp_standard`]. It comes first in the argument
 /// vector, so a caller who needs an older one can say so - see
 /// [`builder::Builder::extra_clang_args`].
-const AUTOCXX_CLANG_ARGS: &[&str; 7] = &[
+const AUTOCXX_CLANG_ARGS: &[&str; 8] = &[
     "-x",
     "c++",
     "-std=c++17",
+    // Which symbols a shared library exports. bindgen reads it as a statement
+    // about whether a symbol can be linked to at all, and drops every function,
+    // and every static data member, whose visibility is not `default` - so
+    // whatever visibility clang's driver happens to default to decides whether a
+    // header binds anything. clang's WebAssembly driver defaults to `hidden`,
+    // which is why a `wasm32-*` target bound types and none of their methods,
+    // with nothing said about it anywhere: see google/autocxx#1508.
+    //
+    // Visibility is not a question autocxx can answer from a header, and none of
+    // what it generates depends on the answer: the shims it writes are compiled
+    // into the same artifact as the calls they serve, where a hidden symbol
+    // links like any other. Where the definition is in a separate shared
+    // library which does not export it, the binding now exists and the link
+    // fails naming the symbol, rather than the method silently not being there.
+    //
+    // Saying `default` is what a host or cross compilation for any other target
+    // already gets, so this restates a default rather than overriding anything
+    // in the builds autocxx is used from, and it goes before a
+    // caller's own arguments: `-fvisibility=hidden` in `extra_clang_args` still
+    // wins, and still means bindgen drops what the header hides. Visibility of
+    // the *compiled* C++ is a matter for the `cc::Build` the caller gets back.
+    "-fvisibility=default",
     // C++17 removed three things a header written for an older standard may
     // still contain, and clang's diagnostic for each of them is an error by
     // default, which bindgen treats as fatal. Raising the standard autocxx

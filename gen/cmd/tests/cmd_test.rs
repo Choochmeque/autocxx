@@ -78,6 +78,42 @@ fn main() {
     "#[link(name = \"autocxx-demo\")]\nextern \"C\" {}"
 );
 
+/// The fixture for [`test_wasm_target_keeps_functions`]: a class with an inline
+/// method and a free function, which must both survive being parsed for a
+/// `wasm32-*` target.
+///
+/// It includes no system header, because nothing here has a wasi sysroot for
+/// clang to find one in: the point is what the triple alone does to a header
+/// clang can read either way.
+static WASM_H: &str = "
+#pragma once
+
+struct Point {
+  int x;
+  int y;
+};
+
+class Rect {
+public:
+  Point top_left;
+  Point bottom_right;
+  int width() const { return bottom_right.x - top_left.x; }
+};
+
+inline int stretch(int by) { return by * 2; }
+";
+static WASM_RS: &str = "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    safety!(unsafe)
+    generate_pod!(\"Rect\")
+    generate!(\"stretch\")
+}
+
+fn main() {}
+";
+
 #[test]
 fn test_help() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("autocxx-gen")?;
@@ -399,6 +435,47 @@ fn test_gen_rs_has_generated_marker() -> Result<(), Box<dyn std::error::Error>> 
     assert!(
         first_line.contains(version),
         "the @generated marker does not name the autocxx version {version}; it starts: {opening}"
+    );
+    Ok(())
+}
+
+/// Parsing for a `wasm32-*` target must bind the same declarations as parsing
+/// for any other, which it did not: clang's WebAssembly driver parses with
+/// `-fvisibility=hidden`, bindgen drops every function whose visibility is not
+/// `default`, and the result was a POD struct with none of its methods, no
+/// function at all and no diagnostic anywhere. See google/autocxx#1508.
+///
+/// cargo sets `TARGET` for a build script and bindgen reads the triple from
+/// there, so setting it is the whole of the repro. Nothing compiles the result,
+/// which would need a wasi sysroot; what is being tested is what the triple
+/// alone costs the bindings.
+#[test]
+fn test_wasm_target_keeps_functions() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let mut files = HashMap::new();
+    files.insert("input.h", WASM_H.as_bytes());
+    files.insert("main.rs", WASM_RS.as_bytes());
+    base_test_ex(
+        &tmp_dir,
+        RsGenMode::Single,
+        |cmd| {
+            cmd.env("TARGET", "wasm32-wasip1");
+        },
+        files,
+        vec!["main.rs"],
+    )?;
+    let rs = std::fs::read_to_string(tmp_dir.path().join("autocxx-ffi-default-gen.rs"))?;
+    // A libclang without frontend support for the triple would have failed the
+    // command itself, above, rather than reaching either of these.
+    assert!(
+        rs.contains("fn width"),
+        "no method was bound for a wasm32 target; the bindings are {} bytes",
+        rs.len()
+    );
+    assert!(
+        rs.contains("fn stretch"),
+        "no free function was bound for a wasm32 target; the bindings are {} bytes",
+        rs.len()
     );
     Ok(())
 }
