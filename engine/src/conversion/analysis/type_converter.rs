@@ -26,7 +26,7 @@ use crate::{
     },
     known_types::{known_types, CxxGenericType},
     parse_callbacks::ParseCallbackResults,
-    types::{make_ident, Namespace, QualifiedName},
+    types::{is_va_list, make_ident, Namespace, QualifiedName},
     vendored_bindgen::callbacks::SpecialMemberKind,
 };
 use autocxx_parser::IncludeCppConfig;
@@ -1191,6 +1191,13 @@ impl<'a> TypeConverter<'a> {
         }
 
         let original_tn = QualifiedName::from_type_path(&typ);
+        // Ahead of the ident rules below, which would otherwise answer for the
+        // x86-64 System V spelling: there a `va_list` parameter decays to
+        // `__va_list_tag *`, losing the typedef, so what the user hears is
+        // that the name has a `__` in it.
+        if is_va_list(&original_tn) {
+            return Err(ConvertErrorFromCpp::UnsupportedVaList);
+        }
         original_tn
             .validate_ok_for_cxx()
             .map_err(ConvertErrorFromCpp::InvalidIdent)?;

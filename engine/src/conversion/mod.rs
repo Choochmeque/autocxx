@@ -36,7 +36,7 @@ use itertools::Itertools;
 use syn::{Item, ItemMod};
 
 use crate::{
-    types::{is_std_function, QualifiedName},
+    types::{is_std_function, is_va_list, QualifiedName},
     CodegenOptions, CppFilePair, ParseCallbackResults, UnsafePolicy,
 };
 
@@ -532,7 +532,19 @@ fn check_for_fatal_attrs(
     callback_results: &ParseCallbackResults,
     name: &QualifiedName,
 ) -> Result<(), ConvertErrorWithContext> {
-    if is_std_function(name) {
+    if is_va_list(name) {
+        // Refused here, where the type is, rather than at each use: which
+        // uses are even representable is decided by the target's choice of
+        // definition, so refusing per use would leave the ABI deciding what
+        // autocxx binds. On AAPCS the definition is a struct bindgen cannot
+        // name, which autocxx turns into an opaque type good enough for
+        // `va_list*` and `va_list&` parameters - so those bound there and
+        // nowhere else until this fired first.
+        Err(ConvertErrorWithContext(
+            ConvertErrorFromCpp::UnsupportedVaList,
+            Some(ErrorContext::new_for_item(name.get_final_ident())),
+        ))
+    } else if is_std_function(name) {
         // Checked before the general template-parameter case below, which is
         // how MSVC's std::function arrives here: its standard library spells
         // the type as a partial specialization over a function type, which

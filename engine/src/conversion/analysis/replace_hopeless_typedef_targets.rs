@@ -68,7 +68,18 @@ pub(crate) fn replace_hopeless_typedef_targets(
             // that.
             {
                 let name_id = name.name.get_final_ident();
-                if api.effective_cpp_name().is_nested() {
+                let blame = blames_any_of(deps, &ignored_types).expect("guarded above");
+                if !opaque_stands_in_for(&blame.reason) {
+                    // The target was turned down rather than merely
+                    // indescribable, so an opaque type standing in for it would
+                    // bind the very thing that was refused, under the alias's
+                    // name.
+                    Api::IgnoredItem {
+                        name: api.name_info().clone(),
+                        err: *blame.reason,
+                        ctx: Some(ErrorContext::new_for_item(name_id)),
+                    }
+                } else if api.effective_cpp_name().is_nested() {
                     Api::IgnoredItem {
                         name: api.name_info().clone(),
                         err: ConvertErrorFromCpp::NestedOpaqueTypedef,
@@ -80,7 +91,7 @@ pub(crate) fn replace_hopeless_typedef_targets(
                         forward_declaration: !config
                             .instantiable
                             .contains(&name.name.to_cpp_name()),
-                        reason: blames_any_of(deps, &ignored_types),
+                        reason: Some(blame),
                     }
                 }
             }
@@ -101,6 +112,25 @@ pub(crate) fn replace_hopeless_typedef_targets(
             _ => api,
         })
         .collect()
+}
+
+/// Whether a typedef whose target failed for this reason may stand in for the
+/// target as an opaque type of its own.
+///
+/// It may wherever the target is something bindgen could not describe: the
+/// alias names a real C++ type, and an opaque type is what that is worth. It
+/// may not for `va_list`, which autocxx refuses as a type outright and on every
+/// target, so an alias for it standing in as opaque would hand back the very
+/// thing the refusal withheld, under the alias's name.
+///
+/// Only that one. The other deliberate refusals are refusals of a *value*
+/// crossing - `long double` and `__float128` say in as many words that a field
+/// of that type is fine, being bytes Rust never reads - and an opaque type
+/// behind a pointer reads nothing either. Whether those should reach a
+/// signature under an alias when they cannot under their own name is a
+/// separate question from this one.
+fn opaque_stands_in_for(reason: &ConvertErrorFromCpp) -> bool {
+    !matches!(reason, ConvertErrorFromCpp::UnsupportedVaList)
 }
 
 /// The first of `deps` which `failures` says could not be generated, together

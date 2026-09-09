@@ -26525,6 +26525,226 @@ fn test_ignore_va_list() {
     run_test("", hdr, rs, &["A"], &[]);
 }
 
+/// A class whose methods take `va_list` every way it can be taken, alongside
+/// one which does not. Shared by the tests below, which differ only in the ABI
+/// bindgen is asked to read it under.
+static VA_LIST_METHODS_HDR: &str = indoc! {"
+    #include <stdarg.h>
+    class A {
+    public:
+        A() {}
+        void take_by_value(va_list ap) { (void)ap; }
+        void take_by_ptr(va_list* ap) { (void)ap; }
+        void take_by_ref(va_list& ap) { (void)ap; }
+        int ok_method(int x) const { return x + 1; }
+    };
+"};
+
+/// What `va_list` is, is the target's choice and not the header's: a struct on
+/// AAPCS64 (arm64 Linux and Android), an array of one struct on x86-64 System
+/// V, x86-64 macOS included - where a parameter decays to `__va_list_tag *` and
+/// loses the typedef name altogether - and a plain `char*` on arm64 Apple
+/// platforms and on Windows. autocxx refuses it on all of them, so that which
+/// of those a build targets does not decide what it binds.
+///
+/// This is the host's own arrangement, whichever that is; the two below ask
+/// bindgen to read the same header as somebody else. Addresses the bug
+/// reported upstream as google/autocxx#1262, which is the AAPCS64 line: there
+/// the struct reached the generated C++ as `std::array<std::uint64_t, 4>` and
+/// the C++ compiler refused the member function pointer built over it.
+#[test]
+fn test_va_list_refused_by_name() {
+    let hdr = indoc! {"
+        #include <stdarg.h>
+        void log_it(const char* fmt, va_list ap);
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["log_it"],
+        &[],
+        "va_list is not bound by autocxx on any target",
+    );
+}
+
+/// The refusal under an ABI where `va_list` is a struct, which no test on an
+/// x86-64 or Apple host reaches natively. See `test_va_list_refused_by_name`.
+#[test]
+fn test_va_list_refused_on_aapcs64() {
+    let hdr = indoc! {"
+        #include <stdarg.h>
+        void log_it(const char* fmt, va_list ap);
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["log_it"], &[], None),
+        make_bindgen_only_clang_arg_adder(&["--target=aarch64-unknown-linux-gnu"]),
+        "va_list is not bound by autocxx on any target",
+    );
+}
+
+/// The refusal under x86-64 System V, where the parameter is `__va_list_tag *`
+/// by the time bindgen sees it and there is no `va_list` left in the signature
+/// to recognise. See `test_va_list_refused_by_name`.
+#[test]
+fn test_va_list_refused_on_x86_64_sysv() {
+    let hdr = indoc! {"
+        #include <stdarg.h>
+        void log_it(const char* fmt, va_list ap);
+    "};
+    run_test_expect_fail_with_error_modified(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["log_it"], &[], None),
+        make_bindgen_only_clang_arg_adder(&["--target=x86_64-unknown-linux-gnu"]),
+        "va_list is not bound by autocxx on any target",
+    );
+}
+
+/// Methods are dropped rather than refusing the whole class, and the class's
+/// other methods still bind. The host's arrangement; the AAPCS64 one is below.
+#[test]
+fn test_va_list_methods_dropped_leaving_the_rest() {
+    let rs = quote! {
+        let a = ffi::A::new().within_unique_ptr();
+        assert_eq!(a.ok_method(autocxx::c_int(3)), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        VA_LIST_METHODS_HDR,
+        rs,
+        directives_from_lists(&["A"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["ok_method"],
+            &["take_by_value", "take_by_ptr", "take_by_ref", "va_list"],
+        ))),
+        None,
+    );
+}
+
+/// The red this fix was written against: on AAPCS64 the `va_list` typedef
+/// points at a struct bindgen cannot name, which autocxx turned into an opaque
+/// type good enough to carry `va_list*` and `va_list&` - so those two methods
+/// bound there and on no other target, and the generated C++ named `va_list`
+/// in a bridge signature. Nothing about the header says which of those happens;
+/// only the triple does.
+///
+/// The build is skipped because the header is read as AAPCS64 and would be
+/// compiled as whatever the host is; what autocxx generated is the whole
+/// claim. Addresses the bug reported upstream as google/autocxx#1262.
+#[test]
+fn test_va_list_methods_dropped_on_aapcs64() {
+    run_test_ex(
+        "",
+        VA_LIST_METHODS_HDR,
+        quote! {},
+        directives_from_lists(&["A"], &[], None),
+        make_bindgen_only_clang_arg_adder(&["--target=aarch64-unknown-linux-gnu"]),
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(
+                &["ok_method"],
+                &["take_by_value", "take_by_ptr", "take_by_ref", "va_list"],
+            ),
+        )])),
+        None,
+    );
+}
+
+/// An alias is a second name for the same type, so a header must not be able to
+/// bind `va_list` by spelling it `using Ap = va_list` instead. A typedef whose
+/// target autocxx could not describe becomes an opaque type standing in for it,
+/// which is right where bindgen simply could not name the target and wrong
+/// where autocxx turned the target down on purpose: there the stand-in hands
+/// back what the refusal withheld. Chains of any depth, since the alias one
+/// link along is refused for a reason of its own by then.
+///
+/// Runs as the host, whatever it is: this one leaked on every ABI, not only the
+/// one google/autocxx#1262 reported.
+#[test]
+fn test_va_list_refused_through_an_alias_chain() {
+    let hdr = indoc! {"
+        #include <stdarg.h>
+        using First = va_list;
+        using Second = First;
+        typedef Second Third;
+        class C {
+        public:
+            C() {}
+            void pass_alias(Second* ap) { (void)ap; }
+            void pass_alias_ref(Second& ap) { (void)ap; }
+            void pass_alias_deep(Third* ap) { (void)ap; }
+            int ok_method(int x) const { return x + 1; }
+        };
+    "};
+    let rs = quote! {
+        let c = ffi::C::new().within_unique_ptr();
+        assert_eq!(c.ok_method(autocxx::c_int(3)), autocxx::c_int(4));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["C"], &[], None),
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["ok_method"],
+            &["pass_alias", "va_list"],
+        ))),
+        None,
+    );
+}
+
+/// `<cstdarg>` provides `std::va_list` as a using-declaration for the global
+/// one, so that is a spelling a header can reach it by. On the ABIs where the
+/// typedef points at a struct - the ones google/autocxx#1262 is about - it is
+/// refused like any other route to it.
+///
+/// Where the typedef is `char *`, which is arm64 Apple and Windows, this route
+/// does bind: bindgen resolves the using-declaration and hands over `*mut
+/// c_char` with the name gone, so there is nothing left for autocxx to
+/// recognise. That is the same type under its own name rather than a wrong one,
+/// which is why the tests below are the two struct ABIs.
+#[test]
+fn test_va_list_through_a_using_declaration_refused_on_aapcs64() {
+    assert_va_list_using_declaration_refused("aarch64-unknown-linux-gnu");
+}
+
+#[test]
+fn test_va_list_through_a_using_declaration_refused_on_x86_64_sysv() {
+    assert_va_list_using_declaration_refused("x86_64-unknown-linux-gnu");
+}
+
+/// Spelled the way `<cstdarg>` spells it, but written out so that the fixture
+/// needs only clang's own `<stdarg.h>` and can be parsed as any target.
+fn assert_va_list_using_declaration_refused(triple: &str) {
+    let hdr = indoc! {"
+        #include <stdarg.h>
+        namespace mystd { using ::va_list; }
+        class G {
+        public:
+            G() {}
+            void take_using(mystd::va_list ap) { (void)ap; }
+            int ok_method(int x) const { return x + 1; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["G"], &[], None),
+        make_bindgen_only_clang_arg_adder(&[&format!("--target={triple}")]),
+        Some(make_checks_without_building(vec![Box::new(
+            CppMatcher::new(&["ok_method"], &["take_using", "va_list"]),
+        )])),
+        None,
+    );
+}
+
 #[test]
 fn test_badly_named_alloc() {
     let hdr = indoc! {"

@@ -254,6 +254,59 @@ pub(crate) fn is_std_function(name: &QualifiedName) -> bool {
     name.get_final_item() == "function" && name.ns_segment_iter().eq(std::iter::once("std"))
 }
 
+/// What to tell a user who has run into `va_list`.
+///
+/// Refusal is the whole of the support, so the message has to carry the reason
+/// there is nothing better: the type is a different type on each ABI, and
+/// autocxx binds the by-value form on none of them. See
+/// [`crate::conversion::ConvertErrorFromCpp::UnsupportedVaList`].
+pub(crate) const VA_LIST_ADVICE: &str = "va_list is not bound by autocxx on any target. It is a different type on each ABI - a struct on AAPCS64 (arm64 Linux and Android), an array of one struct on x86-64 System V, which includes x86-64 macOS, and a plain char* on arm64 Apple platforms and on Windows - and the by-value form which most declarations use is one autocxx cannot bind where it is a struct. Rather than binding it on the targets whose ABI happens to fit and refusing it on the rest, which would make what a header binds depend on where it is built, autocxx refuses it everywhere. Give the C++ an overload which takes the arguments directly, or one which does the whole va_list traversal in C++, and bind that instead.";
+
+/// The spellings `va_list` reaches bindgen under, per ABI.
+///
+/// `va_list` is a typedef for a builtin whose definition the target chooses,
+/// so which of these a header produces is decided by the triple, not by the
+/// header: `char *` on arm64 Apple platforms and on Windows, `__va_list_tag[1]`
+/// on x86-64 System V - x86-64 macOS included, where a parameter decays to
+/// `__va_list_tag *` and loses the typedef sugar entirely - and a struct on
+/// AAPCS. Every spelling is listed because recognising only the portable one
+/// would let the ABI decide whether autocxx refuses.
+const VA_LIST_SPELLINGS: [&str; 8] = [
+    "va_list",
+    "__builtin_va_list",
+    "__builtin_ms_va_list",
+    "__builtin_sysv_va_list",
+    "__gnuc_va_list",
+    "__isoc_va_list",
+    "__darwin_va_list",
+    "__va_list_tag",
+];
+
+/// Whether this is `va_list` or one of the target-specific types it is an
+/// alias for.
+///
+/// Only at the top level, and in `std` for the AAPCS `__va_list`, which is
+/// where the C and C++ standards reserve these names. Somebody's own
+/// `mylib::va_list` is their own type.
+///
+/// One route past this, on the targets which spell `va_list` as a typedef for
+/// `char *` and only there: reached through a using-declaration - which is how
+/// `<cstdarg>` provides `std::va_list` - the parameter arrives from bindgen as
+/// `*mut c_char` with no name left to read, and binds. On every other target
+/// the same route ends at a struct, which is refused. What the name would buy
+/// there is uniformity, not correctness: where the typedef is `char *` the
+/// binding it produces is that same type under its own name.
+pub(crate) fn is_va_list(name: &QualifiedName) -> bool {
+    let mut ns = name.ns_segment_iter();
+    match ns.next() {
+        None => VA_LIST_SPELLINGS.contains(&name.get_final_item()),
+        // Clang declares the AAPCS `__va_list` in namespace std when
+        // compiling C++, and nowhere else.
+        Some("std") => ns.next().is_none() && name.get_final_item() == "__va_list",
+        Some(_) => false,
+    }
+}
+
 /// Problems representing C++ identifiers in a way which is compatible with
 /// cxx.
 #[derive(Error, Clone, Debug)]
@@ -366,7 +419,9 @@ pub(crate) fn strip_bindgen_original_suffix_from_ident(
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{dedup_name_stem, is_std_function, strip_bindgen_original_suffix};
+    use crate::types::{
+        dedup_name_stem, is_std_function, is_va_list, strip_bindgen_original_suffix,
+    };
 
     use super::QualifiedName;
 
@@ -397,6 +452,51 @@ mod tests {
         // reasons and should keep saying so.
         assert!(!is_std_function(&QualifiedName::new_from_cpp_name(
             "std::_Get_function_impl"
+        )));
+    }
+
+    /// Which name `va_list` arrives under is the target's choice, and no one
+    /// host can produce more than its own. This is what pins the spellings
+    /// the other ABIs use.
+    #[test]
+    fn va_list_is_recognised_under_every_abi_spelling() {
+        for spelling in [
+            // Every target which has <stdarg.h> at all.
+            "va_list",
+            // What the typedef resolves to, per target.
+            "__builtin_va_list",
+            "__builtin_ms_va_list",
+            "__builtin_sysv_va_list",
+            "__gnuc_va_list",
+            "__isoc_va_list",
+            "__darwin_va_list",
+            // x86-64 System V, which is what a parameter decays to a pointer
+            // to, the typedef having been lost.
+            "__va_list_tag",
+        ] {
+            assert!(
+                is_va_list(&QualifiedName::new_from_cpp_name(spelling)),
+                "{spelling} went unrecognised"
+            );
+        }
+        // AAPCS, which clang declares in std when compiling C++.
+        assert!(is_va_list(&QualifiedName::new_from_cpp_name(
+            "std::__va_list"
+        )));
+        // Somebody else's va_list is their own type.
+        assert!(!is_va_list(&QualifiedName::new_from_cpp_name(
+            "mylib::va_list"
+        )));
+        assert!(!is_va_list(&QualifiedName::new_from_cpp_name(
+            "std::va_list"
+        )));
+        assert!(!is_va_list(&QualifiedName::new_from_cpp_name(
+            "std::inner::__va_list"
+        )));
+        // Neighbouring names which are not it.
+        assert!(!is_va_list(&QualifiedName::new_from_cpp_name("va_start")));
+        assert!(!is_va_list(&QualifiedName::new_from_cpp_name(
+            "__va_list_x"
         )));
     }
 
