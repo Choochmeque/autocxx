@@ -241,6 +241,40 @@ pub(crate) fn unwrap_std_array(ty: &TypePath) -> Option<&syn::Type> {
     unwrap_bindgen_marker(ty, "__bindgen_marker_StdArray")
 }
 
+/// Peels both cv markers off `ty`. Neither changes what a type is laid out as,
+/// and a `const volatile` type carries one inside the other.
+fn strip_qualifier_markers(mut ty: &Type) -> &Type {
+    while let Type::Path(typ) = ty {
+        match unwrap_const(typ).or_else(|| unwrap_volatile(typ)) {
+            Some(inner) => ty = inner,
+            None => break,
+        }
+    }
+    ty
+}
+
+/// Whether `ty` is a lowered C++ `std::array`, or a C array of them at any
+/// depth.
+///
+/// The two are copied differently, which is what this is for: a `std::array` is
+/// a class and is copied by calling a constructor, while a C array is copied
+/// element by element. `[T; N]` is written for both, so only the marker tells
+/// them apart. Array layers are peeled because a C array *of* `std::array`s
+/// still holds class objects; a pointer or a reference to one holds none, and
+/// is not this.
+pub(crate) fn holds_std_array(ty: &Type) -> bool {
+    let mut ty = strip_qualifier_markers(ty);
+    loop {
+        if matches!(ty, Type::Path(typ) if unwrap_std_array(typ).is_some()) {
+            return true;
+        }
+        match ty {
+            Type::Array(arr) => ty = strip_qualifier_markers(&arr.elem),
+            _ => return false,
+        }
+    }
+}
+
 /// Peels bindgen's `const` markers off `ty`, for the walks which care what a
 /// type is laid out as rather than whether C++ let anyone write to it. A
 /// `const T` occupies exactly what a `T` does.

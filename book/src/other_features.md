@@ -158,6 +158,34 @@ one function.
 A struct with a `volatile` member is still usable, whichever of these applies;
 it simply cannot be `generate_pod!`.
 
+Its *constructors* depend on what the member is, though, because C++'s do. A
+`volatile` member of scalar type changes nothing: C++ copies a scalar by reading
+it. A `volatile` member of **class** type deletes the enclosing class's
+implicitly declared copy and move constructors unless some constructor of the
+member's type accepts the qualified source, because copying the member means
+direct-initializing it from a `const volatile` source and an implicitly declared
+`M(const M&)` will not bind to one. `autocxx` reports that rather than offering
+constructors whose generated C++ could not compile, and says which member is
+responsible.
+
+The copy can be had back: declare a constructor on the member's own type taking
+`const volatile M&`, which is the one reference the source of a copy binds to.
+That constructor does not bring the move back with it. A move reads a `volatile
+M` *rvalue*, and an lvalue reference binds to an rvalue only where it is `const`
+and not `volatile`, so `M(const volatile M&)` cannot take one.
+
+`autocxx` withdraws the move in every case, which is more conservative than C++:
+a member type declaring `M(volatile M&&)`, or a constructor template which would
+accept the source, does keep the enclosing move constructor in C++, and neither
+is something `autocxx` can see. The reason for withdrawing anyway is that
+claiming the move is not the safe error. Writing `std::move` on a class whose
+move constructor C++ has deleted is not itself an error - a *defaulted* move
+constructor defined as deleted is skipped during overload resolution, and the
+copy constructor runs instead where the class has a usable one - so a wrongly
+claimed move compiles
+quietly, performs a copy, and stops compiling as soon as another member has no
+copy constructor to fall back on.
+
 **Bound through a handle - a pointer or reference *to* something `volatile`.**
 `volatile int*` and `volatile int&` are where the qualifier is most often used
 in real headers, and they are the one position in which *Rust* performs the
