@@ -25049,6 +25049,44 @@ fn test_issue_1125() {
     );
 }
 
+/// Two modifiers which each give bindgen a clang argument have to leave both
+/// arguments in force. `Builder::extra_clang_args` appends, so a caller which
+/// composes configuration out of parts - as `combine_modifiers` does - never
+/// silently loses one part's flags.
+///
+/// One `-D` per modifier, each guarding a function the bindings are then asked
+/// for: whichever argument failed to arrive names itself, because the function
+/// it guards is not in the header bindgen parsed. `test_issue_1125`, the only
+/// other `combine_modifiers` call, came closest to needing this and escaped
+/// because its second modifier is cl-only and gives bindgen nothing.
+#[test]
+fn test_composed_modifiers_both_reach_bindgen() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #ifdef AUTOCXX_FIRST_MODIFIER_ARG
+        inline uint32_t from_first_modifier() { return 1; }
+        #endif
+        #ifdef AUTOCXX_SECOND_MODIFIER_ARG
+        inline uint32_t from_second_modifier() { return 2; }
+        #endif
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::from_first_modifier(), 1);
+            assert_eq!(ffi::from_second_modifier(), 2);
+        },
+        directives_from_lists(&["from_first_modifier", "from_second_modifier"], &[], None),
+        combine_modifiers(
+            make_clang_arg_adder(&["-DAUTOCXX_FIRST_MODIFIER_ARG"]),
+            make_clang_arg_adder(&["-DAUTOCXX_SECOND_MODIFIER_ARG"]),
+        ),
+        None,
+        None,
+    );
+}
+
 // Four C++ built-in types which are distinct types in C++ and which no Rust
 // primitive is: `wchar_t`, `char32_t`, `char8_t` and `long double`. Three of
 // them now cross the bridge; the fourth is refused, which is the most that can
