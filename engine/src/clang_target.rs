@@ -181,6 +181,13 @@ fn bindgen_extra_clang_args(env_target: Option<&str>) -> Vec<String> {
     }
 }
 
+/// The extra clang arguments bindgen will add from the environment, for a
+/// caller which needs to know what clang will end up obeying rather than which
+/// target it will parse for.
+pub(crate) fn bindgen_extra_clang_args_for_parse() -> Vec<String> {
+    bindgen_extra_clang_args(std::env::var("TARGET").ok().as_deref())
+}
+
 /// The `--target=` argument to add to a clang invocation, given the extra
 /// clang args the caller supplied.
 ///

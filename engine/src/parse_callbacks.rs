@@ -12,8 +12,9 @@ use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
-    ExceptionSpecification, Explicitness, MemberFunctionTemplateInfo, MethodKind, RefQualifier,
-    SpecialMemberKind, TemplateMemberFunctionInfo, UsingDeclarationInfo, Visibility,
+    ExceptionSpecification, ExceptionSpecifications, Explicitness, MemberFunctionTemplateInfo,
+    MethodKind, RefQualifier, SpecialMemberKind, TemplateMemberFunctionInfo, UsingDeclarationInfo,
+    Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -405,7 +406,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     bases: HashMap<DiscoveredItemId, Vec<ReportedBase>>,
     data_members: HashMap<DiscoveredItemId, Vec<DataMember>>,
     deprecations: HashMap<DiscoveredItemId, Deprecation>,
-    exception_specifications: HashMap<DiscoveredItemId, ExceptionSpecification>,
+    exception_specifications: HashMap<DiscoveredItemId, ExceptionSpecifications>,
     using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<DiscoveredItemId, Vec<TemplateMemberFunction>>,
     member_function_templates: HashMap<DiscoveredItemId, Vec<MemberFunctionTemplate>>,
@@ -425,7 +426,39 @@ impl UnindexedParseCallbackResults {
         }
     }
 
-    pub(crate) fn index(self) -> ParseCallbackResults {
+    pub(crate) fn index(
+        self,
+        arguments_say_specifications_are_part_of_the_type: bool,
+    ) -> ParseCallbackResults {
+        // What the arguments said, unless the parse itself contradicts them.
+        //
+        // `cpp_standard` reads an argument vector rather than running clang's
+        // own parse of it, so it can conclude C++17 of a parse which was not -
+        // an `-std=` reaching clang by a spelling it does not know, or a driver
+        // mode it cannot account for. Believing C++17 wrongly is the direction
+        // which matters, because it answers a `noexcept(expr)` from a canonical
+        // type which carries no specification and so reads every one of them as
+        // "may throw".
+        //
+        // The parse says which it was. An unconditional non-throwing
+        // specification is in the canonical type from C++17 and absent from it
+        // before, whichever of the three ways C++ spelled it, so one that the
+        // canonical type dropped is proof the parse predates C++17. The
+        // converse is not proof of anything, which is why this can only ever
+        // take the answer away.
+        let specification_was_dropped =
+            self.exception_specifications
+                .values()
+                .any(|specifications| {
+                    matches!(
+                        specifications.declared,
+                        ExceptionSpecification::BasicNoexcept
+                            | ExceptionSpecification::DynamicNone
+                            | ExceptionSpecification::NoThrow
+                    ) && specifications.canonical == ExceptionSpecification::None
+                });
+        let exception_specifications_are_part_of_the_type =
+            arguments_say_specifications_are_part_of_the_type && !specification_was_dropped;
         let index = self
             .mods_for_items
             .iter()
@@ -484,6 +517,7 @@ impl UnindexedParseCallbackResults {
 
         ParseCallbackResults {
             results: self,
+            exception_specifications_are_part_of_the_type,
             index,
             bases,
             using_declarations,
@@ -521,10 +555,39 @@ impl UnindexedParseCallbackResults {
     }
 }
 
+/// Which of the two readings bindgen reports for a function answers.
+///
+/// The declaration's own kind, except for `noexcept(expr)`: that says only that
+/// the specification is conditional, and the canonical function type is where
+/// clang resolved the operand. A specification is part of a function's type
+/// only from C++17, so `part_of_the_type` says whether there is anything there
+/// to read; where there is not, `ComputedNoexcept` stands and says that nothing
+/// here knows which way the operand went.
+///
+/// No other declared kind is answered from the canonical type. A pre-C++17
+/// canonical type reports `None` for every function however it was declared, so
+/// reading one for a `noexcept` member would turn "does not throw" into "may
+/// throw anything", and a consumer reproducing that on an override would write
+/// one looser than the method it overrides - which is ill-formed, so the build
+/// breaks rather than the binding being wrong.
+fn resolve_exception_specification(
+    specifications: ExceptionSpecifications,
+    part_of_the_type: bool,
+) -> ExceptionSpecification {
+    match specifications.declared {
+        ExceptionSpecification::ComputedNoexcept if part_of_the_type => specifications.canonical,
+        declared => declared,
+    }
+}
+
 /// A version of [`UnindexedParseCallbackResults`] with an index constructed
 /// for efficient access.
 pub(crate) struct ParseCallbackResults {
     results: UnindexedParseCallbackResults,
+    /// Whether the standard the headers were parsed at makes a function's
+    /// exception specification part of its type, which is what decides whether
+    /// [`Self::get_exception_specification`] can resolve a `noexcept(expr)`.
+    exception_specifications_are_part_of_the_type: bool,
     index: HashMap<NameAndParent, DiscoveredItemId>,
     bases: HashMap<QualifiedName, BaseClasses>,
     using_declarations: HashMap<QualifiedName, Vec<UsingDeclaration>>,
@@ -610,15 +673,23 @@ impl ParseCallbackResults {
             .and_then(|id| self.results.method_kinds.get(&id).cloned())
     }
 
-    /// The exception specification C++ declared a function with. bindgen
-    /// reports none for a function declared without one, which is what
+    /// What a function says about the exceptions it allows. bindgen reports
+    /// nothing for a function declared without a specification, which is what
     /// [`ExceptionSpecification::None`] says here.
+    ///
+    /// See [`resolve_exception_specification`] for the `noexcept(expr)` case.
     pub(crate) fn get_exception_specification(
         &self,
         name: &QualifiedName,
     ) -> ExceptionSpecification {
         self.id_by_name(name)
-            .and_then(|id| self.results.exception_specifications.get(&id).cloned())
+            .and_then(|id| self.results.exception_specifications.get(&id).copied())
+            .map(|specifications| {
+                resolve_exception_specification(
+                    specifications,
+                    self.exception_specifications_are_part_of_the_type,
+                )
+            })
             .unwrap_or(ExceptionSpecification::None)
     }
 
@@ -895,12 +966,12 @@ impl ParseCallbacks for AutocxxParseCallbacks {
     fn denote_exception_specification(
         &self,
         id: DiscoveredItemId,
-        specification: ExceptionSpecification,
+        specifications: ExceptionSpecifications,
     ) {
         self.results
             .borrow_mut()
             .exception_specifications
-            .insert(id, specification);
+            .insert(id, specifications);
     }
 
     fn denote_using_declaration(&self, parent: DiscoveredItemId, using: UsingDeclarationInfo<'_>) {
@@ -1029,5 +1100,161 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                     .has_default_member_initializer
                     .unwrap_or(false),
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        resolve_exception_specification, DiscoveredItemId, ExceptionSpecification,
+        ExceptionSpecifications, UnindexedParseCallbackResults,
+    };
+
+    /// Callback results reporting one function with the given readings.
+    fn results_reporting(specifications: ExceptionSpecifications) -> UnindexedParseCallbackResults {
+        let mut results = UnindexedParseCallbackResults::with_only_a_root_mod();
+        results
+            .exception_specifications
+            .insert(DiscoveredItemId::new(1), specifications);
+        results
+    }
+
+    #[test]
+    fn a_dropped_specification_overrules_the_arguments() {
+        // The backstop for an `-std=` the argument scan could not read. A
+        // `noexcept` function whose canonical type has no specification can only
+        // have come from a parse before C++17, so the resolution is withdrawn
+        // however the arguments read.
+        for declared in [
+            ExceptionSpecification::BasicNoexcept,
+            ExceptionSpecification::DynamicNone,
+            ExceptionSpecification::NoThrow,
+        ] {
+            let results = results_reporting(ExceptionSpecifications {
+                declared,
+                canonical: ExceptionSpecification::None,
+            })
+            .index(true);
+            assert!(
+                !results.exception_specifications_are_part_of_the_type,
+                "{declared:?} dropped by the canonical type did not overrule the arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn a_specification_the_canonical_type_kept_leaves_the_answer_alone() {
+        let results = results_reporting(ExceptionSpecifications {
+            declared: ExceptionSpecification::BasicNoexcept,
+            canonical: ExceptionSpecification::BasicNoexcept,
+        })
+        .index(true);
+        assert!(results.exception_specifications_are_part_of_the_type);
+    }
+
+    #[test]
+    fn the_backstop_only_ever_takes_the_answer_away() {
+        // It cannot conclude C++17 of a parse the arguments said was older:
+        // a canonical type which kept a specification is not proof of anything
+        // this needs, and the escape hatch has to stay an escape.
+        let results = results_reporting(ExceptionSpecifications {
+            declared: ExceptionSpecification::BasicNoexcept,
+            canonical: ExceptionSpecification::BasicNoexcept,
+        })
+        .index(false);
+        assert!(!results.exception_specifications_are_part_of_the_type);
+    }
+
+    /// What the two readings are for a function declared `noexcept(expr)`,
+    /// parsed where the specification is part of the function type and where it
+    /// is not. The C++14 column is what clang reports there for every function:
+    /// no specification at all.
+    fn computed(canonical: ExceptionSpecification) -> ExceptionSpecifications {
+        ExceptionSpecifications {
+            declared: ExceptionSpecification::ComputedNoexcept,
+            canonical,
+        }
+    }
+
+    #[test]
+    fn a_resolved_conditional_specification_is_answered_from_the_type() {
+        // `noexcept(true)`, and an operand clang evaluated to the same.
+        assert_eq!(
+            resolve_exception_specification(computed(ExceptionSpecification::BasicNoexcept), true),
+            ExceptionSpecification::BasicNoexcept
+        );
+        // `noexcept(false)`: the specification allows every exception, which is
+        // what a function declared without one allows.
+        assert_eq!(
+            resolve_exception_specification(computed(ExceptionSpecification::None), true),
+            ExceptionSpecification::None
+        );
+    }
+
+    #[test]
+    fn a_dependent_conditional_specification_stays_unresolved() {
+        // `noexcept(N > 0)` in a template clang has not instantiated: the
+        // canonical type is as conditional as the declaration.
+        assert_eq!(
+            resolve_exception_specification(
+                computed(ExceptionSpecification::ComputedNoexcept),
+                true
+            ),
+            ExceptionSpecification::ComputedNoexcept
+        );
+    }
+
+    #[test]
+    fn a_pre_cpp17_parse_resolves_nothing() {
+        // The canonical type carries no specification to read, so the
+        // declaration's own kind stands - including where the canonical type
+        // reports `None`, which there means "no specification is part of a
+        // function type" and not "this function may throw".
+        for canonical in [
+            ExceptionSpecification::None,
+            ExceptionSpecification::BasicNoexcept,
+        ] {
+            assert_eq!(
+                resolve_exception_specification(computed(canonical), false),
+                ExceptionSpecification::ComputedNoexcept
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_declared_kind_ignores_the_canonical_type() {
+        // At a pre-C++17 parse every one of these has a canonical `None`, so
+        // reading the canonical kind unconditionally would drop a `noexcept` a
+        // consumer has to reproduce and leave it overriding a non-throwing
+        // method with a throwing one. That does not compile, which is the loud
+        // failure; the quiet one is the opposite - `noexcept` over a method
+        // which may throw is legal and calls `std::terminate` if an exception
+        // ever reaches it - and is why a conditional specification is read from
+        // the canonical type only where the parse actually resolved it.
+        for declared in [
+            ExceptionSpecification::None,
+            ExceptionSpecification::DynamicNone,
+            ExceptionSpecification::Dynamic,
+            ExceptionSpecification::MsAny,
+            ExceptionSpecification::BasicNoexcept,
+            ExceptionSpecification::Unevaluated,
+            ExceptionSpecification::Uninstantiated,
+            ExceptionSpecification::Unparsed,
+            ExceptionSpecification::NoThrow,
+        ] {
+            for part_of_the_type in [false, true] {
+                assert_eq!(
+                    resolve_exception_specification(
+                        ExceptionSpecifications {
+                            declared,
+                            canonical: ExceptionSpecification::None,
+                        },
+                        part_of_the_type
+                    ),
+                    declared,
+                    "{declared:?} at part_of_the_type={part_of_the_type}"
+                );
+            }
+        }
     }
 }

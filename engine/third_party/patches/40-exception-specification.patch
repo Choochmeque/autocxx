@@ -19,30 +19,36 @@ at parse time, and report it through an additive
 
 The kinds are reported as libclang reports them rather than folded into "throws"
 and "does not throw", because several of them say only that libclang does not
-know which exceptions the function allows. `ComputedNoexcept` covers
-`noexcept(false)` as well as `noexcept(true)`: clang has evaluated the operand,
-and the type's spelling carries the operand's text, but nothing carries the value
-it evaluated to and there is no cursor for the operand to evaluate. Under
-`-std=c++17` and later the canonical function type resolves it, because the
-specification is then part of the type; under C++14 the canonical type drops
-every specification, so there is nothing to resolve it with. Folding the kind
-here would make the answer depend on the language version without saying so. A
-consumer which needs the distinction can see that it is not available, and one
-which needs the types `throw(A, B)` names can see the same.
+know which exceptions the function allows. `Dynamic` omits the types
+`throw(A, B)` names; `Unevaluated` is a member whose specification clang
+computes only on demand. Folding those into either answer would invent one.
+
+`noexcept(expr)` needs a second reading, and the same header has it.
+`clang_getExceptionSpecificationType` - the type-level call beside the cursor
+one, behind the same feature - answers for a `CXType`, and from C++17 an
+exception specification is part of a function's type. The canonical type is the
+one clang resolved the operand in, so it reports `BasicNoexcept` or `None` where
+the declaration reports only `ComputedNoexcept`. Before C++17 a specification is
+no part of the type and the canonical type carries none at all, which is why
+both readings are reported rather than one merged answer: a consumer which reads
+the canonical kind alone would take a function declared `noexcept` for one which
+may throw, and the language standard a header is parsed at is the consumer's
+choice rather than bindgen's. `ExceptionSpecifications` names the two and says so.
 --- a/callbacks.rs
 +++ b/callbacks.rs
-@@ -3,7 +3,9 @@
+@@ -3,7 +3,10 @@
  pub use crate::ir::analysis::DeriveTrait;
  pub use crate::ir::comp::{MethodKind, SpecialMemberKind};
  pub use crate::ir::derive::CanDerive as ImplementsTrait;
 -pub use crate::ir::function::{Deprecation, RefQualifier, Visibility};
 +pub use crate::ir::function::{
-+    Deprecation, ExceptionSpecification, RefQualifier, Visibility,
++    Deprecation, ExceptionSpecification, ExceptionSpecifications, RefQualifier,
++    Visibility,
 +};
  pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
  pub use crate::ir::int::IntKind;
  pub use cexpr::token::Kind as TokenKind;
-@@ -464,6 +466,23 @@
+@@ -464,6 +467,28 @@
      ) {
      }
  
@@ -54,12 +60,17 @@ which needs the types `throw(A, B)` names can see the same.
 +    /// specification is looser than that of the virtual function it overrides,
 +    /// so an override which drops a `noexcept` is ill-formed.
 +    ///
++    /// Reported as the declaration says it and as the canonical function type
++    /// carries it, because the two differ over `noexcept(expr)` and which of
++    /// them answers depends on the language standard: see
++    /// [`ExceptionSpecifications`].
++    ///
 +    /// Not reported for a function declared without a specification, which says
 +    /// nothing a consumer can act on.
 +    fn denote_exception_specification(
 +        &self,
 +        _id: DiscoveredItemId,
-+        _specification: ExceptionSpecification,
++        _specifications: ExceptionSpecifications,
 +    ) {
 +    }
 +
@@ -85,6 +96,24 @@ which needs the types `throw(A, B)` names can see the same.
      }
  
      /// Try to evaluate this cursor.
+@@ -1863,6 +1873,17 @@
+         unsafe { clang_Type_getCXXRefQualifier(self.x) }
+     }
+ 
++    /// The exception specification this type carries.
++    ///
++    /// Only a function type answers usefully, and only from C++17, where a
++    /// specification became part of a function's type; libclang reports an
++    /// invalid kind for anything else.
++    pub(crate) fn exception_specification(
++        &self,
++    ) -> CXCursor_ExceptionSpecificationKind {
++        unsafe { clang_getExceptionSpecificationType(self.x) }
++    }
++
+     /// Given that this type is a function type, get the type of its return
+     /// value.
+     pub(crate) fn ret_type(&self) -> Option<Type> {
 --- a/codegen/mod.rs
 +++ b/codegen/mod.rs
 @@ -42,7 +42,8 @@
@@ -103,19 +132,29 @@ which needs the types `throw(A, B)` names can see the same.
                  cb.denote_deprecation(discovered_id, deprecation);
 +            });
 +        }
-+        let exception_specification = self.exception_specification();
-+        if exception_specification != ExceptionSpecification::None {
++        let exception_specifications = self.exception_specifications();
++        if exception_specifications.declared != ExceptionSpecification::None {
 +            ctx.options().for_each_callback(|cb| {
 +                cb.denote_exception_specification(
 +                    discovered_id,
-+                    exception_specification,
++                    exception_specifications,
 +                );
              });
          }
  
 --- a/ir/function.rs
 +++ b/ir/function.rs
-@@ -89,6 +89,40 @@
+@@ -10,7 +10,8 @@
+ use crate::clang::{self, ABIKind, Attribute};
+ use crate::parse::{ClangSubItemParser, ParseError, ParseResult};
+ use clang_sys::{
+-    CXCallingConv, CX_CXXAccessSpecifier, CX_CXXPrivate, CX_CXXProtected,
++    CXCallingConv, CXCursor_ExceptionSpecificationKind, CX_CXXAccessSpecifier,
++    CX_CXXPrivate, CX_CXXProtected,
+ };
+ 
+ use quote::TokenStreamExt;
+@@ -89,6 +90,104 @@
      RValue,
  }
  
@@ -153,101 +192,134 @@ which needs the types `throw(A, B)` names can see the same.
 +    NoThrow,
 +}
 +
++/// What a C++ function's declaration says about exceptions, and what its
++/// canonical type says.
++///
++/// The two differ over `noexcept(expr)`. The declaration reports only that the
++/// specification is conditional. From C++17 the specification is part of the
++/// function type, and the canonical type is the one clang resolved the operand
++/// in, so `canonical` is `BasicNoexcept` or `None` there and says which way it
++/// went. Before C++17 a specification is no part of a function's type, the
++/// canonical type carries none at all, and `canonical` is `None` however the
++/// function was declared - including for one declared `noexcept`, so it may not
++/// be read on its own.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ExceptionSpecifications {
++    /// What the declaration says, which is what libclang reports for the
++    /// function's cursor.
++    pub declared: ExceptionSpecification,
++    /// What the canonical function type carries.
++    pub canonical: ExceptionSpecification,
++}
++
++/// What libclang's exception specification kind means.
++fn exception_specification(
++    kind: CXCursor_ExceptionSpecificationKind,
++) -> ExceptionSpecification {
++    use clang_sys::*;
++    match kind {
++        CXCursor_ExceptionSpecificationKind_DynamicNone => {
++            ExceptionSpecification::DynamicNone
++        }
++        CXCursor_ExceptionSpecificationKind_Dynamic => {
++            ExceptionSpecification::Dynamic
++        }
++        CXCursor_ExceptionSpecificationKind_MSAny => {
++            ExceptionSpecification::MsAny
++        }
++        CXCursor_ExceptionSpecificationKind_BasicNoexcept => {
++            ExceptionSpecification::BasicNoexcept
++        }
++        CXCursor_ExceptionSpecificationKind_ComputedNoexcept => {
++            ExceptionSpecification::ComputedNoexcept
++        }
++        CXCursor_ExceptionSpecificationKind_Unevaluated => {
++            ExceptionSpecification::Unevaluated
++        }
++        CXCursor_ExceptionSpecificationKind_Uninstantiated => {
++            ExceptionSpecification::Uninstantiated
++        }
++        CXCursor_ExceptionSpecificationKind_Unparsed => {
++            ExceptionSpecification::Unparsed
++        }
++        CXCursor_ExceptionSpecificationKind_NoThrow => {
++            ExceptionSpecification::NoThrow
++        }
++        CXCursor_ExceptionSpecificationKind_None => ExceptionSpecification::None,
++        // The invalid kind libclang reports for a cursor which declares no
++        // function or a type which is not a function type, and a kind a later
++        // libclang adds. Both read as no specification, so a consumer which
++        // reproduces one writes none: too loose rather than too strict, which
++        // an ordinary C++ compiler rejects outright and one in
++        // Microsoft-compatibility mode accepts with a warning.
++        _ => ExceptionSpecification::None,
++    }
++}
++
  /// Extra C++ facts autocxx needs which vanilla bindgen does not record.
  #[derive(Debug)]
  pub(crate) struct AutocxxFuncInfo {
-@@ -102,6 +136,8 @@
+@@ -102,6 +201,8 @@
      is_defaulted: bool,
      /// `void f() &` or `void f() &&`, where C++ wrote one.
      ref_qualifier: RefQualifier,
-+    /// The exception specification C++ declared the function with.
-+    exception_specification: ExceptionSpecification,
++    /// What C++ said about the exceptions the function allows.
++    exception_specifications: ExceptionSpecifications,
  }
  
  impl AutocxxFuncInfo {
-@@ -111,6 +147,7 @@
+@@ -111,6 +212,7 @@
          is_deleted: bool,
          is_defaulted: bool,
          ref_qualifier: RefQualifier,
-+        exception_specification: ExceptionSpecification,
++        exception_specifications: ExceptionSpecifications,
      ) -> Self {
          Self {
              special_member,
-@@ -118,6 +155,7 @@
+@@ -118,6 +220,7 @@
              is_deleted,
              is_defaulted,
              ref_qualifier,
-+            exception_specification,
++            exception_specifications,
          }
      }
  
-@@ -145,6 +183,11 @@
+@@ -144,6 +247,11 @@
+     /// The ref-qualifier C++ declared this member function with.
      pub fn ref_qualifier(&self) -> RefQualifier {
          self.ref_qualifier
-     }
-+
-+    /// The exception specification C++ declared this function with.
-+    pub fn exception_specification(&self) -> ExceptionSpecification {
-+        self.exception_specification
 +    }
++
++    /// What C++ said about the exceptions this function allows.
++    pub fn exception_specifications(&self) -> ExceptionSpecifications {
++        self.exception_specifications
+     }
  }
  
- /// A deprecation marker on a C++ declaration, and what it was written with.
-@@ -307,6 +350,11 @@
+@@ -307,6 +415,11 @@
      pub fn ref_qualifier(&self) -> RefQualifier {
          self.autocxx.ref_qualifier()
      }
 +
-+    /// The exception specification C++ declared this function with.
-+    pub fn exception_specification(&self) -> ExceptionSpecification {
-+        self.autocxx.exception_specification()
++    /// What C++ said about the exceptions this function allows.
++    pub fn exception_specifications(&self) -> ExceptionSpecifications {
++        self.autocxx.exception_specifications()
 +    }
  }
  
  impl DotAttributes for Function {
-@@ -1022,6 +1070,45 @@
+@@ -1021,6 +1134,14 @@
+                 CXRefQualifier_LValue => RefQualifier::LValue,
                  CXRefQualifier_RValue => RefQualifier::RValue,
                  _ => RefQualifier::None,
-             },
-+            match cursor.exception_specification() {
-+                CXCursor_ExceptionSpecificationKind_DynamicNone => {
-+                    ExceptionSpecification::DynamicNone
-+                }
-+                CXCursor_ExceptionSpecificationKind_Dynamic => {
-+                    ExceptionSpecification::Dynamic
-+                }
-+                CXCursor_ExceptionSpecificationKind_MSAny => {
-+                    ExceptionSpecification::MsAny
-+                }
-+                CXCursor_ExceptionSpecificationKind_BasicNoexcept => {
-+                    ExceptionSpecification::BasicNoexcept
-+                }
-+                CXCursor_ExceptionSpecificationKind_ComputedNoexcept => {
-+                    ExceptionSpecification::ComputedNoexcept
-+                }
-+                CXCursor_ExceptionSpecificationKind_Unevaluated => {
-+                    ExceptionSpecification::Unevaluated
-+                }
-+                CXCursor_ExceptionSpecificationKind_Uninstantiated => {
-+                    ExceptionSpecification::Uninstantiated
-+                }
-+                CXCursor_ExceptionSpecificationKind_Unparsed => {
-+                    ExceptionSpecification::Unparsed
-+                }
-+                CXCursor_ExceptionSpecificationKind_NoThrow => {
-+                    ExceptionSpecification::NoThrow
-+                }
-+                CXCursor_ExceptionSpecificationKind_None => {
-+                    ExceptionSpecification::None
-+                }
-+                // The invalid kind libclang reports for a cursor which declares
-+                // no function, and a kind a later libclang adds. Both read as
-+                // no specification, so a consumer which reproduces one writes
-+                // none: too loose rather than too strict, which an ordinary C++
-+                // compiler rejects outright and one in Microsoft-compatibility
-+                // mode accepts with a warning.
-+                _ => ExceptionSpecification::None,
 +            },
++            ExceptionSpecifications {
++                declared: exception_specification(
++                    cursor.exception_specification(),
++                ),
++                canonical: exception_specification(
++                    cursor.cur_type().canonical_type().exception_specification(),
++                ),
+             },
          );
  
-         let function = Self::new(

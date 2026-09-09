@@ -36847,12 +36847,11 @@ fn test_subclass_virtual_without_specification_gets_none() {
 
 #[test]
 fn test_subclass_conditional_noexcept_non_pure_virtual() {
-    // `noexcept(expr)` reaches autocxx as a kind which says the specification
-    // is conditional and nothing about which way the condition resolved, so
-    // neither writing `noexcept` on the override nor leaving it off is known to
-    // be right. A non-pure virtual therefore gets no override at all, exactly
-    // as an `&&`-qualified one does, and the superclass's own implementation
-    // stands; `other` shows the rest of the subclass is unaffected.
+    // `noexcept(true)` is part of the function type at the C++17 autocxx parses
+    // at, and clang has resolved the operand there, so the override can repeat
+    // what the superclass method says: a bare `noexcept`, which is the same
+    // specification. `other` shows a method with none beside it, and
+    // `conditional_autocxx_super` the helper a refusal would have suppressed.
     let hdr = indoc! {"
     #include <cstdint>
 
@@ -36871,7 +36870,7 @@ fn test_subclass_conditional_noexcept_non_pure_virtual() {
         hdr,
         quote! {
             let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
-            assert_eq!(ffi::call_conditional(o.borrow().as_ref()), 2);
+            assert_eq!(ffi::call_conditional(o.borrow().as_ref()), 5);
             assert_eq!(ffi::call_other(o.borrow().as_ref()), 7);
         },
         quote! {
@@ -36881,12 +36880,12 @@ fn test_subclass_conditional_noexcept_non_pure_virtual() {
         },
         None,
         Some(Box::new(CppMatcher::new(
-            &["uint32_t other() const override;"],
             &[
-                "conditional() const override",
-                "conditional() const noexcept override",
+                "uint32_t conditional() const noexcept override;",
+                "uint32_t other() const override;",
                 "conditional_autocxx_super",
             ],
+            &["uint32_t conditional() const override;"],
         ))),
         Some(quote! {
             use autocxx::subclass::CppSubclass;
@@ -36895,6 +36894,9 @@ fn test_subclass_conditional_noexcept_non_pure_virtual() {
             pub struct MyObserver {
             }
             impl Observer_methods for MyObserver {
+                fn conditional(&self) -> u32 {
+                    5
+                }
                 fn other(&self) -> u32 {
                     7
                 }
@@ -36905,11 +36907,9 @@ fn test_subclass_conditional_noexcept_non_pure_virtual() {
 
 #[test]
 fn test_subclass_conditional_noexcept_pure_virtual() {
-    // The same refusal where the method is pure virtual. There is nothing to
-    // fall back on: the peer class stays abstract and the C++ which allocates
-    // it does not compile, naming the method it has no override for. Refusing
-    // the subclass itself would say so in Rust instead, which needs the
-    // override APIs to depend on their subclass; they do not today.
+    // The same resolution where the method is pure virtual, which is the shape
+    // that used to have no fallback: a refused override left the peer class
+    // abstract and the C++ which allocates it did not compile.
     let hdr = indoc! {"
     #include <cstdint>
 
@@ -36921,16 +36921,160 @@ fn test_subclass_conditional_noexcept_pure_virtual() {
     };
     inline uint32_t call_foo(const Observer& o) { return o.foo(); }
     "};
-    // The trait implementation is empty and the Rust never calls `foo`, so the
-    // diagnostic pinned here is the one the refusal causes and not a Rust error
-    // about a method the trait no longer has. `abstract` is the word every
-    // compiler the suite runs on uses for a class with an unoverridden pure
-    // virtual - clang "allocating an object of abstract class type", gcc
-    // "cannot allocate an object of abstract type", MSVC "cannot instantiate
-    // abstract class" - and it is what distinguishes this failure from the one
-    // a too-loose override emitted instead of the refusal would give, which
-    // speaks of exception specifications instead.
-    run_test_expect_fail_with_errors_ex(
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &[
+                "uint32_t foo() const noexcept override;",
+                "uint32_t MyObserverCpp::foo() const noexcept",
+            ],
+            &["uint32_t foo() const override;"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_conditional_noexcept_false_gets_no_specification() {
+    // `noexcept(false)` allows every exception, so the override is
+    // unconstrained and takes no specification - the same answer a method
+    // declared without one gets. Writing `noexcept` here would compile and
+    // turn an exception leaving the override into a call to `std::terminate`,
+    // which is why the kind was refused outright while the parse standard left
+    // the operand unresolved.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept(false) = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["uint32_t foo() const override;"],
+            &["foo() const noexcept"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_conditional_noexcept_operand_is_evaluated() {
+    // An operand which is neither `true` nor `false` spelled out: clang
+    // evaluates it, and what reaches autocxx is the answer rather than the
+    // expression. `sizeof(uint32_t) >= 4` holds on every target the suite runs
+    // on, so the superclass method does not throw and the override says so.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept(sizeof(uint32_t) >= 4) = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+            assert_eq!(ffi::call_foo(o.borrow().as_ref()), 4);
+        },
+        quote! {
+            generate!("call_foo")
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["uint32_t foo() const noexcept override;"],
+            &["uint32_t foo() const override;"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {
+            }
+            impl Observer_methods for MyObserver {
+                fn foo(&self) -> u32 {
+                    4
+                }
+            }
+        }),
+    );
+}
+
+#[test]
+fn test_subclass_conditional_noexcept_refused_at_a_cpp14_parse() {
+    // The resolution is the parse standard's doing, not libclang's: before
+    // C++17 an exception specification is no part of the function type, so the
+    // canonical type carries none and nothing says which way the operand went.
+    // A caller who overrides the standard autocxx parses at - the documented
+    // escape for C++ which only compiles as C++14 - gets the refusal back, and
+    // a pure virtual one leaves the peer class abstract. This pins the
+    // precedence as well as the behaviour: `extra_clang_args` reaches clang
+    // after autocxx's own `-std=`, so the later flag is the one clang obeys.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    class Observer {
+    public:
+        Observer() {}
+        virtual uint32_t foo() const noexcept(true) = 0;
+        virtual ~Observer() {}
+    };
+    inline uint32_t call_foo(const Observer& o) { return o.foo(); }
+    "};
+    run_test_expect_fail_with_error_modified(
         "",
         hdr,
         quote! {
@@ -36940,17 +37084,41 @@ fn test_subclass_conditional_noexcept_pure_virtual() {
             generate!("call_foo")
             subclass!("Observer",MyObserver)
         },
-        Some(quote! {
-            use autocxx::subclass::CppSubclass;
-            use ffi::Observer_methods;
-            #[autocxx::subclass::subclass]
-            pub struct MyObserver {
-            }
-            impl Observer_methods for MyObserver {
-            }
-        }),
-        &["abstract"],
+        // The header parse alone: the C++ compiler stays at the C++14 the
+        // harness sets, which is what it would have been anyway.
+        make_bindgen_only_clang_arg_adder(&["-std=c++14"]),
+        "abstract",
     );
+}
+
+#[test]
+fn test_cpp17_removed_constructs_still_parse() {
+    // C++17 deleted three things a header written for an older standard may
+    // still contain, and clang's diagnostic for each is an error by default,
+    // which bindgen treats as fatal. autocxx turns all three back into
+    // warnings, because raising the standard it *parses* at must not stop it
+    // reading a header it used to read.
+    //
+    // Only the parse is at stake, so the constructs sit behind `BINDGEN`,
+    // which autocxx defines for libclang and no C++ compiler defines: the
+    // standard the header is compiled at is the caller's own choice and this
+    // change does not touch it. `plain` shows the translation unit was read
+    // rather than abandoned.
+    let hdr = indoc! {"
+    #include <cstdint>
+
+    #ifdef BINDGEN
+    void dynamic_exception_specification() throw(int);
+    inline void register_storage_class() { register int i = 0; (void)i; }
+    inline void increments_a_bool() { bool b = false; b++; (void)b; }
+    #endif
+
+    inline uint32_t plain() { return 7; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::plain(), 7);
+    };
+    run_test("", hdr, rs, &["plain"], &[]);
 }
 
 #[test]
