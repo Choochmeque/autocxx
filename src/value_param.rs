@@ -73,8 +73,7 @@ pub unsafe trait ValueParam<T> {
     /// otherwise `()`.
     #[doc(hidden)]
     type StackStorage;
-    /// Populate the stack storage given as a parameter. Only called if you
-    /// return `true` from `needs_stack_space`.
+    /// Populate the stack storage given as a parameter.
     ///
     /// # Safety
     ///
@@ -85,14 +84,27 @@ pub unsafe trait ValueParam<T> {
     /// Retrieve the pointer to the underlying item, to be passed to C++.
     /// Note that on the C++ side this is currently passed to `std::move`
     /// and therefore may be mutated.
+    ///
+    /// # Safety
+    ///
+    /// The storage must hold a value and must not have moved since it was
+    /// built: for the `MaybeUninit` implementations that means
+    /// `populate_stack_space` returned and nothing has since destroyed or
+    /// replaced what it left there.
     #[doc(hidden)]
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T;
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T;
     #[doc(hidden)]
     /// Any special drop steps required for the stack storage. This is not
     /// necessary if the `StackStorage` type is something self-dropping
     /// such as `UniquePtr`; it's only necessary if it's something where
     /// manual management is required such as `MaybeUninit`.
-    fn do_drop(_stack: Pin<&mut Self::StackStorage>) {}
+    ///
+    /// # Safety
+    ///
+    /// As for `get_ptr`, and this must be the only such call: an
+    /// implementation which needs one destroys the value in place, so nothing
+    /// may touch the storage afterwards.
+    unsafe fn do_drop(_stack: Pin<&mut Self::StackStorage>) {}
 }
 
 unsafe impl<T> ValueParam<T> for &T
@@ -110,14 +122,14 @@ where
         // promised not to move it.
         unsafe { crate::moveit::new::copy(self).new(Pin::new_unchecked(slot.as_mut().unwrap())) }
     }
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: it's OK to (briefly) create a reference to the T because we
         // populated it within `populate_stack_space`. It's OK to unpack the pin
         // because we're not going to move the contents.
         unsafe { Pin::into_inner_unchecked(stack).assume_init_mut() as *mut T }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
         // Switch to MaybeUninit::assume_init_drop when stabilized
         // Safety: per caller guarantees of populate_stack_space, we know this hasn't moved.
         unsafe { std::ptr::drop_in_place(Pin::into_inner_unchecked(stack).assume_init_mut()) };
@@ -132,7 +144,7 @@ unsafe impl<T> ValueParam<T> for CppPin<T> {
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin. The
         // pointer is to the `T` inside the `CppPin`'s own `Box`, which we now
         // own and keep alive until after the call, so it's non-null, aligned
@@ -157,7 +169,7 @@ where
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin, nor of the
         // type stored within the UniquePtr, which we own and keep alive until
         // after the call. Here the cached `CppMutRef` is the pointer to use:
@@ -198,7 +210,7 @@ where
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin, nor of the
         // type stored within the UniquePtr.
         unsafe {
@@ -219,7 +231,7 @@ unsafe impl<T> ValueParam<T> for Pin<Box<T>> {
         unsafe { *Pin::into_inner_unchecked(stack.as_mut()) = Some(self) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
         // Safety: we won't move/swap the contents of the outer pin, nor of the
         // type stored within the UniquePtr.
         unsafe {
@@ -243,12 +255,14 @@ where
         }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
-        <&'a T as ValueParam<T>>::get_ptr(stack)
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::get_ptr(stack) }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
-        <&'a T as ValueParam<T>>::do_drop(stack)
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::do_drop(stack) }
     }
 }
 
@@ -263,12 +277,14 @@ where
         unsafe { self.as_ref().get_ref().populate_stack_space(stack) }
     }
 
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
-        <&'a T as ValueParam<T>>::get_ptr(stack)
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut T {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::get_ptr(stack) }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
-        <&'a T as ValueParam<T>>::do_drop(stack)
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+        // Safety: the promise this call needs is the one our own caller made.
+        unsafe { <&'a T as ValueParam<T>>::do_drop(stack) }
     }
 }
 
@@ -309,14 +325,14 @@ unsafe impl<N: New> ValueParam<N::Output> for ByNew<N> {
         // promised not to move it.
         unsafe { self.0.new(Pin::new_unchecked(slot.as_mut().unwrap())) }
     }
-    fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut N::Output {
+    unsafe fn get_ptr(stack: Pin<&mut Self::StackStorage>) -> *mut N::Output {
         // Safety: it's OK to (briefly) create a reference to the N::Output because we
         // populated it within `populate_stack_space`. It's OK to unpack the pin
         // because we're not going to move the contents.
         unsafe { Pin::into_inner_unchecked(stack).assume_init_mut() as *mut N::Output }
     }
 
-    fn do_drop(stack: Pin<&mut Self::StackStorage>) {
+    unsafe fn do_drop(stack: Pin<&mut Self::StackStorage>) {
         // Switch to MaybeUninit::assume_init_drop when stabilized
         // Safety: per caller guarantees of populate_stack_space, we know this hasn't moved.
         unsafe { std::ptr::drop_in_place(Pin::into_inner_unchecked(stack).assume_init_mut()) };
@@ -345,7 +361,9 @@ impl<T, VP: ValueParam<T>> ValueParamHandler<T, VP> {
     ///
     /// # Safety
     ///
-    /// Callers must call [`populate`] exactly once prior to calling [`get_ptr`].
+    /// Callers must call [`populate`] exactly once prior to calling
+    /// [`get_ptr`], and it must have returned: [`get_ptr`] must not be called
+    /// after a constructor unwound.
     pub unsafe fn populate(self: Pin<&mut Self>, param: VP) {
         // Safety: `space` is pinned structurally, as documented in
         // [`std::pin`] - this type is `PhantomPinned`, nothing here moves the
@@ -365,6 +383,9 @@ impl<T, VP: ValueParam<T>> ValueParamHandler<T, VP> {
     pub fn get_ptr(self: Pin<&mut Self>) -> *mut T {
         // Structural pinning, as documented in [`std::pin`]. `map_unchecked_mut` doesn't play
         // nicely with `unwrap`, so we have to do it manually.
+        // Safety: `VP::get_ptr` asks that `populate_stack_space` returned for
+        // this storage and that it hasn't moved since; both are the promise
+        // made by whoever called the unsafe `populate` above.
         unsafe {
             VP::get_ptr(Pin::new_unchecked(
                 self.get_unchecked_mut().space.as_mut().unwrap(),
