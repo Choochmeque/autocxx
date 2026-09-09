@@ -23,7 +23,21 @@ as an invalid type and `TemplateInstantiation::from_ty` drops it, so `N` is not
 reachable from the type; `clang_Cursor_getNumTemplateArguments` and its
 companions report every argument of the specialization's cursor with its kind,
 and an integral one with its value. `Cursor::template_arguments` is that, and
-`std_array_shape` reads the pair `std::array` is written with.
+`std_array_shape` reads the pair from there.
+
+The element is then taken back off the type. A cursor is the instantiated
+declaration and holds its arguments canonical, which is all a length can be; an
+element loses every typedef that way, and a `replaces=` annotation is recorded
+against the name the source wrote - so an element canonicalised past a typedef
+is substituted for nothing, and the array is emitted over the class the typedef
+named rather than over the stand-in. The type's own arguments keep what was
+written, so the element is looked for among those - by naming the same C++ type
+the cursor reported, and only where exactly one of them does, since two
+arguments naming it leave nothing to say which the element was written as and
+the spellings are not interchangeable. Failing that, and for an element whose
+canonical type is not a class, the cursor's stands: an element which
+canonicalises to an integer is written from whichever name reaches codegen, and
+that is a choice of spelling rather than a substitution being lost.
 
 The substitution is made only where `[T; N]` names the same C++ type back.
 `sizeof(std::array<T, N>)` is not mandated to be `N * sizeof(T)`, so the size
@@ -165,7 +179,7 @@ the blob and the array occupy the same bytes but are not the same Rust type.
          let kind = if location.kind() == CXCursor_TemplateRef ||
              (ty.template_args().is_some() && ty_kind != CXType_Typedef)
          {
-@@ -1350,3 +1374,104 @@
+@@ -1350,3 +1374,152 @@
          }
      }
  }
@@ -207,6 +221,16 @@ the blob and the array occupy the same bytes but are not the same Rust type.
 +    if len == 0 {
 +        return None;
 +    }
++    // The arguments come off the cursor because that is the only place
++    // libclang reports a non-type one, and a cursor is the *instantiated*
++    // declaration: its arguments are canonical, and canonicalisation drops a
++    // typedef. A `replaces=` annotation is recorded against the name it was
++    // written with, so an element reduced to the class a typedef stands for
++    // misses the substitution and the array is emitted over a type bindgen was
++    // told to write something else for. The type reports the argument as
++    // written, where there is a written form to report, so the element comes
++    // from there and only the length from the cursor.
++    let element = written_class_argument(ty, element).unwrap_or(*element);
 +    // The element has to be one `[T; N]` names as the same C++ type it was
 +    // written with, and two kinds are not.
 +    //
@@ -238,7 +262,45 @@ the blob and the array occupy the same bytes but are not the same Rust type.
 +    {
 +        return None;
 +    }
-+    Some((*element, len))
++    Some((element, len))
++}
++
++/// `element` as the source wrote it, rather than as the instantiated
++/// declaration holds it. `None` where there is no written form to read, or
++/// where it says nothing the canonical one does not.
++///
++/// Only an element whose canonical type is a class is taken this way, a class
++/// being what the substitutions this is for put in place of one. Anything else
++/// keeps the canonical form: where it canonicalises to an integer the written
++/// name is what decides the Rust type - `uint32_t` is `u32` and `unsigned int`
++/// is `c_uint` - which is a choice of spelling rather than a substitution being
++/// lost.
++///
++/// The arguments a type reports are not always a specialization's own: an alias
++/// template in front of one reports the alias template's, which may be fewer,
++/// reordered, or arguments to something else again. So the element is found
++/// among them by naming the same C++ type the cursor reported, and only where
++/// exactly one of them does. Two arguments naming it leave nothing to say which
++/// of the two the element was written as, and the spellings are not
++/// interchangeable: `uint32_t` is a Rust primitive to codegen whatever it was
++/// declared over, so an alias of that name for a class would be written as an
++/// integer.
++fn written_class_argument(
++    ty: &clang::Type,
++    element: &clang::Type,
++) -> Option<clang::Type> {
++    let canonical = element.canonical_type();
++    if canonical.kind() != clang_sys::CXType_Record {
++        return None;
++    }
++    let mut spellings = ty.template_args()?.filter(|written| {
++        written.is_valid() && written.canonical_type() == canonical
++    });
++    let spelling = spellings.next()?;
++    if spellings.next().is_some() {
++        return None;
++    }
++    (spelling != canonical).then_some(spelling)
 +}
 +
 +/// Whether `declaration` is declared in namespace `std` itself.
