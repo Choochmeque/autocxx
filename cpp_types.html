@@ -486,6 +486,78 @@ fn main() {
     ffi::drink(&amp;nicer_than_it_sounds);
 }
 </code></pre>
+<h2 id="your-own-smart-pointers"><a class="header" href="#your-own-smart-pointers">Your own smart pointers</a></h2>
+<p>A class template which holds a pointer to its argument - <code>scoped_refptr&lt;T&gt;</code>,
+<code>intrusive_ptr&lt;T&gt;</code>, whatever your codebase calls its own - is one of those
+opaque instantiations, and so by default there is no way to reach what it points
+at. A
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.smart_pointer.html"><code>smart_pointer!</code></a>
+directive naming the <em>template</em> says that it is a smart pointer, and every
+instantiation of it then has a <code>get</code> method answering with a raw pointer to the
+payload:</p>
+<h4 id="c-header-4"><a class="header" href="#c-header-4">C++ header:</a></h4>
+<pre><code class="language-cpp">#include &lt;cstdint&gt;
+struct Milk {
+  uint32_t creaminess;
+};
+template&lt;typename T&gt;
+class Jug {
+public:
+  Jug() : contents(nullptr) {}
+  explicit Jug(T* contents) : contents(contents) {}
+  Jug(Jug&amp;&amp; other) : contents(other.contents) { other.contents = nullptr; }
+  ~Jug() { delete contents; }
+  T* get() const { return contents; }
+private:
+  T* contents;
+};
+inline Jug&lt;Milk&gt; fetch() { return Jug&lt;Milk&gt;(new Milk{7}); }
+
+</code></pre>
+<h4 id="rust-4"><a class="header" href="#rust-4">Rust:</a></h4>
+<pre><code class="language-rust noplayground">
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("fetch")
+    generate_pod!("Milk")
+    smart_pointer!("Jug")
+}
+
+fn main() {
+    let jug = ffi::fetch();
+    // Safe: `fetch` hands back a jug with milk in it, and the milk lives as
+    // long as the jug does.
+    let milk = unsafe { &amp;*jug.get() };
+    assert_eq!(milk.creaminess, 7);
+}
+</code></pre>
+<p>The claim the directive makes is that <code>p.get()</code> on a <code>const</code> instantiation
+yields a <code>T*</code>, and your C++ compiler is what checks it: the generated shim is
+declared returning <code>T*</code> and calls <code>get()</code>, which does not compile if there is no
+such member or if what it returns will not convert. <code>bindgen</code> reports the
+members a class template declares, but not an inherited one, not a member
+function template, and nothing whatsoever about a <em>specialization</em> - so autocxx
+cannot tell a template with no <code>get</code> from one whose <code>get</code> it was not told about,
+and does not refuse either. A directive which matches no instantiation <em>is</em> an
+error, since the accessor you asked for would otherwise silently not be
+there.</p>
+<p>Under <code>safety!(unsafe_references_wrapped)</code> the accessor is an <code>unsafe fn</code>
+answering with a <code>CppRef</code> instead of a raw pointer, since safe code may
+dereference one of those.</p>
+<p><code>autocxx</code> never guesses. A class with a <code>get</code>, or one written to look exactly
+like <code>std::unique_ptr</code>, is treated like any other template until you say
+otherwise.</p>
+<p>An instantiation which appears <em>only</em> as a template argument of something else -
+<code>Carton&lt;Jug&lt;Milk&gt;&gt;</code> and nothing more - does not get the accessor, because
+<code>autocxx</code> names such an argument without converting it.</p>
+<p>What you can do with one of these is otherwise what you could always do with an
+opaque instantiation: receive it from C++, hold it, hand it back, and drop it,
+which destroys it in C++. <code>get</code> is the whole of what the directive adds - there
+is no way to make one from Rust and no way to copy one - so a reference-counted
+pointer can be moved from the Rust side but not shared from it.</p>
 <h2 id="implicit-member-functions"><a class="header" href="#implicit-member-functions">Implicit member functions</a></h2>
 <p>Most of the API of a C++ type is contained within the type, so <code>autocxx</code> can
 understand what is available for Rust to call when that type is analyzed.
