@@ -8,10 +8,7 @@
 
 //! The triviality certificate cxx will not write for an array element.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-use autocxx_parser::IncludeCppConfig;
+use autocxx_parser::{stable_hash, IncludeCppConfig};
 use indexmap::set::IndexSet;
 use syn::{FnArg, PatType, ReturnType, Type};
 
@@ -132,17 +129,20 @@ fn note_element(ty: &Type, witnesses: &mut IndexSet<QualifiedName>) {
 /// the holder shims make too; the hashes are what make it a name nobody
 /// writes.
 ///
+/// Both hashes are [`stable_hash`], not any hash: this name is emitted into
+/// generated Rust and generated C++ and becomes part of a linker symbol, and generated
+/// output for unchanged input has to be byte-identical from one run to the
+/// next whatever compiled the generator.
+///
 /// The readable part is reduced to single underscores first, because cxx turns
 /// down any C++ identifier containing a double one - cxx-gen 0.7.200
 /// `src/syntax/ident.rs:15` - and a class called `Elem_` would otherwise make
 /// one when the rest of the name is appended.
 pub(crate) fn witness_name(config: &IncludeCppConfig, ty: &QualifiedName) -> String {
-    let mut hasher = DefaultHasher::new();
-    ty.to_cpp_name().hash(&mut hasher);
     config.uniquify_name_per_mod(&format!(
         "{}_autocxx_array_element_{:x}",
         single_underscores(ty.get_final_item()),
-        hasher.finish()
+        stable_hash(&ty.to_cpp_name())
     ))
 }
 
@@ -160,4 +160,32 @@ fn single_underscores(name: &str) -> String {
         out.pop();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::witness_name;
+    use crate::types::QualifiedName;
+    use autocxx_parser::IncludeCppConfig;
+    use syn::parse_quote;
+
+    /// This name is written into generated Rust and generated C++ and becomes
+    /// part of a linker symbol, so the same input has to produce the same name
+    /// whatever built the generator - and both hashes in it have to come from
+    /// [`autocxx_parser::stable_hash`] for that to hold. Pinned for the same
+    /// reasons as `autocxx_parser`'s own config-hash pin: if this moves,
+    /// every build system caching on generated file contents rebuilds
+    /// everything downstream of an autocxx bridge.
+    #[test]
+    fn test_witness_name_is_pinned() {
+        let hexathorpe = syn::token::Pound(proc_macro2::Span::call_site());
+        let config: IncludeCppConfig = parse_quote! {
+            #hexathorpe include "a.h"
+            generate!("Foo")
+        };
+        assert_eq!(
+            witness_name(&config, &QualifiedName::new_from_cpp_name("a::b::Elem")),
+            "Elem_autocxx_array_element_d99fd6cbbb04d53e_0xb03cf0e02f64c740"
+        );
+    }
 }
