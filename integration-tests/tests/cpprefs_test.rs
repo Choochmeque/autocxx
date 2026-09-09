@@ -1251,3 +1251,55 @@ fn test_non_pod_constant_cpprefs() {
     };
     run_cpprefs_test(cxx, hdr, rs, &["FX_HELD", "fx_Held"], &[]);
 }
+
+/// A `smart_pointer!` instantiation's `get` under the wrapped-references
+/// policy, where what it hands back is a `CppRef` rather than a raw pointer -
+/// and is an `unsafe fn`, because safe code may dereference a `CppRef` and
+/// nothing here promises the smart pointer holds anything.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_get_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Widget {
+            uint32_t v;
+            explicit fx_Widget(uint32_t v) : v(v) {}
+            uint32_t peek() const { return v; }
+        };
+        template<typename T>
+        class fx_MyPtr {
+        public:
+            fx_MyPtr() : p_(nullptr) {}
+            explicit fx_MyPtr(T* p) : p_(p) {}
+            fx_MyPtr(fx_MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~fx_MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline fx_MyPtr<fx_Widget> fx_make() {
+            return fx_MyPtr<fx_Widget>(new fx_Widget(42));
+        }
+    "};
+    let rs = quote! {
+        let p = ffi::fx_make();
+        // Safe: `fx_make` hands back a smart pointer holding a widget, and the
+        // widget lives as long as the smart pointer this borrows from.
+        let widget: autocxx::CppRef<ffi::fx_Widget> = unsafe { p.as_ref().unwrap().get() };
+        // A `CppRef` is a receiver in this mode, which is the whole point of
+        // handing one back rather than a raw pointer.
+        assert_eq!(widget.peek(), 42);
+    };
+    run_cpprefs_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("fx_make")
+            generate!("fx_Widget")
+            smart_pointer!("fx_MyPtr")
+        },
+        None,
+    );
+}
