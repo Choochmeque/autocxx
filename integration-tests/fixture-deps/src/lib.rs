@@ -14,4 +14,8 @@
 //! so this package's manifest is the fixture manifest - see its comments for
 //! what is in it and why.
 //!
-//! There is no code here to run, and the library is empty on purpose.
+//! There is no code here to run, and the library is empty on purpose. It has to
+//! be a library rather than nothing at all, because trybuild adds the package it
+//! was pointed at to the fixture's own dependencies whenever that package has a
+//! library target - which is what carries this crate's build script, and with it
+//! the link search path the fixture needs, into the fixture's build.

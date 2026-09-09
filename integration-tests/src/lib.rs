@@ -289,11 +289,17 @@ fn lock_builder() -> MutexGuard<'static, LinkableTryBuilder> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// TryBuild which maintains a directory of libraries to link.
-/// This is desirable because otherwise, if we alter the rustc flags
-/// then trybuild rebuilds *everything* including all the dev-dependencies.
-/// This object exists purely so that we use the same flags for every
-/// test case.
+/// Holds the directory a fixture's library, headers and generated bindings are
+/// staged into.
+///
+/// Staging writes fixed filenames - `libautocxx-demo` and the rest - so only one
+/// build at a time can be using a given directory: whoever is building has to be
+/// the one whose files are in it.
+///
+/// It used to be here for a second reason, that every fixture should build with
+/// the same rustc flags, since a change in those rebuilds all of a fixture's
+/// dependencies. That is now true by construction - see [`fixture_rustflags`],
+/// which no longer names this directory or any other.
 struct LinkableTryBuilder {
     /// Directory in which we'll keep any linkable libraries
     temp_dir: TempDir,
@@ -353,7 +359,8 @@ impl LinkableTryBuilder {
         let asan = std::env::var_os("AUTOCXX_ASAN").is_some();
         run_trybuild(
             rs_path,
-            &fixture_rustflags(self.temp_dir.path(), asan),
+            &fixture_rustflags(asan),
+            self.temp_dir.path(),
             &rs_find_env(rs_find_mode, self.temp_dir.path()),
         )
     }
@@ -372,12 +379,16 @@ impl LinkableTryBuilder {
 /// build; its fixtures get `=1` like everyone else's, which only lets a
 /// sanitizer report name a line.
 ///
-/// The search path is a separate element from the `-L` introducing it, which is
-/// what lets it contain a space; see [`encoded_rustflags`]. `--cfg trybuild -A
-/// dead_code` is trybuild's own contribution, restated here for the reason
-/// given there.
-fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
-    let mut flags = vec!["-L".into(), temp_dir.into(), "-Cdebuginfo=1".into()];
+/// Every element here is the same for every fixture in every process, which is
+/// the property that matters: cargo fingerprints these flags, so anything that
+/// varied would rebuild each fixture's dependencies before compiling it. The
+/// staging directory used to be here, as a `-L`, and it varies - see
+/// [`FIXTURE_LINK_SEARCH_VAR`] for where it went instead.
+///
+/// `--cfg trybuild -A dead_code` is trybuild's own contribution, restated here
+/// for the reason given in [`encoded_rustflags`].
+fn fixture_rustflags(asan: bool) -> Vec<OsString> {
+    let mut flags = vec![OsString::from("-Cdebuginfo=1")];
     if asan {
         flags.extend(
             [
@@ -396,10 +407,13 @@ fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
 /// Joins flags with the `0x1f` separator `CARGO_ENCODED_RUSTFLAGS` uses.
 ///
 /// That variable rather than `RUSTFLAGS`, which cargo splits on whitespace with
-/// no quoting or escaping of any kind - so the `-L` naming the temporary
-/// directory cannot be expressed there at all once that path contains a space.
-/// A Windows profile under `C:\Users\First Last` or a `TMPDIR` with a space in
-/// it gave `error: multiple input filenames provided`, every fixture, always.
+/// no quoting or escaping of any kind. That used to be the whole reason: the
+/// `-L` naming the staging directory could not be expressed there at all once
+/// the path contained a space, and a Windows profile under `C:\Users\First
+/// Last` or a `TMPDIR` with a space in it gave `error: multiple input filenames
+/// provided`, every fixture, always. No path goes through here any more - see
+/// [`FIXTURE_LINK_SEARCH_VAR`] - but the second reason below stands on its own,
+/// and a channel with no splitting rule keeps the question from coming back.
 ///
 /// Cargo takes extra flags from exactly one of four sources - the first of
 /// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, `target.*.rustflags`,
@@ -423,11 +437,10 @@ fn encoded_rustflags(flags: &[OsString]) -> OsString {
         encoded.push(flag);
     }
     // Cargo reads this one as a `String` and ignores it otherwise, falling
-    // through to sources this deliberately replaced - so a temporary directory
-    // whose path is not Unicode would lose every flag here, including the `-L`,
-    // and fail somewhere much further along. Said here instead. The spelling
-    // this replaced could not carry such a path either: it went through
-    // `to_str().unwrap()`.
+    // through to sources this deliberately replaced - so a flag that is not
+    // Unicode would lose every flag here and fail somewhere much further along.
+    // Said here instead. Nothing composed today can be anything but ASCII; this
+    // is what says so if that stops being true.
     assert!(
         encoded.to_str().is_some(),
         "the fixture's rustc flags are not valid Unicode, which \
@@ -492,6 +505,21 @@ const TRYBUILD_CHILD_RS_PATH: &str = "AUTOCXX_TRYBUILD_CHILD_RS_PATH";
 /// value cannot be used: it belongs to whoever is running.
 const FIXTURE_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixture-deps");
 
+/// Tells the fixture where the library staged for it is.
+///
+/// Read by `autocxx-fixture-deps`'s build script, which turns it into a
+/// `rustc-link-search`; the name is declared in both places and nowhere else.
+///
+/// It goes this way round rather than as a `-L` in [`fixture_rustflags`]
+/// because cargo fingerprints rustc flags and does not fingerprint one crate's
+/// link search path into another's. The staging directory is a fresh temporary
+/// one per process, so as a flag it made every fixture's dependencies stale in
+/// every new process - and every fixture build began by rebuilding them.
+/// Emitted from a build script it invalidates that one build script and nothing
+/// else, so the flags are now identical for every fixture everywhere and the
+/// dependencies are compiled once.
+const FIXTURE_LINK_SEARCH_VAR: &str = "AUTOCXX_FIXTURE_LINK_SEARCH";
+
 /// Printed by the child the moment it enters build mode, so that the parent can
 /// tell "the build ran and succeeded" apart from "whatever ran under that name
 /// was not the child, and did nothing at all". Without it a missing or wrong
@@ -553,15 +581,19 @@ pub fn run_trybuild_child_if_requested() -> bool {
 fn run_trybuild(
     rs_path: &Path,
     rustflags: &[OsString],
+    link_search: &Path,
     rs_find_env: &[(String, OsString)],
 ) -> Result<(), String> {
     let child_bin = match find_trybuild_child_bin() {
         Ok(child_bin) => child_bin,
-        Err(reason) => return build_in_process(rs_path, rustflags, rs_find_env, &reason),
+        Err(reason) => {
+            return build_in_process(rs_path, rustflags, link_search, rs_find_env, &reason)
+        }
     };
     let mut cmd = std::process::Command::new(child_bin);
     cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
         .env("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR)
+        .env(FIXTURE_LINK_SEARCH_VAR, link_search)
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags))
         .env_remove("RUSTFLAGS")
         .stdin(std::process::Stdio::null())
@@ -581,6 +613,7 @@ fn run_trybuild(
             return build_in_process(
                 rs_path,
                 rustflags,
+                link_search,
                 rs_find_env,
                 &format!("the `{TRYBUILD_CHILD_BIN_NAME}` helper could not be run ({err})"),
             )
@@ -594,6 +627,7 @@ fn run_trybuild(
         return build_in_process(
             rs_path,
             rustflags,
+            link_search,
             rs_find_env,
             &format!(
                 "the executable found as `{TRYBUILD_CHILD_BIN_NAME}` did not announce \
@@ -684,6 +718,7 @@ fn find_bin_in_ancestors(dir: &Path, file_name: &str) -> Option<PathBuf> {
 fn build_in_process(
     rs_path: &Path,
     rustflags: &[OsString],
+    link_search: &Path,
     rs_find_env: &[(String, OsString)],
     reason: &str,
 ) -> Result<(), String> {
@@ -722,8 +757,13 @@ fn build_in_process(
         ),
         ("RUSTFLAGS", std::env::var_os("RUSTFLAGS")),
         ("CARGO_MANIFEST_DIR", std::env::var_os("CARGO_MANIFEST_DIR")),
+        (
+            FIXTURE_LINK_SEARCH_VAR,
+            std::env::var_os(FIXTURE_LINK_SEARCH_VAR),
+        ),
     ];
     std::env::set_var("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR);
+    std::env::set_var(FIXTURE_LINK_SEARCH_VAR, link_search);
     std::env::set_var("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags));
     std::env::remove_var("RUSTFLAGS");
     for key in RS_FIND_KEYS {
@@ -1425,8 +1465,9 @@ impl BuilderModifierFns for ForceWrapperGeneration {
 mod tests {
     use super::{
         encoded_rustflags, find_bin_in_ancestors, find_trybuild_child_bin, fixture_rustflags,
-        OsString, Path, TRYBUILD_CHILD_SEARCH_DEPTH,
+        OsString, TRYBUILD_CHILD_SEARCH_DEPTH,
     };
+    use std::path::MAIN_SEPARATOR;
     use tempfile::tempdir;
 
     /// Lays out `dirs` under a temporary root and puts `helper` in the root's
@@ -1512,47 +1553,70 @@ mod tests {
             .collect()
     }
 
-    /// The whole point of the encoded channel: a search path containing a space
-    /// arrives as ONE argument. Through `$RUSTFLAGS`, which cargo splits on
-    /// whitespace, the tail of the path became a second input filename and
-    /// every fixture failed to build.
+    /// An argument containing a space survives the encoding as ONE argument.
+    ///
+    /// Nothing the harness composes today contains a space - see
+    /// [`the_flags_name_no_path`] - so this pins the encoder rather than any
+    /// present caller. It is here because the test it replaces covered this
+    /// property incidentally, by putting a path with a space through it: through
+    /// `$RUSTFLAGS`, which cargo splits on whitespace with no quoting of any
+    /// kind, the tail of that path became a second input filename and every
+    /// fixture failed to build. An encoder which started splitting its
+    /// arguments again would pass every other test here, because they are all
+    /// single words.
     #[test]
-    fn a_search_path_containing_a_space_stays_one_argument() {
-        let args = decoded(&fixture_rustflags(
-            Path::new("/tmp/space dir/.tmp01"),
-            false,
-        ));
-        let l = args.iter().position(|a| a == "-L").unwrap();
-        assert_eq!(args[l + 1], "/tmp/space dir/.tmp01");
+    fn an_argument_containing_a_space_stays_one_argument() {
+        let args = decoded(&[
+            OsString::from("-Clink-arg=--script=/tmp/space dir/link.x"),
+            OsString::from("-Cdebuginfo=1"),
+        ]);
+        assert_eq!(
+            args,
+            ["-Clink-arg=--script=/tmp/space dir/link.x", "-Cdebuginfo=1"]
+        );
         assert!(
-            !args.iter().any(|a| a == "dir/.tmp01"),
-            "the path was split on its space: {args:?}"
+            !args.iter().any(|arg| arg == "dir/link.x"),
+            "the argument was split on its space: {args:?}"
         );
     }
 
-    /// A path without a space produces exactly the arguments this harness
-    /// passed when it composed `$RUSTFLAGS` by hand and cargo split it again -
-    /// including the two trybuild used to append for us, which the encoded
-    /// channel makes cargo ignore.
+    /// The flags carry no filesystem path, which is what keeps them the same
+    /// for every fixture in every process - and so keeps cargo's fingerprints
+    /// for a fixture's dependencies valid across processes and across runs.
+    ///
+    /// The staging directory now travels in
+    /// [`super::FIXTURE_LINK_SEARCH_VAR`], one environment variable holding one
+    /// value, which no layer splits. That channel's own end-to-end behaviour
+    /// with a space in the path is not asserted here - see the note in the pull
+    /// request which introduced it.
     #[test]
-    fn a_space_free_path_gives_the_flags_it_always_did() {
+    fn the_flags_name_no_path() {
+        for asan in [false, true] {
+            let args = decoded(&fixture_rustflags(asan));
+            assert!(
+                !args.iter().any(|arg| arg == "-L"),
+                "a search path is back in the fixture's flags: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg.contains(MAIN_SEPARATOR)),
+                "a path is back in the fixture's flags: {args:?}"
+            );
+        }
+    }
+
+    /// Exactly the arguments this harness passed when it composed `$RUSTFLAGS`
+    /// by hand and cargo split it again, less the search path - including the
+    /// two trybuild used to append for us, which the encoded channel makes
+    /// cargo ignore.
+    #[test]
+    fn the_flags_are_the_ones_a_fixture_always_built_with() {
         assert_eq!(
-            decoded(&fixture_rustflags(Path::new("/tmp/plain"), false)),
-            [
-                "-L",
-                "/tmp/plain",
-                "-Cdebuginfo=1",
-                "--cfg",
-                "trybuild",
-                "-A",
-                "dead_code"
-            ]
+            decoded(&fixture_rustflags(false)),
+            ["-Cdebuginfo=1", "--cfg", "trybuild", "-A", "dead_code"]
         );
         assert_eq!(
-            decoded(&fixture_rustflags(Path::new("/tmp/plain"), true)),
+            decoded(&fixture_rustflags(true)),
             [
-                "-L",
-                "/tmp/plain",
                 "-Cdebuginfo=1",
                 "-Z",
                 "sanitizer=address",

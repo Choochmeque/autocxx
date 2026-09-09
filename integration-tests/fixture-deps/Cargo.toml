@@ -15,6 +15,7 @@ edition = "2021"
 publish = false
 description = "The dependencies autocxx's test fixtures are built with"
 repository = "https://github.com/google/autocxx"
+build = "build.rs"
 
 # Every dependency here is unused by this crate's own (empty) library and is
 # meant to be: trybuild composes each fixture's manifest out of the
