@@ -1,0 +1,409 @@
+Subject: Emit an unnamed namespace's members in the namespace enclosing it
+
+An unnamed namespace is defined to behave as a namespace whose name nothing can
+write, followed by a using-directive for it, so its members are found by lookup
+in the namespace which encloses them. `namespace { struct A {}; }` at the top of
+a header declares a type whose only C++ spelling, from any translation unit
+which includes that header, is `A`.
+
+With `--enable-cxx-namespaces` that namespace currently gets a module of its
+own, named `_bindgen_mod_<id>` because there is no name to use. Neither half of
+that name is usable. `_bindgen_mod_<id>` is not a C++ name, so a consumer which
+writes C++ from the output - a wrapper generator, a test harness which names the
+types back - emits a namespace which does not exist; and `<id>` is
+`Item::exposed_id`, a counter over every item parsed, so the Rust path moves
+whenever anything earlier in the header is edited. An allowlist cannot reach
+into it either: `--allowlist-type A` is matched against
+`root::_bindgen_mod_12::A`, and the `12` is not something a build file can
+write down.
+
+An inline namespace has the same transparency and is already handled this way:
+`<Module as CodeGenerator>::codegen` emits no module for one, `Item::compute_path`
+and `Item::real_canonical_name` leave it out of the paths and names they build,
+and `Item::codegen_depth` does not count it. The result is output which names the
+enclosing namespace, which is valid, because that is where lookup finds the
+members. This extends each of those to a namespace with no name, which needs it
+more: an inline namespace's own name is at least a name C++ would accept.
+
+`conservative_inline_namespaces` has no counterpart here, and cannot have one. It
+exists so that a caller who wants an inline namespace's own name in the path can
+ask for it; an unnamed namespace has no name to ask for.
+
+# Where the enclosing namespace declares the same name
+
+Unlike an inline namespace, an unnamed one can declare a name the enclosing
+namespace also declares, the two being different scopes as any two namespaces
+are:
+
+    namespace { constexpr int LIMIT = 1; }
+    constexpr int LIMIT = 2;
+    static_assert(::LIMIT == 2);
+
+These are two entities, which an inline namespace could not give you: a member
+of one is a member of the enclosing namespace for redeclaration too, so the
+second `LIMIT` would be a redefinition. Qualified lookup resolves `::LIMIT` to
+the enclosing declaration rather than finding both, because a using-directive is
+consulted only where direct lookup found nothing - so C++ can name one of them
+and not the other. Rust has one namespace for both, and emitting both into one module would
+be a redefinition; emitting one and dropping the other silently would answer with
+the wrong constant.
+
+So `compute_transparent_unnamed_namespaces` decides, once, which unnamed
+namespaces are transparent: all of them, except one whose members would land
+under a name already taken. Such a namespace keeps its module, under the invented
+name, because that module is the only thing left which tells the two apart - and
+a consumer which meets the invented name knows it cannot spell that item in C++,
+which is the truth. The decision is taken deepest-first, so that an unnamed
+namespace inside an unnamed namespace is judged against the first named scope
+above them both, which is where both sets of names would land.
+
+Which pairs of names count is not the same question for each kind, so
+`Declarations` keeps them apart. A variable or a function is only ever filed
+there by a declaration that is really present, and two of them under one name is
+either a redefinition or - worse, because the second is dropped - the wrong value
+quietly standing in for the right one. A module is the same, and a module sharing
+a name with a type is a redefinition too, Rust having one namespace for both.
+
+Two *types* are allowed to meet, and have to be. A type is parented into
+whichever module was being traversed when it was first referred to, so a
+namespace appears to declare types it merely mentions - `uint32_t`, or a type
+declared outside it and named by one of its members - and refusing on those would
+refuse nearly every unnamed namespace there is. A consumer which is handed two
+types under one name can see that it has, which is not true of the variable that
+silently went missing.
+
+The pass runs as codegen is entered and before anything else, because
+`resolve_typerefs` and `process_replacements` ask items for names and for
+allowlisting paths, and an allowlisting path is memoized - a decision taken after
+them would reach some items and not others.
+diff -u -r bg-base/codegen/mod.rs bg-work/codegen/mod.rs
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -676,7 +676,12 @@
+             }
+         };
+ 
++        // A transparent unnamed namespace has its children emitted into the
++        // parent module, as an inline namespace's are: lookup in the enclosing
++        // namespace finds them, and there is no name to call a module of their
++        // own.
+         if !ctx.options().enable_cxx_namespaces ||
++            ctx.is_transparent_unnamed_namespace(item.id()) ||
+             (self.is_inline() &&
+                 !ctx.options().conservative_inline_namespaces)
+         {
+@@ -7218,7 +7223,7 @@
+         item: &Item,
+     ) -> Option<DiscoveredItemId> {
+         let mut parent_item = ctx.resolve_item(item.parent_id());
+-        while !is_reportable_module(parent_item) {
++        while !is_reportable_module(ctx, parent_item) {
+             let parent_id = parent_item.parent_id();
+             if parent_id == parent_item.id() {
+                 return None;
+@@ -7228,10 +7233,12 @@
+         Some(DiscoveredItemId::new(parent_item.id().as_usize()))
+     }
+ 
+-    /// Full-fat namespaces only: not inline namespaces, and not other layers of
+-    /// parentage such as a struct.
+-    fn is_reportable_module(item: &Item) -> bool {
+-        item.as_module().is_some_and(|item_mod| !item_mod.is_inline())
++    /// Full-fat namespaces only: not inline namespaces, not the unnamed ones
++    /// which become no module either, and not other layers of parentage such as
++    /// a struct.
++    fn is_reportable_module(ctx: &BindgenContext, item: &Item) -> bool {
++        !ctx.is_transparent_unnamed_namespace(item.id()) &&
++            item.as_module().is_some_and(|item_mod| !item_mod.is_inline())
+     }
+ 
+     /// Report each member function of a class template through
+diff -u -r bg-base/ir/context.rs bg-work/ir/context.rs
+--- a/ir/context.rs
++++ b/ir/context.rs
+@@ -335,6 +335,50 @@
+     name
+ }
+ 
++/// The names a namespace declares, by what kind of name each one is.
++///
++/// Kept apart because which pairs of kinds cannot share a module is not the
++/// same question for each. A variable or a function is only ever filed here by
++/// a declaration that is really there, and two of them under one name is either
++/// a redefinition or - worse, since bindgen drops the second - the wrong value
++/// quietly standing in for the right one. A module is the same, and a module
++/// sharing a name with a type is a redefinition too, Rust having one namespace
++/// for both.
++///
++/// Two *types* are the exception, and are allowed to meet. bindgen parents a
++/// type into whichever module was being traversed when the type was first
++/// referred to, so a namespace appears to declare types it merely mentions -
++/// `uint32_t`, or a type declared outside it and named in one of its members -
++/// and refusing on those would refuse almost everything. A consumer which
++/// meets two types under one name can see that it has, which is not true of
++/// the value that silently went missing.
++#[derive(Default)]
++struct Declarations {
++    values: HashSet<String>,
++    modules: HashSet<String>,
++    types: HashSet<String>,
++}
++
++impl Declarations {
++    /// Whether emitting these declarations alongside `outer` would put two
++    /// things under one name.
++    fn collides_with(&self, outer: &Self) -> bool {
++        let shares = |a: &HashSet<String>, b: &HashSet<String>| {
++            a.iter().any(|name| b.contains(name))
++        };
++        shares(&self.values, &outer.values) ||
++            shares(&self.modules, &outer.modules) ||
++            shares(&self.modules, &outer.types) ||
++            shares(&self.types, &outer.modules)
++    }
++
++    fn absorb(&mut self, other: Self) {
++        self.values.extend(other.values);
++        self.modules.extend(other.modules);
++        self.types.extend(other.types);
++    }
++}
++
+ /// A context used during parsing and generation of structs.
+ #[derive(Debug)]
+ pub(crate) struct BindgenContext {
+@@ -473,6 +517,13 @@
+     /// and is always `None` before that and `Some` after.
+     enum_typedef_combos: Option<HashSet<ItemId>>,
+ 
++    /// The unnamed namespaces whose members are emitted in the namespace
++    /// enclosing them.
++    ///
++    /// This is populated by `compute_transparent_unnamed_namespaces` as codegen
++    /// is entered, and is always `None` before that and `Some` after.
++    transparent_unnamed_namespaces: Option<HashSet<ItemId>>,
++
+     /// The set of (`ItemId`s of) types that can't derive debug.
+     ///
+     /// This is populated when we enter codegen by `compute_cannot_derive_debug`
+@@ -656,6 +707,7 @@
+             used_template_parameters: None,
+             need_bitfield_allocation: Default::default(),
+             enum_typedef_combos: None,
++            transparent_unnamed_namespaces: None,
+             cannot_derive_debug: None,
+             cannot_derive_default: None,
+             cannot_derive_copy: None,
+@@ -1280,6 +1332,11 @@
+     {
+         self.in_codegen = true;
+ 
++        // Before anything asks an item for a name or a path, because this
++        // decides what some of them are, and an allowlisting path is memoized:
++        // a decision taken later would reach some items and not others.
++        self.compute_transparent_unnamed_namespaces();
++
+         self.resolve_typerefs();
+         self.compute_bitfield_units();
+         self.process_replacements();
+@@ -3097,6 +3154,132 @@
+     }
+ 
+     /// Compute which `enum`s have an associated `typedef` definition.
++    /// Decide which unnamed namespaces are transparent, which is to say which
++    /// of them have their members emitted in the namespace enclosing them.
++    ///
++    /// An unnamed namespace behaves as a namespace whose name nothing can
++    /// write, followed by a using-directive for it, so lookup in the enclosing
++    /// namespace finds its members - and there is no name to give a module of
++    /// its own anyway. That is how an inline namespace is already treated, and
++    /// the reason applies with more force here.
++    ///
++    /// Except where emitting them there would put two declarations under one
++    /// name. Unlike an inline namespace an unnamed one can hold a name the
++    /// enclosing namespace also holds, which is legal precisely because its
++    /// members have internal linkage, and C++ resolves the qualified name to
++    /// the enclosing declaration rather than finding both. Such a namespace
++    /// keeps its module, under the name `Item::base_name` invents for it,
++    /// because that module is the only thing left which tells the two apart.
++    ///
++    /// See `Declarations::collides_with` for which pairs of names count.
++    fn compute_transparent_unnamed_namespaces(&mut self) {
++        let _t = self.timer("compute_transparent_unnamed_namespaces");
++        assert!(self.transparent_unnamed_namespaces.is_none());
++
++        let mut transparent = HashSet::default();
++        self.fold_unnamed_namespaces(self.root_module.into(), &mut transparent);
++        self.transparent_unnamed_namespaces = Some(transparent);
++    }
++
++    /// What the module `id` declares once its own transparent children have
++    /// been folded into it, deciding those children on the way back up.
++    ///
++    /// Deepest first, so that an unnamed namespace inside an unnamed namespace
++    /// is judged against the first named scope above them both, which is where
++    /// both sets of names would land.
++    fn fold_unnamed_namespaces(
++        &self,
++        id: ItemId,
++        transparent: &mut HashSet<ItemId>,
++    ) -> Declarations {
++        let mut declared = Declarations::default();
++        let Some(module) = self.resolve_item(id).as_module() else {
++            return declared;
++        };
++        let mut unnamed = Vec::new();
++        for child in module.children() {
++            match self.resolve_item(*child).as_module() {
++                Some(child_module) if child_module.name().is_none() => {
++                    unnamed.push(*child);
++                }
++                Some(child_module) => {
++                    let names = self.fold_unnamed_namespaces(*child, transparent);
++                    // An inline namespace is emitted into this module too, so
++                    // what it declares arrives here and has to be counted here.
++                    if child_module.is_inline() &&
++                        !self.options().conservative_inline_namespaces
++                    {
++                        declared.absorb(names);
++                    } else {
++                        self.record_declaration(&mut declared, *child);
++                    }
++                }
++                None => self.record_declaration(&mut declared, *child),
++            }
++        }
++        for child in unnamed {
++            let names = self.fold_unnamed_namespaces(child, transparent);
++            if names.collides_with(&declared) {
++                self.record_declaration(&mut declared, child);
++            } else {
++                declared.absorb(names);
++                transparent.insert(child);
++            }
++        }
++        declared
++    }
++
++    /// File an item under the name it declares in the module holding it, and
++    /// under what kind of name that is.
++    ///
++    /// The name codegen will emit, which for a type nested in another type is
++    /// the two names joined - `Outer::Inner` is emitted as `Outer_Inner`, and
++    /// what it can collide with is a module of that name.
++    ///
++    /// Walked here rather than asked of `Item::real_canonical_name`, which
++    /// would consult the very decision being taken. The walk stops where that
++    /// one does, at the first enclosing module, so it never needs to.
++    fn declared_name(&self, id: ItemId) -> String {
++        let mut names = Vec::new();
++        let mut item = self.resolve_item(id);
++        loop {
++            names.push(self.resolve_item(item.name_target(self)).base_name(self));
++            let parent = self.resolve_item(item.parent_id());
++            if parent.is_module() || parent.id() == item.id() {
++                break;
++            }
++            item = parent;
++        }
++        names.reverse();
++        names.retain(|name| !name.is_empty());
++        names.join("_")
++    }
++
++    fn record_declaration(&self, declared: &mut Declarations, id: ItemId) {
++        let item = self.resolve_item(id);
++        let name = self.declared_name(id);
++        match item.kind() {
++            ItemKind::Module(..) => declared.modules.insert(name),
++            ItemKind::Var(..) | ItemKind::Function(..) => {
++                declared.values.insert(name)
++            }
++            ItemKind::Type(..) => declared.types.insert(name),
++        };
++    }
++
++    /// Whether this is an unnamed namespace whose members are emitted in the
++    /// namespace enclosing it. See
++    /// `compute_transparent_unnamed_namespaces`.
++    pub(crate) fn is_transparent_unnamed_namespace<Id: Into<ItemId>>(
++        &self,
++        id: Id,
++    ) -> bool {
++        self.transparent_unnamed_namespaces
++            .as_ref()
++            .expect("unnamed namespaces are resolved as codegen is entered")
++            .contains(&id.into())
++    }
++
+     fn compute_enum_typedef_combos(&mut self) {
+         let _t = self.timer("compute_enum_typedef_combos");
+         assert!(self.enum_typedef_combos.is_none());
+diff -u -r bg-base/ir/item.rs bg-work/ir/item.rs
+--- a/ir/item.rs
++++ b/ir/item.rs
+@@ -495,10 +495,11 @@
+ 
+         self.ancestors(ctx)
+             .filter(|id| {
+-                ctx.resolve_item(*id).as_module().is_some_and(|module| {
+-                    !module.is_inline() ||
+-                        ctx.options().conservative_inline_namespaces
+-                })
++                !ctx.is_transparent_unnamed_namespace(*id) &&
++                    ctx.resolve_item(*id).as_module().is_some_and(|module| {
++                        !module.is_inline() ||
++                            ctx.options().conservative_inline_namespaces
++                    })
+             })
+             .count() +
+             1
+@@ -687,7 +688,7 @@
+     }
+ 
+     /// Get the target item ID for name generation.
+-    fn name_target(&self, ctx: &BindgenContext) -> ItemId {
++    pub(crate) fn name_target(&self, ctx: &BindgenContext) -> ItemId {
+         let mut targets_seen = DebugOnlyItemSet::new();
+         let mut item = self;
+ 
+@@ -788,7 +789,7 @@
+     }
+ 
+     /// Get this item's base name (aka non-namespaced name).
+-    fn base_name(&self, ctx: &BindgenContext) -> String {
++    pub(crate) fn base_name(&self, ctx: &BindgenContext) -> String {
+         if let Some(path) = self.annotations().use_instead_of() {
+             return path.last().unwrap().clone();
+         }
+@@ -907,6 +908,14 @@
+                 !opt.within_namespaces || !ctx.resolve_item(*id).is_module()
+             })
+             .filter(|id| {
++                // A transparent unnamed namespace contributes no segment here
++                // either: where namespaces are disabled this is what joins an
++                // item's ancestors into its name, and a name nothing can write
++                // is no part of it.
++                if ctx.is_transparent_unnamed_namespace(*id) {
++                    return false;
++                }
++
+                 if !ctx.options().conservative_inline_namespaces {
+                     if let ItemKind::Module(ref module) =
+                         *ctx.resolve_item(*id).kind()
+@@ -1107,10 +1116,11 @@
+             .map(|id| ctx.resolve_item(id))
+             .filter(|item| {
+                 item.id() == target.id() ||
+-                    item.as_module().is_some_and(|module| {
+-                        !module.is_inline() ||
+-                            ctx.options().conservative_inline_namespaces
+-                    })
++                    (!ctx.is_transparent_unnamed_namespace(item.id()) &&
++                        item.as_module().is_some_and(|module| {
++                            !module.is_inline() ||
++                                ctx.options().conservative_inline_namespaces
++                        }))
+             })
+             .map(|item| {
+                 ctx.resolve_item(item.name_target(ctx))
