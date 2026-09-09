@@ -39974,3 +39974,150 @@ fn test_allocator_prelude_helpers_are_not_reached_by_adl() {
         None,
     );
 }
+
+/// Removing ownership from a C++-owned peer drops the last strong reference to
+/// the subclass inside that call, so the subclass's `Drop` runs there, with
+/// the peer still live and reachable. A virtual call made from that `Drop`
+/// must arrive in Rust and say the subclass has gone; while the peer left its
+/// `obs` moved-from for the duration of the exchange, the call dereferenced a
+/// null `rust::Box` instead and the fixture died silently.
+#[test]
+fn test_subclass_virtual_call_from_drop_during_ownership_removal() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    class TestObserver {
+    public:
+        TestObserver() {}
+        virtual void a() const = 0;
+        virtual ~TestObserver() {}
+    };
+    inline void TriggerTestObserverA(const TestObserver& obs) {
+        const_cast<TestObserver&>(obs).a();
+    }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {
+            // The report is what this test reads, and the default hook's
+            // backtrace is hundreds of lines the harness would truncate it
+            // out of - `RUST_BACKTRACE` is set for every job in CI.
+            std::panic::set_hook(Box::new(|info| {
+                eprintln!("FX-SUBCLASS-REENTRY: {info}");
+            }));
+            let peer = MyTestObserver::new_cpp_owned(MyTestObserver {
+                cpp_peer: Default::default(),
+            });
+            // The peer holds the only strong reference. Removing ownership
+            // from the peer is what C++ does when it is done with the pair,
+            // and it destroys the subclass inside the call.
+            peer.as_ref().unwrap().relinquish_ownership();
+            // Unreachable: the re-entrant call above ends the process. If it
+            // were reached, the test would fail by succeeding.
+        },
+        quote! {
+            generate!("TriggerTestObserverA")
+            subclass!("TestObserver", MyTestObserver)
+        },
+        Some(quote! {
+            use autocxx::subclass::{CppSubclass, CppSubclassCppPeer};
+            use ffi::TestObserver_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyTestObserver {}
+            impl TestObserver_methods for MyTestObserver {
+                fn a(&self) {}
+            }
+            impl Drop for MyTestObserver {
+                fn drop(&mut self) {
+                    let superclass: &ffi::TestObserver = self.as_ref();
+                    ffi::TriggerTestObserverA(superclass);
+                }
+            }
+        }),
+        &[
+            // Only printed once trybuild has built the code and gone on to run
+            // it, so this also says the generated Rust compiled.
+            "Test case failed at runtime",
+            "FX-SUBCLASS-REENTRY",
+            "called after subclass destroyed",
+        ],
+    );
+}
+
+/// A self-owned subclass owns its peer, so removing ownership from the peer
+/// destroys the peer itself inside the call. Nothing may therefore follow that
+/// call in the peer's own method - which is what this asserts by completing:
+/// under the sanitizer, an assignment to the freed peer is a use-after-free.
+#[test]
+fn test_subclass_peer_destroyed_during_ownership_removal() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    extern \"C\" void mark_freed() noexcept;
+    class TestObserver {
+    public:
+        TestObserver() {}
+        virtual void a() const = 0;
+        virtual ~TestObserver() {
+            mark_freed();
+        }
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let obs = MyTestObserver::new_self_owned(MyTestObserver {
+                cpp_peer: Default::default(),
+            });
+            // What C++ keeps once such a pair has registered itself: a
+            // pointer, with no strong reference left on the Rust side.
+            let peer: *const ffi::MyTestObserverCpp = obs.as_ref().borrow().peer();
+            core::mem::drop(obs);
+            assert!(!Lazy::force(&STATUS).lock().unwrap().rust_dropped);
+            assert!(!Lazy::force(&STATUS).lock().unwrap().cpp_freed);
+            // The peer holds the last strong reference and the subclass owns
+            // the peer, so this destroys both, the peer during the call.
+            unsafe { (*peer).relinquish_ownership() };
+            assert!(Lazy::force(&STATUS).lock().unwrap().rust_dropped);
+            assert!(Lazy::force(&STATUS).lock().unwrap().cpp_freed);
+        },
+        quote! {
+            subclass!("TestObserver", MyTestObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use once_cell::sync::Lazy;
+            use std::sync::Mutex;
+
+            use autocxx::subclass::{CppSubclass, CppSubclassCppPeer, CppSubclassSelfOwned};
+            use ffi::TestObserver_methods;
+            #[autocxx::subclass::subclass(self_owned)]
+            pub struct MyTestObserver {}
+            impl TestObserver_methods for MyTestObserver {
+                fn a(&self) {}
+            }
+            impl Drop for MyTestObserver {
+                fn drop(&mut self) {
+                    Lazy::force(&STATUS).lock().unwrap().rust_dropped = true;
+                }
+            }
+
+            // `extern "C"`, not a bare `#[no_mangle] fn`: the header
+            // declares this as a C function, and that is the calling
+            // convention the destructor above uses to reach it.
+            #[no_mangle]
+            pub extern "C" fn mark_freed() {
+                Lazy::force(&STATUS).lock().unwrap().cpp_freed = true;
+            }
+
+            #[derive(Default)]
+            struct Status {
+                cpp_freed: bool,
+                rust_dropped: bool,
+            }
+
+            static STATUS: Lazy<Mutex<Status>> = Lazy::new(|| Mutex::new(Status::default()));
+        }),
+    );
+}
