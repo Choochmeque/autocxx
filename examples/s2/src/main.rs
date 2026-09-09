@@ -22,8 +22,8 @@ include_cpp! {
     generate!("describe_point")
 }
 
-// Everything that we care about is inlined, so we don't have to do
-// anything fancy to build or link any external code.
+// R1Interval is header-only, but R2Rect's methods are not: build.rs compiles
+// s2geometry's r2rect.cc so the wrappers generated for them resolve.
 fn main() {
     // Create a couple of R1Intervals using their pre-existing C++
     // constructors. Actually these will be cxx::UniquePtr<R1Interval>s.

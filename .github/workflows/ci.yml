@@ -60,6 +60,12 @@ jobs:
             flags: /EHsc
     env:
       CXXFLAGS: ${{matrix.flags}}
+      # Replaced wholesale before the first step that compiles any of the
+      # workspace - see "Exclude failing targets and tests" below - so what
+      # this value says about warnings never reaches a build here, and
+      # `deny_warnings` is explained at the examples job, which does use it.
+      # Not spare, though: rust-cache runs before the replacement and hashes
+      # RUST* variables into its key.
       RUSTFLAGS: --cfg deny_warnings -Dwarnings -Cdebuginfo=1
 
     steps:
@@ -100,9 +106,13 @@ jobs:
         # never diagnosed). The creduce-needing reduce tests are env-gated
         # behind AUTOCXX_RUN_REDUCTION_TESTS these days, so both packages'
         # remaining tests may simply work; running to find out.
-        # This deliberately drops deny_warnings from the job-level RUSTFLAGS
-        # for the suite itself - the fixtures are not warning-clean and are
-        # not meant to be - while keeping the workflow's debuginfo choice.
+        # This deliberately drops -Dwarnings from the job-level RUSTFLAGS for
+        # the suite itself, and --cfg deny_warnings with it, leaving cxx.cc's
+        # -Werror check to the examples job, while keeping the workflow's
+        # debuginfo choice. Not for the fixtures' sake: they build under flags
+        # integration-tests composes itself (fixture_rustflags), which replace
+        # the run's RUSTFLAGS and do not carry -Dwarnings. What is left under
+        # these is the workspace's own build and test targets.
         # It historically also carried the per-leg skip cfgs, the last of
         # which retired in 2026 when every skip on both Windows lists turned
         # out fixed or fixable.
@@ -198,6 +208,12 @@ jobs:
       # scripts and proc macros do run and compile under this flag too, but
       # a build.rs panic reports its own file:line without debuginfo, and
       # losing frames beyond that is an accepted tradeoff.
+      #
+      # No Rust code in this repository reads `deny_warnings`: cxx's build
+      # script does, as `warnings_into_errors(cfg!(deny_warnings))`, and
+      # RUSTFLAGS reaches a build script's own compilation. It is the only
+      # thing compiling cxx.cc with -Werror, and on MSVC with /WX, which is
+      # what makes the C4530 above fatal. Looks dead, isn't.
       RUSTFLAGS: --cfg deny_warnings -Dwarnings -Cdebuginfo=0
     steps:
       - uses: actions/checkout@v6
