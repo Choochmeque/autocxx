@@ -22,13 +22,26 @@ pub type Builder = autocxx_engine::Builder<'static, CargoBuilderContext>;
 ///
 /// Cargo's own variables (`TARGET`, `OUT_DIR`, the `CARGO_CFG_*` set) are
 /// absent: cargo keys the build directory on them and reruns build scripts
-/// itself when they change.
+/// itself when they change. `PATH` is absent deliberately, though clang-sys
+/// searches it for a clang to ask about include directories: it differs
+/// between one shell and the next and between CI steps, so watching it would
+/// regenerate bindings constantly and teach people to ignore the rebuild.
 const CODEGEN_ENV_VARS: &[&str] = &[
     // engine::get_clang_path
     "CLANG_PATH",
     "CXX",
+    // Which libclang clang-sys loads. Loaded at runtime by default
+    // (engine's `runtime` feature), so this is decided in the build script
+    // and not when the engine was compiled. Same list as engine/build.rs.
+    "LIBCLANG_PATH",
+    "LIBCLANG_STATIC_PATH",
+    "LLVM_CONFIG_PATH",
     // engine::clang_target::bindgen_extra_clang_args
     "BINDGEN_EXTRA_CLANG_ARGS",
+    // Read by the clang bindgen runs and by the one clang-sys asks for the
+    // C++ include directories, so they change which headers are found.
+    "CPATH",
+    "CPLUS_INCLUDE_PATH",
     // engine::builder::add_sanitizer_flags
     "AUTOCXX_ASAN",
     // engine's header dumps
@@ -46,8 +59,8 @@ const CODEGEN_ENV_VARS: &[&str] = &[
 /// so setting a suffixed one changes the answer and all three have to be
 /// watched.
 ///
-/// Split from [`CargoBuilderContext::setup`] so the set can be tested without a
-/// test reaching into the process environment.
+/// Split from the printing so the set can be tested without a test reaching
+/// into the process environment.
 fn env_directives(target: Option<&str>) -> Vec<String> {
     let mut vars: Vec<String> = CODEGEN_ENV_VARS.iter().map(|v| v.to_string()).collect();
     if let Some(target) = target {
@@ -70,12 +83,14 @@ impl BuilderContext for CargoBuilderContext {
         let _ = env_logger::builder()
             .format(|buf, record| writeln!(buf, "cargo:warning=MESSAGE:{}", record.args()))
             .try_init();
-        for directive in env_directives(std::env::var("TARGET").ok().as_deref()) {
-            println!("{directive}");
-        }
     }
     fn get_dependency_recorder() -> Option<Box<dyn RebuildDependencyRecorder>> {
         Some(Box::new(CargoRebuildDependencyRecorder::new()))
+    }
+    fn record_environment_dependencies() {
+        for directive in env_directives(std::env::var("TARGET").ok().as_deref()) {
+            println!("{directive}");
+        }
     }
 }
 
@@ -112,16 +127,16 @@ impl RebuildDependencyRecorder for CargoRebuildDependencyRecorder {
     }
 }
 
-/// What this crate tells cargo to watch. Emitting any `rerun-if-changed` at all
-/// turns off cargo's whole-package scan, so an input this crate reads and does
-/// not report is an input nothing watches.
+/// What this crate tells cargo to watch. Emitting any `rerun-if` directive at
+/// all replaces cargo's whole-package scan, so an input this crate reads and
+/// does not report is an input which no longer reruns the build script.
 ///
 /// The build these tests drive stops after codegen - `build_listing_files`
 /// returns a [`cc::Build`] which nothing here calls `compile` on - so no C++
 /// compiler is involved, only libclang. What they therefore do *not* cover:
 /// that cargo acts on the lines (its own contract), that a second build reuses
-/// or regenerates anything, and the `rerun-if-env-changed` lines reaching real
-/// stdout, which [`env_directives`] is tested for instead.
+/// or regenerates anything, and the directives reaching real stdout, which the
+/// functions producing them are tested for instead.
 #[cfg(test)]
 mod rerun_tests {
     use super::{
@@ -231,9 +246,14 @@ fn main() {
         for var in [
             "CLANG_PATH",
             "CXX",
+            "LIBCLANG_PATH",
+            "LIBCLANG_STATIC_PATH",
+            "LLVM_CONFIG_PATH",
             "BINDGEN_EXTRA_CLANG_ARGS",
             "BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin",
             "BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin",
+            "CPATH",
+            "CPLUS_INCLUDE_PATH",
             "AUTOCXX_ASAN",
             "AUTOCXX_PREPROCESS",
             "AUTOCXX_REPRO_CASE",
