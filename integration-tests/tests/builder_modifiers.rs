@@ -72,6 +72,10 @@ impl BuilderModifierFns for UnsignedCharAdder {
 
 /// Both modifiers, applied in order. For a test which needs, say, a C++
 /// standard *and* a warning scoped off.
+///
+/// `Builder::extra_clang_args` assigns rather than appends, so of two modifiers
+/// which both give clang arguments only the second's survive. No pair used here
+/// does; a pair that did would have to combine the lists itself.
 pub(crate) fn combine_modifiers(
     a: Option<BuilderModifier>,
     b: Option<BuilderModifier>,
@@ -98,19 +102,12 @@ impl BuilderModifierFns for CombinedModifier {
     }
 }
 
-struct ClangArgAdder(Vec<String>, Vec<String>);
+struct ClangArgAdder(Vec<String>);
 
 pub(crate) fn make_clang_arg_adder(args: &[&str]) -> Option<BuilderModifier> {
-    make_clang_optional_arg_adder(args, &[])
-}
-
-pub(crate) fn make_clang_optional_arg_adder(
-    args: &[&str],
-    optional_args: &[&str],
-) -> Option<BuilderModifier> {
-    let args: Vec<_> = args.iter().map(|a| a.to_string()).collect();
-    let optional_args: Vec<_> = optional_args.iter().map(|a| a.to_string()).collect();
-    Some(Box::new(ClangArgAdder(args, optional_args)))
+    Some(Box::new(ClangArgAdder(
+        args.iter().map(|a| a.to_string()).collect(),
+    )))
 }
 
 impl BuilderModifierFns for ClangArgAdder {
@@ -125,9 +122,6 @@ impl BuilderModifierFns for ClangArgAdder {
     fn modify_cc_builder<'a>(&self, mut builder: &'a mut cc::Build) -> &'a mut cc::Build {
         for f in &self.0 {
             builder = builder.flag(f);
-        }
-        for f in &self.1 {
-            builder = builder.flag_if_supported(f);
         }
         builder
     }

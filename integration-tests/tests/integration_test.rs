@@ -9,9 +9,8 @@
 use crate::{
     builder_modifiers::{
         combine_modifiers, make_bindgen_only_clang_arg_adder, make_clang_arg_adder,
-        make_clang_optional_arg_adder, make_cpp17_adder, make_cpp20_adder,
-        make_unsigned_char_adder, EnableAutodiscover, ForceWrapperGeneration,
-        SetSuppressSystemHeaders,
+        make_cpp17_adder, make_cpp20_adder, make_unsigned_char_adder, EnableAutodiscover,
+        ForceWrapperGeneration, SetSuppressSystemHeaders,
     },
     code_checkers::{
         make_checks, make_checks_without_building, make_error_finder, make_rust_code_finder,
@@ -19,11 +18,11 @@ use crate::{
     },
 };
 use autocxx_integration_tests::{
-    directives_from_lists, do_run_test, do_run_test_manual, run_generate_all_test, run_test,
-    run_test_ex, run_test_expect_fail, run_test_expect_fail_ex, run_test_expect_fail_with_error,
-    run_test_expect_fail_with_error_ex, run_test_expect_fail_with_error_modified,
-    run_test_expect_fail_with_errors, run_test_expect_fail_with_errors_ex, BuilderModifier,
-    CodeCheckerFns, TestError,
+    directives_from_lists, do_run_test, do_run_test_manual, make_msvc_warning_scope,
+    run_generate_all_test, run_test, run_test_ex, run_test_expect_fail, run_test_expect_fail_ex,
+    run_test_expect_fail_with_error, run_test_expect_fail_with_error_ex,
+    run_test_expect_fail_with_error_modified, run_test_expect_fail_with_errors,
+    run_test_expect_fail_with_errors_ex, BuilderModifier, CodeCheckerFns, TestError,
 };
 use indoc::indoc;
 use itertools::Itertools;
@@ -23328,9 +23327,9 @@ fn test_implicit_constructor_rules() {
         // C4624. It is emitted against this header rather than against
         // anything autocxx wrote, and dropping the types that draw it would
         // drop the destructor half of the matrix - the warning is what those
-        // rows are, so it is scoped off for this one test; flag_if_supported
-        // drops the MSVC spelling everywhere else.
-        make_clang_optional_arg_adder(&[], &["/wd4624"]),
+        // rows are, so it is scoped off for this one test, and only on the
+        // builds which speak cl's spelling.
+        make_msvc_warning_scope(&[4624]),
         None,
         None,
     );
@@ -25043,7 +25042,7 @@ fn test_issue_1125() {
             // without it cl warns, and with it the bindings generated for this
             // header are byte-identical to the ones without. The unnamed
             // bitfield beside it is the reduction.
-            make_clang_optional_arg_adder(&[], &["/wd4201"]),
+            make_msvc_warning_scope(&[4201]),
         ),
         None,
         None,
@@ -29520,9 +29519,9 @@ fn test_member_initializer_does_not_excuse_a_missing_destructor() {
         // it: a class holding a member it cannot destroy is exactly what has
         // to be put to the analysis here, and no version of this header both
         // says that and avoids the warning. Scoped to this one fixture, the
-        // way the note beside `/WX` in `configure_builder` describes for the
-        // other C4624 test.
-        make_clang_optional_arg_adder(&[], &["/wd4624"]),
+        // way the note on `warnings_are_errors_flag` describes for the other
+        // C4624 test.
+        make_msvc_warning_scope(&[4624]),
         None,
         None,
     );
@@ -30136,7 +30135,7 @@ fn test_virtual_diamond_is_concrete() {
         // against anything autocxx wrote, so no change to the generator could
         // remove it, and no shape which does not draw it would exercise the
         // dominance rule. Scoped off here rather than answered.
-        make_clang_optional_arg_adder(&[], &["/wd4250"]),
+        make_msvc_warning_scope(&[4250]),
         None,
         None,
     );
@@ -30192,7 +30191,7 @@ fn test_virtual_diamond_through_a_typedef_is_concrete() {
             None,
         ),
         // As above: cl's dominance report is this fixture's subject too.
-        make_clang_optional_arg_adder(&[], &["/wd4250"]),
+        make_msvc_warning_scope(&[4250]),
         None,
         None,
     );
