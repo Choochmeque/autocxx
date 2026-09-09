@@ -11647,6 +11647,40 @@ fn test_std_array_field_in_pod_struct() {
     run_test("", hdr, rs, &["make_packet", "read_body"], &["Packet"]);
 }
 
+/// The same field nested, which is the shape `unqualified_array_element_type`
+/// has to peel a marker out of the middle of: a `std::array` of `std::array`s
+/// carries one on each layer. What this pins is the round trip;
+/// `test_nested_std_array_field_of_cxxstring_is_refused_for_its_element` is
+/// where the peeling itself is told apart from its absence.
+#[test]
+fn test_nested_std_array_field_in_pod_struct() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Matrix { std::array<std::array<uint32_t, 2>, 3> rows; };
+    inline Matrix make_matrix() {
+        Matrix m{};
+        m.rows[0][0] = 1;
+        m.rows[0][1] = 2;
+        m.rows[1][0] = 3;
+        m.rows[1][1] = 4;
+        m.rows[2][0] = 5;
+        m.rows[2][1] = 6;
+        return m;
+    }
+    inline uint32_t read_cell(Matrix m) { return m.rows[2][1]; }
+    "};
+    let rs = quote! {
+        let m = ffi::make_matrix();
+        assert_eq!(m.rows, [[1u32, 2], [3, 4], [5, 6]]);
+        assert_eq!(
+            ffi::read_cell(ffi::Matrix { rows: [[0, 0], [0, 0], [0, 9]] }),
+            9
+        );
+    };
+    run_test("", hdr, rs, &["make_matrix", "read_cell"], &["Matrix"]);
+}
+
 /// A `std::array` alongside the container holders, to show the lowering does
 /// not disturb them: the `std::vector` still crosses as a `CxxVector` and the
 /// `std::shared_ptr` as a `SharedPtr`, in the same bridge.
