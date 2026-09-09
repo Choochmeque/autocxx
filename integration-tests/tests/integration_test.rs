@@ -14708,6 +14708,356 @@ fn test_array_of_substituted_type_is_not_built_past_its_rust_storage() {
     );
 }
 
+/// A class holding a member whose type is an instantiation of a
+/// prelude-substituted class *template* is sized in Rust the way C++ sizes it.
+///
+/// `std::vector`, `std::shared_ptr`, `std::weak_ptr` and `std::unique_ptr`
+/// reach bindgen as one-pointer class templates out of the `replaces=` prelude,
+/// and all but the last are wider in C++ than that. The substitution is recorded
+/// against the template, and a class holding one holds an *instantiation* of it,
+/// which is an item of its own: measuring that item as clang laid it out leaves
+/// the class short by the difference, and `within_box` then has C++ construct
+/// past the end of the storage Rust allocated - see
+/// `test_member_of_substituted_template_is_not_built_past_its_rust_storage`.
+///
+/// Size and alignment only, which is what a class crossing the boundary by value
+/// is sized from. The tracker is handed clang's offset for each member, so
+/// nothing here says where Rust puts one.
+///
+/// One row per route such a member takes to the layout: written as itself in
+/// both the leading and the trailing position, through a typedef, with an
+/// argument which is itself substituted for, with an argument which is another
+/// instantiation of the same substituted template, and as an array of them -
+/// which is the array sizing of
+/// `test_array_of_substituted_type_does_not_shrink_its_class` one level down
+/// and only right if the two compose. The last rows compensate for nothing and
+/// say so: a stand-in as wide as the type it stands in for, and two templates
+/// the header declares itself which nothing substitutes for - one whose size
+/// its argument does not reach and one whose size is its argument.
+#[test]
+fn test_member_of_substituted_template_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <memory>
+        #include <string>
+        #include <vector>
+        // The member last, so only tail padding can make the size right.
+        struct fx_Trailing { uint32_t n; std::vector<uint32_t> m; };
+        // And first, so the bytes to account for are in front of a member
+        // rather than at the end.
+        struct fx_Leading { std::vector<uint32_t> m; uint32_t n; };
+        struct fx_Shared { uint32_t n; std::shared_ptr<uint32_t> m; };
+        struct fx_Weak { uint32_t n; std::weak_ptr<uint32_t> m; };
+        // An argument which is itself a type the prelude substitutes for.
+        struct fx_OfString { uint32_t n; std::vector<std::string> m; };
+        // And one which is another instantiation of the same template.
+        struct fx_OfVector { uint32_t n; std::vector<std::vector<uint32_t>> m; };
+        typedef std::vector<uint32_t> fx_alias;
+        struct fx_Aliased { uint32_t n; fx_alias m; };
+        // Arrays of them, which only come out right if the array sizing and
+        // this compose.
+        struct fx_Array { uint32_t n; std::vector<uint32_t> m[3]; };
+        struct fx_ArrayOfArray { uint32_t n; std::vector<uint32_t> m[2][3]; };
+        // A stand-in as wide as the type it stands in for: nothing to add.
+        struct fx_Same { uint32_t n; std::unique_ptr<uint32_t> m; };
+        // Templates of the header's own, which nothing substitutes for: the
+        // arithmetic has to leave both alone.
+        template<typename T> struct fx_Wrap { T* p; uint64_t q; };
+        struct fx_Own { uint32_t n; fx_Wrap<uint32_t> m; };
+        template<typename T> struct fx_Box { T t; };
+        struct fx_OwnSized { uint32_t n; fx_Box<uint64_t> m; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_Trailing);
+                case 1: return sizeof(fx_Leading);
+                case 2: return sizeof(fx_Shared);
+                case 3: return sizeof(fx_Weak);
+                case 4: return sizeof(fx_OfString);
+                case 5: return sizeof(fx_OfVector);
+                case 6: return sizeof(fx_Aliased);
+                case 7: return sizeof(fx_Array);
+                case 8: return sizeof(fx_ArrayOfArray);
+                case 9: return sizeof(fx_Same);
+                case 10: return sizeof(fx_Own);
+                default: return sizeof(fx_OwnSized);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_Trailing);
+                case 1: return alignof(fx_Leading);
+                case 2: return alignof(fx_Shared);
+                case 3: return alignof(fx_Weak);
+                case 4: return alignof(fx_OfString);
+                case 5: return alignof(fx_OfVector);
+                case 6: return alignof(fx_Aliased);
+                case 7: return alignof(fx_Array);
+                case 8: return alignof(fx_ArrayOfArray);
+                case 9: return alignof(fx_Same);
+                case 10: return alignof(fx_Own);
+                default: return alignof(fx_OwnSized);
+            }
+        }
+    "};
+    let rs = quote! {
+        // Every row reported at once: one short class says little about the
+        // others, and the first assertion to fire would hide them.
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_Trailing, "a trailing std::vector<uint32_t>");
+        check!(1, ffi::fx_Leading, "a leading std::vector<uint32_t>");
+        check!(2, ffi::fx_Shared, "a std::shared_ptr<uint32_t>");
+        check!(3, ffi::fx_Weak, "a std::weak_ptr<uint32_t>");
+        check!(4, ffi::fx_OfString, "a std::vector<std::string>");
+        check!(5, ffi::fx_OfVector, "a std::vector<std::vector<uint32_t>>");
+        check!(6, ffi::fx_Aliased, "a typedef to std::vector<uint32_t>");
+        check!(7, ffi::fx_Array, "a std::vector<uint32_t>[3]");
+        check!(8, ffi::fx_ArrayOfArray, "a std::vector<uint32_t>[2][3]");
+        check!(9, ffi::fx_Same, "a std::unique_ptr<uint32_t>");
+        check!(10, ffi::fx_Own, "an unsubstituted template of a fixed size");
+        check!(11, ffi::fx_OwnSized, "an unsubstituted template sized by its argument");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with a template-instantiation member disagrees with C++:{report}"
+        );
+        // Placement construction into Rust-provided storage of that size.
+        let _ = ffi::fx_Leading::new().within_box();
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_Trailing",
+            "fx_Leading",
+            "fx_Shared",
+            "fx_Weak",
+            "fx_OfString",
+            "fx_OfVector",
+            "fx_Aliased",
+            "fx_Array",
+            "fx_ArrayOfArray",
+            "fx_Same",
+            "fx_Own",
+            "fx_OwnSized",
+            "fx_size",
+            "fx_align",
+        ],
+        &[],
+    );
+}
+
+/// What a short class costs: C++ builds the object past the end of the storage
+/// Rust sized for it, over whatever Rust put next.
+///
+/// The size assertions above say the two languages agree on the number. This
+/// says what the number is for: `new` is placement construction into storage
+/// the caller provides, `moveit` and `within_box` provide it at `size_of`, and a
+/// `size_of` short of `sizeof` leaves that many bytes of the object outside the
+/// storage it was built into. Which of them C++ writes to is a separate
+/// question, and the reason the canary is read rather than reasoned about. Here
+/// the storage is a field of a `repr(C)` struct, so what follows it is known
+/// rather than whatever the allocator happened to hand out.
+#[test]
+fn test_member_of_substituted_template_is_not_built_past_its_rust_storage() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <vector>
+        struct fx_Guarded {
+            std::vector<uint32_t> m;
+            // An ordinary member function, whose writes reach the whole of the
+            // object C++ thinks it has.
+            void fill() { for (uint32_t i = 0; i < 4; ++i) m.push_back(i); }
+        };
+        inline size_t fx_guarded_sizeof() { return sizeof(fx_Guarded); }
+    "};
+    let rs = quote! {
+        // Without this the test could pass by the difference reaching past the
+        // canary rather than by there being none.
+        assert!(
+            ffi::fx_guarded_sizeof() <= std::mem::size_of::<Guarded>(),
+            "the canary is too short to cover what C++ would write"
+        );
+        let mut guarded = Guarded {
+            obj: core::mem::MaybeUninit::uninit(),
+            canary: [FX_CANARY; 16],
+        };
+        // SAFETY: `obj` is fresh storage which nothing has pinned, so the
+        // `New` contract holds; `guarded` is never moved after this point, as
+        // the object in it is not trivially relocatable; and the object is
+        // destroyed in place, while initialised, before `guarded` dies.
+        unsafe {
+            ffi::fx_Guarded::new().new(core::pin::Pin::new_unchecked(&mut guarded.obj));
+            let obj = core::pin::Pin::new_unchecked(&mut *guarded.obj.as_mut_ptr());
+            obj.fill();
+            core::ptr::drop_in_place(guarded.obj.as_mut_ptr());
+        }
+        // SAFETY: `canary` is live, initialised and aligned, and every bit
+        // pattern is a valid `[u64; 16]` - including one C++ overwrote.
+        //
+        // Volatile because nothing in Rust's model writes to `canary`, so a
+        // plain read may be folded to the value it was initialised with.
+        let canary = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(guarded.canary)) };
+        assert!(
+            canary.iter().all(|&word| word == FX_CANARY),
+            "C++ built a {} byte object into the {} bytes Rust sized for it, over {:x?}",
+            ffi::fx_guarded_sizeof(),
+            std::mem::size_of::<ffi::fx_Guarded>(),
+            canary
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Guarded", "fx_guarded_sizeof"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            const FX_CANARY: u64 = 0x0123_4567_89ab_cdef;
+
+            /// `fx_Guarded` with Rust's own bytes immediately after it.
+            #[repr(C)]
+            struct Guarded {
+                obj: core::mem::MaybeUninit<ffi::fx_Guarded>,
+                canary: [u64; 16],
+            }
+        }),
+    );
+}
+
+/// The same for a substitute the header declares itself, rather than one out of
+/// autocxx's prelude, and for the two directions in which this composes with the
+/// sizing of an array.
+///
+/// A `replaces=` annotation is not autocxx's to use alone: a header autocxx is
+/// pointed at can carry one, and the substitute it names is a class template
+/// like any other. Three rows here, each narrower in Rust than what it stands in
+/// for. The second holds an array, so the class comes out right only if the
+/// array sizing runs inside the substitute as well as around it. The third holds
+/// two members of one substituted instantiation, which tells a walk remembering
+/// where it *is* from one remembering everywhere it has *been*: the second member
+/// is a repeat for the one and a cycle for the other. They are named through a
+/// typedef so that both are the same item; two members written out as the same
+/// instantiation are two items, and nothing notices.
+#[test]
+fn test_member_of_own_substituted_template_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        template <typename T> struct fx_WideReal { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_WideReal\"></div> */
+        template <typename T> struct fx_WideStand { T* p; };
+        struct fx_Narrowed { uint32_t n; fx_WideReal<uint32_t> m; };
+        template <typename T> struct fx_ArrReal { uint64_t a[6]; };
+        /** <div rustbindgen replaces=\"fx_ArrReal\"></div> */
+        template <typename T> struct fx_ArrStand { T* p[2]; };
+        struct fx_Arrayed { uint32_t n; fx_ArrReal<uint32_t> m; };
+        // Two members of one substituted instantiation, side by side - named
+        // through a typedef, which is what makes them one item rather than two
+        // of the same shape. The walk has to forget each on the way back out,
+        // or the second is a type it believes it is already inside.
+        typedef fx_WideReal<uint32_t> fx_V;
+        template <typename T> struct fx_SibReal { uint64_t z[8]; };
+        /** <div rustbindgen replaces=\"fx_SibReal\"></div> */
+        template <typename T> struct fx_SibStand { fx_V a; fx_V b; };
+        struct fx_Siblings { uint32_t n; fx_SibReal<uint32_t> m; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_Narrowed);
+                case 1: return sizeof(fx_Arrayed);
+                default: return sizeof(fx_Siblings);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_Narrowed);
+                case 1: return alignof(fx_Arrayed);
+                default: return alignof(fx_Siblings);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_Narrowed, "a substitute of one pointer");
+        check!(1, ffi::fx_Arrayed, "a substitute holding an array");
+        check!(2, ffi::fx_Siblings, "a substitute holding two of one substitute");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with a member of a header's own substituted template disagrees with C++:{report}"
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_Narrowed",
+            "fx_Arrayed",
+            "fx_Siblings",
+            "fx_size",
+            "fx_align",
+        ],
+        &[],
+    );
+}
+
+/// A `replaces=` annotation which puts an instantiation of the replaced template
+/// inside the substitute is a cycle, and the generator comes back from it.
+///
+/// C++ has no class which holds itself by value, but two declarations that are
+/// each fine on their own build one here: `fx_Stand` holds an `fx_Real`, and
+/// `fx_Real` *is* `fx_Stand`. A walk with no memory of where it has been does
+/// not come back at all - the process dies of a stack overflow before anything
+/// is written, which no `#[test]` can report on.
+///
+/// What the header cannot be is *correct*, whatever this measures: the Rust it
+/// asks for is a struct which holds itself, which nothing can lay out. So a
+/// reported failure is the whole of what is asked for here, and which failure it
+/// is is left open - rustc rejects the recursive struct today, and a generator
+/// which one day declined the header itself would satisfy this just as well.
+#[test]
+fn test_replaces_cycle_through_a_class_template_is_not_followed_forever() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        template <typename T> struct fx_Real { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_Real\"></div> */
+        template <typename T> struct fx_Stand { fx_Real<T> inner; };
+        struct fx_Holder { uint32_t n; fx_Real<uint32_t> m; };
+    "};
+    run_test_expect_fail("", hdr, quote! {}, &["fx_Holder"], &[]);
+}
+
 /// A pointer to a view, and an rvalue reference to one, are both handles to a
 /// view that already exists. Refusing them is not a matter of taste the way it
 /// is for the `rust::Str*` they resemble: `rust::Str` is `&str`, a type Rust
