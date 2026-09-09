@@ -1,0 +1,147 @@
+Subject: Mark the array a std::array<T, N> was lowered to
+
+`--represent-std-array` writes `std::array<T, N>` as the Rust array `[T; N]`,
+which is the object the class is. C++ also has `T[N]`, and that is written
+`[T; N]` too, so the output says the same thing about two different C++ types.
+
+bindgen itself has the fact and keeps it: a class lowered to the array it is
+laid out as carries the class's name, and an array C++ wrote as one has no
+declaration to take a name from, so its name is `None`. `codegen`'s decay rule
+for a parameter already reads exactly that. What it does not do is survive into
+the rendered type, where `[T; N]` is all either one becomes.
+
+Where the array stands on its own that costs nothing, because there is only
+one type it can be: C adjusts a parameter declared as an array to a pointer,
+and no C++ function returns an array, so an array in either position is the
+class. Behind a pointer or a reference there is no such argument -
+`const T (&)[N]` and `const std::array<T, N>&` are both real, both reach the
+output as the same `&[T; N]`, and a consumer which has to name the C++ type
+back cannot tell which it was given.
+
+`--use-std-array-newtype-wrapper` wraps the named one in
+`__bindgen_marker_StdArray<[T; N]>`, the shape `--use-opaque-newtype-wrapper`,
+`--use-reference-newtype-wrapper` and `--use-const-newtype-wrapper` already
+use: a fake type the caller declares itself, through `--raw-line` or by
+post-processing. Off by default, so no existing output changes.
+
+The wrap is in the array arm of `TryToRustTy for Type`, which the vector arm no
+longer shares: a vector is not a class, is never named, and would never be
+marked, but the two are different enough that saying so is cheaper than
+relying on it.
+
+diff -u -r bg-base/codegen/helpers.rs bg-work/codegen/helpers.rs
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -186,6 +186,30 @@
+     }
+ }
+ 
++/// The name of the marker newtype `std_array_wrapper` puts round the array a
++/// `std::array` was lowered to.
++const STD_ARRAY_MARKER: &str = "__bindgen_marker_StdArray";
++
++/// The array a `std::array<T, N>` was lowered to, wrapped in a marker newtype
++/// if one was asked for.
++///
++/// `is_std_array` is whether the array carries a name. Under
++/// `--represent-std-array` that name is the class the array is the layout of;
++/// an array C++ wrote as one has no declaration to take a name from, so it has
++/// none. Both are written `[T; N]`, and this is what keeps them apart.
++pub(crate) fn std_array_wrapper(
++    ty: syn::Type,
++    is_std_array: bool,
++    ctx: &BindgenContext,
++) -> syn::Type {
++    if is_std_array && ctx.options().use_std_array_newtype_wrapper {
++        let marker = Ident::new(STD_ARRAY_MARKER, Span::call_site());
++        syn::parse_quote! { #marker < #ty > }
++    } else {
++        ty
++    }
++}
++
+ /// The name of the marker newtype `long_double_wrapper` puts round a
+ /// `long double`.
+ const LONG_DOUBLE_MARKER: &str = "__bindgen_marker_LongDouble";
+diff -u -r bg-base/codegen/mod.rs bg-work/codegen/mod.rs
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -5018,7 +5018,20 @@
+                 let prefix = ctx.trait_prefix();
+                 Ok(syn::parse_quote! { ::#prefix::option::Option<#ty> })
+             }
+-            TypeKind::Array(item, len) | TypeKind::Vector(item, len) => {
++            TypeKind::Array(item, len) => {
++                let ty = item.try_to_rust_ty(ctx, &())?;
++                let array = syn::parse_quote! { [ #ty ; #len ] };
++                // The name is the whole of the difference. A class lowered to
++                // the array it is laid out as keeps the class's name; an array
++                // C++ wrote as one has no declaration to take a name from. See
++                // `std_array_wrapper`, and `std_array_shape` for the lowering.
++                Ok(helpers::std_array_wrapper(
++                    array,
++                    self.name().is_some(),
++                    ctx,
++                ))
++            }
++            TypeKind::Vector(item, len) => {
+                 let ty = item.try_to_rust_ty(ctx, &())?;
+                 Ok(syn::parse_quote! { [ #ty ; #len ] })
+             }
+diff -u -r bg-base/options/cli.rs bg-work/options/cli.rs
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -712,6 +712,7 @@
+         use_distinct_char32_t,
+         use_distinct_char8_t,
+         represent_cxx_operators,
++        use_std_array_newtype_wrapper,
+         use_opaque_newtype_wrapper,
+         use_reference_newtype_wrapper,
+         use_const_newtype_wrapper,
+@@ -1028,6 +1029,7 @@
+             use_distinct_char32_t,
+             use_distinct_char8_t,
+             represent_cxx_operators,
++            use_std_array_newtype_wrapper,
+             use_opaque_newtype_wrapper,
+             use_reference_newtype_wrapper,
+             use_const_newtype_wrapper,
+diff -u -r bg-base/options/mod.rs bg-work/options/mod.rs
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -463,6 +463,34 @@
+         as_args: "--represent-std-array",
+     },
+ 
++    /// Whether the array a `std::array<T, N>` was lowered to should be wrapped
++    /// in a marker newtype saying so.
++    ///
++    /// `--represent-std-array` writes `[T; N]` for the class, which is the
++    /// object it is; but C++ also has `T[N]`, and that is written `[T; N]`
++    /// too. Nothing in the output tells a consumer which of the two it has.
++    /// That is invisible where the array stands on its own - C++ decays an
++    /// array parameter and cannot return one, so an array in either of those
++    /// positions is the class - and it is not invisible behind a pointer or a
++    /// reference, where `const T (&)[N]` and `const std::array<T, N>&` are
++    /// different C++ types a consumer may have to name apart.
++    ///
++    /// The wrapper is a fake type called `__bindgen_marker_StdArray`, to be
++    /// replaced by post-processing the output or by a `use` injected with
++    /// `--every-module-raw-line` or similar.
++    use_std_array_newtype_wrapper: bool {
++        methods: {
++            /// If this is true, wrap the array a `std::array` was lowered to
++            /// in a fake newtype wrapper which post-processors can replace
++            /// with something more sensible. Disabled by default.
++            pub fn use_std_array_newtype_wrapper(mut self, doit: bool) -> Builder {
++                self.options.use_std_array_newtype_wrapper = doit;
++                self
++            }
++        },
++        as_args: "--use-std-array-newtype-wrapper",
++    },
++
+     /// Types that have been blocklisted and should not appear anywhere in the generated code.
+     blocklisted_types: RegexSet {
+         methods: {
