@@ -1371,13 +1371,30 @@ impl<'a> CppCodeGenerator<'a> {
                 subclass.cpp_remove_ownership(),
                 holder
             )),
+            // An exchange, not an assignment: `obs` is what every virtual
+            // method above dereferences, and releasing the holder it replaces
+            // can release the subclass's last strong reference, which runs
+            // Rust destructors. Those can call back into a virtual method
+            // here, and can destroy this peer where the pair is self-owned. So
+            // the replacement is in place first and the release is last - see
+            // `autocxx::subclass::CppSubclassRustPeerHolder::unowned`.
+            //
+            // Written out of moves rather than `rust::Box::swap`, which
+            // exchanges the pointers with an unqualified `swap`, so the
+            // holder's own namespace can offer a better-matching one. These
+            // statements name everything from the global namespace, cast the
+            // holder to the parameter type the bridge declares, and write out
+            // the types they bind: the peer's superclass is the user's own
+            // class, so an unqualified name here is looked up in it, and
+            // nothing found there may be a better match than the function this
+            // means to call or supply a type quietly deduced from it. One that
+            // is merely as good stops the build instead. Same reasoning as
+            // `CppFunctionBody::FunctionCall`'s `::autocxx_move_or_copy`.
             definition: Some(format!(
-                "void {}::{}() const {{\nconst_cast<{}*>(this)->really_remove_ownership();\n}}\nvoid {}::really_remove_ownership() {{\nauto new_obs = {}(std::move(obs));\nobs = std::move(new_obs);\n}}\n",
-                subclass.cpp(),
-                subclass.cpp_remove_ownership(),
-                subclass.cpp(),
-                subclass.cpp(),
-                subclass.remove_ownership()
+                "void {peer}::{cpp_remove}() const {{\nconst_cast<{peer}*>(this)->really_remove_ownership();\n}}\nvoid {peer}::really_remove_ownership() {{\n// `obs` must be valid whenever Rust code can run. Releasing `owning` - the\n// first of these to be destroyed - can destroy this object, so no statement\n// follows it.\n::rust::Box<::{holder}> replacement = ::{remove}(static_cast<const ::{holder}&>(*obs));\n::rust::Box<::{holder}> owning = ::std::move(obs);\nobs = ::std::move(replacement);\n}}\n",
+                peer = subclass.cpp(),
+                cpp_remove = subclass.cpp_remove_ownership(),
+                remove = subclass.remove_ownership(),
             )),
             cpp_headers: vec![Header::CxxgenH],
             ..Default::default()

@@ -1167,10 +1167,14 @@ impl<'a> RsCodeGenerator<'a> {
             });
         }
         let remove_ownership = sub.remove_ownership();
+        // By reference, so that the peer keeps its holder - and so the strong
+        // reference - for the duration: releasing that reference runs Rust
+        // destructors, and the peer must not be mid-exchange when they run.
+        // `CppSubclassRustPeerHolder::unowned` states the whole invariant.
         global_items.push(parse_quote! {
             #[allow(non_snake_case)]
-            pub fn #remove_ownership(me: Box<#holder>) -> Box<#holder> {
-                Box::new(#holder(me.0.relinquish_ownership()))
+            pub fn #remove_ownership(me: &#holder) -> Box<#holder> {
+                Box::new(#holder(me.0.unowned()))
             }
         });
         RsCodegenResult {
@@ -1186,7 +1190,7 @@ impl<'a> RsCodeGenerator<'a> {
                     pub type #holder;
                 },
                 parse_quote! {
-                    fn #remove_ownership(me: Box<#holder>) -> Box<#holder>;
+                    fn #remove_ownership(me: &#holder) -> Box<#holder>;
                 },
             ],
             ..Default::default()

@@ -90,12 +90,26 @@ impl<T> CppSubclassRustPeerHolder<T> {
             CppSubclassRustPeerHolder::Unowned(weak) => weak.upgrade(),
         }
     }
-    pub fn relinquish_ownership(self) -> Self {
+    /// The non-owning form of this holder, leaving `self` - and so the strong
+    /// reference, where this is the owning form - alone.
+    ///
+    /// Releasing that reference is the caller's business, and the caller is
+    /// the C++ peer, which owns this holder in a `rust::Box` field its own
+    /// virtual methods dereference. So it installs what this returns before
+    /// releasing the holder it replaced, and does nothing afterwards:
+    /// releasing the last strong reference runs the subclass's `Drop`, which
+    /// can call back into a virtual method - which is why the field may not be
+    /// moved-from across it - and destroys whatever the subclass owns,
+    /// including the peer itself where the pair is self-owned. See
+    /// `CppCodeGenerator::generate_subclass`.
+    pub fn unowned(&self) -> Self {
         match self {
             CppSubclassRustPeerHolder::Owned(strong) => {
-                CppSubclassRustPeerHolder::Unowned(Rc::downgrade(&strong))
+                CppSubclassRustPeerHolder::Unowned(Rc::downgrade(strong))
             }
-            _ => self,
+            CppSubclassRustPeerHolder::Unowned(weak) => {
+                CppSubclassRustPeerHolder::Unowned(weak.clone())
+            }
         }
     }
 }
