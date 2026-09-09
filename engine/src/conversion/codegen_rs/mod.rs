@@ -54,8 +54,8 @@ use super::{
         tdef::{resolve_typedefs, typedef_targets},
     },
     api::{
-        AnalysisPhase, Api, ConstRefShim, HolderSurface, SharedPtrShim, SubclassName, TypeKind,
-        UniquePtrShim, VectorShim, WeakPtrShim, SUPER_FN_SUFFIX,
+        AnalysisPhase, Api, ConstRefShim, CustomPtrShim, HolderSurface, SharedPtrShim,
+        SubclassName, TypeKind, UniquePtrShim, VectorShim, WeakPtrShim, SUPER_FN_SUFFIX,
     },
     convert_error::ErrorContextType,
     derives::DeriveRequests,
@@ -766,6 +766,17 @@ impl<'a> RsCodeGenerator<'a> {
                     Some(HolderSurface::VectorOfPointers { element, .. }) => {
                         self.generate_vector_surface(&name, &bridge_id, &element, &mut result)
                     }
+                    Some(HolderSurface::CustomPtr {
+                        payload,
+                        payload_is_const,
+                        ..
+                    }) => self.generate_custom_ptr_surface(
+                        &name,
+                        &bridge_id,
+                        &payload,
+                        payload_is_const,
+                        &mut result,
+                    ),
                     Some(HolderSurface::ConstRef { payload, .. }) => {
                         self.generate_const_ref_surface(&name, &bridge_id, &payload, &mut result)
                     }
@@ -1413,6 +1424,94 @@ impl<'a> RsCodeGenerator<'a> {
             });
         }
         let doc = const_ref_holder_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #doc]
+            impl #holder {
+                #(#methods)*
+            }
+        });
+    }
+
+    /// Declare the one C++ helper of a user smart pointer's holder in the
+    /// bridge, and put a method for it on the holder itself.
+    ///
+    /// Written here rather than as a synthesized `Api::Function` for the reason
+    /// [`Self::generate_shared_ptr_surface`] gives, and `get` is that surface's
+    /// `get` in every respect: the same raw pointer, the same `unsafe fn` under
+    /// the wrapped-references policy, and the same reason for it - a smart
+    /// pointer may hold nothing, and what it does hold is kept alive by C++ on
+    /// terms nothing here knows. The pointer is `*mut` where C++ wrote a
+    /// mutable argument, because that is what the template's `get` hands back;
+    /// mutating through one is `unsafe` for the ordinary reason, and it is a
+    /// raw pointer, so it makes no promise about aliasing to break. See
+    /// google/autocxx#670.
+    fn generate_custom_ptr_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        payload: &Type,
+        payload_is_const: bool,
+        result: &mut RsCodegenResult,
+    ) {
+        // As in `generate_shared_ptr_surface`: the bridge mod has a flat
+        // namespace, and the output mod, where the methods go, uses the
+        // qualified spellings.
+        let holder = name.get_final_ident();
+        let bridge_payload = unqualify_type(payload.clone(), self.bridge_type_names);
+        let wrapped = matches!(
+            self.unsafe_policy,
+            UnsafePolicy::ReferencesWrappedAllFunctionsSafe
+        );
+        let mut methods: Vec<ImplItem> = Vec::new();
+        for shim in CustomPtrShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name));
+            let method_id = make_ident(shim.rust_name());
+            let unsafety: Option<syn::token::Unsafe> =
+                matches!(shim, CustomPtrShim::Get if wrapped).then(|| parse_quote! { unsafe });
+            // What the bridge declares is what the C++ shim returns, and that
+            // is the template's own `get`: a `const T*` for a `MyPtr<const T>`
+            // and a `T*` otherwise. cxx typechecks the declaration against the
+            // real C++ signature through a function pointer, so the two have to
+            // agree exactly.
+            let bridge_ret: Type = if payload_is_const {
+                parse_quote! { *const #bridge_payload }
+            } else {
+                parse_quote! { *mut #bridge_payload }
+            };
+            let (method_ret, body): (Type, Expr) = match shim {
+                // A `CppRef` is what safe code may dereference under this
+                // policy, and this pointer promises neither to be non-null nor
+                // to outlive the call, so the method is `unsafe` and its safety
+                // comment is where the caller vouches for both - exactly as for
+                // `std::shared_ptr::get`. A mutable payload is handed over as a
+                // shared `CppRef` all the same, which is the surface every
+                // other holder's `get` has; `CppRef::const_cast` is how a
+                // caller asks for the other one.
+                CustomPtrShim::Get if wrapped => (
+                    parse_quote! { autocxx::CppRef<#payload> },
+                    parse_quote! { autocxx::CppRef::from_ptr(cxxbridge::#shim_id(self)) },
+                ),
+                CustomPtrShim::Get if payload_is_const => (
+                    parse_quote! { *const #payload },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+                CustomPtrShim::Get => (
+                    parse_quote! { *mut #payload },
+                    parse_quote! { cxxbridge::#shim_id(self) },
+                ),
+            };
+            result.extern_c_mod_items.push(parse_quote! {
+                fn #shim_id(self_: &#bridge_id) -> #bridge_ret;
+            });
+            let doc = custom_ptr_method_doc(shim, wrapped);
+            methods.push(parse_quote! {
+                #[doc = #doc]
+                pub #unsafety fn #method_id(&self) -> #method_ret {
+                    #body
+                }
+            });
+        }
+        let doc = custom_ptr_holder_doc();
         result.output_mod_items.push(parse_quote! {
             #[doc = #doc]
             impl #holder {
@@ -2508,6 +2607,61 @@ fn const_ref_method_doc(shim: ConstRefShim, wrapped: bool) -> String {
              The referent's C++ type is `const`, so this is a `*const` - \
              though Rust will let you cast one, exactly as C++'s \
              `const_cast` would."
+        ),
+    }
+}
+
+/// What the generated docs say about the holder of an instantiation of a user's
+/// own smart pointer template.
+fn custom_ptr_holder_doc() -> String {
+    "This type is an instantiation of a C++ class template a `smart_pointer!` \
+     directive declared to be a smart pointer, held opaquely.\n\n\
+     autocxx knows nothing about such a template beyond that declaration, so \
+     the instantiation is declared to cxx as an opaque extern type whose C++ \
+     definition is exactly that specialization. C++ can hand one to Rust and \
+     take it back, and destroys it when Rust drops it; the method below is what \
+     the directive adds, and is the whole of what Rust can do with one \
+     besides.\n\n\
+     The method below is the whole of what the directive adds: there is no way \
+     to make one of these from Rust and no way to copy one, so a \
+     reference-counted pointer can be moved from Rust but not shared from it. \
+     Nothing here makes the holder `Send` or `Sync`."
+        .to_string()
+}
+
+/// What the generated docs say about that holder's one method.
+fn custom_ptr_method_doc(shim: CustomPtrShim, wrapped: bool) -> String {
+    let claim = "What this points at is whatever the template's own `get` \
+         hands back, and the `smart_pointer!` directive is the only thing which \
+         says there is such a member: autocxx cannot inspect a specialization, \
+         so the C++ compiler is the arbiter of the claim.";
+    let lifetime = "A smart pointer may hold nothing, in which case this is \
+         null. What it does hold is kept alive by C++ on terms autocxx does not \
+         know - a reference count this holder owns a share of, or something \
+         else entirely - and dropping the holder may be what ends that.";
+    match shim {
+        CustomPtrShim::Get if wrapped => format!(
+            "What this smart pointer points at, as a `CppRef` - the \
+             template's `get`.\n\n\
+             {claim}\n\n\
+             {lifetime}\n\n\
+             # Safety\n\n\
+             Under this policy a `CppRef` is what a C++ `const T&` parameter \
+             takes, and the generated C++ dereferences it without any further \
+             `unsafe` on your part - so producing one is where the promise has \
+             to be made. The caller must establish that this smart pointer is \
+             not empty and that what it points at outlives the `CppRef`.\n\n\
+             A mutable payload reaches Rust as a shared `CppRef` all the same, \
+             which is the surface every other holder's `get` has. \
+             `CppRef::const_cast` will hand you a `CppMutRef` if you ask, \
+             exactly as C++'s `const_cast` would."
+        ),
+        CustomPtrShim::Get => format!(
+            "What this smart pointer points at - the template's `get`.\n\n\
+             {claim}\n\n\
+             {lifetime} That is why dereferencing this pointer is `unsafe`: \
+             nothing here promises it is non-null, and nothing here ties what \
+             it points at to the life of the holder."
         ),
     }
 }

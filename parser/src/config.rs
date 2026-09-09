@@ -132,6 +132,31 @@ fn bindgen_spellings(item: String) -> impl Iterator<Item = String> {
     })
 }
 
+/// Whether the name autocxx knows a type by is one a directive naming
+/// `directive` claims.
+///
+/// bindgen flattens a nested class into its enclosing one, so C++'s
+/// `ns::Outer::MyPtr` is `ns::Outer_MyPtr`, and which `::` in what the user
+/// wrote separates namespaces from nesting is not something this can know -
+/// so every split is tried, exactly as an allowlist entry offers bindgen every
+/// split.
+///
+/// A name may also be written without its namespaces, which is the latitude
+/// `throws!` gives and carries the same cost: a short name claims every
+/// template of that name, in every namespace.
+pub fn name_matches_directive(cpp_name: &str, directive: &str) -> bool {
+    // Both sides are split, not just the directive: the name a template is
+    // known by is bindgen's where a conversion asks, and C++'s where it was
+    // rebuilt from a `concrete!` expression, and a directive written either way
+    // means the same template.
+    let candidates: Vec<String> = bindgen_spellings(cpp_name.to_string()).collect();
+    bindgen_spellings(directive.to_string()).any(|spelling| {
+        candidates.iter().any(|candidate| {
+            *candidate == spelling || candidate.ends_with(&format!("::{spelling}"))
+        })
+    })
+}
+
 /// Allowlist configuration.
 #[derive(Hash, Debug)]
 pub enum Allowlist {
@@ -247,6 +272,10 @@ pub struct IncludeCppConfig {
     pub(crate) blocklist: Vec<String>,
     pub(crate) constructor_blocklist: Vec<String>,
     pub instantiable: Vec<String>,
+    /// The class templates a `smart_pointer!` directive says hold a pointer to
+    /// their argument, named as C++ names them. Every instantiation of one gets
+    /// an accessor for what it points at.
+    pub smart_pointers: Vec<String>,
     pub(crate) exclude_utilities: bool,
     pub(crate) mod_name: Option<Ident>,
     pub rust_types: Vec<RustPath>,
@@ -421,6 +450,20 @@ impl IncludeCppConfig {
 
     pub fn is_on_constructor_blocklist(&self, cpp_name: &str) -> bool {
         self.constructor_blocklist.contains(&cpp_name.to_string())
+    }
+
+    /// Whether a `smart_pointer!` directive named this class template.
+    ///
+    /// `cpp_name` is the name autocxx knows the template by, which is the one
+    /// bindgen reported: namespaces separated by `::`, and any enclosing class
+    /// flattened into the final segment with an `_`, so a `MyPtr` declared
+    /// inside `Outer` is `Outer_MyPtr`. A directive may be written either way -
+    /// `smart_pointer!("Outer::MyPtr")` is what C++ calls it - and may leave the
+    /// namespaces off, as `throws!` may for a function.
+    pub fn is_smart_pointer_template(&self, cpp_name: &str) -> bool {
+        self.smart_pointers
+            .iter()
+            .any(|entry| name_matches_directive(cpp_name, entry))
     }
 
     pub fn is_on_throws_list(&self, cpp_name: &str) -> bool {

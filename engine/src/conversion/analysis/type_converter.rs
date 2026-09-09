@@ -253,6 +253,9 @@ pub(crate) struct TypeConverter<'a> {
     /// through an alias in a template argument before anything converts it.
     alias_targets: HashMap<QualifiedName, Type>,
     ignored_types: HashSet<QualifiedName>,
+    /// The accessor surfaces of holders which already existed when a
+    /// conversion worked one out. See [`Self::take_deferred_surfaces`].
+    deferred_surfaces: HashMap<QualifiedName, HolderSurface>,
     config: &'a IncludeCppConfig,
     original_name_map: CppNameMap,
 }
@@ -280,6 +283,7 @@ impl<'a> TypeConverter<'a> {
             instantiations_on_incomplete_types: Self::find_instantiations_on_incomplete_types(apis),
             alias_targets: Self::find_alias_targets(apis),
             ignored_types: Self::find_ignored_types(apis),
+            deferred_surfaces: HashMap::new(),
             config,
             original_name_map: CppNameMap::new_for_analysis(apis),
         }
@@ -1080,6 +1084,22 @@ impl<'a> TypeConverter<'a> {
                 if mentions_volatile(&Type::Path(typ.clone())) {
                     return Err(ConvertErrorFromCpp::VolatileTemplateArgument);
                 }
+                // A class template a `smart_pointer!` directive named becomes
+                // the same opaque holder as the containers above, with the one
+                // accessor that directive claims for it. The instantiation is
+                // otherwise the concrete type autocxx already made here, so
+                // everything which could be done with one still can. See
+                // google/autocxx#670.
+                if self.config.is_smart_pointer_template(&tn.to_cpp_name()) {
+                    let surface = self.custom_ptr_surface(&tn, &typ, ns, &mut extra_apis)?;
+                    return self.lower_to_holder(
+                        typ,
+                        Some(surface),
+                        deps,
+                        extra_apis,
+                        target_is_const,
+                    );
+                }
                 let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
                 extra_apis.extend(api.into_iter());
                 // Although it's tempting to remove the dep on the original type,
@@ -1449,6 +1469,86 @@ impl<'a> TypeConverter<'a> {
         })
     }
 
+    /// The accessor surface of an instantiation of a class template a
+    /// `smart_pointer!` directive named: `get`, over the first template
+    /// argument.
+    ///
+    /// The argument is read here in two spellings, because the two halves of
+    /// the shim need different ones. The `cxx::bridge` needs the Rust type, so
+    /// the argument is converted like any other payload - which is also what
+    /// records the names the holder then depends on, and what may manufacture a
+    /// type of its own for a nested instantiation. The C++ shim needs the C++
+    /// type, because what it hands back is a pointer to the argument and a
+    /// user's template promises no `element_type` typedef to name one with.
+    ///
+    /// A `const` argument is kept as such in both: `MyPtr<const T>::get`
+    /// returns a `const T*`, so the shim has to be declared returning one and
+    /// Rust has to be handed a `*const T`. The qualifier travels in the C++
+    /// spelling by itself; the Rust side has it peeled off first, since nothing
+    /// downstream knows what to do with bindgen's marker, and
+    /// [`Self::arg_is_const_qualified`] is what sees it where an alias carried
+    /// it instead.
+    ///
+    /// It is the *first* type argument, not the first one which happens to be a
+    /// named type: `MyPtr<int*, Tag>` points at an `int*`, and picking the
+    /// argument which can be handled would give it a `Tag*` accessor for a
+    /// `Tag` it has nothing to do with. An argument which is not a named type
+    /// is refused instead.
+    fn custom_ptr_surface(
+        &mut self,
+        tn: &QualifiedName,
+        typ: &TypePath,
+        ns: &Namespace,
+        extra_apis: &mut ApiVec<NullPhase>,
+    ) -> Result<HolderSurface, ConvertErrorFromCpp> {
+        let argument = typ
+            .path
+            .segments
+            .last()
+            .and_then(|seg| match &seg.arguments {
+                PathArguments::AngleBracketed(ab) => ab.args.iter().find_map(|arg| match arg {
+                    GenericArgument::Type(ty) => Some(ty),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            // Nothing gets this far with no type argument at all: a template
+            // whose parameters are values rather than types is one bindgen
+            // renders as a blob of bytes, and a signature mentioning that is
+            // refused before any of this. Said rather than unwrapped, so that a
+            // shape which does reach here is named.
+            .ok_or_else(|| ConvertErrorFromCpp::SmartPointerWithoutTypeArgument(tn.clone()))?;
+        let Type::Path(argument) = argument else {
+            return Err(ConvertErrorFromCpp::SmartPointerPayloadNotANamedType(
+                tn.clone(),
+                argument.to_token_stream().to_string(),
+            ));
+        };
+        let payload_is_const = self.arg_is_const_qualified(argument)?;
+        let stripped = match unwrap_const(argument) {
+            Some(inner) => inner.clone(),
+            None => Type::Path(argument.clone()),
+        };
+        // Asked again of what the marker wrapped: `MyPtr<int* const>` arrives
+        // as a path, bindgen's `const` marker being one, and what it qualifies
+        // is the pointer the check above turns down.
+        if !matches!(stripped, Type::Path(_)) {
+            return Err(ConvertErrorFromCpp::SmartPointerPayloadNotANamedType(
+                tn.clone(),
+                stripped.to_token_stream().to_string(),
+            ));
+        }
+        let mut payload =
+            self.convert_type(stripped, ns, &TypeConversionContext::WithinContainer)?;
+        extra_apis.append(&mut payload.extra_apis);
+        Ok(HolderSurface::CustomPtr {
+            payload: Box::new(payload.ty.into()),
+            payload_cpp: Box::new(Type::Path(argument.clone()).into()),
+            payload_is_const,
+            deps: payload.types_encountered,
+        })
+    }
+
     /// Divert a template instantiation cxx cannot spell to the opaque C++
     /// holder autocxx already manufactures for such things, with `surface`
     /// saying which accessors the holder gets.
@@ -1482,9 +1582,14 @@ impl<'a> TypeConverter<'a> {
     /// The opaque holder for `typ`, made if this is the first time this
     /// instantiation has been seen and found if it is not, and its name.
     ///
-    /// `surface` is used only in the first case: a holder carries the
-    /// accessors it was created with, and everything which arrives at the same
-    /// C++ specialization afterwards shares that one holder.
+    /// A holder carries the accessors it was created with, and everything
+    /// which arrives at the same C++ specialization afterwards shares that one
+    /// holder. Where the holder was made here, `surface` goes straight onto it.
+    /// Where it already existed it is remembered instead, for
+    /// [`Self::take_deferred_surfaces`]: an instantiation which a `concrete!`
+    /// directive named is registered before any conversion runs, so the
+    /// conversion which knows what accessors it should have finds it already
+    /// made and has nothing of its own to put them on.
     fn manufacture_holder(
         &mut self,
         typ: TypePath,
@@ -1492,24 +1597,38 @@ impl<'a> TypeConverter<'a> {
         extra_apis: &mut ApiVec<NullPhase>,
     ) -> Result<QualifiedName, ConvertErrorFromCpp> {
         let (new_tn, api) = self.get_templated_typename(&Type::Path(typ))?;
-        if let Some(Api::ConcreteType {
-            name,
-            rs_definition,
-            cpp_definition,
-            incomplete_argument,
-            ..
-        }) = api
-        {
-            extra_apis.push(Api::ConcreteType {
+        match api {
+            Some(Api::ConcreteType {
+                name,
+                rs_definition,
+                cpp_definition,
+                incomplete_argument,
+                ..
+            }) => extra_apis.push(Api::ConcreteType {
                 name,
                 rs_definition,
                 cpp_definition,
                 holder_surface: surface,
                 constructor_and_allocator_deps: Vec::new(),
                 incomplete_argument,
-            });
+            }),
+            _ => {
+                if let Some(surface) = surface {
+                    self.deferred_surfaces
+                        .entry(new_tn.clone())
+                        .or_insert(surface);
+                }
+            }
         }
         Ok(new_tn)
+    }
+
+    /// The accessor surfaces worked out for holders which already existed, to
+    /// be put onto them by [`crate::conversion::analysis::fun::FnAnalyzer`]
+    /// once conversion is over. Each is the surface of the first conversion
+    /// which asked for one, which is the rule a holder made here follows too.
+    pub(crate) fn take_deferred_surfaces(&mut self) -> HashMap<QualifiedName, HolderSurface> {
+        std::mem::take(&mut self.deferred_surfaces)
     }
 
     fn get_templated_typename(
@@ -1933,6 +2052,52 @@ fn sibling_shared_ptr(typ: &TypePath) -> TypePath {
 /// problem) but fortunately, don't need to. We need to keep the type
 /// system happy by adding an [ApiAnalysis] but in practice, for the sorts
 /// of things that get created, it's always blank.
+/// Put onto each holder the accessor surface a conversion worked out for it
+/// after it already existed.
+///
+/// A holder made during conversion carries its surface from the moment it is
+/// made. One which was already there does not, and there is exactly one way to
+/// be already there: a `concrete!` directive registers an instantiation before
+/// any conversion runs. The conversion which then meets that instantiation in a
+/// signature is the one which knows what accessors it should have - it has the
+/// template arguments in front of it - but it finds the type made and has
+/// nothing of its own to put them on. This is where the two meet.
+///
+/// A holder which already has a surface keeps it, which is the rule
+/// [`TypeConverter::manufacture_holder`] follows for the holders it makes.
+pub(crate) fn attach_deferred_holder_surfaces<P: AnalysisPhase>(
+    type_converter: &mut TypeConverter,
+    apis: ApiVec<P>,
+) -> ApiVec<P> {
+    let mut surfaces = type_converter.take_deferred_surfaces();
+    if surfaces.is_empty() {
+        return apis;
+    }
+    apis.into_iter()
+        .map(|api| match api {
+            Api::ConcreteType {
+                name,
+                rs_definition,
+                cpp_definition,
+                holder_surface: None,
+                constructor_and_allocator_deps,
+                incomplete_argument,
+            } => {
+                let holder_surface = surfaces.shift_remove(&name.name);
+                Api::ConcreteType {
+                    name,
+                    rs_definition,
+                    cpp_definition,
+                    holder_surface,
+                    constructor_and_allocator_deps,
+                    incomplete_argument,
+                }
+            }
+            _ => api,
+        })
+        .collect()
+}
+
 pub(crate) fn add_analysis<A: AnalysisPhase>(api: UnanalyzedApi) -> Api<A> {
     match api {
         Api::ConcreteType {

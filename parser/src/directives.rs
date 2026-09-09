@@ -82,6 +82,13 @@ pub(crate) fn get_directives() -> &'static DirectivesMap {
             )),
         );
         need_exclamation.insert(
+            "smart_pointer".into(),
+            Box::new(StringList(
+                |config| &mut config.smart_pointers,
+                |config| &config.smart_pointers,
+            )),
+        );
+        need_exclamation.insert(
             "throws".into(),
             Box::new(StringList(
                 |config| &mut config.throws_list,

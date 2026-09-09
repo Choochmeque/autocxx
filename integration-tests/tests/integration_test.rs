@@ -34057,3 +34057,1054 @@ fn test_deduced_return_is_not_resolved_to_a_using_declared_name() {
     };
     run_test("", hdr, rs, &["fx_use::fx_deduced"], &[]);
 }
+
+/// A class template someone wrote themselves, holding a pointer to its
+/// argument the way `scoped_refptr` and the rest of the smart pointers people
+/// write do. autocxx already carries an instantiation of one across the bridge
+/// as an opaque type; what it cannot do by itself is look inside one, because
+/// nothing tells it what the template means. A `smart_pointer!` directive is
+/// that telling, and this is what it buys: `get`, answering with a pointer to
+/// the payload.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_get() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            let widget = unsafe { &*p.get() };
+            assert_eq!(widget.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A smart pointer which holds nothing answers with a null pointer, which is
+/// the only emptiness question this surface asks: no two smart pointers spell
+/// emptiness the same way, and `get` being null is what they all agree on.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_get_of_empty_is_null() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_nothing() { return MyPtr<Widget>(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_nothing();
+            assert!(p.get().is_null());
+        },
+        quote! {
+            generate!("make_nothing")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `MyPtr<const Widget>::get` returns a `const Widget*`, so the shim is
+/// declared returning one and Rust is handed a `*const` rather than a `*mut`.
+/// The two have to agree exactly: cxx typechecks the bridge declaration against
+/// the real C++ signature through a function pointer, which is an exact match
+/// or a compile error.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_const_payload() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        typedef MyPtr<const Widget> ConstWidgetPtr;
+        inline ConstWidgetPtr make_widget() { return ConstWidgetPtr(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            // Pinned as a function pointer rather than by assigning the
+            // result: a `*mut Widget` would coerce to a `*const Widget` and the
+            // assignment would prove nothing. Coercing the method itself
+            // demands the signature match exactly.
+            let get: fn(&ffi::ConstWidgetPtr) -> *const ffi::Widget = ffi::ConstWidgetPtr::get;
+            let p = ffi::make_widget();
+            assert_eq!(unsafe { &*get(p.as_ref().unwrap()) }.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate!("ConstWidgetPtr")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The directive names the template, and a template usually lives in a
+/// namespace. Naming it in full works.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_in_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx {
+            struct Widget { uint32_t value; };
+            template<typename T>
+            class MyPtr {
+            public:
+                MyPtr() : p_(nullptr) {}
+                explicit MyPtr(T* p) : p_(p) {}
+                MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+                ~MyPtr() { delete p_; }
+                T* get() const { return p_; }
+            private:
+                T* p_;
+            };
+            inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::fx::make_widget();
+            let widget = unsafe { &*p.get() };
+            assert_eq!(widget.value, 42);
+        },
+        quote! {
+            generate!("fx::make_widget")
+            generate_pod!("fx::Widget")
+            smart_pointer!("fx::MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The same template named by its final segment alone, which is how `throws!`
+/// lets a function be named and is the same claim about the same template.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_in_namespace_named_unqualified() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx {
+            struct Widget { uint32_t value; };
+            template<typename T>
+            class MyPtr {
+            public:
+                MyPtr() : p_(nullptr) {}
+                explicit MyPtr(T* p) : p_(p) {}
+                MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+                ~MyPtr() { delete p_; }
+                T* get() const { return p_; }
+            private:
+                T* p_;
+            };
+            inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::fx::make_widget();
+            let widget = unsafe { &*p.get() };
+            assert_eq!(widget.value, 42);
+        },
+        quote! {
+            generate!("fx::make_widget")
+            generate_pod!("fx::Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// One directive covers every instantiation of the template, each of which is
+/// its own opaque type with its own accessor over its own payload.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_two_instantiations() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        struct Gadget { uint32_t other; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+        inline MyPtr<Gadget> make_gadget() { return MyPtr<Gadget>(new Gadget{7}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let w = ffi::make_widget();
+            let g = ffi::make_gadget();
+            assert_eq!(unsafe { &*w.get() }.value, 42);
+            assert_eq!(unsafe { &*g.get() }.other, 7);
+        },
+        quote! {
+            generate!("make_widget")
+            generate!("make_gadget")
+            generate_pod!("Widget")
+            generate_pod!("Gadget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// An instantiation reached through a typedef is the same instantiation, and
+/// the accessor goes on it whichever way autocxx first met it.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_through_typedef() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        typedef MyPtr<Widget> WidgetPtr;
+        inline WidgetPtr make_widget() { return WidgetPtr(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p: cxx::UniquePtr<ffi::WidgetPtr> = ffi::make_widget();
+            assert_eq!(unsafe { &*p.get() }.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate!("WidgetPtr")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The rest of what a smart pointer holder can do, which it could do before
+/// this directive existed and still can: C++ hands one to Rust, Rust hands it
+/// back, and dropping it is what destroys it in C++. The accessor is added to
+/// that rather than replacing any of it.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_round_trips_and_drops() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& destructions() { static uint32_t count = 0; return count; }
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { if (p_) { destructions()++; } delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+        inline uint32_t read(const MyPtr<Widget>& p) { return p.get()->value; }
+        inline uint32_t destruction_count() { return destructions(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::destruction_count(), 0);
+            {
+                let p = ffi::make_widget();
+                assert_eq!(unsafe { &*p.get() }.value, 42);
+                assert_eq!(ffi::read(p.as_ref().unwrap()), 42);
+                assert_eq!(ffi::destruction_count(), 0);
+            }
+            assert_eq!(ffi::destruction_count(), 1);
+        },
+        quote! {
+            generate!("make_widget")
+            generate!("read")
+            generate!("destruction_count")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// autocxx never guesses that a class template is a smart pointer. Without the
+/// directive the same header gives the same opaque instantiation it always did,
+/// and no accessor: a `get` member is not a declaration of intent, and a
+/// template written like `std::unique_ptr` is not treated like one.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_no_smart_pointer_surface_without_the_directive() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            assert!(!p.is_null());
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+        },
+        None,
+        Some(make_string_absence_finder(vec!["autocxx_get".to_string()])),
+        None,
+    );
+}
+
+/// The directive's one claim is that the template has a `get`, and the C++
+/// compiler is what checks it: the shim calls `get()`, and a template without
+/// one does not compile. autocxx does not refuse such a template itself,
+/// because `bindgen`'s facts cannot tell a template which has no `get` from one
+/// whose `get` it does not report - a member function template, an inherited
+/// member, or whatever an explicit specialization declares.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_without_get_fails_to_compile() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* ptr() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    // Worded differently by every compiler; the member and the access are
+    // what they have in common.
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        &["MyPtr", "get"],
+    );
+}
+
+/// A `get` C++ made private is one no caller may reach, and the C++ compiler
+/// says so at the shim - again rather than autocxx refusing it, since a private
+/// `get(int)` may sit beside a public `get()` `bindgen` never reported.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_with_private_get_fails_to_compile() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+        private:
+            T* get() const { return p_; }
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        &["private", "get"],
+    );
+}
+
+/// A directive which matched no instantiation would leave the user without the
+/// accessor they asked for and with nothing said about it, so it is an error.
+/// A misspelling is the common way to get there.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_directive_matching_nothing_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPointer")
+        },
+        "matched no template instantiation",
+    );
+}
+
+/// An `instantiable!` directive naming a smart pointer instantiation adds
+/// nothing to it, as it adds nothing to the `std::shared_ptr` holders - see
+/// [`test_no_constructors_for_smart_pointer_holders`]. Such a type is made by
+/// C++ and handed over; a `new()` would have to build one into Rust storage,
+/// and there is none of the right size for a type cxx knows only as opaque.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_no_constructors_for_smart_pointer_instantiations() {
+    let hdr = indoc! {"
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+            bool is_held() const { return p_ != nullptr; }
+        private:
+            T* p_;
+        };
+        typedef MyPtr<int> IntPtr;
+        inline IntPtr make_int() { return IntPtr(new int(42)); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_int();
+            assert_eq!(unsafe { *p.get() }, autocxx::c_int(42));
+        },
+        quote! {
+            generate!("make_int")
+            generate!("IntPtr")
+            smart_pointer!("MyPtr")
+            instantiable!("IntPtr")
+        },
+        None,
+        // The holder's own name plus the suffix every synthesized allocator
+        // and special member carries, as
+        // [`test_no_constructors_for_smart_pointer_holders`] asks it - and
+        // `is_held`, an ordinary member of the template, which `instantiable!`
+        // binds to an instantiation which has no holder surface.
+        Some(make_string_absence_finder(vec![
+            "AutocxxConcrete_autocxx_alloc".into(),
+            "AutocxxConcrete_autocxx_free".into(),
+            "new_autocxx".into(),
+            "is_held".into(),
+        ])),
+        None,
+    );
+}
+
+/// An instantiation named by a `concrete!` directive gets the accessor too.
+/// Such a type is registered before any type conversion runs, so the
+/// conversion which meets the instantiation in a signature - and which is what
+/// knows what its accessors should be - finds it already made. Before this the
+/// surface was dropped on the floor and the directive reported that it had
+/// matched nothing.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_named_by_concrete_directive() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p: cxx::UniquePtr<ffi::WidgetPtr> = ffi::make_widget();
+            assert!(!p.get().is_null());
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            concrete!("MyPtr<Widget>", WidgetPtr)
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A template whose `get` it inherits from a base is a smart pointer like any
+/// other. bindgen reports the members a class template declares and not the
+/// ones it inherits, so the refusal must not fire on the silence: C++ resolves
+/// the call in the base and the shim compiles.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_with_inherited_get() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class PtrBase {
+        public:
+            T* get() const { return p_; }
+        protected:
+            PtrBase() : p_(nullptr) {}
+            explicit PtrBase(T* p) : p_(p) {}
+            T* p_;
+        };
+        template<typename T>
+        class MyPtr : public PtrBase<T> {
+        public:
+            MyPtr() {}
+            explicit MyPtr(T* p) : PtrBase<T>(p) {}
+            MyPtr(MyPtr&& other) : PtrBase<T>(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete this->p_; }
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            assert_eq!(unsafe { &*p.get() }.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `get` written as a member function *template* is one bindgen does not
+/// parse as a member at all, so what it reports for such a class is the special
+/// members and nothing else. The refusal must not fire on that silence either.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_with_member_template_get() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            template<typename U = T>
+            U* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            assert_eq!(unsafe { &*p.get() }.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The accessor's return type is written as a pointer to the template's first
+/// argument, so an argument with no C++ name to write - a pointer, a reference,
+/// an array - is refused rather than skipped in favour of the next argument,
+/// which would give the instantiation an accessor for a type it has nothing to
+/// do with.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_payload_which_is_not_a_named_type_is_refused() {
+    let hdr = indoc! {"
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<int*> make_ptr() { return MyPtr<int*>(); }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("make_ptr")
+            smart_pointer!("MyPtr")
+        },
+        "is not a named type",
+    );
+}
+
+/// An instantiation which appears only as a template argument of something else
+/// is named in C++ by writing that argument out again, and is never converted -
+/// so it never becomes a holder and never gets the accessor. The directive says
+/// it matched nothing rather than leaving the user to find the accessor
+/// missing.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_only_inside_another_template_is_reported() {
+    let hdr = indoc! {"
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        template<typename T>
+        struct Carton { T value; };
+        inline Carton<MyPtr<int>> make_carton() { return Carton<MyPtr<int>>(); }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("make_carton")
+            smart_pointer!("MyPtr")
+        },
+        "matched no template instantiation",
+    );
+}
+
+/// Handing a smart pointer to C++ by value hands over what it owns: C++
+/// destroys the object it was given, and the moved-from holder Rust still
+/// carries destroys nothing. Counted in C++ rather than assumed.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_ownership_passes_by_value() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t& destructions() { static uint32_t count = 0; return count; }
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { if (p_) { destructions()++; } delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+        inline uint32_t consume(MyPtr<Widget> p) { return p.get()->value; }
+        inline uint32_t destruction_count() { return destructions(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            assert_eq!(ffi::destruction_count(), 0);
+            assert_eq!(ffi::consume(p), 42);
+            // The one destruction is C++'s own, of what it was handed.
+            assert_eq!(ffi::destruction_count(), 1);
+        },
+        quote! {
+            generate!("make_widget")
+            generate!("consume")
+            generate!("destruction_count")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// C++ lets `p.get()` call a *static* `get`, evaluating and discarding the
+/// object expression, so a template which declares one is not a template
+/// without a reachable `get`.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_with_static_get() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        inline Widget* the_widget() { static Widget w{42}; return &w; }
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() {}
+            static T* get() { return the_widget(); }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            assert_eq!(unsafe { &*p.get() }.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `concrete!` name and a typedef for one instantiation, with an
+/// `instantiable!` on top: the accessor goes on it once, and the template's own
+/// members are not bound beside it - which would have given the type a second
+/// method called `get`, in generated Rust which does not compile.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_named_by_concrete_and_instantiable() {
+    let hdr = indoc! {"
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+            bool is_held() const { return p_ != nullptr; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<int> make_int() { return MyPtr<int>(new int(42)); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_int();
+            assert_eq!(unsafe { *p.get() }, autocxx::c_int(42));
+        },
+        quote! {
+            generate!("make_int")
+            concrete!("MyPtr<int>", IntPtr)
+            instantiable!("IntPtr")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        // The `instantiable!` is inert here, as it is for every holder: no
+        // allocator, no constructor, and none of the template's own members -
+        // `is_held` among them - beside the accessor.
+        Some(make_string_absence_finder(vec![
+            "_autocxx_alloc".into(),
+            "_autocxx_free".into(),
+            "new_autocxx".into(),
+            "is_held".into(),
+        ])),
+        None,
+    );
+}
+
+/// One instantiation reached through both a typedef and a `concrete!` name.
+/// The typedef is converted in an earlier phase than the signature which uses
+/// it, by a type converter which is then thrown away, so the accessor has to
+/// survive that.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_named_by_concrete_and_typedef() {
+    let hdr = indoc! {"
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        typedef MyPtr<int> IntPtr;
+        inline IntPtr make_int() { return IntPtr(new int(42)); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_int();
+            assert_eq!(unsafe { *p.get() }, autocxx::c_int(42));
+        },
+        quote! {
+            generate!("make_int")
+            generate!("IntPtr")
+            concrete!("MyPtr<int>", NamedPtr)
+            smart_pointer!("MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A payload whose C++ name is hidden by a function of the same name. autocxx
+/// emits an alias for such a type and names it by that alias everywhere in the
+/// generated C++, the accessor's return type included - which it can only do if
+/// the C++ name is spelled by the code generator rather than during analysis.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_payload_whose_name_is_shadowed() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Widget { uint32_t value; };
+        template<typename T>
+        class MyPtr {
+        public:
+            MyPtr() : p_(nullptr) {}
+            explicit MyPtr(T* p) : p_(p) {}
+            MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+            ~MyPtr() { delete p_; }
+            T* get() const { return p_; }
+        private:
+            T* p_;
+        };
+        inline MyPtr<Widget> make_widget() { return MyPtr<Widget>(new Widget{42}); }
+        // Declared last, so that the header's own code may still name the type
+        // plainly: an elaborated-type-specifier is not allowed in a
+        // new-expression, which is what writing this first would have forced.
+        void Widget();
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_widget();
+            assert_eq!(unsafe { &*p.get() }.value, 42);
+        },
+        quote! {
+            generate!("make_widget")
+            generate_pod!("Widget")
+            smart_pointer!("MyPtr")
+        },
+        None,
+        // The alias, and not the hidden name, is what the accessor returns a
+        // pointer to.
+        Some(Box::new(CppMatcher::new(
+            &["Widget_autocxx_unshadowed* MyPtr"],
+            &["inline Widget* MyPtr"],
+        ))),
+        None,
+    );
+}
+
+/// A class template nested inside a class, named in the directive the way
+/// `bindgen` flattens it while the `concrete!` directive beside it names it the
+/// way C++ writes it. Both spellings mean one template, so the directive has to
+/// match the same instantiation whichever side is asking.
+///
+/// Addresses the bug reported upstream as google/autocxx#670.
+#[test]
+fn test_smart_pointer_nested_template_named_either_way() {
+    let hdr = indoc! {"
+        struct Outer {
+            template<typename T>
+            class MyPtr {
+            public:
+                MyPtr() : p_(nullptr) {}
+                explicit MyPtr(T* p) : p_(p) {}
+                MyPtr(MyPtr&& other) : p_(other.p_) { other.p_ = nullptr; }
+                ~MyPtr() { delete p_; }
+                T* get() const { return p_; }
+            private:
+                T* p_;
+            };
+        };
+        inline Outer::MyPtr<int> make_int() { return Outer::MyPtr<int>(new int(42)); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let p = ffi::make_int();
+            assert_eq!(unsafe { *p.get() }, autocxx::c_int(42));
+        },
+        quote! {
+            generate!("make_int")
+            concrete!("Outer::MyPtr<int>", IntPtr)
+            smart_pointer!("Outer_MyPtr")
+        },
+        None,
+        None,
+        None,
+    );
+}

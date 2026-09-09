@@ -37,8 +37,8 @@ use super::{
         pod::PodAnalysis,
     },
     api::{
-        Api, ConstRefShim, HolderSurface, Provenance, SharedPtrShim, SubclassName, TypeKind,
-        UniquePtrShim, VectorShim, WeakPtrShim,
+        Api, ConstRefShim, CustomPtrShim, HolderSurface, Provenance, SharedPtrShim, SubclassName,
+        TypeKind, UniquePtrShim, VectorShim, WeakPtrShim,
     },
     apivec::ApiVec,
     parse::CppRefQualifier,
@@ -307,6 +307,10 @@ impl<'a> CppCodeGenerator<'a> {
                         }
                         Some(HolderSurface::VectorOfPointers { .. }) => {
                             self.generate_vector_shims(api.name())
+                        }
+                        Some(HolderSurface::CustomPtr { payload_cpp, .. }) => {
+                            let payload_cpp = self.original_name_map.type_to_cpp(payload_cpp)?;
+                            self.generate_custom_ptr_shims(api.name(), &payload_cpp)
                         }
                         Some(HolderSurface::ConstRef { .. }) => {
                             self.generate_const_ref_shims(api.name())
@@ -1148,6 +1152,49 @@ impl<'a> CppCodeGenerator<'a> {
         self.additional_functions.push(ExtraCpp {
             declaration: Some(declaration),
             headers: vec![Header::System("functional"), Header::System("memory")],
+            ..Default::default()
+        })
+    }
+
+    /// The one C++ helper which is the whole of what Rust can do with the
+    /// opaque holder of an instantiation of a user's smart pointer template.
+    ///
+    /// Written against the template argument rather than against a member
+    /// typedef of the holder: the std smart pointers name their payload
+    /// `element_type` and a template someone wrote need not name it at all, so
+    /// the argument autocxx made the instantiation with is what is spelt here.
+    /// `payload_cpp` is that argument as C++ wrote it, `const` included, so a
+    /// `MyPtr<const T>` declares the `const T*` its `get` really returns. It is
+    /// spelled here rather than during analysis so that it goes through this
+    /// phase's name map, which is the one carrying the aliases that stand in
+    /// for type names a function or variable of the same name hides.
+    ///
+    /// That declared return type is also what the `cxx::bridge` was told, and
+    /// cxx typechecks the two against each other through a function pointer -
+    /// so what Rust is handed is this declaration and not whatever the
+    /// template's `get` returns. The body is what has to agree with the
+    /// template, by C++'s ordinary rule for a return statement: a `get`
+    /// returning a `const T*` where the argument was mutable does not compile,
+    /// and one returning something implicitly convertible to `T*` compiles and
+    /// converts. That is the arbitration the `smart_pointer!` directive
+    /// promises, autocxx being unable to inspect a specialization. See
+    /// google/autocxx#670.
+    fn generate_custom_ptr_shims(&mut self, tn: &QualifiedName, payload_cpp: &str) {
+        let holder = tn.get_final_item();
+        let declaration = CustomPtrShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn);
+                let member = shim.cpp_member_name();
+                match shim {
+                    CustomPtrShim::Get => format!(
+                        "inline {payload_cpp}* {name}(const {holder}& self) {{ return self.{member}(); }}"
+                    ),
+                }
+            })
+            .join("\n");
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
             ..Default::default()
         })
     }

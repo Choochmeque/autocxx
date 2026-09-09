@@ -14,8 +14,12 @@ use syn::{ItemType, Type};
 
 use crate::{
     conversion::{
-        analysis::type_converter::{
-            add_analysis, Annotated, TypeConversionContext, TypeConverter, TypeKind,
+        analysis::{
+            fun::instantiated_template,
+            type_converter::{
+                add_analysis, attach_deferred_holder_surfaces, Annotated, TypeConversionContext,
+                TypeConverter, TypeKind,
+            },
         },
         api::{
             AnalysisPhase, Api, ApiName, NestedCppNames, NullPhase, OpaqueTypedefReason,
@@ -107,6 +111,11 @@ pub(crate) fn convert_typedef_targets(
         Api::subclass_unchanged,
     );
     results.extend(extra_apis.into_iter().map(add_analysis));
+    // A typedef naming an instantiation which already existed - one a
+    // `concrete!` directive registered - is converted here and nowhere else,
+    // so a holder surface worked out for it has to be put on before this
+    // converter is discarded.
+    let results = attach_deferred_holder_surfaces(&mut type_converter, results);
     ignore_typedefs_to_alias_templates(results)
 }
 
@@ -362,7 +371,22 @@ pub(crate) fn typedef_targets<P: AnalysisPhase<TypedefAnalysis = TypedefAnalysis
 ///
 /// Excludes the opaque holders autocxx lowers a smart pointer to: what one of
 /// those wraps is made and destroyed by the shims beside it, and a
-/// default-constructed `std::shared_ptr` owns nothing at all.
+/// default-constructed `std::shared_ptr` owns nothing at all. An instantiation
+/// of a class template a `smart_pointer!` directive named is excluded by that
+/// directive rather than by its holder surface, which is attached later than
+/// this runs: the accessor autocxx puts on such a type is called `get`, and so
+/// is the member of the template which `instantiable!` would bind beside it.
+/// Whether a concrete type instantiates a class template a `smart_pointer!`
+/// directive named.
+fn instantiates_smart_pointer(
+    config: &IncludeCppConfig,
+    rs_definition: Option<&crate::minisyn::Type>,
+    cpp_definition: &str,
+) -> bool {
+    instantiated_template(rs_definition, cpp_definition)
+        .is_some_and(|template| config.is_smart_pointer_template(&template.to_cpp_name()))
+}
+
 pub(crate) fn instantiable_concrete_types<P: AnalysisPhase<TypedefAnalysis = TypedefAnalysis>>(
     apis: &ApiVec<P>,
     config: &IncludeCppConfig,
@@ -375,10 +399,13 @@ pub(crate) fn instantiable_concrete_types<P: AnalysisPhase<TypedefAnalysis = Typ
         .filter_map(|api| match api {
             Api::ConcreteType {
                 name,
+                rs_definition,
                 cpp_definition,
                 holder_surface: None,
                 ..
-            } => Some((name.name.clone(), Some(cpp_definition.as_str()))),
+            } if !instantiates_smart_pointer(config, rs_definition.as_deref(), cpp_definition) => {
+                Some((name.name.clone(), Some(cpp_definition.as_str())))
+            }
             _ => None,
         })
         .collect();

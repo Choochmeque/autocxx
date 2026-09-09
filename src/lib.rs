@@ -501,6 +501,98 @@ macro_rules! instantiable {
     ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
 }
 
+/// Declares that a C++ class template is a smart pointer: that an instantiation
+/// of it holds a pointer to its first template argument, and hands that pointer
+/// back from a member function called `get`.
+///
+/// autocxx already carries an instantiation of any class template across the
+/// bridge - `MyPtr<Widget>` becomes an opaque type which C++ can hand to Rust
+/// and Rust can hand back, and which C++ destroys when Rust drops it. What it
+/// cannot do by itself is look inside one, because it has no idea what the
+/// template means. This directive is you saying what it means, and what you get
+/// for it is a `get` method on every instantiation of that template, answering
+/// with a raw pointer to the thing it points at:
+///
+/// ```rust,ignore
+/// let p = ffi::make_widget(); // a MyPtr<Widget>
+/// let w = unsafe { &*p.get() };
+/// ```
+///
+/// The syntax is:
+/// `smart_pointer!("CppNameGoesHere")`
+///
+/// naming the *template* - `smart_pointer!("MyPtr")`, not `MyPtr<Widget>` -
+/// either fully qualified or by its final name, and with any enclosing class
+/// spelled either as C++ writes it (`Outer::MyPtr`) or as `bindgen` flattens it
+/// (`Outer_MyPtr`). A name written without its namespace claims every template
+/// of that name, as `throws!` does for a function.
+///
+/// An instantiation gets the accessor wherever autocxx converts one: met in a
+/// signature, or named by a typedef or a [`concrete!`] directive which
+/// something converted reaches. A `concrete!` name which nothing else in the
+/// bindings mentions is registered rather than converted, and gets no
+/// accessor. One
+/// which appears *only* as a template argument of something else -
+/// `Carton<MyPtr<Widget>>` and nothing more - does not, because autocxx names
+/// such an argument without converting it. Where that is the only instantiation
+/// in play, the directive reports that it matched nothing; where another
+/// instantiation did get the accessor, that one is simply without it.
+///
+/// # What is claimed, and what checks it
+///
+/// The claim is that the C++ expression `p.get()` on a `const` instantiation
+/// yields a `T*`, where `T` is the first template argument, and your C++
+/// compiler is what settles it: the generated shim is declared returning `T*`
+/// and calls `get()`, so a template without that member, or one whose `get`
+/// returns something which will not convert, fails to compile there.
+///
+/// autocxx does not check first, though `bindgen` does report the member
+/// functions a class template declares. Those facts cannot carry a refusal:
+/// `bindgen` parses no member function *template*, so a `get` written as one is
+/// indistinguishable from a `get` which is not there; it reports no inherited
+/// member; and it reports nothing whatsoever about a specialization, which may
+/// declare something else again. Refusing on them would turn valid C++ down
+/// with nothing you could do about it.
+///
+/// A directive which matches no instantiation is an error rather than a no-op,
+/// because the accessor you asked for would otherwise silently not be there.
+/// The check is satisfied by one instantiation, so where several are in play it
+/// says nothing about the others.
+///
+/// # What it does not do
+///
+/// autocxx never guesses that a type is a smart pointer - a class with a `get`
+/// is not asked about, and one written like `std::unique_ptr` is not treated
+/// like it. This directive is the only way in.
+///
+/// The pointer is raw, and dereferencing one is `unsafe` for the ordinary
+/// reason: nothing here says the smart pointer is non-empty, and nothing says
+/// how long what it points at outlives the `get`. A null smart pointer answers
+/// with a null pointer. `MyPtr<const T>` hands back a `*const T`, anything else
+/// a `*mut T`.
+///
+/// Under `safety!(unsafe_references_wrapped)` the same method is an `unsafe fn`
+/// answering with an [`CppRef`], because safe code may dereference one of those:
+/// the caller is vouching for the same two things the raw pointer left to them.
+/// A mutable payload still arrives as a shared [`CppRef`]; `CppRef::const_cast`
+/// is how to ask for the other one.
+///
+/// `get` is the whole of what this adds: there is no way to make one of these
+/// from Rust and no way to copy one, so a reference-counted pointer can be moved
+/// from Rust but not shared from it. Rust can receive one from C++, hold it,
+/// hand it back, read through it, and drop it - which destroys it in C++.
+///
+/// Where a `smart_pointer!` instantiation is also named by an
+/// [`instantiable!`] directive, the smart-pointer accessor is what it gets: the
+/// template's other member functions are not bound to it.
+///
+/// A directive to be included inside
+/// [include_cpp] - see [include_cpp] for general information.
+#[macro_export]
+macro_rules! smart_pointer {
+    ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
+}
+
 /// Indicates that a C++ function may throw exceptions. When a function
 /// is marked with this directive, its Rust binding will return
 /// `Result<T, cxx::Exception>` instead of `T`, allowing the caller

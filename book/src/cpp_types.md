@@ -367,6 +367,88 @@ fn main() {
 )
 ```
 
+## Your own smart pointers
+
+A class template which holds a pointer to its argument - `scoped_refptr<T>`,
+`intrusive_ptr<T>`, whatever your codebase calls its own - is one of those
+opaque instantiations, and so by default there is no way to reach what it points
+at. A
+[`smart_pointer!`](https://docs.rs/autocxx/latest/autocxx/macro.smart_pointer.html)
+directive naming the *template* says that it is a smart pointer, and every
+instantiation of it then has a `get` method answering with a raw pointer to the
+payload:
+
+```rust,ignore,autocxx,hidecpp
+autocxx_integration_tests::doctest(
+"",
+"#include <cstdint>
+struct Milk {
+  uint32_t creaminess;
+};
+template<typename T>
+class Jug {
+public:
+  Jug() : contents(nullptr) {}
+  explicit Jug(T* contents) : contents(contents) {}
+  Jug(Jug&& other) : contents(other.contents) { other.contents = nullptr; }
+  ~Jug() { delete contents; }
+  T* get() const { return contents; }
+private:
+  T* contents;
+};
+inline Jug<Milk> fetch() { return Jug<Milk>(new Milk{7}); }
+",
+{
+use autocxx::prelude::*;
+
+include_cpp! {
+    #include "input.h"
+    safety!(unsafe_ffi)
+    generate!("fetch")
+    generate_pod!("Milk")
+    smart_pointer!("Jug")
+}
+
+fn main() {
+    let jug = ffi::fetch();
+    // Safe: `fetch` hands back a jug with milk in it, and the milk lives as
+    // long as the jug does.
+    let milk = unsafe { &*jug.get() };
+    assert_eq!(milk.creaminess, 7);
+}
+}
+)
+```
+
+The claim the directive makes is that `p.get()` on a `const` instantiation
+yields a `T*`, and your C++ compiler is what checks it: the generated shim is
+declared returning `T*` and calls `get()`, which does not compile if there is no
+such member or if what it returns will not convert. `bindgen` reports the
+members a class template declares, but not an inherited one, not a member
+function template, and nothing whatsoever about a *specialization* - so autocxx
+cannot tell a template with no `get` from one whose `get` it was not told about,
+and does not refuse either. A directive which matches no instantiation *is* an
+error, since the accessor you asked for would otherwise silently not be
+there.
+
+Under `safety!(unsafe_references_wrapped)` the accessor is an `unsafe fn`
+answering with a `CppRef` instead of a raw pointer, since safe code may
+dereference one of those.
+
+`autocxx` never guesses. A class with a `get`, or one written to look exactly
+like `std::unique_ptr`, is treated like any other template until you say
+otherwise.
+
+An instantiation which appears *only* as a template argument of something else -
+`Carton<Jug<Milk>>` and nothing more - does not get the accessor, because
+`autocxx` names such an argument without converting it.
+
+What you can do with one of these is otherwise what you could always do with an
+opaque instantiation: receive it from C++, hold it, hand it back, and drop it,
+which destroys it in C++. `get` is the whole of what the directive adds - there
+is no way to make one from Rust and no way to copy one - so a reference-counted
+pointer can be moved from the Rust side but not shared from it.
+
 ## Implicit member functions
 
 Most of the API of a C++ type is contained within the type, so `autocxx` can

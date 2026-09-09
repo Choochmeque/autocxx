@@ -25,7 +25,7 @@ mod utilities;
 pub(crate) use super::parse_callbacks::CppOriginalName;
 use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use analysis::fun::FnAnalyzer;
-use autocxx_parser::IncludeCppConfig;
+use autocxx_parser::{name_matches_directive, IncludeCppConfig};
 pub(crate) use codegen_cpp::CppCodeGenerator;
 pub(crate) use convert_error::ConvertError;
 use convert_error::{ConvertErrorFromCpp, ConvertErrorWithContext, ErrorContext};
@@ -49,7 +49,7 @@ use self::{
         constructor_deps::decorate_types_with_constructor_deps,
         destructibility::remove_ownership_of_non_destructible_types,
         field_accessors::add_field_accessors,
-        fun::FnPhase,
+        fun::{instantiated_template, FnPhase},
         gc::filter_apis_by_following_edges_from_allowlist,
         pod::analyze_pod_apis,
         remove_ignored::filter_apis_by_ignored_dependents,
@@ -57,7 +57,7 @@ use self::{
         statics::expose_statics,
         tdef::convert_typedef_targets,
     },
-    api::{AnalysisPhase, Api, NestedCppNames, NullPhase},
+    api::{AnalysisPhase, Api, HolderSurface, NestedCppNames, NullPhase},
     apivec::ApiVec,
     codegen_rs::RsCodeGenerator,
     parse::{find_shadowed_types, ParseBindgen},
@@ -240,6 +240,12 @@ impl<'a> BridgeConverter<'a> {
                 // explicit `generate!` which produced nothing usable is a hard
                 // error instead of a silent failure. See google/autocxx#1269.
                 confirm_all_generate_directives_still_obeyed(self.config, &analyzed_apis)
+                    .map_err(ConvertError::Cpp)?;
+                // `smart_pointer!` is settled here for the same reason: the
+                // holders it asked for are made during function analysis and
+                // may be collected after it, so this is where what the user
+                // asked for can be compared with what they got.
+                confirm_smart_pointer_directives_obeyed(self.config, &analyzed_apis)
                     .map_err(ConvertError::Cpp)?;
                 // `derive!` names a type the same way, and equally may name
                 // one which never made it this far - or one whose Rust
@@ -462,6 +468,59 @@ fn confirm_all_generate_directives_still_obeyed(
                 ),
                 None => ConvertErrorFromCpp::DidNotGenerateAnything(generate_directive),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Check each `smart_pointer!` directive against what autocxx made of it.
+///
+/// One thing can be wrong here and shows up nowhere else. A directive
+/// which named no template autocxx met - a misspelling, a name written without
+/// the namespace which declares it, a template nothing generated uses - leaves
+/// the user without the accessor they asked for and with nothing said about it.
+///
+/// Whether the template really has a `get` is *not* checked here, though
+/// bindgen does report the members a class template declares. Those facts
+/// cannot carry a refusal: bindgen parses no member function template, so a
+/// `get` written as one is indistinguishable from a `get` which is not there;
+/// it reports no inherited member, so a `get` in a base is invisible too; and it
+/// reports nothing whatsoever about a specialization, which may declare
+/// something else again. A refusal built on them would turn valid C++ down with
+/// nothing the user could do about it. The generated shim calls `get()` instead,
+/// and the C++ compiler says so if there is no such member - which is what the
+/// directive's documentation promises.
+fn confirm_smart_pointer_directives_obeyed(
+    config: &IncludeCppConfig,
+    apis: &ApiVec<FnPhase>,
+) -> Result<(), ConvertErrorFromCpp> {
+    if config.smart_pointers.is_empty() {
+        return Ok(());
+    }
+    let templates: Vec<QualifiedName> = apis
+        .iter()
+        .filter_map(|api| match api {
+            Api::ConcreteType {
+                rs_definition,
+                cpp_definition,
+                holder_surface: Some(HolderSurface::CustomPtr { .. }),
+                ..
+            } => instantiated_template(rs_definition.as_deref(), cpp_definition),
+            _ => None,
+        })
+        .collect();
+    for directive in &config.smart_pointers {
+        // Matched by the same rule the conversion used to decide which
+        // instantiations got a surface, so that this cannot report a directive
+        // as unmatched which did in fact take effect.
+        let mut matched = templates
+            .iter()
+            .filter(|template| name_matches_directive(&template.to_cpp_name(), directive))
+            .peekable();
+        if matched.peek().is_none() {
+            return Err(ConvertErrorFromCpp::SmartPointerDirectiveMatchedNothing(
+                directive.clone(),
+            ));
         }
     }
     Ok(())
