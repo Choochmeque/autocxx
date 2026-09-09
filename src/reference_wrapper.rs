@@ -118,7 +118,8 @@ impl<T: ?Sized> CppRef<T> {
     /// Callers must also be sure that the C++ reference is properly
     /// aligned, not null, pointing to valid data, etc.
     pub unsafe fn as_ref(&self) -> &T {
-        &*self.as_ptr()
+        // Safety: rests on the caller's promises above.
+        unsafe { &*self.as_ptr() }
     }
 
     /// Create a C++ reference from a raw pointer.
@@ -236,15 +237,16 @@ impl<T: ?Sized> CppMutRef<T> {
     ///
     /// # Safety
     ///
-    /// Callers must guarantee that the referent is not modified by any other
-    /// C++ or Rust code while the returned reference exists. Callers must
-    /// also guarantee that no other Rust reference is created to the referent
-    /// while the returned reference exists.
+    /// Callers must guarantee that the referent is not accessed by any other
+    /// C++ or Rust code while the returned reference exists - a Rust `&mut` is
+    /// exclusive, so a read elsewhere breaks it as surely as a write does - and
+    /// that no other Rust reference to the referent is created meanwhile.
     ///
     /// Callers must also be sure that the C++ reference is properly
     /// aligned, not null, pointing to valid data, etc.
     pub unsafe fn as_mut(&mut self) -> &mut T {
-        &mut *self.as_mut_ptr()
+        // Safety: rests on the caller's promises above.
+        unsafe { &mut *self.as_mut_ptr() }
     }
 
     /// Create a C++ reference from a raw pointer.
@@ -365,8 +367,9 @@ struct CppPinContents<T: ?Sized>(T);
 ///   which has now returned, this type of local analysis may well be practical.
 /// * *Share a thing between Rust and C++*. This object can vend both C++
 ///   references and Rust references (via `as_ref` etc.) It may be possible
-///   for you to guarantee that C++ does not mutate the object while any Rust
-///   reference exists. If you choose this model, you'll need to carefully
+///   for you to guarantee that C++ does not mutate the object while a Rust
+///   `&` exists - and, for a Rust `&mut`, that C++ does not so much as read it,
+///   because that reference is exclusive. If you choose this model, you'll need to carefully
 ///   track exactly what happens to references and pointers on both sides,
 ///   and document your evidence for why you are sure this is safe.
 ///   Failure here is bad: Rust makes all sorts of optimization decisions based
@@ -464,17 +467,26 @@ impl<T: ?Sized> CppPin<T> {
     /// You must guarantee that C++ will not mutate the object while the
     /// reference exists.
     pub unsafe fn as_ref(&self) -> &T {
-        &*self.as_ptr()
+        // Safety: rests on the caller's promises above.
+        unsafe { &*self.as_ptr() }
     }
 
     /// Get a normal Rust mutable reference to the underlying object. This is unsafe.
     ///
     /// # Safety
     ///
-    /// You must guarantee that C++ will not mutate the object while the
-    /// reference exists.
+    /// You must guarantee that C++ will not touch the object while the
+    /// reference exists: a Rust `&mut` is exclusive, so a read from C++ breaks
+    /// it as surely as a write does. Validity, alignment and lifetime come from
+    /// the `CppPin`'s own storage rather than from you.
+    ///
+    /// You must also leave the object where it is. This returns a plain
+    /// `&mut T`, which would let you `swap` or `replace` the object, and a
+    /// `CppPin` is what [`Self::from_pinned_box`] un-pinned its `Box` into on
+    /// the promise that the address stays put - as C++ may be relying on.
     pub unsafe fn as_mut(&mut self) -> &mut T {
-        &mut *self.as_mut_ptr()
+        // Safety: rests on the caller's promise above.
+        unsafe { &mut *self.as_mut_ptr() }
     }
 
     /// Extract the object from within its prison, for re-use again within
@@ -495,7 +507,7 @@ impl<T: ?Sized> CppPin<T> {
         // to
         //   Box<T>
         // is safe.
-        std::mem::transmute(self.0)
+        unsafe { std::mem::transmute(self.0) }
     }
 }
 

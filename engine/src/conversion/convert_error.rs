@@ -178,7 +178,22 @@ pub enum ConvertErrorFromCpp {
     },
     #[error("Found an attempt at using a type marked as blocked! ({})", .0.to_cpp_name())]
     Blocked(QualifiedName),
-    #[error("This function or method uses a type where one of the template parameters was incomprehensible to bindgen/autocxx - probably because it uses template specialization.")]
+    /// Attached to the type, not to its uses, so the message is about the type:
+    /// it reaches a user through whatever mentioned it, including
+    /// [`Self::ConcreteVersionOfIgnoredTemplate`] for a specialization.
+    ///
+    /// Two kinds of type arrive here: one bindgen wrote without all of its own
+    /// parameters, and - from `tdef::ignore_typedefs_to_alias_templates` - a
+    /// typedef whose target is one of those, which has no parameters of its own
+    /// to lose. The message covers both, which is why it does not say that this
+    /// type is the one missing them.
+    ///
+    /// Nor does it say which of the two things bindgen does to a parameter: it
+    /// writes only the ones it found used, and there are kinds of parameter -
+    /// non-type, template-template - it cannot write at all (see
+    /// `third_party/patches/14-alias-template.patch`). That path arrives here
+    /// too, through the same typedef propagation.
+    #[error("bindgen did not write all of the template parameters C++ declared for this type, or for one it is an alias of: it writes only the ones it found used in a definition, and cannot represent some kinds of parameter at all. autocxx cannot tell which specialization the arguments that are left belong to, so it will not name one.")]
     UnusedTemplateParam,
     #[error("This is a C++ alias template: C++ declared {declared} template parameter(s) for it, of which {type_params} are type parameters. bindgen represents no other kind, so it emitted the alias as a plain typedef - but naming the alias in C++ requires the template arguments that typedef has lost, so autocxx cannot generate C++ which uses it. Naming the type the alias points at in a 'generate!' directive is usually what was wanted.")]
     AliasTemplate { declared: usize, type_params: usize },
@@ -287,8 +302,18 @@ pub enum ConvertErrorFromCpp {
     TypedefTakesGenericParameters,
     #[error("This method belonged to an item in an anonymous namespace, not currently supported.")]
     MethodInAnonymousNamespace,
-    #[error("We're unable to make a concrete version of this template, because we found an error handling the template.")]
-    ConcreteVersionOfIgnoredTemplate,
+    /// A specialization of a template autocxx turned down. Some, but not
+    /// necessarily all, of the reasons the template was turned down apply to a
+    /// specialization of it too, so this errs on the side of caution - and
+    /// carries the template's own reason, because that reason is the only thing
+    /// which says what the user would have to change. Without it the message
+    /// named neither the template nor what was wrong with it, which is what
+    /// google/autocxx#687 saw on a `base::flat_set<url::Origin>` parameter.
+    #[error("Found an attempt at using a specialization of {}, a template autocxx could not generate: {}", .name.to_cpp_name(), .reason)]
+    ConcreteVersionOfIgnoredTemplate {
+        name: QualifiedName,
+        reason: Box<ConvertErrorFromCpp>,
+    },
     #[error("This is a typedef to a type in an anonymous namespace, not currently supported.")]
     TypedefToTypeInAnonymousNamespace,
     #[error("This type refers to a generic type parameter of an outer type, which is not yet supported.")]

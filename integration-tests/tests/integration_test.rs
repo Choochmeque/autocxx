@@ -2977,6 +2977,60 @@ fn test_ref_qualified_methods_for_specialized_types() {
     );
 }
 
+/// A parameter whose type is a specialization of a template bindgen wrote
+/// without all of the parameters C++ declared for it. Refusing it is right -
+/// with three of four parameters gone there is no telling which specialization
+/// the argument that is left belongs to - but the refusal has to say
+/// which template and what was wrong with it, since
+/// that is the only part which tells the user what to change. It used to say
+/// neither: "we found an error handling the template" named no template and no
+/// error, so the reported symptom was a signature which looked bindable and a
+/// binding which never appeared.
+///
+/// The shape is the one reported: `base::flat_set<url::Origin>` is an alias for
+/// a `base::flat_tree` whose key, key-extractor and comparator parameters no
+/// member's type mentions, so bindgen writes the class with the container
+/// parameter alone.
+///
+/// Binding such a function is a separate matter and not what this pins: it
+/// needs the arguments bindgen dropped, which nothing in its output carries.
+///
+/// Addresses the bug reported upstream as google/autocxx#687.
+#[test]
+fn test_specialization_of_refused_template_says_which_and_why() {
+    let hdr = indoc! {"
+        #include <functional>
+        #include <vector>
+        namespace url {
+        class Origin {
+        public:
+            int id;
+        };
+        }
+        namespace base {
+        struct identity {};
+        template <class Key, class GetKeyFromValue, class KeyCompare, class Container>
+        class flat_tree {
+            Container body_;
+        };
+        template <class Key, class Compare = std::less<void>>
+        using flat_set = flat_tree<Key, identity, Compare, std::vector<Key>>;
+        }
+        void take(const base::flat_set<url::Origin>& origins, bool now);
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["take"],
+        &[],
+        &[
+            "base::flat_tree",
+            "only the ones it found used in a definition",
+        ],
+    );
+}
+
 /// A member returning an instantiation of a *member* template of the same class
 /// template. The instantiation supplies its own template argument and not the
 /// enclosing template's, so its rendering would name a parameter it does not
