@@ -23686,16 +23686,18 @@ fn test_instantiation_on_incomplete_type_beside_and_within_its_own_template() {
     );
 }
 
-/// A class *with a member* of such an instantiation is generated as any other
-/// class is: the member is read, an accessor which borrows it is written, and
-/// the constructors autocxx cannot work out are withheld with the note which
-/// says so. Whether the class can be destroyed is C++'s business - its
-/// destructor may be defined where `bb` is complete.
+/// A class *with a member* of such an instantiation keeps the member: it is
+/// read, an accessor which borrows it is written, and the constructors autocxx
+/// cannot work out are withheld with the note which says so.
 ///
 /// Refusing the member instead would lose that: a field whose conversion fails
 /// is dropped rather than kept with its error, so the constructor analysis
 /// would see a class it understood completely and offer a copy constructor
 /// C++ had deleted.
+///
+/// Whether such a class may be *destroyed* is a separate question, settled by
+/// the tests below: this one declares no destructor of its own, so it may not
+/// be, and what that costs is the ownership surface rather than the member.
 #[test]
 fn test_member_of_instantiation_on_incomplete_type_is_still_a_member() {
     let hdr = indoc! {"
@@ -23721,6 +23723,462 @@ fn test_member_of_instantiation_on_incomplete_type_is_still_a_member() {
             ),
             make_string_absence_finder(vec!["synthetic_const_copy_ctor".to_string()]),
         ])),
+        None,
+    );
+}
+
+/// The shape the rule above deliberately left alone, and which C++ refuses:
+/// `Owner` holds one of these by value and declares no destructor, so
+/// destroying an `Owner` anywhere is where the compiler writes `~Owner()` -
+/// and writing it destroys the `std::unique_ptr<bb>` inside the member.
+///
+/// Nothing here builds unless every position which destroys an `Owner` is
+/// gone: the smart-pointer trio, the allocator pair behind
+/// `ffi::Owner::new()`, and the destructor autocxx synthesizes for a class
+/// C++ never wrote one for.
+#[test]
+fn test_member_of_instantiation_on_incomplete_type_without_a_destructor() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![
+            // The note has to name the member and the argument: an `Owner`
+            // which quietly lost its ownership surface would build too.
+            make_string_finder(vec![
+                "writing it destroys its member `value`, which needs `bb` to be complete"
+                    .to_string(),
+            ]),
+            make_string_absence_finder(
+                ["impl UniquePtr < Owner >", "impl CxxVector < Owner >"]
+                    .map(|s| s.to_string())
+                    .to_vec(),
+            ),
+        ])),
+        None,
+    );
+}
+
+/// `= default` written in the class says exactly what writing nothing says:
+/// C++ defers the definition to the first use, so this is the case above
+/// wearing a declaration, and it is refused the same way.
+#[test]
+fn test_member_of_instantiation_on_incomplete_type_with_a_defaulted_destructor() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; ~Owner() = default; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Owner >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A destructor the class declares itself is defined in some translation
+/// unit, and destroying an `Owner` here is a call to it rather than an
+/// instantiation of anything. So this class is owned as any other is - the
+/// point of reading the destructor at all rather than refusing every class
+/// with such a member.
+#[test]
+fn test_member_of_instantiation_on_incomplete_type_with_its_own_destructor() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; ~Owner(); };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "impl UniquePtr < Owner >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// The same, with the destructor's body written here rather than elsewhere.
+/// A compiler which accepted that body already destroyed the member, which is
+/// the strongest evidence there is that destroying one is fine - and it is
+/// available whenever the template holds its argument by pointer, which is the
+/// case the rule cannot tell from the one above and turns down conservatively.
+#[test]
+fn test_member_of_instantiation_on_incomplete_type_with_a_destructor_defined_here() {
+    let hdr = indoc! {"
+        class bb;
+        template <typename at> class au { at* aw; };
+        using bc = au<bb>;
+        struct Owner { bc value; ~Owner() {} };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "impl UniquePtr < Owner >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// cxx writes a container's element glue from the signature alone, and that
+/// glue destroys elements - so the signature is refused, by the same
+/// predicate which already decides that a forward declaration may be pointed
+/// at but not contained.
+#[test]
+fn test_class_with_undestroyable_member_is_refused_in_a_container() {
+    let hdr = indoc! {"
+        #include <memory>
+        #include <vector>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        class Holder { public: virtual std::vector<Owner>& bd() = 0; virtual ~Holder() {} };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Holder"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "writing it destroys its member `value`, which needs bb to be complete".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// Handing one across by value is the other way to make Rust own one, and it
+/// is refused by name in the signature rather than silently vanishing. The
+/// same predicate does it as for the container above: naming the class is
+/// fine, owning one is not.
+#[test]
+fn test_class_with_undestroyable_member_is_refused_by_value() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        class Factory { public: virtual Owner make() = 0; virtual ~Factory() {} };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Factory"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "writing it destroys its member `value`, which needs bb to be complete".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// Destroying an array destroys each element, so an array of them is a member
+/// of the same kind. bindgen writes this member as `[T; 3]` rather than as a
+/// path, which is the whole reason it needs saying.
+#[test]
+fn test_array_member_of_instantiation_on_incomplete_type() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value[3]; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Owner >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A `const` member is destroyed exactly as a mutable one is. bindgen writes
+/// the constness as a wrapper around the type, so the traversal has to see
+/// through it.
+#[test]
+fn test_const_member_of_a_class_with_an_undestroyable_member() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        struct Outer { const Owner owner; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Outer"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Outer >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// The other direction, which is where this rule can do damage: a member
+/// whose *own* type autocxx has only a stand-in for. C++ forbids a by-value
+/// member of an incomplete type outright, so such a member is one autocxx
+/// merely failed to understand - here an opaque typedef standing in for a
+/// perfectly destructible instantiation - and refusing it would take the
+/// ownership surface away from a class which works. Written `volatile`,
+/// because the qualifier is a wrapper and reading the type through it is
+/// where this went wrong.
+#[test]
+fn test_volatile_member_of_an_opaque_typedef_is_still_owned() {
+    let hdr = indoc! {"
+        #include <string>
+        #include <cstdint>
+
+        template <typename STRING_TYPE> class BasicStringPiece {
+        public:
+            typedef size_t size_type;
+            typedef typename STRING_TYPE::value_type value_type;
+            const value_type* ptr_;
+            size_type length_;
+        };
+
+        typedef BasicStringPiece<std::string> StringPiece;
+
+        struct Container {
+            Container() {}
+            volatile StringPiece sp;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Container"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "impl UniquePtr < Container >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A `volatile` member likewise. bindgen writes that qualifier as a wrapper
+/// too, and destroying one is no different.
+#[test]
+fn test_volatile_member_of_a_class_with_an_undestroyable_member() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        struct Outer { volatile Owner owner; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Outer"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Outer >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A virtual base written under an alias. There is no storage field to fall
+/// back on, and the base arrives under the name the header wrote, so the base
+/// is read through the same traversal a member is rather than looked up
+/// directly.
+#[test]
+fn test_virtual_base_named_through_an_alias() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        using Base = Owner;
+        struct Derived : virtual Base { int x; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Derived"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Derived >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A member which is a *pointer* to one destroys nothing when the enclosing
+/// class is destroyed, so the class is owned as any other is. The rule has to
+/// stop at the pointer: flagging this would withdraw ownership from classes
+/// which merely refer to such a type.
+#[test]
+fn test_pointer_member_of_instantiation_on_incomplete_type_is_owned() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc* value; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "impl UniquePtr < Owner >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A member written through an alias to an *array* of them. The wrappers
+/// interleave - an alias to an array to an instantiation - so unwrapping
+/// arrays once and following aliases once is not enough; each step has to ask
+/// both questions again.
+#[test]
+fn test_array_alias_member_of_instantiation_on_incomplete_type() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        typedef au<bb> Array[2];
+        struct Owner { Array value; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Owner"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Owner >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A base is destroyed by the derived class's destructor just as a member is.
+/// bindgen writes an ordinary base as a field, which the member rule already
+/// sees; a *virtual* base gets no storage field at all, so the base graph has
+/// to be read as well.
+#[test]
+fn test_virtual_base_with_an_undestroyable_member() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        struct Derived : virtual Owner { int x; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Derived"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(
+            ["impl UniquePtr < Derived >", "impl UniquePtr < Owner >"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// A base class is destroyed by the derived class's destructor just as a
+/// member is, and bindgen hands an ordinary base to autocxx as a field - so
+/// the rule reaches it without knowing it is one.
+#[test]
+fn test_base_class_with_an_undestroyable_member() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        struct Derived : Owner { int x; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Derived"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(
+            ["impl UniquePtr < Derived >", "impl UniquePtr < Owner >"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// A class holding one of *those* by value is in the same position, for the
+/// same reason, so the relation closes over itself.
+#[test]
+fn test_class_holding_a_class_with_an_undestroyable_member() {
+    let hdr = indoc! {"
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        struct Outer { Owner owner; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Outer"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(
+            ["impl UniquePtr < Outer >", "impl UniquePtr < Owner >"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
         None,
     );
 }
