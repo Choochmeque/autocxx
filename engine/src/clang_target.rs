@@ -315,11 +315,44 @@ pub(crate) fn expected_wchar_t_size(extra_clang_args: &[&str]) -> u32 {
     ))
 }
 
+/// Whether flags for `target` take cl.exe's spellings rather than gcc's.
+///
+/// Gated as [`crate::builder`] is, which is the only thing that asks.
+#[cfg(any(test, feature = "build"))]
+fn target_is_msvc(target: &str) -> bool {
+    target.contains("msvc")
+}
+
+/// Whether the target this build is *for* takes cl.exe's flag spellings.
+///
+/// cargo's `TARGET`, which is the same thing cc reads when the caller has not set
+/// a target of its own, and otherwise the triple autocxx was compiled for.
+///
+/// Deliberately not [`target_to_describe`]'s answer, which a `--target` in the
+/// clang arguments outranks: that argument says which headers libclang is to
+/// parse, and the question here is which compiler will compile the result. The
+/// two are the same target in every build that has not been told to differ, and
+/// where they do differ it is cc's choice of compiler that decides whose
+/// spelling a flag has to be in.
+///
+/// A statement about the target and not a promise about the compiler - `CXX` can
+/// point an MSVC target at a gcc-driver clang. See [`crate::builder`]'s
+/// `msvc_flags` for why that trade is the right way round, and why cc's own
+/// compiler-family answer is not used instead.
+#[cfg(any(test, feature = "build"))]
+pub(crate) fn build_target_is_msvc() -> bool {
+    target_is_msvc(
+        std::env::var("TARGET")
+            .as_deref()
+            .unwrap_or(COMPILED_TARGET),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        args_specify_target, choose_clang_target_arg, clang_target_arg_for, target_to_describe,
-        wchar_t_size_for_target,
+        args_specify_target, choose_clang_target_arg, clang_target_arg_for, target_is_msvc,
+        target_to_describe, wchar_t_size_for_target,
     };
 
     const GNU: &str = "x86_64-pc-windows-gnu";
@@ -408,6 +441,33 @@ mod tests {
                 None,
                 "{target} should be left to clang's own default"
             );
+        }
+    }
+
+    /// Which targets are told in cl.exe's spellings. Every Rust MSVC triple, not
+    /// just the usual one: the sub-architecture and vendor fields vary, and a
+    /// build that was not recognised as MSVC loses `/Zc:__cplusplus` and `/EHsc`
+    /// silently.
+    #[test]
+    fn the_msvc_targets_are_the_ones_spelled_clexes_way() {
+        for target in [
+            MSVC,
+            "i686-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+            "arm64ec-pc-windows-msvc",
+            "thumbv7a-pc-windows-msvc",
+            "x86_64-uwp-windows-msvc",
+        ] {
+            assert!(target_is_msvc(target), "{target}");
+        }
+        for target in [
+            GNU,
+            LINUX,
+            "x86_64-pc-windows-gnullvm",
+            "aarch64-apple-darwin",
+            "wasm32-unknown-unknown",
+        ] {
+            assert!(!target_is_msvc(target), "{target}");
         }
     }
 

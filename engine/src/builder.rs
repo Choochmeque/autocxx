@@ -45,6 +45,69 @@ pub enum BuilderError {
 #[cfg_attr(feature = "nightly", doc(cfg(feature = "build")))]
 pub type BuilderBuild = cc::Build;
 
+/// The flags cl.exe needs for the C++ autocxx generates, and none where cl is
+/// not the compiler.
+///
+/// `/Zc:__cplusplus`: cl reports `__cplusplus` as 199711L whatever `/std:` says
+/// unless this is passed, so a header gating declarations on the standard macro
+/// (the portable idiom) is parsed by libclang one way, clang reporting it
+/// truthfully, and compiled by cl another. Microsoft recommends passing it, and
+/// it only makes the macro agree with the standard the build already selected.
+///
+/// `/EHsc`: without an `/EH` model cl warns (C4530) and gives no standard unwind
+/// guarantees, while the shims generated for `throws!` contain try/catch. cc adds
+/// no `/EH` flag itself. A user's `/EHa` in `CXXFLAGS` still wins, per MSVC's own
+/// override rules.
+///
+/// Both are passed with `flag`, not `flag_if_supported`. Both are required
+/// wherever cl is the compiler, so a dropped one is a quietly mis-built library
+/// rather than a missing nicety, and `flag_if_supported` decides by running a
+/// probe compile whose failure to *run* it reads as "unsupported" (cc's
+/// `is_flag_supported_inner(..).unwrap_or(false)`), dropping the flag and naming
+/// nothing in the log.
+///
+/// `msvc_like` comes from the target ([`crate::clang_target::build_target_is_msvc`]),
+/// which is how the integration harness decides `/WX` and for the same reason:
+/// the target cannot fail to answer. Asking cc which compiler family it picked
+/// would be better informed, and is what `cc::Build::std` itself uses to choose
+/// between `-std:` and `-std=`, but obtaining it is a spawn and a
+/// scratch-directory write of cc's own; when that fails cc guesses from the
+/// compiler's filename, does not cache the guess, and may answer differently when
+/// `compile()` asks again - so one transient failure could leave cl compiling with
+/// `-std:` and without these two, which is the shape this is getting away from.
+///
+/// A statement about the target, then, and not a promise about the compiler:
+/// `CXX` can point an MSVC target at a gcc-driver clang, which would be handed a
+/// `/Zc:` it reads as a filename and would stop. Checked: clang-cl takes both
+/// flags, a gcc-driver clang takes neither. That is a loud failure in a
+/// configuration nothing here uses, bought against a silent one in the
+/// configuration everything uses.
+///
+/// One case stays silent, and it is the cost of not probing: the decision is
+/// taken while `build()` runs, from the target known then, so a caller which
+/// afterwards points the returned `cc::Build` at a *different* target gets the
+/// flags chosen for the first one. Only an in-process caller can do that - a
+/// build script's target is settled before it runs - and the one in this repo,
+/// the integration harness, sets the target autocxx was compiled for, which is
+/// the same answer. Following the final configuration instead is what a probe
+/// does, and why it runs too late to be told about.
+///
+/// Split from the call site so the decision can be tested on its own.
+fn msvc_flags(msvc_like: bool) -> &'static [&'static str] {
+    if msvc_like {
+        &["/Zc:__cplusplus", "/EHsc"]
+    } else {
+        // gcc and clang read `/Zc:__cplusplus` as the name of a file to compile.
+        &[]
+    }
+}
+
+fn apply_msvc_flags(builder: &mut BuilderBuild, msvc_like: bool) {
+    for flag in msvc_flags(msvc_like) {
+        builder.flag(flag);
+    }
+}
+
 /// The C++ flags the `AUTOCXX_ASAN` build mode asks for, and none when it is
 /// off.
 ///
@@ -319,23 +382,7 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         let mut counter = 0;
         let mut builder = cc::Build::new();
         builder.cpp(true);
-        // cl.exe reports __cplusplus as 199711L whatever /std: says unless
-        // this is also passed, so a user's header gating declarations on the
-        // standard macro - the portable idiom - would be parsed by libclang
-        // one way (clang reports it truthfully) and compiled by cl another.
-        // Microsoft's own recommendation is to pass this; it only makes the
-        // macro agree with the standard the build already selected.
-        // flag_if_supported rather than a compiler-family test: the probe
-        // runs with the real compiler once the build is fully configured,
-        // whereas asking the half-built Build which family it is got a quiet
-        // wrong answer here. cl accepts the flag; gcc and clang fail the
-        // probe and need nothing anyway.
-        builder.flag_if_supported("/Zc:__cplusplus");
-        // Without an /EH model cl.exe warns (C4530) and gives no standard
-        // unwind guarantees, and the shims generated for throws! contain
-        // try/catch. cc adds no /EH flag itself. A user-supplied /EHa in
-        // CXXFLAGS still wins per MSVC's own override rules.
-        builder.flag_if_supported("/EHsc");
+        apply_msvc_flags(&mut builder, crate::clang_target::build_target_is_msvc());
         add_sanitizer_flags(&mut builder);
         let mut generated_rs = Vec::new();
         let mut generated_cpp = Vec::new();
@@ -428,10 +475,16 @@ fn cxx_version_check() -> Result<(), BuilderError> {
 ///
 /// What these pin is the *delivery*: that a flag which is required arrives
 /// without a probe compile having to succeed first, which is the regression that
-/// matters and the one `flag_if_supported` caused.
+/// matters and the one `flag_if_supported` caused. Which builds are MSVC is
+/// pinned next door by `clang_target`'s `target_is_msvc`. That the pair meet
+/// correctly on a real cl is pinned by `test_cpp17` on the MSVC CI leg, which
+/// asserts `__cplusplus >= 201703L` in a fixture header and can only pass if
+/// `/Zc:__cplusplus` reached the compiler; no unit test here can stand in for it.
 #[cfg(test)]
 mod flag_tests {
-    use super::{apply_sanitizer_flags, sanitizer_flags, BuilderBuild};
+    use super::{
+        apply_msvc_flags, apply_sanitizer_flags, msvc_flags, sanitizer_flags, BuilderBuild,
+    };
 
     /// The arguments a build ends up giving the compiler, for a `cc::Build` which
     /// cannot run a probe compile at all - there is no such compiler. That is the
@@ -459,6 +512,25 @@ mod flag_tests {
             .collect()
     }
 
+    /// The cl-only flags reach the compiler whether or not cc could run a probe
+    /// compile of its own, which is what `flag_if_supported` had made them depend
+    /// on. Fails if that mechanism comes back.
+    ///
+    /// Spelled out rather than read back from [`msvc_flags`], so that emptying
+    /// that list cannot leave this passing with nothing to check.
+    #[test]
+    fn the_msvc_flags_arrive_with_no_compiler_to_probe_with() {
+        let args = args_with_no_compiler_to_probe_with("x86_64-pc-windows-msvc", |b| {
+            apply_msvc_flags(b, true)
+        });
+        for flag in ["/Zc:__cplusplus", "/EHsc"] {
+            assert!(
+                args.iter().any(|a| a == flag),
+                "{flag} missing from {args:?}"
+            );
+        }
+    }
+
     /// Instrumentation is the only thing `AUTOCXX_ASAN` is for, so it arrives on
     /// the same terms: a build whose C++ went uninstrumented has to fail rather
     /// than pass having checked nothing.
@@ -475,13 +547,17 @@ mod flag_tests {
         );
     }
 
-    /// Which flags the condition selects, as literals, so that the test above
-    /// and the build itself cannot drift together into agreeing about nothing.
+    /// Which flags belong to which condition, as literals, so that the tests
+    /// above and the builds themselves cannot drift together into agreeing about
+    /// nothing.
     #[test]
-    fn the_mode_selects_exactly_its_own_flags() {
+    fn each_condition_selects_exactly_its_own_flags() {
+        assert_eq!(msvc_flags(true), ["/Zc:__cplusplus", "/EHsc"]);
         assert_eq!(sanitizer_flags(true), ["-fsanitize=address"]);
-        // A build which did not ask for the sanitizer is not instrumented
-        // behind the caller's back.
+        // A build which did not ask for the sanitizer is not instrumented behind
+        // the caller's back, and gcc and clang read `/Zc:__cplusplus` as the name
+        // of a file to compile.
+        assert!(msvc_flags(false).is_empty());
         assert!(sanitizer_flags(false).is_empty());
     }
 }
