@@ -322,6 +322,7 @@ mod tests {
     use crate::conversion::parse::CppRefQualifier;
     use crate::conversion::ConvertErrorFromCpp;
     use crate::types::QualifiedName;
+    use crate::vendored_bindgen::callbacks::ExceptionSpecification;
     use syn::parse_quote;
 
     fn name(id: &str) -> ApiName {
@@ -372,6 +373,7 @@ mod tests {
                 is_deleted: None,
                 deprecation: None,
                 ref_qualifier: CppRefQualifier::None,
+                exception_specification: ExceptionSpecification::None,
             }),
             analysis: (),
         }

@@ -31,6 +31,7 @@ use super::{
     fun::function_wrapper::{CppFunctionBody, CppFunctionKind},
     pod::{PodAnalysis, PodPhase},
 };
+use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 
 pub(crate) fn add_casts(apis: ApiVec<PodPhase>) -> ApiVec<PodPhase> {
     apis.into_iter()
@@ -118,6 +119,7 @@ fn create_cast(from: &QualifiedName, to: &QualifiedName, mutable: CastMutability
             provenance: Provenance::SynthesizedOther,
             variadic: false,
             ref_qualifier: CppRefQualifier::None,
+            exception_specification: ExceptionSpecification::None,
         }),
         analysis: (),
     }

@@ -7,7 +7,8 @@
 // except according to those terms.
 
 use crate::vendored_bindgen::callbacks::{
-    Deprecation, Explicitness, MethodKind as CppMethodKind, SpecialMemberKind, Virtualness,
+    Deprecation, ExceptionSpecification, Explicitness, MethodKind as CppMethodKind,
+    SpecialMemberKind, Virtualness,
 };
 
 use syn::{
@@ -617,6 +618,10 @@ pub(crate) struct FuncToConvert {
     /// [`crate::conversion::parse::CppRefQualifier`]. Always
     /// [`CppRefQualifier::None`] for functions we synthesize ourselves.
     pub(crate) ref_qualifier: CppRefQualifier,
+    /// The exception specification C++ declared this function with.
+    /// [`ExceptionSpecification::None`] for a function we synthesize
+    /// ourselves, which C++ never declared at all.
+    pub(crate) exception_specification: ExceptionSpecification,
 }
 
 /// Layers of analysis which may be applied to decorate each API.

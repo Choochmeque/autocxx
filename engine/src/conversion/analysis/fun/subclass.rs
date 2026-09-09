@@ -20,13 +20,16 @@ use crate::conversion::api::{
 };
 use crate::conversion::apivec::ApiVec;
 use crate::conversion::parse::CppRefQualifier;
+use crate::conversion::ConvertErrorFromCpp;
 use crate::conversion::CppEffectiveName;
 use crate::minisyn::{minisynize_punctuated, Ident};
 use crate::parse_callbacks::CppOriginalName;
+use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 use crate::{
     conversion::{
         analysis::fun::function_wrapper::{
-            CppFunction, CppFunctionBody, CppFunctionKind, TypeConversionPolicy,
+            CppExceptionSpecification, CppFunction, CppFunctionBody, CppFunctionKind,
+            TypeConversionPolicy,
         },
         api::{Api, ApiName},
     },
@@ -52,6 +55,49 @@ pub(super) fn subclasses_by_superclass(
         }
     }
     subclasses_per_superclass
+}
+
+/// What a subclass override has to say about exceptions, given the
+/// specification C++ declared on the superclass virtual method it overrides.
+///
+/// C++ requires an override to allow no more exceptions than the method it
+/// overrides, so only a non-throwing specification constrains it; an override
+/// of a method which may throw needs none. A specification libclang reports
+/// without resolving cannot be answered either way - writing `noexcept` would
+/// promise more than the superclass does, and omitting it would be ill-formed
+/// if the superclass promised anything - so it refuses instead of guessing.
+pub(super) fn override_exception_specification(
+    superclass_method: ExceptionSpecification,
+) -> Result<CppExceptionSpecification, ConvertErrorFromCpp> {
+    match superclass_method {
+        // Non-throwing, however C++ spelled it. `noexcept` satisfies an
+        // inherited `throw()` and an inherited `__attribute__((nothrow))`
+        // alike.
+        ExceptionSpecification::BasicNoexcept
+        | ExceptionSpecification::DynamicNone
+        | ExceptionSpecification::NoThrow => Ok(CppExceptionSpecification::Noexcept),
+        // Allows every exception, so the override is unconstrained.
+        ExceptionSpecification::None | ExceptionSpecification::MsAny => {
+            Ok(CppExceptionSpecification::None)
+        }
+        // `throw(A, B)` restricts the override to A and B, and libclang reports
+        // the kind without the types. Writing no specification passes an
+        // ordinary compiler's check only because it fails it - one in
+        // Microsoft-compatibility mode accepts it with a warning - so the
+        // restriction would be lost quietly there.
+        ExceptionSpecification::Dynamic
+        // `noexcept(expr)`, reported without saying which way the operand
+        // resolved, and a specification clang has not computed or instantiated.
+        // A defaulted member's specification is among those clang computes only
+        // on demand, and a defaulted member can be virtual: `virtual A&
+        // operator=(const A&) = default` reports `Unevaluated`.
+        | ExceptionSpecification::ComputedNoexcept
+        | ExceptionSpecification::Unevaluated
+        | ExceptionSpecification::Uninstantiated
+        | ExceptionSpecification::Unparsed => {
+            Err(ConvertErrorFromCpp::UnreproducibleExceptionSpecification)
+        }
+    }
 }
 
 pub(super) fn create_subclass_fn_wrapper(
@@ -88,6 +134,10 @@ pub(super) fn create_subclass_fn_wrapper(
         // methods reach here; a pure virtual one has no `_super` helper, and
         // its override survives (and has to, or the subclass stays abstract).
         ref_qualifier: fun.ref_qualifier,
+        // `Sub::foo_super` calls the superclass method rather than overriding
+        // it, so C++ puts no specification on it whatever the superclass
+        // method promises.
+        exception_specification: ExceptionSpecification::None,
     })
 }
 
@@ -166,6 +216,7 @@ pub(super) fn create_subclass_function(
     dependencies: Vec<QualifiedName>,
     unsafe_policy: &UnsafePolicy,
     ref_qualifier: CppRefQualifier,
+    exception_specification: CppExceptionSpecification,
     cpp_super_fn_name: Option<Ident>,
     superclass_fn_is_deprecated: bool,
 ) -> Api<FnPrePhase1> {
@@ -217,8 +268,11 @@ pub(super) fn create_subclass_function(
                 pass_obs_field: true,
                 qualification: Some(cpp),
                 // This method overrides the superclass's, so if that one is
-                // ref-qualified then this one must be too.
+                // ref-qualified then this one must be too - and if it promises
+                // not to throw, this one must promise the same or C++ rejects
+                // it.
                 ref_qualifier,
+                exception_specification,
                 is_virtual_override: true,
                 // The override's own body calls into Rust and names the
                 // superclass method nowhere, but the `_super` helper generated
@@ -267,6 +321,7 @@ pub(super) fn create_subclass_constructor(
         ),
         ref_qualifier: CppRefQualifier::None,
         // A constructor overrides nothing.
+        exception_specification: CppExceptionSpecification::None,
         is_virtual_override: false,
         // The body calls the superclass constructor by name.
         calls_deprecated: fun.deprecation.is_some(),
@@ -321,6 +376,7 @@ pub(super) fn create_subclass_constructor(
         provenance: Provenance::SynthesizedSubclassConstructor(subclass_constructor_details),
         variadic: fun.variadic,
         ref_qualifier: CppRefQualifier::None,
+        exception_specification: ExceptionSpecification::None,
     });
     let subclass_constructor_name = ApiName::new_with_cpp_name(
         &Namespace::new(),
@@ -330,4 +386,71 @@ pub(super) fn create_subclass_constructor(
         )),
     );
     (maybe_wrap, subclass_constructor_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{override_exception_specification, CppExceptionSpecification};
+    use crate::conversion::ConvertErrorFromCpp;
+    use crate::vendored_bindgen::callbacks::ExceptionSpecification;
+
+    /// Every kind libclang reports, including the ones no portable C++ fixture
+    /// can reach: `throw(X)` is gone in C++17 and `throw()` in C++20,
+    /// `throw(...)` is a Microsoft extension and `__attribute__((nothrow))` is
+    /// not MSVC's spelling, so a fixture written with any of them would not
+    /// compile on every platform autocxx's own tests run on.
+    #[test]
+    fn every_specification_kind_decides_one_way_or_refuses() {
+        for (specification, expected) in [
+            (
+                ExceptionSpecification::BasicNoexcept,
+                Ok(CppExceptionSpecification::Noexcept),
+            ),
+            (
+                ExceptionSpecification::DynamicNone,
+                Ok(CppExceptionSpecification::Noexcept),
+            ),
+            (
+                ExceptionSpecification::NoThrow,
+                Ok(CppExceptionSpecification::Noexcept),
+            ),
+            (
+                ExceptionSpecification::None,
+                Ok(CppExceptionSpecification::None),
+            ),
+            (
+                ExceptionSpecification::MsAny,
+                Ok(CppExceptionSpecification::None),
+            ),
+            (
+                ExceptionSpecification::Dynamic,
+                Err(ConvertErrorFromCpp::UnreproducibleExceptionSpecification),
+            ),
+            (
+                ExceptionSpecification::Unevaluated,
+                Err(ConvertErrorFromCpp::UnreproducibleExceptionSpecification),
+            ),
+            (
+                ExceptionSpecification::ComputedNoexcept,
+                Err(ConvertErrorFromCpp::UnreproducibleExceptionSpecification),
+            ),
+            (
+                ExceptionSpecification::Uninstantiated,
+                Err(ConvertErrorFromCpp::UnreproducibleExceptionSpecification),
+            ),
+            (
+                ExceptionSpecification::Unparsed,
+                Err(ConvertErrorFromCpp::UnreproducibleExceptionSpecification),
+            ),
+        ] {
+            let got = override_exception_specification(specification);
+            match (&got, &expected) {
+                (Ok(got), Ok(expected)) => assert_eq!(got, expected, "{specification:?}"),
+                (Err(got), Err(expected)) => {
+                    assert_eq!(got.to_string(), expected.to_string(), "{specification:?}")
+                }
+                _ => panic!("{specification:?} answered {got:?}"),
+            }
+        }
+    }
 }

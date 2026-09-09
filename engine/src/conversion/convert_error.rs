@@ -235,6 +235,8 @@ pub enum ConvertErrorFromCpp {
     RValueReturn,
     #[error("This method is rvalue-reference-qualified (`&&`), so it can only be called on an object which is about to be discarded. autocxx always holds C++ objects behind a reference or a smart pointer, so it has no way to express that; the method is therefore not generated. See https://github.com/google/autocxx/issues/837.")]
     RValueRefQualifiedMethod,
+    #[error("autocxx cannot reproduce this virtual method's exception specification on a subclass override. libclang reports `noexcept(expr)` without saying which way its operand resolved, reports `throw(A, B)` without the types it names, and reports a specification it has not computed or instantiated as nothing at all. C++ requires an override to allow no more exceptions than the method it overrides, so no specification autocxx could write on the override would be known to be correct; the subclass gets no override for this method, and the superclass's own implementation stands where it has one. See https://github.com/google/autocxx/issues/1435.")]
+    UnreproducibleExceptionSpecification,
     #[error("This method is private")]
     PrivateMethod,
     #[error("This type's C++ destructor is inaccessible (private, protected or deleted), so Rust could never destroy one of these. autocxx therefore does not generate constructors, copy/move support or smart pointer support for it; you can still call its methods on a reference or pointer obtained from C++. See https://github.com/google/autocxx/issues/829.")]

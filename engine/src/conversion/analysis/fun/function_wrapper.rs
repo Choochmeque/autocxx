@@ -735,6 +735,21 @@ pub(crate) enum CppFunctionKind {
 /// around that collision today.
 pub(crate) const RECEIVER_ARG_NAME: &str = "autocxx_gen_this";
 
+/// The exception specification a generated C++ declaration carries.
+///
+/// Only the two forms autocxx ever writes: it reproduces a superclass virtual
+/// method's promise not to throw, and writes nothing otherwise. It never
+/// introduces a specification C++ did not declare, because `noexcept` on a
+/// function which can throw turns a propagating exception into a call to
+/// `std::terminate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CppExceptionSpecification {
+    /// Write no specification.
+    None,
+    /// Write `noexcept`.
+    Noexcept,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CppFunction {
     pub(crate) payload: CppFunctionBody,
@@ -778,6 +793,13 @@ pub(crate) struct CppFunction {
     /// False for the peer's `_super` helper, which is a new method of its own
     /// rather than an override, and for every function outside a peer class.
     pub(crate) is_virtual_override: bool,
+    /// The exception specification this declaration repeats. Only ever
+    /// [`CppExceptionSpecification::Noexcept`] for a subclass peer's override
+    /// of a superclass virtual method which itself promises not to throw:
+    /// C++ rejects an override whose specification is looser than that of the
+    /// method it overrides. Nothing else autocxx generates overrides anything,
+    /// so nothing else is constrained.
+    pub(crate) exception_specification: CppExceptionSpecification,
 }
 
 /// Every combination of conversions which the rest of autocxx builds, and what
