@@ -8412,7 +8412,18 @@ fn test_abstract_nested_type() {
     // N::A_B is an abstract nested type which we can't represent, so the
     // explicitly requested take_A_B can't be generated either - and saying so
     // beats silently generating nothing (google/autocxx#1269).
-    run_test_expect_fail("", hdr, rs, &["take_A_B", "N::A_B"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_A_B", "N::A_B"],
+        &[],
+        &[
+            "take_A_B",
+            "did not result in any usable code being generated",
+            "AbstractNestedType",
+        ],
+    );
 }
 
 #[test]
@@ -13606,7 +13617,20 @@ fn test_type_called_type() {
     // We can't generate `take_type` (its parameter is a forward declaration
     // as far as we're concerned) and it was explicitly requested, so this is
     // reported rather than silently skipped - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["take_type"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_type"],
+        &[],
+        // What bindgen made of `a::b<4>::type` is bindgen's business; that the
+        // directive is refused, and refused for that argument, is ours.
+        &[
+            "take_type",
+            "did not result in any usable code being generated",
+            "Problem handling function argument",
+        ],
+    );
 }
 
 #[test]
@@ -13742,7 +13766,18 @@ fn test_error_fatal_for_explicitly_generated_static_data() {
         extern const uint32_t FOO[3];
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["FOO"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["FOO"],
+        &[],
+        &[
+            "FOO",
+            "did not result in any usable code being generated",
+            "StaticDataOfUnsupportedType",
+        ],
+    );
 }
 
 #[test]
@@ -13758,14 +13793,19 @@ fn test_error_generated_for_array_dependent_function() {
         }
     "};
     let rs = quote! {};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         rs,
         quote! { generate! ("take_func")},
         None,
-        None,
-        None,
+        // Which opaque blob bindgen substituted for the std::function, and how
+        // wide it is, differs by standard library; the refusal does not.
+        &[
+            "take_func",
+            "did not result in any usable code being generated",
+            "Problem handling function argument",
+        ],
     );
 }
 
@@ -13828,7 +13868,18 @@ fn test_error_generated_for_double_underscore() {
         inline void __thingy() {}
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["__thingy"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["__thingy"],
+        &[],
+        &[
+            "__thingy",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
+    );
 }
 
 #[test]
@@ -14060,7 +14111,19 @@ fn test_underscored_namespace_for_inner_type() {
     let rs = quote! {};
     // The namespace name isn't acceptable to cxx, so the explicitly requested
     // `bar` can't be generated and we say so - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["bar"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["bar"],
+        &[],
+        &[
+            "bar",
+            "did not result in any usable code being generated",
+            "__foo::daft_bob",
+            "Names containing __ are reserved by C++",
+        ],
+    );
 }
 
 #[test]
@@ -19104,7 +19167,18 @@ fn test_issue_1269_explicit_fn_discarded_by_name_check() {
     let hdr = indoc! {"
         inline int __ykllvmwrap_irtrace_compile(int a) { return a; }
     "};
-    run_test_expect_fail("", hdr, quote! {}, &["__ykllvmwrap_irtrace_compile"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["__ykllvmwrap_irtrace_compile"],
+        &[],
+        &[
+            "__ykllvmwrap_irtrace_compile",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
+    );
 }
 
 /// An explicitly requested function whose parameter type is rejected during
@@ -19115,7 +19189,7 @@ fn test_issue_1269_explicit_fn_discarded_due_to_param() {
         struct Blocked { int a; };
         inline int uses_blocked(Blocked& b) { return b.a; }
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {},
@@ -19124,8 +19198,11 @@ fn test_issue_1269_explicit_fn_discarded_due_to_param() {
             block!("Blocked")
         },
         None,
-        None,
-        None,
+        &[
+            "uses_blocked",
+            "did not result in any usable code being generated",
+            "marked as blocked!",
+        ],
     );
 }
 
@@ -19137,7 +19214,7 @@ fn test_issue_1269_explicit_type_discarded_by_name_check() {
     let hdr = indoc! {"
         namespace a { struct __Dupe { int q; }; }
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {},
@@ -19145,8 +19222,11 @@ fn test_issue_1269_explicit_type_discarded_by_name_check() {
             generate!("a::__Dupe")
         },
         None,
-        None,
-        None,
+        &[
+            "a::__Dupe",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
     );
 }
 
@@ -25000,7 +25080,18 @@ fn test_array_trouble2() {
     "};
     // The typedef takes generic parameters so we can't generate it; it was
     // asked for by name, so we report that - google/autocxx#1269.
-    run_test_expect_fail("", hdr, quote! {}, &["array_d"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["array_d"],
+        &[],
+        &[
+            "array_d",
+            "did not result in any usable code being generated",
+            "TypedefTakesGenericParameters",
+        ],
+    );
 }
 
 #[test]
