@@ -121,10 +121,127 @@ impl BuilderModifierFns for DoctestStd {
     }
 }
 
+/// The triple `configure_builder` hands cc as both host and target.
+///
+/// What the `rustc` on `PATH` targets by default, reassembled by `rust_info`
+/// from `rustc --print cfg` - not the triple this harness was itself compiled
+/// for, which is a different thing wherever the two disagree. It is the answer
+/// cc is given, though, so the compiler cc then picks and the flag spellings
+/// chosen below are decided by one and the same triple.
+///
+/// Read once: `rust_info` answers by running `rustc` twice, and there is a
+/// fixture build per test. Loud if rustc does not answer, because the spelling
+/// of every flag below depends on what it says.
+fn target_triple() -> &'static str {
+    static TRIPLE: OnceCell<String> = OnceCell::new();
+    TRIPLE
+        .get_or_init(|| {
+            rust_info::get()
+                .target_triple
+                .expect("rustc reported no target triple")
+        })
+        .as_str()
+}
+
+/// Whether flags for `target` take cl.exe's spellings rather than gcc's.
+///
+/// A statement about the target, not a guarantee about the compiler: `CXX` can
+/// point an MSVC target at something else, and clang-cl is cl-spelled without
+/// being cl. Nothing in this repo or its CI does either, and the alternative is
+/// worse - see [`make_msvc_warning_scope`].
+///
+/// One definition, because the decisions it drives have to agree with each
+/// other: see [`warnings_are_errors_flag`] and [`make_msvc_warning_scope`].
+fn target_is_msvc(target: &str) -> bool {
+    target.contains("msvc")
+}
+
+/// Warnings are errors, in `target`'s compiler's spelling. cl.exe took until
+/// 2026 to get its half: the fixtures produced thirty-two warnings at /W4, all
+/// their own doing, none from the generated C++, from cxx, or from the standard
+/// library except where a fixture reaches into it. Twelve C4458 and a C4100
+/// were simply fixed. The survivors describe shapes that ARE the test (a matrix
+/// of deleted destructors, C4624; a nameless struct, C4201) and are scoped off
+/// at their own fixtures by [`make_msvc_warning_scope`]. Two have since left
+/// that list: C4408 when the anonymous struct in a reduction was given a data
+/// member, which cost the bindings nothing, and C5205 (deleting an abstract
+/// class, clang's -Wdelete-abstract-non-virtual-dtor) when autocxx stopped
+/// generating the deleting path for such a class at all; that one was never
+/// about the fixture. Each remaining scope is worth re-asking that question of.
+/// The D9002 command-line warnings that also stood in the way died when flags
+/// started being spelled per compiler family.
+fn warnings_are_errors_flag(target: &str) -> &'static str {
+    if target_is_msvc(target) {
+        "/WX"
+    } else {
+        "-Werror"
+    }
+}
+
+/// Scope one cl.exe warning off one fixture's build, named by the number cl
+/// reports it under: `make_msvc_warning_scope(&[4250])` for C4250.
+///
+/// For a warning which *is* the proposition its fixture asserts, so that no
+/// version of the header both makes the point and stays quiet. Nothing is
+/// suppressed anywhere else, and nothing is hidden from the other compilers:
+/// no clang or gcc warning needs this treatment today, because at `-Wall
+/// -Werror` the fixtures are quiet.
+///
+/// `flag`, decided by the target, and deliberately not `flag_if_supported`:
+/// the suite compiles with warnings fatal (`warnings_are_errors_flag`), so a
+/// scope that fails to arrive fails the fixture. `flag_if_supported` resolves a
+/// flag by running a probe compile of its own and reads any failure to *run*
+/// that probe - a spawn lost to a concurrent suite, an unwritable scratch
+/// directory - as "unsupported", dropping the flag and saying nothing about
+/// having dropped it (cc's `is_flag_supported_inner(..).unwrap_or(false)`; a
+/// `cargo:warning` about compiler detection may land nearby, naming no flag).
+/// On the MSVC leg
+/// that silently dropped the C4250 scope from two virtual-diamond fixtures on
+/// separate runs, leaving `/WX` to make each fixture's own declared warning
+/// fatal. Deciding from the target instead keeps the scope and the `/WX` it
+/// answers to in step; no probe could be made to agree with `/WX` at all.
+pub fn make_msvc_warning_scope(warnings: &[u32]) -> Option<BuilderModifier> {
+    Some(Box::new(MsvcWarningScope(msvc_warning_scope_flags(
+        warnings,
+        target_triple(),
+    ))))
+}
+
+/// What [`make_msvc_warning_scope`] contributes to a build for `target`: cl's
+/// spelling, and nothing at all where cl is not the compiler - gcc and clang
+/// read `/wd4250` as the name of a file to compile.
+fn msvc_warning_scope_flags(warnings: &[u32], target: &str) -> Vec<String> {
+    if target_is_msvc(target) {
+        warnings.iter().map(|w| format!("/wd{w}")).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+struct MsvcWarningScope(Vec<String>);
+
+impl BuilderModifierFns for MsvcWarningScope {
+    fn modify_autocxx_builder<'a>(
+        &self,
+        builder: Builder<'a, TestBuilderContext>,
+    ) -> Builder<'a, TestBuilderContext> {
+        // bindgen is libclang, which neither parses cl's spelling nor treats
+        // warnings as errors.
+        builder
+    }
+
+    fn modify_cc_builder<'a>(&self, mut builder: &'a mut cc::Build) -> &'a mut cc::Build {
+        for flag in &self.0 {
+            builder = builder.flag(flag);
+        }
+        builder
+    }
+}
+
 fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
-    let target = rust_info::get().target_triple.unwrap();
-    b.host(&target)
-        .target(&target)
+    let target = target_triple();
+    b.host(target)
+        .target(target)
         .opt_level(1)
         // std(), not .flag("-std=c++14"): cc picks the right spelling per
         // tool family (so cl.exe no longer prints D9002 "ignoring unknown
@@ -160,7 +277,7 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
     // thousands of lines into every Windows CI log. `/W4` is the curated
     // equivalent, and is what `warnings(true)` asks for.
     b.warnings(true).extra_warnings(false);
-    if target.contains("msvc") {
+    if target_is_msvc(target) {
         // Exception unwinding, asked for explicitly rather than through the
         // CXXFLAGS=/EHsc the CI legs set: a command-line dump on the msvc leg
         // showed the environment's flags reaching this builder's compiles in
@@ -182,29 +299,77 @@ fn configure_builder(b: &mut BuilderBuild) -> &mut BuilderBuild {
         // on by default.
         b.flag("/EHsc");
     }
-    // Warnings are errors, in each compiler's spelling. cl.exe took until
-    // 2026 to get its half: the fixtures produced thirty-two warnings at /W4
-    // - all their own doing, none from the generated C++, from cxx, or from
-    // the standard library except where a fixture reaches into it. Twelve
-    // C4458 and a C4100 were simply fixed. The survivors describe shapes
-    // that ARE the test - a matrix of deleted destructors (C4624), a nameless
-    // struct (C4201) - and are scoped off at their own fixtures through
-    // make_clang_optional_arg_adder's flag_if_supported route, the same
-    // per-test mechanism their clang equivalents already use. Two have since
-    // left that list: C4408 when the anonymous struct in a reduction was
-    // given a data member, which cost the bindings nothing, and C5205
-    // (deleting an abstract class, clang's
-    // -Wdelete-abstract-non-virtual-dtor) when autocxx stopped generating the
-    // deleting path for such a class at all - that one was never about the
-    // fixture. Each remaining scope is worth re-asking that question of. The
-    // D9002 command-line warnings that also stood in the way died when flags
-    // started being spelled per compiler family.
-    b.flag(if target.contains("msvc") {
-        "/WX"
-    } else {
-        "-Werror"
-    });
+    b.flag(warnings_are_errors_flag(target));
     b
+}
+
+/// Tests for the flags a fixture's build is given, which are the harness's own
+/// and so cannot be asserted from a fixture.
+#[cfg(test)]
+mod flag_tests {
+    use super::{
+        msvc_warning_scope_flags, warnings_are_errors_flag, BuilderModifierFns, MsvcWarningScope,
+    };
+
+    /// Target, the C4250 scope it should be given, and the flag that makes
+    /// warnings fatal on it. One row per leg of CI.
+    const CASES: [(&str, &[&str], &str); 4] = [
+        ("x86_64-pc-windows-msvc", &["/wd4250"], "/WX"),
+        ("x86_64-pc-windows-gnu", &[], "-Werror"),
+        ("x86_64-unknown-linux-gnu", &[], "-Werror"),
+        ("aarch64-apple-darwin", &[], "-Werror"),
+    ];
+
+    /// A fixture's warning scope and the flag which makes that warning fatal
+    /// are one decision written in two places: a build which took only the
+    /// second fails on a warning the fixture declared, and one which took only
+    /// the first hands `/wd4250` to a compiler that reads it as a filename.
+    ///
+    /// Both sides are spelled out per target rather than compared with each
+    /// other, so that a predicate which answered the same way everywhere would
+    /// fail this rather than agree with itself.
+    #[test]
+    fn a_warning_scope_applies_to_exactly_the_builds_whose_warnings_are_fatal() {
+        for (target, scope, fatal) in CASES {
+            assert_eq!(
+                msvc_warning_scope_flags(&[4250], target).as_slice(),
+                scope,
+                "{target}"
+            );
+            assert_eq!(warnings_are_errors_flag(target), fatal, "{target}");
+        }
+        assert_eq!(
+            msvc_warning_scope_flags(&[4250, 4624], "x86_64-pc-windows-msvc"),
+            ["/wd4250", "/wd4624"]
+        );
+    }
+
+    /// The scope reaches the compiler whether or not cc could run a probe
+    /// compile, which is what `flag_if_supported` would have made it depend on.
+    /// Asserted against a compiler which cannot be run at all - the strongest
+    /// form of that failure, and the one a probed flag leaves no trace of.
+    #[test]
+    fn a_warning_scope_arrives_with_no_compiler_to_probe_with() {
+        let scope = MsvcWarningScope(msvc_warning_scope_flags(&[4250], "x86_64-pc-windows-msvc"));
+        let mut b = cc::Build::new();
+        b.cpp(true)
+            .cargo_metadata(false)
+            // cc reads these from the environment a build script runs in, and
+            // this is a test binary.
+            .opt_level(1)
+            .target("x86_64-pc-windows-msvc")
+            .host("x86_64-pc-windows-msvc")
+            .compiler("/no-such-directory-for-this-test/cl.exe");
+        scope.modify_cc_builder(&mut b);
+        let args: Vec<_> = b
+            .try_get_compiler()
+            .expect("cc could not describe the compiler")
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "/wd4250"), "{args:?}");
+    }
 }
 
 /// Environment variables telling generated code where to find its bindings, as
