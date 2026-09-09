@@ -24803,6 +24803,276 @@ fn test_issue_1098c() {
     run_generate_all_test(hdr);
 }
 
+// Items in an anonymous namespace, which address the bug reported upstream as
+// google/autocxx#310.
+//
+// No other translation unit can write a path into an anonymous namespace, which
+// is what makes one look unbindable. But the C++ autocxx generates *is* a
+// translation unit which includes the header, and from there the items do have
+// names: `namespace { X }` is defined to behave as a namespace whose name
+// nothing can write, followed by a using-directive for it, so its members are
+// found by lookup in the namespace enclosing them. That enclosing name is the
+// one autocxx writes, in C++ and in the Rust path alike.
+//
+// bindgen reaches the same conclusion for an inline namespace and emits its
+// members in the parent module; `43-unnamed-namespace-transparency.patch`
+// extends that to a namespace with no name. Before it, an anonymous namespace
+// got a module called `_bindgen_mod_<id>` - a name no C++ declares, and one
+// whose `<id>` moves whenever anything earlier in the header is edited - so
+// the tests below either generated C++ which did not compile, naming that
+// module, or were refused outright.
+//
+// The exception is a name the enclosing namespace also declares, which it may
+// do because the two are different scopes, as any two namespaces are. Those
+// are two entities, and qualified lookup resolves the name to the enclosing
+// declaration rather than finding both, because a using-directive is consulted
+// only where direct lookup found nothing. Where autocxx can see that has
+// happened - a variable, a namespace - the anonymous one stays in the module
+// bindgen invented for it, out of everything's reach, which is what C++ says
+// about it too. Two *types* it cannot see: bindgen files a type under whichever
+// namespace first mentioned it, so a namespace appears to declare types it only
+// refers to, and the pair is reported as the duplicate it looks like instead.
+//
+// A header in which an anonymous namespace and the scope around it both supply
+// a *namespace* name has no end-to-end test, because autocxx cannot bind one
+// either way: its own wrapper functions name types without a leading `::`, so
+// the C++ it writes cannot say which `N` an `N::B` means. That is true of such a
+// header however the anonymous namespace is emitted, and is a separate thing
+// from what is covered here. The two tests above pin the part that is ours -
+// that the name a nested type is emitted under is the one checked for a
+// collision - using a shape autocxx can still bind.
+//
+// What is *not* here, because it never reaches autocxx: a function declared in
+// an anonymous namespace, member or free. Such a function has internal linkage,
+// and bindgen generates nothing at all for an internal-linkage function.
+
+/// The shape from the issue: a type in an anonymous namespace, crossing as the
+/// opaque token it is. `within_unique_ptr` is the part the old
+/// `MethodInAnonymousNamespace` refusal used to take away, the allocator and
+/// the destructor autocxx synthesizes being methods on the type.
+#[test]
+fn test_type_in_anonymous_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        struct A { uint32_t a; };
+        }
+        inline A make_a(uint32_t v) { A a; a.a = v; return a; }
+        inline uint32_t read_a(const A& a) { return a.a; }
+    "};
+    let rs = quote! {
+        let a = ffi::make_a(42).within_unique_ptr();
+        assert_eq!(ffi::read_a(a.as_ref().unwrap()), 42);
+    };
+    run_test("", hdr, rs, &["make_a", "read_a"], &[]);
+}
+
+/// And the type can be asked for by name. A `generate!` is passed to bindgen's
+/// allowlist, which was matching it against `root::_bindgen_mod_<id>::A`: the
+/// `<id>` is not something anyone could write down, so the directive found
+/// nothing however it was spelled.
+#[test]
+fn test_type_in_anonymous_namespace_on_allowlist() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        struct A { uint32_t a; };
+        }
+        inline uint32_t read_a(A a) { return a.a; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::read_a(ffi::A { a: 12 }), 12);
+    };
+    run_test("", hdr, rs, &["read_a"], &["A"]);
+}
+
+/// The enclosing namespace is whichever one the anonymous namespace sits in,
+/// not the root: `foo::A` is what C++ calls this, so `ffi::foo::A` is what
+/// Rust calls it.
+#[test]
+fn test_type_in_anonymous_namespace_within_a_named_one() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace foo {
+        namespace {
+        struct A { uint32_t a; };
+        }
+        }
+        inline uint32_t read_a(foo::A a) { return a.a; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::read_a(ffi::foo::A { a: 7 }), 7);
+    };
+    run_test("", hdr, rs, &["read_a"], &["foo::A"]);
+}
+
+/// Nesting collapses all the way down: each anonymous namespace is transparent
+/// to the one above it, so the type belongs to the first named scope there is.
+#[test]
+fn test_type_in_nested_anonymous_namespaces() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        namespace {
+        struct A { uint32_t a; };
+        }
+        }
+        inline uint32_t read_a(A a) { return a.a; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::read_a(ffi::A { a: 5 }), 5);
+    };
+    run_test("", hdr, rs, &["read_a"], &["A"]);
+}
+
+/// A typedef naming such a type, which was refused as
+/// `TypedefToTypeInAnonymousNamespace`. The target has a name, so it resolves
+/// like any other alias.
+#[test]
+fn test_typedef_to_type_in_anonymous_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        struct A { uint32_t a; };
+        }
+        typedef A B;
+        inline uint32_t read_b(B b) { return b.a; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::read_b(ffi::A { a: 9 }), 9);
+    };
+    run_test("", hdr, rs, &["read_b"], &["A"]);
+}
+
+/// An enum, whose enumerators have to arrive under the same name the type did.
+#[test]
+fn test_enum_in_anonymous_namespace() {
+    let hdr = indoc! {"
+        namespace {
+        enum E { E_ONE, E_TWO };
+        }
+        inline bool is_two(E e) { return e == E_TWO; }
+    "};
+    let rs = quote! {
+        assert!(ffi::is_two(ffi::E::E_TWO));
+        assert!(!ffi::is_two(ffi::E::E_ONE));
+    };
+    run_test("", hdr, rs, &["E", "is_two"], &[]);
+}
+
+/// A *type* whose name the enclosing namespace also declares is the one case
+/// which keeps the old answer: both are refused, under the rule for two C++
+/// items arriving as one name.
+///
+/// C++ can name one of them - `::A` is the enclosing declaration, qualified
+/// lookup not consulting the using-directive once it has found that - so this is
+/// more refusal than the language requires. It is what autocxx can honestly do
+/// with what it is told: bindgen files a type under whichever namespace first
+/// mentioned it, so "this namespace also declares `A`" is not a question its
+/// output can answer, and the same reasoning that would let the enclosing `A`
+/// through here would throw away almost every anonymous namespace that merely
+/// *mentions* an outside type.
+#[test]
+fn test_type_in_anonymous_namespace_whose_name_is_declared_outside_too() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        struct A { uint32_t a; };
+        }
+        struct A { uint32_t b; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["A"],
+        &[],
+        &[
+            "DuplicateItemsFoundInParsing",
+            "bindgen generated multiple different APIs",
+        ],
+    );
+}
+
+/// The same for a variable, where getting it wrong is not a compile error but a
+/// wrong number: both constants exist, and `::LIMIT` is the enclosing one.
+#[test]
+fn test_variable_in_anonymous_namespace_does_not_displace_the_enclosing_one() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        constexpr uint32_t LIMIT = 1;
+        }
+        constexpr uint32_t LIMIT = 2;
+        inline uint32_t limit() { return ::LIMIT; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::limit(), 2);
+        assert_eq!(ffi::LIMIT, 2);
+    };
+    run_test("", hdr, rs, &["limit", "LIMIT"], &[]);
+}
+
+/// A type nested in a type is emitted under the two names joined, so what it
+/// can collide with is a namespace of *that* name rather than of its own. This
+/// header has both `Outer::Inner`, which becomes `Outer_Inner`, and a namespace
+/// called `Outer_Inner`; Rust has one namespace for a struct and a module, so
+/// the anonymous namespace stays where it is.
+#[test]
+fn test_nested_type_in_anonymous_namespace_named_like_a_namespace() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        struct Outer { struct Inner { uint32_t x; }; };
+        }
+        namespace Outer_Inner { struct B { uint32_t b; }; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Outer_Inner::B { b: 3 }.b, 3);
+    };
+    run_test("", hdr, rs, &[], &["Outer_Inner::B"]);
+}
+
+/// And the converse, which must *not* be refused: `Outer::Inner` is emitted as
+/// `Outer_Inner`, so a namespace called `Inner` is not in its way and the
+/// anonymous namespace can still be flattened.
+#[test]
+fn test_nested_type_in_anonymous_namespace_beside_a_namespace_of_its_own_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        struct Outer { struct Inner { uint32_t x; }; };
+        }
+        namespace Inner { struct B { uint32_t b; }; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::Outer_Inner { x: 5 }.x, 5);
+        assert_eq!(ffi::Inner::B { b: 3 }.b, 3);
+    };
+    run_test("", hdr, rs, &[], &["Outer_Inner", "Inner::B"]);
+}
+
+/// A named namespace *inside* an anonymous one, which is the reverse nesting.
+/// `foo` is emitted one level higher than bindgen put it, so everything which
+/// counts how deep it is has to agree - including the `use super::..::root` it
+/// opens with.
+#[test]
+fn test_named_namespace_inside_an_anonymous_one() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace {
+        namespace foo {
+        struct A { uint32_t value; };
+        }
+        }
+        inline uint32_t read_a(foo::A a) { return a.value; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::read_a(ffi::foo::A { value: 11 }), 11);
+    };
+    run_test("", hdr, rs, &["read_a"], &["foo::A"]);
+}
+
 #[test]
 fn test_pass_rust_str_and_return_struct() {
     let cxx = indoc! {"
