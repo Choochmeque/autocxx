@@ -122,9 +122,18 @@ Where nothing else uses the parameter it is still not rendered - `template
 <class C, class T> struct iterator { typedef T value_type; };` has no fields
 at all - and an impl assigning `iterator_value_type<T>` would then name a `T`
 which is not in scope. So an impl is emitted only where its associated type
-can be named under the parameters its class was rendered with. Saying nothing
-leaves the class not implementing the trait, which is where it stood before
-this option existed.
+can be named under the parameters its class was rendered with.
+
+Saying nothing there leaves the class not implementing the trait, which is
+where it stood before this option existed.
+
+What the trait asks of its associated type the impl asks of the type it
+assigns, as a bound of its own. `typedef R rep;` on a class template assigns a
+bare parameter, which satisfies none of it, so without that bound the impl
+compiled for no instantiation at all. With it the class implements the trait
+for the arguments which do satisfy it. MSVC's `std::chrono::duration` declares
+`rep` that way and its standard library projects the name over
+`duration<long long>`, which needs the impl both to be there and to hold.
 
 The trait is declared in the root module, because that is where the
 dependent qualified types which need it are parented, so every reference
@@ -394,7 +403,7 @@ class whose base holds the inner type has no impl to reach.
              };
  
 +        let inner_type_predicates: Vec<proc_macro2::TokenStream> = where_clause
-+            .into_iter()
++            .iter()
 +            .map(|(param, traits)| quote! { #param: #( #traits )+* })
 +            .collect();
 +        let where_clause = if inner_type_predicates.is_empty() {
@@ -415,7 +424,7 @@ class whose base holds the inner type has no impl to reach.
                  #( #fields )*
              }
          });
-@@ -3065,6 +3173,51 @@
+@@ -3065,6 +3173,74 @@
              let child_item = ctx.resolve_item(*ty);
              // assert_eq!(child_item.parent_id(), item.id());
              child_item.codegen(ctx, result, &());
@@ -457,9 +466,32 @@ class whose base holds the inner type has no impl to reach.
 +            let child_ty = syn::Type::with_implicit_template_params(
 +                child_ty, ctx, child_item,
 +            );
++            // What the trait asks of its associated type, asked of the type
++            // this impl assigns. `typedef R rep;` on a class template assigns
++            // an unbounded parameter, which satisfies none of it; the class
++            // then implements the trait for the arguments which do, rather
++            // than carrying an impl which cannot compile for any of them.
++            let associated_type_predicate = ctx
++                .inner_type_trait_source(associated_type_name)
++                .map(|source| {
++                    let bounds = associated_type_bounds(
++                        ctx,
++                        derives_of_item(ctx.resolve_item(source), ctx, false),
++                    );
++                    quote! { #child_ty #bounds }
++                })
++                .filter(|predicate| !predicate.is_empty());
++            let mut impl_predicates = inner_type_predicates.clone();
++            impl_predicates.extend(associated_type_predicate);
++            let impl_where_clause = if impl_predicates.is_empty() {
++                quote! {}
++            } else {
++                quote! { where #( #impl_predicates ),* }
++            };
 +            result.push(quote! {
 +                impl #impl_generics_labels #trait_name
-+                    for #canonical_ident #impl_generics_params #where_clause
++                    for #canonical_ident #impl_generics_params
++                    #impl_where_clause
 +                {
 +                    type #associated_type = #child_ty;
 +                }
@@ -467,7 +499,7 @@ class whose base holds the inner type has no impl to reach.
          }
  
          // NOTE: Some unexposed attributes (like alignment attributes) may
-@@ -3261,7 +3414,7 @@
+@@ -3261,7 +3437,7 @@
  
          if needs_clone_impl {
              result.push(quote! {
@@ -476,7 +508,7 @@ class whose base holds the inner type has no impl to reach.
                      fn clone(&self) -> Self { *self }
                  }
              });
-@@ -3274,6 +3427,7 @@
+@@ -3274,6 +3450,7 @@
                  flex_inner_ty.as_ref(),
                  &generic_param_names,
                  &impl_generics_labels,
@@ -484,7 +516,7 @@ class whose base holds the inner type has no impl to reach.
              ));
          }
  
-@@ -3291,7 +3445,7 @@
+@@ -3291,7 +3468,7 @@
              // non-zero padding bytes, especially when forwards/backwards compatibility is
              // involved.
              result.push(quote! {
@@ -493,7 +525,7 @@ class whose base holds the inner type has no impl to reach.
                      fn default() -> Self {
                          #body
                      }
-@@ -3310,7 +3464,7 @@
+@@ -3310,7 +3487,7 @@
              let prefix = ctx.trait_prefix();
  
              result.push(quote! {
@@ -502,7 +534,7 @@ class whose base holds the inner type has no impl to reach.
                      #impl_
                  }
              });
-@@ -3324,13 +3478,18 @@
+@@ -3324,13 +3501,18 @@
                  &ty_for_impl,
                  opaque_bases.is_some(),
              ) {
@@ -528,7 +560,7 @@ class whose base holds the inner type has no impl to reach.
                  };
  
                  let prefix = ctx.trait_prefix();
-@@ -3344,7 +3503,7 @@
+@@ -3344,7 +3526,7 @@
  
          if !methods.is_empty() {
              result.push(quote! {
@@ -537,7 +569,7 @@ class whose base holds the inner type has no impl to reach.
                      #( #methods )*
                  }
              });
-@@ -3360,6 +3519,7 @@
+@@ -3360,6 +3542,7 @@
          flex_inner_ty: Option<&proc_macro2::TokenStream>,
          generic_param_names: &[Ident],
          impl_generics_labels: &proc_macro2::TokenStream,
@@ -545,7 +577,7 @@ class whose base holds the inner type has no impl to reach.
      ) -> proc_macro2::TokenStream {
          let prefix = ctx.trait_prefix();
  
-@@ -3476,12 +3636,12 @@
+@@ -3476,12 +3659,12 @@
          };
  
          quote! {
@@ -560,7 +592,7 @@ class whose base holds the inner type has no impl to reach.
                  #from_ptr_sized
              }
          }
-@@ -4983,6 +5143,15 @@
+@@ -4983,6 +5166,15 @@
                  let ident = ctx.rust_ident(name);
                  Ok(syn::parse_quote! { #ident })
              }
@@ -892,7 +924,7 @@ class whose base holds the inner type has no impl to reach.
  
      /// A cursor to module map. Similar reason than above.
      modules: HashMap<Cursor, ModuleId>,
-@@ -531,6 +533,13 @@
+@@ -531,6 +533,19 @@
      /// Populated when we enter codegen by `compute_has_float`; always `None`
      /// before that and `Some` after.
      has_float: Option<HashSet<ItemId>>,
@@ -903,18 +935,25 @@ class whose base holds the inner type has no impl to reach.
 +    /// full of inner typedefs nobody reaches through does not acquire a trait
 +    /// apiece. Populated by `identify_dependent_qualified_types`.
 +    used_inner_type_names: HashSet<String>,
++
++    /// One dependent qualified type apiece for those names, so that an
++    /// impl can be bounded by what the trait's associated type asks for:
++    /// the bounds come from what such a type derives, and every one of a
++    /// name derives the same set, the trait being declared once.
++    inner_type_trait_sources: HashMap<String, ItemId>,
  }
  
  /// A traversal of allowlisted items.
-@@ -651,6 +660,7 @@
+@@ -651,6 +666,8 @@
              have_destructor: None,
              has_type_param_in_array: None,
              has_float: None,
 +            used_inner_type_names: HashSet::default(),
++            inner_type_trait_sources: HashMap::default(),
          }
      }
  
-@@ -850,11 +860,17 @@
+@@ -850,11 +867,17 @@
      }
  
      /// Add a new named template type parameter to this context's item set.
@@ -934,7 +973,7 @@ class whose base holds the inner type has no impl to reach.
              "Should directly be a named type, not a resolved reference or anything"
          );
          assert_eq!(
-@@ -873,7 +889,9 @@
+@@ -873,7 +896,9 @@
  
          let old_named_ty = self
              .type_params
@@ -945,7 +984,7 @@ class whose base holds the inner type has no impl to reach.
          assert!(
              old_named_ty.is_none(),
              "should not have already associated a named type with this id"
-@@ -881,13 +899,21 @@
+@@ -881,13 +906,21 @@
      }
  
      /// Get the named type defined at the given cursor location, if we've
@@ -970,7 +1009,7 @@ class whose base holds the inner type has no impl to reach.
      }
  
      // TODO: Move all this syntax crap to other part of the code.
-@@ -924,6 +950,31 @@
+@@ -924,6 +957,31 @@
          Cow::Borrowed(name)
      }
  
@@ -1002,7 +1041,7 @@ class whose base holds the inner type has no impl to reach.
      /// Returns a mangled name as a rust identifier.
      pub(crate) fn rust_ident<S>(&self, name: S) -> Ident
      where
-@@ -1051,21 +1102,23 @@
+@@ -1051,21 +1109,23 @@
          }
      }
  
@@ -1034,7 +1073,7 @@ class whose base holds the inner type has no impl to reach.
              let canonical_type_name =
                  self.resolve_item(id).canonical_name(self);
              self.with_loaned_item(id, |ctx, item| {
-@@ -1226,6 +1279,9 @@
+@@ -1226,6 +1286,9 @@
  
          self.assign_field_names();
  
@@ -1044,7 +1083,7 @@ class whose base holds the inner type has no impl to reach.
          self.assert_no_dangling_references();
  
          // Compute the allowlisted set after processing replacements and
-@@ -1250,11 +1306,104 @@
+@@ -1250,11 +1313,118 @@
          self.compute_has_float();
          self.compute_cannot_derive_hash();
          self.compute_cannot_derive_partialord_partialeq_or_eq();
@@ -1124,20 +1163,34 @@ class whose base holds the inner type has no impl to reach.
 +            .codegen_items
 +            .as_ref()
 +            .expect("the codegen item set is computed earlier in `gen`");
-+        self.used_inner_type_names = self
++        let named: Vec<(String, ItemId)> = self
 +            .items()
 +            .filter(|(id, item)| {
 +                codegen_items.contains(id) &&
 +                    !item.is_blocklisted(self) &&
 +                    item.is_enabled_for_codegen(self)
 +            })
-+            .filter_map(|(_, item)| match item.kind().as_type()?.kind() {
++            .filter_map(|(id, item)| match item.kind().as_type()?.kind() {
 +                TypeKind::DependentQualifiedType(_, name) => {
-+                    Some(name.clone())
++                    Some((name.clone(), id))
 +                }
 +                _ => None,
 +            })
 +            .collect();
++        for (name, id) in named {
++            self.used_inner_type_names.insert(name.clone());
++            self.inner_type_trait_sources.entry(name).or_insert(id);
++        }
++    }
++
++    /// A dependent qualified type which looks this inner type name up, for the
++    /// bounds its trait's associated type carries. See
++    /// [`Self::inner_type_trait_sources`].
++    pub(crate) fn inner_type_trait_source(
++        &self,
++        name: &str,
++    ) -> Option<ItemId> {
++        self.inner_type_trait_sources.get(name).copied()
 +    }
 +
 +    /// Whether a dependent qualified name anywhere looks up this inner type
@@ -1149,7 +1202,7 @@ class whose base holds the inner type has no impl to reach.
      /// When the `__testing_only_extra_assertions` feature is enabled, this
      /// function walks the IR graph and asserts that we do not have any edges
      /// referencing an `ItemId` for which we do not have an associated IR item.
-@@ -2760,7 +2909,10 @@
+@@ -2760,7 +2930,10 @@
                                      TypeKind::Function(..) |
                                      TypeKind::ResolvedTypeRef(..) |
                                      TypeKind::Opaque |
@@ -1161,7 +1214,7 @@ class whose base holds the inner type has no impl to reach.
                                      _ => {}
                                  }
                                  if self.is_stdint_type(&name) {
-@@ -3282,17 +3434,28 @@
+@@ -3282,17 +3455,28 @@
  
      /// Finish configuring and perform the actual item resolution.
      pub(crate) fn resolve(self, ctx: &BindgenContext) -> &Item {
@@ -1192,7 +1245,7 @@ class whose base holds the inner type has no impl to reach.
              }
  
              let ty_kind = item.as_type().map(|t| t.kind());
-@@ -3310,7 +3473,7 @@
+@@ -3310,7 +3494,7 @@
                  {
                      id = next_id.into();
                  }
@@ -1201,7 +1254,7 @@ class whose base holds the inner type has no impl to reach.
              }
          }
      }
-@@ -3345,6 +3508,13 @@
+@@ -3345,6 +3529,13 @@
  }
  
  impl TemplateParameters for PartialType {
