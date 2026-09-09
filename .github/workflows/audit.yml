@@ -1,0 +1,41 @@
+# Checks the whole lockfile against the RustSec advisory database. The
+# dependency review on pull requests cannot do this: it looks at what a pull
+# request changes, so an advisory published against a version locked months ago
+# is invisible to it. Both of the advisories this job was added for arrived
+# that way.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.lock, .cargo/audit.toml, .github/workflows/audit.yml]
+  # Pull requests which move the lock, so a bump that reintroduces something is
+  # answered before it lands rather than that night. Keep this out of the
+  # required checks while the filter is here: a required check which a path
+  # filter skips stays pending for good.
+  pull_request:
+    paths: [Cargo.lock, .cargo/audit.toml, .github/workflows/audit.yml]
+  # Nightly, offset from the CI and fuzz crons. The lockfile does not have to
+  # change for this to start failing, which is the point of the schedule.
+  schedule: [cron: "10 2 * * *"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      # cargo-audit works from the lockfile, so neither the submodules nor a
+      # build of anything are needed here.
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # What fails the job is in .cargo/audit.toml rather than in flags here,
+      # so that the same policy applies to a run from a working copy.
+      - run: cargo audit

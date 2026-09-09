@@ -1,0 +1,24 @@
+# What `cargo audit` fails on. The audit workflow runs the tool with no flags,
+# so a run from the repository root reaches the same verdict as CI does.
+# cargo-audit looks for this file at ./.cargo/audit.toml and falls back to
+# $CARGO_HOME/audit.toml; it does not search upwards, so a run from a member
+# directory gets whatever policy that finds instead.
+
+[advisories]
+# atty 0.2.14, in the graph only through clap 3 (autocxx-gen, autocxx-reduce
+# and the mdbook preprocessor): a Windows-only unaligned read which needs a
+# custom global allocator to bite. Parked with the clap 3 -> 4 migration, which
+# is what removes the crate. RUSTSEC-2024-0375, unmaintained against the same
+# crate, is left reported as a warning.
+ignore = ["RUSTSEC-2021-0145"]
+
+[output]
+# cargo-audit files unsoundness as a warning, so an unconfigured run exits 0 on
+# it - RUSTSEC-2026-0190 against anyhow was one of those. Unmaintained stays a
+# warning by choice: those advisories are answered by dropping or replacing the
+# crate rather than by a version bump, so a red run every night would report a
+# migration already decided on and not yet done.
+deny = ["unsound"]
+# No default once this section is written out; cargo-audit rejects the file
+# without it.
+quiet = false

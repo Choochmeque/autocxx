@@ -37,7 +37,7 @@ jobs:
     # should be killed rather than left to the 6h default.
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       # cargo-fuzz needs nightly: the sanitizer and coverage instrumentation
