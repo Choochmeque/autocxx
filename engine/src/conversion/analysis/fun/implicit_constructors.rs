@@ -16,7 +16,9 @@ use itertools::Itertools;
 use syn::{PatType, Type};
 
 use crate::conversion::analysis::type_converter::TypeKind;
-use crate::conversion::type_helpers::{array_element_type, unwrap_reference};
+use crate::conversion::type_helpers::{
+    array_element_type, is_volatile_qualified, unwrap_reference,
+};
 use crate::{
     conversion::{
         analysis::{
@@ -258,12 +260,17 @@ fn describe_base(base: &QualifiedName) -> String {
 /// Describes a field for [`WhyNoSpecialMember::DependencyLacksIt`], with
 /// whatever of its name and type we happen to know.
 ///
-/// Says when the field is `const`, because the answers recorded against a
-/// `const` field are about the field and not about its type - see where
-/// `fields_items_found` is built - and a reader who went and looked the type up
-/// would find it can do the thing we said was missing.
+/// Says when the field is `const` or `volatile`, because the answers recorded
+/// against a qualified field are about the field and not about its type - see
+/// where `fields_items_found` is built - and a reader who went and looked the
+/// type up would find it can do the thing we said was missing.
 fn describe_field(field: &FieldInfo, ty: Option<&QualifiedName>) -> String {
-    let qualifier = if field.is_const { "`const` " } else { "" };
+    let qualifier = match (field.is_const, field.is_volatile) {
+        (true, true) => "`const volatile` ",
+        (true, false) => "`const` ",
+        (false, true) => "`volatile` ",
+        (false, false) => "",
+    };
     match (&field.name, ty) {
         (Some(name), Some(ty)) => {
             format!("{qualifier}field `{name}` of type `{}`", ty.to_cpp_name())
@@ -500,6 +507,7 @@ pub(super) fn find_constructors_present(
         explicits,
         unknown_types,
         const_move_constructors,
+        const_volatile_copy_constructors,
     } = find_explicit_items(apis);
     let enums: HashSet<QualifiedName> = apis
         .iter()
@@ -702,6 +710,83 @@ pub(super) fn find_constructors_present(
                             .const_move_constructor
                             .unwrap_or(items_found.const_copy_constructor);
                         items_found.non_const_copy_constructor = SpecialMemberFound::NotPresent;
+                    }
+                    // A `volatile` field is not its type either, and the
+                    // qualifier is stricter than `const`. C++ direct-initializes
+                    // each member from the corresponding member of the source
+                    // ([class.copy.ctor]/15.3), so a copy of the containing class
+                    // reads a `const volatile M` lvalue and a move reads a
+                    // `volatile M` xvalue. Where overload resolution finds no
+                    // usable candidate for that, C++ defines the containing
+                    // constructor as deleted ([class.copy.ctor]/10.1).
+                    //
+                    // The two directions do not come out the same.
+                    //
+                    // The copy survives if M declared a constructor taking a
+                    // `const volatile M&`, that being the one reference the
+                    // lvalue binds to; [class.copy.ctor]/7 names that spelling
+                    // alongside `const M&` for this reason.
+                    //
+                    // The move is withdrawn either way. Only a reference whose
+                    // referent is volatile-qualified can bind the xvalue - an
+                    // lvalue reference binds to an rvalue only where it is
+                    // const-qualified and *not* volatile-qualified
+                    // ([dcl.init.ref]/5.2), so `M(const volatile M&)` does not
+                    // take one, and `M(const M&)` and `M(M&&)` drop the
+                    // qualifier. An `M(volatile M&&)` would take it and C++ does
+                    // keep the containing move for one; nothing here records
+                    // that spelling, and the conservative answer is given
+                    // instead. See
+                    // `test_volatile_class_member_conservative_where_cpp_keeps_more`.
+                    //
+                    // Withdrawing it is not merely conservative. A synthesized
+                    // move emits `std::move`, and where C++ has deleted the move
+                    // constructor that is not an error: a defaulted move
+                    // constructor defined as deleted is excluded from overload
+                    // resolution ([over.match.funcs.general]/9), so the
+                    // expression silently selects the *copy* constructor where
+                    // the class has a usable one. Claiming the move on that
+                    // basis compiles only for as long as the copy survives, and
+                    // a second field with a usable move and a deleted copy
+                    // leaves nothing to select at all.
+                    //
+                    // Only a member held by value, and only of class type: C++
+                    // copies a scalar by reading it, which is the volatile
+                    // access the qualifier asks for, so a built-in, an
+                    // enumeration or a pointer deletes nothing.
+                    // `copyable_from_volatile` is the question the field
+                    // accessors ask of a `volatile` member, and the two answers
+                    // have to agree.
+                    //
+                    // After the `const` rule, not before: a `const volatile`
+                    // member is answered by this one, an `M(const M&&)` being no
+                    // more able to bind a `volatile` xvalue than `M(const M&)`.
+                    let volatile_member_of_class_type = field_info.is_volatile
+                        && matches!(
+                            field_info.type_kind,
+                            TypeKind::Regular | TypeKind::SubclassHolder(_)
+                        )
+                        && (field_info.holds_std_array
+                            || !ty.as_ref().is_some_and(|ty| {
+                                enums.contains(ty) || known_types().copyable_from_volatile(ty)
+                            }));
+                    if volatile_member_of_class_type {
+                        // A lowered `std::array` is a class whose constructors
+                        // nothing here reports: `ty` is the element type, which
+                        // is what a C array would be asked about, and the
+                        // element's constructors are not the array's. So the
+                        // rescue is not available to one: `std::array`'s own
+                        // implicit copy constructor binds no volatile source
+                        // whichever form C++ gives it.
+                        if field_info.holds_std_array
+                            || !ty
+                                .as_ref()
+                                .is_some_and(|ty| const_volatile_copy_constructors.contains(ty))
+                        {
+                            items_found.const_copy_constructor = SpecialMemberFound::NotPresent;
+                        }
+                        items_found.non_const_copy_constructor = SpecialMemberFound::NotPresent;
+                        items_found.move_constructor = SpecialMemberFound::NotPresent;
                     }
                     Some((describe_field(field_info, ty.as_ref()), items_found))
                 })
@@ -1409,11 +1494,18 @@ struct ExplicitItems {
     /// The classes whose declared move constructor takes a `const T&&`. See
     /// [`ItemsFound::const_move_constructor`].
     const_move_constructors: HashSet<QualifiedName>,
+    /// The classes whose declared copy constructor takes a `const volatile
+    /// T&`. That is the only source a `volatile` member of the class can be
+    /// *copied* from - it cannot be moved from, an lvalue reference to a
+    /// volatile type binding to no rvalue - so it is what a class holding one
+    /// has to ask about; see where `fields_items_found` acts on `is_volatile`.
+    const_volatile_copy_constructors: HashSet<QualifiedName>,
 }
 
 fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
     let mut result = HashMap::new();
     let mut const_move_constructors = HashSet::new();
+    let mut const_volatile_copy_constructors = HashSet::new();
     let mut merge_fun = |ty: QualifiedName, kind: ExplicitKind, fun: &FuncToConvert| match result
         .entry(ExplicitType { ty, kind })
     {
@@ -1527,7 +1619,17 @@ fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
                 // "copyable from a const source", which is exactly what the
                 // rule choosing the shape of a containing class's implicit
                 // copy constructor asks about.
-                TraitMethodKind::CopyConstructor => Some(ExplicitKind::ConstCopyConstructor),
+                TraitMethodKind::CopyConstructor => {
+                    // The slot conflates the two const-qualified spellings,
+                    // which is right for every rule but one: a `volatile`
+                    // member can only be copied from a `const volatile T&`,
+                    // `T(const T&)` binding to no volatile source. Record which
+                    // spelling it was.
+                    if source_is_const_volatile_reference(&fun.inputs) {
+                        const_volatile_copy_constructors.insert(impl_for.clone());
+                    }
+                    Some(ExplicitKind::ConstCopyConstructor)
+                }
                 TraitMethodKind::MoveConstructor => {
                     // C++ counts `T(const T&&)` as a move constructor like any
                     // other, so it stays in the same slot and every rule which
@@ -1552,6 +1654,7 @@ fn find_explicit_items(apis: &ApiVec<FnPrePhase1>) -> ExplicitItems {
         explicits: result,
         unknown_types,
         const_move_constructors,
+        const_volatile_copy_constructors,
     }
 }
 
@@ -1615,6 +1718,33 @@ fn source_is_const_rvalue_reference(
             Type::Path(typ) => {
                 matches!(unwrap_reference(typ, true), Some(ptr) if ptr.mutability.is_none())
             }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether the object a copy constructor copies *from* is a `const volatile
+/// T&`.
+///
+/// Only that spelling can copy a `volatile` member: the member's own
+/// qualifier is part of the source's type, and neither `const T&` nor `T&`
+/// binds to a `volatile` glvalue. [class.copy.ctor]/7 names it alongside
+/// `const T&` when deciding the shape of a containing class's implicit copy
+/// constructor, which is why the two cannot be left conflated.
+///
+/// bindgen writes a reference as `__bindgen_marker_Reference<P>` where `P` is
+/// a pointer carrying the constness of the referent; the referent's
+/// volatility is on the pointee, Rust having no volatile pointer type. Only
+/// the source is asked about, as in [`source_is_const_rvalue_reference`].
+fn source_is_const_volatile_reference(
+    inputs: &syn::punctuated::Punctuated<crate::minisyn::FnArg, syn::token::Comma>,
+) -> bool {
+    // bindgen puts the receiver first and the source immediately after it.
+    match inputs.iter().nth(1).map(|input| &input.0) {
+        Some(syn::FnArg::Typed(PatType { ty, .. }, ..)) => match ty.as_ref() {
+            Type::Path(typ) => matches!(unwrap_reference(typ, false), Some(ptr)
+                if ptr.mutability.is_none() && is_volatile_qualified(&ptr.elem)),
             _ => false,
         },
         _ => false,

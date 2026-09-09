@@ -26,7 +26,7 @@ use crate::{
         check_for_fatal_attrs,
         convert_error::{ConvertErrorWithContext, ErrorContext},
         error_reporter::convert_apis,
-        type_helpers::array_element_type,
+        type_helpers::{array_element_type, holds_std_array, is_volatile_qualified},
         ConvertErrorFromCpp,
     },
     known_types::known_types,
@@ -52,6 +52,17 @@ pub(crate) struct FieldInfo {
     /// constructor unless the field also has a default member initializer;
     /// see `find_constructors_present`.
     pub(crate) is_const: bool,
+    /// Whether C++ declared the field itself `volatile`, as opposed to it
+    /// pointing at something volatile. For a field of class type that deletes
+    /// the enclosing class's implicitly declared copy and move constructors,
+    /// unless a constructor of the field's own type accepts the qualified
+    /// source; see `find_constructors_present`.
+    pub(crate) is_volatile: bool,
+    /// Whether the field holds a lowered C++ `std::array` - as its own type,
+    /// or as the element of a C array of them. `ty` spells a `std::array` and a
+    /// C array alike, and they are not copied alike: one is a class, copied by
+    /// calling a constructor, the other is copied element by element.
+    pub(crate) holds_std_array: bool,
     /// Whether C++ gave the field a default member initializer, `int x = 5;`.
     /// One stands in for whatever an implicitly declared default constructor
     /// would otherwise have had to do with the field.
@@ -374,6 +385,19 @@ fn get_struct_field_types(
                         ty: r.ty,
                         type_kind: r.kind,
                         is_const: r.is_const,
+                        // Read off the type bindgen wrote rather than the
+                        // converted one: the converter peels the `volatile`
+                        // marker without recording it, there being no Rust
+                        // spelling for the qualifier to survive into.
+                        is_volatile: is_volatile_qualified(&f.ty),
+                        // Two channels for the same fact, as for `is_const`,
+                        // and each sees what the other cannot. The type
+                        // bindgen wrote still has the C array layers of
+                        // `std::array<T, N> a[2]`, which conversion flattens
+                        // away; the converted type has been resolved through
+                        // an alias, whose target carries the marker that
+                        // `volatile A a` does not spell.
+                        holds_std_array: holds_std_array(&f.ty) || r.is_std_array,
                         has_default_initializer: false,
                         bindgen_opaque_data: f
                             .ident
@@ -414,6 +438,11 @@ fn add_reported_field_facts(field_info: &mut [FieldInfo], data_members: &[DataMe
         // report reads the member's type in bindgen's IR, where the qualifier
         // is still on whichever link of an alias chain C++ put it.
         field.is_const |= reported.is_const;
+        // The other qualifier reaches us the same two ways, and the report is
+        // the channel which sees one written on an alias: `typedef volatile
+        // Inner vi;` is resolved through before the field's type is emitted,
+        // so no marker lands on it.
+        field.is_volatile |= reported.is_volatile;
     }
 }
 

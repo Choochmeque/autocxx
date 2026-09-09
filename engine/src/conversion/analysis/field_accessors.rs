@@ -374,6 +374,13 @@ fn member_shape(
     // A pointer member is handed over as the pointer it is - always copyable,
     // whatever it points at - and the type converter has already had its say
     // about what may be pointed at.
+    //
+    // One pointee it has not: a `volatile T*` member earns a getter whose
+    // generated C++ returns a plain `T*`, which will not compile against a
+    // `volatile T* const` member. The qualifier survives this far for a pointer
+    // *parameter* or return, where it becomes a volatile handle; a field's
+    // getter is written as a wrapper whose return type is rendered without it.
+    // Such a member has to be private to be bindable today.
     if is_pointer_like(&field_info.ty) {
         return Ok(Shape::ByValue);
     }
