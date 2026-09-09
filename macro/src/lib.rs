@@ -51,7 +51,7 @@ fn subclass_impl(attr: TokenStream, item: TokenStream) -> Result<proc_macro2::To
         use syn::spanned::Spanned;
         return Err(Error::new(
             s.vis.span(),
-            "Rust subclasses of C++ types must by public",
+            "Rust subclasses of C++ types must be public",
         ));
     }
     let id = &s.ident;

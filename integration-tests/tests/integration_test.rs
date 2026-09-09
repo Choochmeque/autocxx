@@ -19,7 +19,7 @@ use crate::{
 };
 use autocxx_integration_tests::{
     directives_from_lists, do_run_test, do_run_test_manual, make_msvc_warning_scope,
-    run_generate_all_test, run_test, run_test_ex, run_test_expect_fail, run_test_expect_fail_ex,
+    run_generate_all_test, run_test, run_test_ex, run_test_expect_fail,
     run_test_expect_fail_with_error, run_test_expect_fail_with_error_ex,
     run_test_expect_fail_with_error_modified, run_test_expect_fail_with_errors,
     run_test_expect_fail_with_errors_ex, BuilderModifier, CodeCheckerFns, TestError,
@@ -993,7 +993,22 @@ fn test_negative_take_as_pod_with_destructor() {
         let a = ffi::Bob { a: 12, b: 13 };
         assert_eq!(ffi::take_bob(a), 12);
     };
-    run_test_expect_fail(cxx, hdr, rs, &["take_bob"], &["Bob"]);
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob"],
+        &["Bob"],
+        // autocxx writes this static_assert itself, so the text is a C++ string
+        // literal every compiler echoes back; only the framing around it differs.
+        &[
+            "CppBuild",
+            "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type Bob should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
+        ],
+    );
 }
 
 #[test]
@@ -1017,7 +1032,20 @@ fn test_negative_take_as_pod_with_move_constructor() {
         let a = ffi::Bob { a: 12, b: 13 };
         assert_eq!(ffi::take_bob(a), 12);
     };
-    run_test_expect_fail(cxx, hdr, rs, &["take_bob"], &["Bob"]);
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob"],
+        &["Bob"],
+        &[
+            "CppBuild",
+            "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type Bob should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
+        ],
+    );
 }
 
 #[test]
@@ -4187,7 +4215,14 @@ fn test_negative_rs_nonsense() {
     let rs = quote! {
         foo bar
     };
-    run_test_expect_fail(cxx, hdr, rs, &["BOB"], &[]);
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        rs,
+        &["BOB"],
+        &[],
+        "syntax error interpreting Rust code",
+    );
 }
 
 #[test]
@@ -4202,7 +4237,17 @@ fn test_negative_cpp_nonsense() {
     let rs = quote! {
         assert_eq!(ffi::BOB, 3);
     };
-    run_test_expect_fail(cxx, hdr, rs, &["BOB"], &[]);
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs,
+        &["BOB"],
+        &[],
+        // autocxx parses the header with libclang on every platform, so the
+        // stage is fixed wherever this runs; the wording of the diagnostic is
+        // clang's to change between versions, the name it complains about is not.
+        &["ClangDiagnostic", "CAT"],
+    );
 }
 
 #[test]
@@ -4235,9 +4280,35 @@ fn test_negative_make_nonpod() {
     let rs3 = quote! {
         ffi::Bob { do_not_attempt_to_allocate_nonpod_types: [] };
     };
-    run_test_expect_fail(cxx, hdr, rs, &["take_bob", "Bob", "make_bob"], &[]);
-    run_test_expect_fail(cxx, hdr, rs2, &["take_bob", "Bob", "make_bob"], &[]);
-    run_test_expect_fail(cxx, hdr, rs3, &["take_bob", "Bob", "make_bob"], &[]);
+    run_test_expect_fail_with_error(
+        cxx,
+        hdr,
+        rs,
+        &["take_bob", "Bob", "make_bob"],
+        &[],
+        "cannot construct `ffi::Bob` with struct literal syntax due to private fields",
+    );
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs2,
+        &["take_bob", "Bob", "make_bob"],
+        &[],
+        &["E0560", "has no field named `a`"],
+    );
+    // autocxx emits no field of this name any more, so this snippet now says
+    // only that an invented field name is rejected.
+    run_test_expect_fail_with_errors(
+        cxx,
+        hdr,
+        rs3,
+        &["take_bob", "Bob", "make_bob"],
+        &[],
+        &[
+            "E0560",
+            "has no field named `do_not_attempt_to_allocate_nonpod_types`",
+        ],
+    );
 }
 
 #[test]
@@ -6312,7 +6383,17 @@ fn test_typedef_to_nonpod_struct_field_rejected() {
         };
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &[], &["Outer"]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &[],
+        &["Outer"],
+        &[
+            "InnerAlias could not be POD because it is a typedef to Inner",
+            "std::string isn't safe to be POD",
+        ],
+    );
 }
 
 #[test]
@@ -8386,7 +8467,18 @@ fn test_abstract_nested_type() {
     // N::A_B is an abstract nested type which we can't represent, so the
     // explicitly requested take_A_B can't be generated either - and saying so
     // beats silently generating nothing (google/autocxx#1269).
-    run_test_expect_fail("", hdr, rs, &["take_A_B", "N::A_B"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_A_B", "N::A_B"],
+        &[],
+        &[
+            "take_A_B",
+            "did not result in any usable code being generated",
+            "AbstractNestedType",
+        ],
+    );
 }
 
 #[test]
@@ -12688,7 +12780,14 @@ fn test_union_pod() {
     };
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &[], &["A"]);
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        rs,
+        &[],
+        &["A"],
+        "Type A could not be POD because it is a union",
+    );
 }
 
 #[test]
@@ -14138,7 +14237,20 @@ fn test_type_called_type() {
     // We can't generate `take_type` (its parameter is a forward declaration
     // as far as we're concerned) and it was explicitly requested, so this is
     // reported rather than silently skipped - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["take_type"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_type"],
+        &[],
+        // What bindgen made of `a::b<4>::type` is bindgen's business; that the
+        // directive is refused, and refused for that argument, is ours.
+        &[
+            "take_type",
+            "did not result in any usable code being generated",
+            "Problem handling function argument",
+        ],
+    );
 }
 
 #[test]
@@ -14274,7 +14386,18 @@ fn test_error_fatal_for_explicitly_generated_static_data() {
         extern const uint32_t FOO[3];
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["FOO"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["FOO"],
+        &[],
+        &[
+            "FOO",
+            "did not result in any usable code being generated",
+            "StaticDataOfUnsupportedType",
+        ],
+    );
 }
 
 #[test]
@@ -14290,14 +14413,22 @@ fn test_error_generated_for_array_dependent_function() {
         }
     "};
     let rs = quote! {};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         rs,
         quote! { generate! ("take_func")},
         None,
-        None,
-        None,
+        // Which route the refusal takes differs by standard library: bindgen
+        // substitutes an opaque blob for the std::function under libc++ and
+        // libstdc++, and names it under MSVC's, so one arrives against the
+        // argument and the other against the dependent type. Both append the
+        // same advice.
+        &[
+            "take_func",
+            "did not result in any usable code being generated",
+            "std::function is not supported by bindgen or cxx",
+        ],
     );
 }
 
@@ -14341,7 +14472,20 @@ fn test_error_generated_for_pod_with_nontrivial_destructor() {
         inline void take_a(A) {}
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["take_a"], &["A"]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_a"],
+        &["A"],
+        &[
+            "CppBuild",
+            "type A should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type A should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
+        ],
+    );
 }
 
 #[test]
@@ -14353,7 +14497,18 @@ fn test_error_generated_for_double_underscore() {
         inline void __thingy() {}
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["__thingy"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["__thingy"],
+        &[],
+        &[
+            "__thingy",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
+    );
 }
 
 #[test]
@@ -14371,7 +14526,20 @@ fn test_error_generated_for_pod_with_nontrivial_move_constructor() {
         inline void take_a(A) {}
     "};
     let rs = quote! {};
-    run_test_expect_fail("", hdr, rs, &["take_a"], &["A"]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["take_a"],
+        &["A"],
+        &[
+            "CppBuild",
+            "type A should be trivially move constructible and trivially destructible to be used with generate_pod!",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type A should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
+        ],
+    );
 }
 
 #[test]
@@ -14578,7 +14746,19 @@ fn test_underscored_namespace_for_inner_type() {
     let rs = quote! {};
     // The namespace name isn't acceptable to cxx, so the explicitly requested
     // `bar` can't be generated and we say so - google/autocxx#1269.
-    run_test_expect_fail("", hdr, rs, &["bar"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["bar"],
+        &[],
+        &[
+            "bar",
+            "did not result in any usable code being generated",
+            "__foo::daft_bob",
+            "Names containing __ are reserved by C++",
+        ],
+    );
 }
 
 #[test]
@@ -19530,7 +19710,17 @@ fn test_issue_1366_reference_field_still_has_no_default_ctor() {
             let mut _stack_obj = ffi::A::new();
         }
     };
-    run_test_expect_fail("", hdr, rs, &["A"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["A"],
+        &[],
+        &[
+            "E0599",
+            "no associated function or constant named `new` found",
+        ],
+    );
 }
 
 #[test]
@@ -19622,7 +19812,18 @@ fn test_issue_1269_explicit_fn_discarded_by_name_check() {
     let hdr = indoc! {"
         inline int __ykllvmwrap_irtrace_compile(int a) { return a; }
     "};
-    run_test_expect_fail("", hdr, quote! {}, &["__ykllvmwrap_irtrace_compile"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["__ykllvmwrap_irtrace_compile"],
+        &[],
+        &[
+            "__ykllvmwrap_irtrace_compile",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
+    );
 }
 
 /// An explicitly requested function whose parameter type is rejected during
@@ -19633,7 +19834,7 @@ fn test_issue_1269_explicit_fn_discarded_due_to_param() {
         struct Blocked { int a; };
         inline int uses_blocked(Blocked& b) { return b.a; }
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {},
@@ -19642,8 +19843,11 @@ fn test_issue_1269_explicit_fn_discarded_due_to_param() {
             block!("Blocked")
         },
         None,
-        None,
-        None,
+        &[
+            "uses_blocked",
+            "did not result in any usable code being generated",
+            "marked as blocked!",
+        ],
     );
 }
 
@@ -19655,7 +19859,7 @@ fn test_issue_1269_explicit_type_discarded_by_name_check() {
     let hdr = indoc! {"
         namespace a { struct __Dupe { int q; }; }
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {},
@@ -19663,8 +19867,11 @@ fn test_issue_1269_explicit_type_discarded_by_name_check() {
             generate!("a::__Dupe")
         },
         None,
-        None,
-        None,
+        &[
+            "a::__Dupe",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
     );
 }
 
@@ -20025,7 +20232,7 @@ fn test_pv_subclass_calls_impossible() {
     };
     inline void bar() {}
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -20035,8 +20242,6 @@ fn test_pv_subclass_calls_impossible() {
             generate!("bar")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use autocxx::subclass::CppSubclass;
             use ffi::Observer_methods;
@@ -20051,6 +20256,7 @@ fn test_pv_subclass_calls_impossible() {
                 }
             }
         }),
+        &["Observer_supers", "E0599", "foo_super"],
     );
 }
 
@@ -20067,7 +20273,7 @@ fn test_pv_subclass_not_pub() {
     };
     inline void bar() {}
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -20077,8 +20283,6 @@ fn test_pv_subclass_not_pub() {
             generate!("bar")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use autocxx::subclass::CppSubclass;
             use ffi::Observer_methods;
@@ -20091,6 +20295,7 @@ fn test_pv_subclass_not_pub() {
                 }
             }
         }),
+        &["Rust subclasses of C++ types must be public"],
     );
 }
 
@@ -21074,7 +21279,7 @@ fn test_subclass_superclass_protected_destructor_still_unownable() {
         virtual ~Observer() {}
     };
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -21084,8 +21289,6 @@ fn test_subclass_superclass_protected_destructor_still_unownable() {
             generate!("Observer")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use ffi::Observer_methods;
             #[autocxx::subclass::subclass]
@@ -21095,6 +21298,11 @@ fn test_subclass_superclass_protected_destructor_still_unownable() {
             impl Observer_methods for MyObserver {
             }
         }),
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_box",
+        ],
     );
 }
 
@@ -21905,7 +22113,7 @@ fn test_pv_subclass_fancy_constructor() {
     };
     inline void take_observer(const Observer&) {}
     "};
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -21916,8 +22124,6 @@ fn test_pv_subclass_fancy_constructor() {
             generate!("take_observer")
             subclass!("Observer",MyObserver)
         },
-        None,
-        None,
         Some(quote! {
             use autocxx::subclass::CppSubclass;
             use ffi::Observer_methods;
@@ -21931,6 +22137,7 @@ fn test_pv_subclass_fancy_constructor() {
                 }
             }
         }),
+        &["E0277", "CppPeerConstructor"],
     );
 }
 
@@ -25518,7 +25725,18 @@ fn test_array_trouble2() {
     "};
     // The typedef takes generic parameters so we can't generate it; it was
     // asked for by name, so we report that - google/autocxx#1269.
-    run_test_expect_fail("", hdr, quote! {}, &["array_d"], &[]);
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["array_d"],
+        &[],
+        &[
+            "array_d",
+            "did not result in any usable code being generated",
+            "TypedefTakesGenericParameters",
+        ],
+    );
 }
 
 #[test]
@@ -25887,12 +26105,13 @@ fn test_ctype_wrapper_name_collision_is_refused() {
             return std::unique_ptr<uint32_t>(new uint32_t(7));
         }
     "};
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {},
         &["fx_read_colliding", "fx_make_u32"],
         &["c_u32"],
+        &["InvalidCxx", "unsupported type: c_u32"],
     );
 }
 
@@ -28287,7 +28506,16 @@ fn test_cpp_union_pod() {
         } CorrelationId_t;
     "};
     run_test("", hdr, quote! {}, &["CorrelationId_t_"], &[]);
-    run_test_expect_fail("", hdr, quote! {}, &[], &["CorrelationId_t_"]);
+    // The reason names bindgen's own spelling of the anonymous union, which is
+    // not ours to rely on; the classification and the subject are.
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["CorrelationId_t_"],
+        &["UnsafePodType", "CorrelationId_t_ could not be POD"],
+    );
 }
 
 /// The shape of a class which C++ deliberately forbids anyone else from
@@ -28338,7 +28566,7 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
     );
     // Constructing one and letting Rust own it used to compile, then free the
     // memory without ever running the C++ destructor.
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {
@@ -28346,9 +28574,14 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_box",
+        ],
     );
     // Nor may it be owned via a UniquePtr...
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {
@@ -28356,9 +28589,14 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_unique_ptr",
+        ],
     );
     // ...nor on the Rust stack.
-    run_test_expect_fail(
+    run_test_expect_fail_with_errors(
         "",
         hdr,
         quote! {
@@ -28366,6 +28604,7 @@ fn assert_no_owning_apis_for_inaccessible_destructor(hdr: &str) {
         },
         &["A", "get_a"],
         &[],
+        &["E0624", "associated function `new` is private", "E0277"],
     );
 }
 
@@ -30121,7 +30360,20 @@ fn test_pure_virtual_destructor_no_make_unique() {
     let rs = quote! {
         let _ = ffi::PureDtorNoNew::new().within_unique_ptr();
     };
-    run_test_expect_fail("", hdr, rs, &["PureDtorNoNew"], &[]);
+    // Not the private `new` the inaccessible-destructor tests get: here there
+    // is no `new` at all.
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        rs,
+        &["PureDtorNoNew"],
+        &[],
+        &[
+            "E0599",
+            "no associated function or constant named `new` found",
+            "PureDtorNoNew",
+        ],
+    );
 }
 
 #[test]
@@ -32824,7 +33076,7 @@ fn test_opaque_type_with_inaccessible_destructor_is_not_owned() {
         None,
     );
     // Owning one does not.
-    run_test_expect_fail_ex(
+    run_test_expect_fail_with_errors_ex(
         "",
         hdr,
         quote! {
@@ -32832,8 +33084,11 @@ fn test_opaque_type_with_inaccessible_destructor_is_not_owned() {
         },
         directives,
         None,
-        None,
-        None,
+        &[
+            "E0624",
+            "associated function `new` is private",
+            "within_unique_ptr",
+        ],
     );
 }
 
