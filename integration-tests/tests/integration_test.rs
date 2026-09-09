@@ -9879,11 +9879,14 @@ fn test_take_array() {
     run_test("", hdr, rs, &["take_array"], &[]);
 }
 
-/// A *reference* to an array keeps the array type where a plain array
+/// A *reference* to a C array keeps the array type where a plain array
 /// parameter would have decayed: `const uint32_t (&a)[4]` reaches autocxx as
 /// `&[u32; 4]`, and cxx writes a Rust `[T; N]` as `std::array<T, N>`, so the
-/// bridge declared a parameter the function has not got. autocxx turns it down
-/// instead. Part of the arrays request reported upstream as google/autocxx#266;
+/// bridge would declare a parameter the function has not got. autocxx turns it
+/// down instead, and can say so specifically now that
+/// `36-std-array-marker.patch` tells it which of the two C++ array types a
+/// `[T; N]` came from - `test_std_array_const_reference_param` is the one it
+/// binds. Part of the arrays request reported upstream as google/autocxx#266;
 /// `test_take_array` is the decayed parameter, which is unaffected.
 #[test]
 fn test_array_reference_param_refused() {
@@ -9899,7 +9902,7 @@ fn test_array_reference_param_refused() {
         quote! {},
         &["take_array_ref"],
         &[],
-        "keeps a C++ array in its signature",
+        "takes or returns a reference to a C array",
     );
 }
 
@@ -9917,7 +9920,7 @@ fn test_mutable_array_reference_param_refused() {
         quote! {},
         &["take_mut_array_ref"],
         &[],
-        "keeps a C++ array in its signature",
+        "takes or returns a reference to a C array",
     );
 }
 
@@ -9925,7 +9928,8 @@ fn test_mutable_array_reference_param_refused() {
 /// array is spelled out, but an alias hides it: `A4*` is a pointer to a path
 /// when that check looks, and only becomes `*mut [u32; 4]` once the alias is
 /// resolved. cxx then wrote `::std::array< ::std::uint32_t, 4> *` for a
-/// function taking `uint32_t (*)[4]`.
+/// function taking `uint32_t (*)[4]`. A pointer is the one indirection no
+/// `std::array` is bound behind either, so this refusal covers both.
 #[test]
 fn test_array_pointer_through_alias_refused() {
     let hdr = indoc! {"
@@ -10800,6 +10804,28 @@ fn test_volatile_array_member_refused() {
     );
 }
 
+/// A reference to a `volatile std::array` is not bound, and the reason is one
+/// layer further down than the reference. A `cv`-qualified `std::array` is a
+/// specialization `[T; N]` cannot spell the qualifier of, so
+/// `35-std-array-as-rust-array.patch` leaves it the opaque blob it always was,
+/// and a blob in a signature is refused. Opening the reference position does
+/// not open this one - which is the point, cxx having nothing to write in
+/// `std::array<T, N> const&` that would say the object is volatile.
+#[test]
+fn test_volatile_std_array_reference_param_refused() {
+    // Declared and not defined: `std::array`'s `operator[]` is not
+    // volatile-qualified, so a body which indexed one would not compile, and
+    // nothing needs the definition once the signature is refused. The element
+    // is one which crosses on its own, so the qualifier is the only thing
+    // under test.
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    uint32_t sum(volatile std::array<uint8_t, 4>& a);
+    "};
+    run_test_expect_fail_with_error("", hdr, quote! {}, &["sum"], &[], "opaque blob of bytes");
+}
+
 /// A struct with a `volatile` member cannot be POD, because a POD struct's
 /// fields are ordinary Rust fields and reading one is an ordinary load. Asking
 /// for it by `generate_pod!` says so rather than handing over the field.
@@ -11540,25 +11566,187 @@ fn test_array_like_user_template_still_refused() {
     );
 }
 
-/// A reference to a `std::array` is still turned down, and the reason is that
-/// autocxx cannot see which of two C++ types it has: `const T (&)[N]` and
-/// `const std::array<T, N>&` both reach it as `&[T; N]`, and cxx writes the
-/// second for either. By value there is no such pair - C++ decays an array
-/// parameter and cannot return one at all - which is why that case is bound.
+/// A reference to a `std::array` is the way C++ usually passes one, and it is
+/// bound as a Rust reference to the array.
+///
+/// The reason it could not be until now is that `const T (&)[N]` and
+/// `const std::array<T, N>&` are different C++ types which reach autocxx as
+/// the same `&[T; N]` - bindgen writes `[T; N]` for the class and for the C
+/// array alike - and cxx spells that back as the `std::array`, so binding one
+/// would silently have been binding the other.
+/// `third_party/patches/36-std-array-marker.patch` keeps the two apart, and
+/// `test_array_reference_param_refused` is the one still turned down.
 #[test]
-fn test_std_array_reference_param_refused() {
+fn test_std_array_const_reference_param() {
     let hdr = indoc! {"
     #include <array>
     #include <cstdint>
     inline uint32_t sum(const std::array<uint8_t, 4>& a) { return a[0] + a[3]; }
     "};
-    run_test_expect_fail_with_error(
+    let rs = quote! {
+        let a = [1u8, 2, 3, 4];
+        assert_eq!(ffi::sum(&a), 5);
+    };
+    run_test("", hdr, rs, &["sum"], &[]);
+}
+
+/// The mutable spelling, which arrives as `Pin<&mut [T; N]>` as every other
+/// mutable C++ reference does. What crosses is the array itself rather than a
+/// copy of it, so what C++ writes is what Rust reads back.
+#[test]
+fn test_std_array_mutable_reference_param() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline void bump(std::array<uint8_t, 4>& a) { for (auto& e : a) { e += 1; } }
+    "};
+    let rs = quote! {
+        let mut a = [10u8, 20, 30, 40];
+        ffi::bump(std::pin::Pin::new(&mut a));
+        assert_eq!(a, [11u8, 21, 31, 41]);
+    };
+    run_test("", hdr, rs, &["bump"], &[]);
+}
+
+/// A reference return, whose lifetime autocxx takes from the receiver. cxx
+/// writes the same `std::array<T, N> const&` for it that it writes for the
+/// parameter.
+#[test]
+fn test_std_array_reference_return_from_method() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    class Holder {
+    public:
+        Holder() : data{5, 6, 7, 8} {}
+        const std::array<uint8_t, 4>& get() const { return data; }
+    private:
+        std::array<uint8_t, 4> data;
+    };
+    "};
+    let rs = quote! {
+        let holder = ffi::Holder::new().within_unique_ptr();
+        assert_eq!(holder.get(), &[5u8, 6, 7, 8]);
+    };
+    run_test("", hdr, rs, &["Holder"], &[]);
+}
+
+/// The mutable return, which is the one that shows the reference reaches the
+/// object C++ holds rather than a copy: writing through it and reading back
+/// through the const one sees the write.
+#[test]
+fn test_std_array_mutable_reference_return_from_method() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    class Holder {
+    public:
+        Holder() : data{5, 6, 7, 8} {}
+        const std::array<uint8_t, 4>& get() const { return data; }
+        std::array<uint8_t, 4>& data_mut() { return data; }
+    private:
+        std::array<uint8_t, 4> data;
+    };
+    "};
+    // `Pin::get_mut` is what takes the array back out of the `Pin` autocxx
+    // returns a mutable reference as; `[u8; 4]` is `Unpin`, so it is free.
+    let rs = quote! {
+        let mut holder = ffi::Holder::new().within_unique_ptr();
+        std::pin::Pin::get_mut(holder.pin_mut().data_mut())[0] = 9;
+        assert_eq!(holder.get(), &[9u8, 6, 7, 8]);
+    };
+    run_test("", hdr, rs, &["Holder"], &[]);
+}
+
+/// The alias spelling. The marker sits inside the alias's definition rather
+/// than at the use, so the fact reaches the reference through the typedef's
+/// own analysis - `TypedefAnalysis::target_is_std_array` - and not off the
+/// type, which by then is a bare `[T; N]`.
+#[test]
+fn test_std_array_reference_through_alias() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    using IVs = std::array<uint8_t, 4>;
+    inline uint32_t sum(const IVs& a) { return a[0] + a[3]; }
+    "};
+    let rs = quote! {
+        let a = [1u8, 2, 3, 4];
+        assert_eq!(ffi::sum(&a), 5);
+    };
+    run_test("", hdr, rs, &["sum"], &[]);
+}
+
+/// The element rule is the same behind a reference as by value: cxx names
+/// `std::array<T, N>` in either position, so a class autocxx will not pass by
+/// value is no more holdable in one here. Refused for the element, not for the
+/// reference.
+#[test]
+fn test_std_array_reference_of_bad_element_refused() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    #include <string>
+    struct Elem { std::string s; };
+    inline uint32_t total(const std::array<Elem, 2>& a) {
+        return a[0].s.size() + a[1].s.size();
+    }
+    "};
+    run_test_expect_fail_with_error("", hdr, quote! {}, &["total"], &[], "cannot cross by value");
+}
+
+/// The other side of that rule behind a reference: an element which does cross
+/// by value crosses here too, and needs the same certificate it needs by
+/// value - a reference is still cxx naming `std::array<T, N>`, so the element
+/// still has to be one it will hold in one.
+#[test]
+fn test_std_array_reference_of_pod_class() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    struct Elem { uint32_t v; };
+    inline uint32_t total(const std::array<Elem, 3>& a) {
+        return a[0].v + a[1].v + a[2].v;
+    }
+    "};
+    let rs = quote! {
+        let a = [
+            ffi::Elem { v: 1 },
+            ffi::Elem { v: 2 },
+            ffi::Elem { v: 4 },
+        ];
+        assert_eq!(ffi::total(&a), 7);
+    };
+    run_test("", hdr, rs, &["total"], &["Elem"]);
+}
+
+/// The same reference through the C++ wrapper autocxx writes, which is the
+/// path `AUTOCXX_FORCE_WRAPPER_GENERATION` puts every function down: the
+/// wrapper's parameter is declared in C++ by `type_to_cpp`, so this is what
+/// pins that it spells the reference the same way cxx does.
+#[test]
+fn test_std_array_reference_param_forced_wrapper() {
+    let hdr = indoc! {"
+    #include <array>
+    #include <cstdint>
+    inline uint32_t sum(const std::array<uint8_t, 4>& a) { return a[0] + a[3]; }
+    inline void bump(std::array<uint8_t, 4>& a) { for (auto& e : a) { e += 1; } }
+    "};
+    let rs = quote! {
+        let a = [1u8, 2, 3, 4];
+        assert_eq!(ffi::sum(&a), 5);
+        let mut b = [10u8, 20, 30, 40];
+        ffi::bump(std::pin::Pin::new(&mut b));
+        assert_eq!(b, [11u8, 21, 31, 41]);
+    };
+    run_test_ex(
         "",
         hdr,
-        quote! {},
-        &["sum"],
-        &[],
-        "keeps a C++ array in its signature",
+        rs,
+        directives_from_lists(&["sum", "bump"], &[], None),
+        Some(Box::new(ForceWrapperGeneration)),
+        None,
+        None,
     );
 }
 
@@ -24416,6 +24604,36 @@ fn test_volatile_member_of_a_class_with_an_undestroyable_member() {
         using bc = au<bb>;
         struct Owner { bc value; };
         struct Outer { volatile Owner owner; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Outer"], &[], None),
+        None,
+        Some(make_checks(vec![make_string_absence_finder(vec![
+            "impl UniquePtr < Outer >".to_string(),
+        ])])),
+        None,
+    );
+}
+
+/// A `std::array` of one of those, which is the two features meeting: the
+/// member is an array of a class C++ cannot destroy here, and the class is
+/// refused ownership for it. The traversal reaches the element by peeling the
+/// array layers and the markers on them together - see
+/// `unqualified_array_element_type`, which peels the `std::array` marker
+/// alongside the `const` one.
+#[test]
+fn test_std_array_member_of_a_class_with_an_undestroyable_member() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <memory>
+        template <typename at> class au { std::unique_ptr<at> aw; };
+        class bb;
+        using bc = au<bb>;
+        struct Owner { bc value; };
+        struct Outer { std::array<Owner, 2> owners; };
     "};
     run_test_ex(
         "",
