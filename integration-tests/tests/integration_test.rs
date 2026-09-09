@@ -15910,6 +15910,443 @@ fn test_replaces_cycle_through_a_class_template_is_not_followed_forever() {
     run_test_expect_fail("", hdr, quote! {}, &["fx_Holder"], &[]);
 }
 
+/// A class *deriving from* a substituted type is sized in Rust the way C++
+/// sizes it.
+///
+/// bindgen writes a base class as a field of the base's own type, and the same
+/// `replaces=` substitution which makes a member narrower than what C++
+/// declared makes that field narrower too. The measurement had not followed:
+/// the tracker was handed the type the class was declared to derive from,
+/// concluded the base had filled the room the target gave it, and emitted no
+/// padding for the difference. A `struct D : std::string { uint32_t n; }` came
+/// out sixteen bytes wide against C++'s thirty-two, and `within_box` then has
+/// C++ construct past the end of the storage Rust allocated - see
+/// `test_base_of_substituted_type_is_not_built_past_its_rust_storage`.
+///
+/// One row per route a base takes to the substitution: a substitute the header
+/// declares itself, with a member after the base and with none at all - the
+/// second measures the base against the class's own size rather than against
+/// the offset of a member - a base named through a typedef to a substituted
+/// type, a base out of autocxx's own prelude, and a base which is an
+/// instantiation of a prelude-substituted class *template*.
+///
+/// Then one row per way the run of bytes the stand-in does not fill has to be
+/// written out. A second base after the substituted one puts the class's own
+/// member at an offset whose distance from the emitted bases is not a whole
+/// number of that member's alignment, which is more bytes than the gap when it
+/// is written at that alignment. Two packed classes, which get no padding
+/// written for a gap `saw_field` counted at all, the second with a gap of a
+/// single byte that a class which was not packed would close on its own. And a
+/// stand-in *wider* than what it stands in for overruns the room the target
+/// gave the bases, which is the arm that collapses them to opaque bytes.
+///
+/// The last three rows compensate for nothing and say so: a member aligned more
+/// strictly than bindgen promises, whose padding is written at the eight bytes
+/// bindgen settles for and so is longer than the gap - that class was right
+/// before any of this and has to stay right - a base whose stand-in is exactly
+/// as wide as it is, and a base with no substitution at all.
+///
+/// One shape is left out. Where a substituted base is followed by another base,
+/// the field written for that second base still lands where the first one's
+/// stand-in left off rather than where the target puts it. The class reaches
+/// the size the target gave it and its own members are where C++ puts them,
+/// which is why `fx_Multi` can be asserted on at all; the later base is not.
+/// That is the same thing `18-base-class-extent.patch` records as out of reach
+/// for want of `clang_getOffsetOfBase`, which libclang has reported only since
+/// 20.0.
+#[test]
+fn test_base_of_substituted_type_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <memory>
+        #include <string>
+        #include <vector>
+        struct fx_WideReal { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_WideReal\"></div> */
+        struct fx_WideStand { void* p; };
+        // A member after the base, to be placed at the offset C++ gives it.
+        struct fx_Derived : fx_WideReal { uint32_t n; };
+        // And none at all, so only the class's own size says where the base
+        // ended.
+        struct fx_Bare : fx_WideReal {};
+        // The base named through a typedef to the substituted type.
+        typedef fx_WideReal fx_alias;
+        struct fx_Aliased : fx_alias { uint32_t n; };
+        // A base out of autocxx's own `replaces=` prelude.
+        struct fx_Prelude : std::string { uint32_t n; };
+        // And one which is an instantiation of a substituted class template.
+        struct fx_Template : std::vector<uint32_t> { uint32_t n; };
+        // A stand-in as wide as the type it stands in for: nothing to add.
+        struct fx_Same : std::unique_ptr<uint32_t> { uint32_t n; };
+        // A second base after the substituted one, and a member whose offset
+        // leaves a gap that is not a whole number of its own alignment.
+        struct fx_Other { char q; };
+        struct fx_Multi : fx_WideReal, fx_Other { uint32_t n; };
+        // A stand-in *wider* than the type it stands in for, which overruns
+        // the room the target gave the bases.
+        struct fx_Small { char p[3]; };
+        /** <div rustbindgen replaces=\"fx_Small\"></div> */
+        struct fx_Bigger { char p[9]; };
+        struct fx_Wider : fx_Small { uint64_t n; };
+        // No substitution at all: the arithmetic has to leave this alone.
+        struct fx_PlainBase { uint64_t a; uint64_t b; uint64_t c; };
+        struct fx_Plain : fx_PlainBase { uint32_t n; };
+        #pragma pack(push, 1)
+        // A packed class gets no padding written for a gap `saw_field`
+        // counted, so the run in front of its member has to be written where
+        // the bases end. The second is a gap of one byte, smaller than the
+        // alignment of what follows it, which a class that was not packed
+        // would close on its own.
+        struct fx_Packed : fx_WideReal { uint32_t n; };
+        struct fx_NineReal { char a[9]; };
+        struct fx_PackedTight : fx_NineReal { uint32_t n; };
+        #pragma pack(pop)
+        /** <div rustbindgen replaces=\"fx_NineReal\"></div> */
+        struct fx_EightStand { char a[8]; };
+        // A member whose alignment is stricter than bindgen promises: the
+        // padding written in front of one is a whole number of the eight bytes
+        // it settles for, which is more than the gap. This class was right
+        // before the run of bytes was written out where the bases end and has
+        // to stay right.
+        struct fx_WideChars { char a[24]; };
+        /** <div rustbindgen replaces=\"fx_WideChars\"></div> */
+        struct fx_NarrowChars { char a[17]; };
+        struct alignas(16) fx_Over { char a[16]; };
+        struct fx_Aligned : fx_WideChars { fx_Over a[1]; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_Derived);
+                case 1: return sizeof(fx_Bare);
+                case 2: return sizeof(fx_Aliased);
+                case 3: return sizeof(fx_Prelude);
+                case 4: return sizeof(fx_Template);
+                case 5: return sizeof(fx_Multi);
+                case 6: return sizeof(fx_Wider);
+                case 7: return sizeof(fx_Packed);
+                case 8: return sizeof(fx_PackedTight);
+                case 9: return sizeof(fx_Aligned);
+                case 10: return sizeof(fx_Same);
+                default: return sizeof(fx_Plain);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_Derived);
+                case 1: return alignof(fx_Bare);
+                case 2: return alignof(fx_Aliased);
+                case 3: return alignof(fx_Prelude);
+                case 4: return alignof(fx_Template);
+                case 5: return alignof(fx_Multi);
+                case 6: return alignof(fx_Wider);
+                case 7: return alignof(fx_Packed);
+                case 8: return alignof(fx_PackedTight);
+                case 9: return alignof(fx_Aligned);
+                case 10: return alignof(fx_Same);
+                default: return alignof(fx_Plain);
+            }
+        }
+    "};
+    let rs = quote! {
+        // Every row reported at once: one short class says little about the
+        // others, and the first assertion to fire would hide them.
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_Derived, "a substituted base with a member after it");
+        check!(1, ffi::fx_Bare, "a substituted base and nothing else");
+        check!(2, ffi::fx_Aliased, "a typedef to a substituted base");
+        check!(3, ffi::fx_Prelude, "a std::string base");
+        check!(4, ffi::fx_Template, "a std::vector<uint32_t> base");
+        check!(5, ffi::fx_Multi, "a substituted base and a second base");
+        check!(6, ffi::fx_Wider, "a base whose stand-in is wider");
+        check!(7, ffi::fx_Packed, "a substituted base in a packed class");
+        check!(8, ffi::fx_PackedTight, "a one byte gap in a packed class");
+        check!(9, ffi::fx_Aligned, "a member aligned more strictly than eight");
+        check!(10, ffi::fx_Same, "a std::unique_ptr<uint32_t> base");
+        check!(11, ffi::fx_Plain, "a base of no substituted type");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with a base class disagrees with C++:{report}"
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "fx_Derived",
+                "fx_Bare",
+                "fx_Aliased",
+                "fx_Prelude",
+                "fx_Template",
+                "fx_Multi",
+                "fx_Wider",
+                "fx_Packed",
+                "fx_PackedTight",
+                "fx_Aligned",
+                "fx_Same",
+                "fx_Plain",
+                "fx_size",
+                "fx_align",
+            ],
+            &[],
+            None,
+        ),
+        combine_modifiers(
+            // `fx_Over` wants more alignment than a pre-C++17 `operator new`
+            // gives, which autocxx refuses rather than under-aligns.
+            make_cpp17_adder(),
+            // C4324 is cl reporting that `fx_Aligned` was padded because of an
+            // alignment specifier, which is the whole of what that row is: a
+            // member aligned more strictly than bindgen promises, and the
+            // padding on either side of it. Take the `alignas` away and the
+            // row is not the row.
+            make_msvc_warning_scope(&[4324]),
+        ),
+        None,
+        None,
+    );
+}
+
+/// What a class short of its own base costs: C++ builds the object past the end
+/// of the storage Rust sized for it, over whatever Rust put next.
+///
+/// The size assertions above say the two languages agree on the number. This
+/// says what the number is for, in the manner of
+/// `test_array_of_substituted_type_is_not_built_past_its_rust_storage`: `new`
+/// is placement construction into storage the caller provides, `moveit` and
+/// `within_box` provide it at `size_of`, and a `size_of` short of `sizeof` is
+/// an overrun of exactly the difference. Here the storage is a field of a
+/// `repr(C)` struct, so what follows it is known rather than whatever the
+/// allocator happened to hand out.
+#[test]
+fn test_base_of_substituted_type_is_not_built_past_its_rust_storage() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        struct fx_GuardedBase { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_GuardedBase\"></div> */
+        struct fx_GuardedStand { void* p; };
+        struct fx_Guarded : fx_GuardedBase {
+            uint64_t n;
+            // Ordinary writes, one per member. The inherited ones land past
+            // where a short Rust size would end.
+            void fill() { a = 1; b = 2; c = 3; n = 4; }
+        };
+        inline size_t fx_guarded_sizeof() { return sizeof(fx_Guarded); }
+    "};
+    let rs = quote! {
+        // Without this the test could pass by the difference reaching past the
+        // canary rather than by there being none.
+        assert!(
+            ffi::fx_guarded_sizeof() <= std::mem::size_of::<Guarded>(),
+            "the canary is too short to cover what C++ would write"
+        );
+        let mut guarded = Guarded {
+            obj: core::mem::MaybeUninit::uninit(),
+            canary: [FX_CANARY; 16],
+        };
+        // SAFETY: `obj` is fresh storage which nothing has pinned, so the
+        // `New` contract holds; `guarded` is never moved after this point, as
+        // the object in it is not trivially relocatable; and the object is
+        // destroyed in place, while initialised, before `guarded` dies.
+        unsafe {
+            ffi::fx_Guarded::new().new(core::pin::Pin::new_unchecked(&mut guarded.obj));
+            let obj = core::pin::Pin::new_unchecked(&mut *guarded.obj.as_mut_ptr());
+            obj.fill();
+            core::ptr::drop_in_place(guarded.obj.as_mut_ptr());
+        }
+        // SAFETY: `canary` is live, initialised and aligned, and every bit
+        // pattern is a valid `[u64; 16]` - including one C++ overwrote.
+        //
+        // Volatile because nothing in Rust's model writes to `canary`, so a
+        // plain read may be folded to the value it was initialised with.
+        let canary = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(guarded.canary)) };
+        assert!(
+            canary.iter().all(|&word| word == FX_CANARY),
+            "C++ built a {} byte object into the {} bytes Rust sized for it, over {:x?}",
+            ffi::fx_guarded_sizeof(),
+            std::mem::size_of::<ffi::fx_Guarded>(),
+            canary
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Guarded", "fx_guarded_sizeof"], &[], None),
+        None,
+        None,
+        Some(quote! {
+            const FX_CANARY: u64 = 0x0123_4567_89ab_cdef;
+
+            /// `fx_Guarded` with Rust's own bytes immediately after it.
+            #[repr(C)]
+            struct Guarded {
+                obj: core::mem::MaybeUninit<ffi::fx_Guarded>,
+                canary: [u64; 16],
+            }
+        }),
+    );
+}
+
+/// A bitfield after a substituted base is put where the target puts it.
+///
+/// A bitfield allocation unit is laid out from where the tracker has reached
+/// rather than from an offset of its own, so nothing is ever written in front
+/// of one to close a gap - which is why the run of bytes a stand-in does not
+/// fill is written where the bases end rather than left to the member after
+/// them. `fx_BitTail` lends its tail padding to what a derived class lays out
+/// next under the Itanium ABI, so the bitfield starts at byte nine while the
+/// one-pointer stand-in written for the base ends at eight; under the MSVC ABI,
+/// which lends nothing, it starts at sixteen. Either way there is a gap, and
+/// either way the bitfield lands early without it.
+///
+/// The size assertion catches the MSVC case on its own. It cannot catch the
+/// Itanium one - the class ends at sixteen with the bitfield in the wrong place
+/// just as it does with it in the right one - so the padding field is read out
+/// of the generated Rust by name, which is the only place that offset is
+/// visible: a non-POD type's fields are never named again after bindgen writes
+/// them.
+#[test]
+fn test_bitfield_after_a_substituted_base_is_not_placed_early() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        struct fx_BitTail { fx_BitTail(); uint64_t x; char c; };
+        /** <div rustbindgen replaces=\"fx_BitTail\"></div> */
+        struct fx_BitStand { void* p; };
+        struct fx_Bits : fx_BitTail { unsigned char b : 1; };
+        inline size_t fx_bits_sizeof() { return sizeof(fx_Bits); }
+        inline size_t fx_bits_alignof() { return alignof(fx_Bits); }
+    "};
+    let cxx = indoc! {"
+        fx_BitTail::fx_BitTail() : x(0), c(0) {}
+    "};
+    let rs = quote! {
+        assert_eq!(
+            std::mem::size_of::<ffi::fx_Bits>(),
+            ffi::fx_bits_sizeof()
+        );
+        assert_eq!(
+            std::mem::align_of::<ffi::fx_Bits>(),
+            ffi::fx_bits_alignof()
+        );
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        directives_from_lists(&["fx_Bits", "fx_bits_sizeof", "fx_bits_alignof"], &[], None),
+        None,
+        // How many bytes the run is depends on the ABI - nine on Itanium,
+        // sixteen where a base lends no tail padding - so what is read here is
+        // that it is written, and written where the base field ends.
+        Some(make_rust_code_finder(vec![quote! {
+            pub _base: root::fx_BitTail,
+            pub __bindgen_padding_bases:
+        }])),
+        None,
+    );
+}
+
+/// A base whose field is written wider than the type clang measured is counted
+/// at the width it is written.
+///
+/// An alignment attribute on a typedef raises the alignment of the name without
+/// touching its size, so clang answers a layout question about it with a size
+/// that is not a whole number of its own alignment - which no Rust type is. The
+/// field written for such a base is as wide as its alignment, and the run of
+/// bytes written where the bases end starts after that rather than after
+/// clang's number; counted the other way, a base measured at one byte and
+/// written as sixteen has fifteen of them counted twice and the class comes out
+/// twice the width C++ gives it.
+///
+/// Neither row was wrong before a base was measured as the type it is written
+/// as, so both pass without that change as well as with it: this is what pins
+/// the rounding that change needs, in the manner of the row for a member
+/// aligned more strictly than eight above.
+///
+/// The second row is the same disagreement with no substitution in it - the
+/// walk follows the alias to the type it names, which is the narrower of the
+/// two - and is here because it is the class C++ would call ordinary which this
+/// changes at all: it used to have its bases collapsed to opaque bytes and now
+/// has typed bases with the run of bytes written after them. Both are the
+/// target's layout.
+///
+/// Not compiled for MSVC, which has no way to give a typedef an alignment of
+/// its own.
+#[test]
+#[cfg(not(target_env = "msvc"))]
+fn test_base_written_wider_than_clang_measured_it_is_counted_as_written() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        struct fv_Tiny { char c; };
+        struct alignas(16) fv_Real { char data[32]; };
+        /** <div rustbindgen opaque replaces=\"fv_Real\"></div> */
+        typedef fv_Tiny fv_Stand __attribute__((aligned(16)));
+        struct alignas(64) fv_Derived : fv_Real {};
+        struct fv_B { char b; };
+        typedef fv_B fv_Aligned __attribute__((aligned(16)));
+        struct fv_C { char c; };
+        struct fv_Two : fv_Aligned, fv_C { alignas(16) char n; };
+        inline size_t fv_size(size_t which) {
+            return which == 0 ? sizeof(fv_Derived) : sizeof(fv_Two);
+        }
+        inline size_t fv_align(size_t which) {
+            return which == 0 ? alignof(fv_Derived) : alignof(fv_Two);
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fv_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fv_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fv_Derived, "an opaque base of an aligned typedef");
+        check!(1, ffi::fv_Two, "an aligned typedef naming a narrower type");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class with an aligned typedef base disagrees with C++:{report}"
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["fv_Derived", "fv_Two", "fv_size", "fv_align"], &[], None),
+        // Both classes want more alignment than a pre-C++17 `operator new`
+        // gives, which autocxx refuses rather than under-aligns.
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
 /// A class holding a `std::array` of a prelude-substituted type is sized in
 /// Rust the way C++ sizes it.
 ///
