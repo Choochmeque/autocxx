@@ -9,10 +9,8 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
-    ffi::OsString,
     fmt::Display,
     io::{self, Read},
-    path::PathBuf,
     process,
 };
 
@@ -69,12 +67,6 @@ fn main() {
                 .short('s')
                 .help("Skip running doctests"),
         )
-        .arg(
-            Arg::new("manifest_dir")
-            .long("manifest-dir")
-            .help("Path to directory containing outermost autocxx Cargo.toml; necessary for trybuild to build test code successfully")
-            .default_value_os(calculate_cargo_dir().as_os_str())
-        )
         .get_matches();
     if let Some(supports_matches) = matches.subcommand_matches("supports") {
         // Only do our preprocessing and testing for the html renderer, not linkcheck.
@@ -85,14 +77,6 @@ fn main() {
         }
     }
     preprocess(&matches).unwrap();
-}
-
-fn calculate_cargo_dir() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    for _ in 0..3 {
-        path = path.parent().map(|p| p.to_path_buf()).unwrap_or(path);
-    }
-    path.join("integration-tests")
 }
 
 fn preprocess(args: &ArgMatches) -> Result<(), Error> {
@@ -137,7 +121,6 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
                     &case.cpp,
                     &case.hdr,
                     case.rs,
-                    &OsString::from(args.value_of("manifest_dir").unwrap()),
                     if case.cpp17 { Some("c++17") } else { None },
                 );
                 let desc = match err {

@@ -43,6 +43,10 @@ rust_info = "0.3.1"
 cc = "1.0.89"
 quote = "1.0"
 once_cell = "1.7"
+# To read one field out of `cargo metadata` - see `workspace_target_dir`. A
+# dependency of this package no longer reaches the test fixtures, so this is
+# paid for once, here.
+serde_json = "1.0"
 # This is necessary for building the projects created
 # by the trybuild test system...
 autocxx = { path = "..", version = "=0.30.0" }

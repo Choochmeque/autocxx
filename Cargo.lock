@@ -193,6 +193,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "autocxx-fixture-deps"
+version = "0.30.0"
+dependencies = [
+ "autocxx",
+ "cxx",
+ "link-cplusplus",
+ "moveit",
+ "once_cell",
+ "quote",
+ "static_assertions",
+]
+
+[[package]]
 name = "autocxx-gen"
 version = "0.30.0"
 dependencies = [
@@ -230,6 +243,7 @@ dependencies = [
  "quote",
  "rust_info",
  "rustversion",
+ "serde_json",
  "static_assertions",
  "syn 1.0.109",
  "tempfile",

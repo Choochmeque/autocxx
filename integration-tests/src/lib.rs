@@ -7,12 +7,12 @@
 // except according to those terms.
 
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs::File,
     io::{Read, Write},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{Condvar, Mutex, PoisonError},
 };
 
 use autocxx_engine::{
@@ -73,13 +73,17 @@ fn init_logging() {
 
 /// API to run a documentation test. Panics if the test fails.
 /// Guarantees not to emit anything to stdout and so can be run in an mdbook context.
-pub fn doctest(
-    cxx_code: &str,
-    header_code: &str,
-    rust_code: TokenStream,
-    manifest_dir: &OsStr,
-) -> Result<(), TestError> {
-    doctest_with_std(cxx_code, header_code, rust_code, manifest_dir, None)
+///
+/// Neither this nor [`doctest_with_std`] takes the directory of the package to
+/// build against any more, and neither writes `CARGO_MANIFEST_DIR` or
+/// `CARGO_PKG_NAME` into this process. Nothing read either: the package a
+/// fixture is built against is the one named by this crate's
+/// `FIXTURE_PACKAGE_DIR`, whoever is calling. Nor may they still write that
+/// variable - the mdbook preprocessor calls these from several threads at once,
+/// so a writer here would be racing the one in `build_in_process`, and a doctest
+/// could be built against the wrong package's dependencies.
+pub fn doctest(cxx_code: &str, header_code: &str, rust_code: TokenStream) -> Result<(), TestError> {
+    doctest_with_std(cxx_code, header_code, rust_code, None)
 }
 
 /// As [`doctest`], for an example which needs a C++ standard other than the
@@ -90,11 +94,8 @@ pub fn doctest_with_std(
     cxx_code: &str,
     header_code: &str,
     rust_code: TokenStream,
-    manifest_dir: &OsStr,
     cpp_std: Option<&'static str>,
 ) -> Result<(), TestError> {
-    std::env::set_var("CARGO_PKG_NAME", "autocxx-integration-tests");
-    std::env::set_var("CARGO_MANIFEST_DIR", manifest_dir);
     do_run_test_manual(
         cxx_code,
         header_code,
@@ -254,7 +255,7 @@ pub fn build_from_folder(
         .include(folder.join("demo"));
     build_cpp(b, "autocxx-demo").map_err(TestError::CppBuild)?;
     // use the trybuild crate to build the Rust file.
-    lock_builder()
+    acquire_lane()
         .build(
             &target_dir,
             "autocxx-demo",
@@ -268,41 +269,165 @@ pub fn build_from_folder(
     Ok(())
 }
 
-/// The shared builder, locked, recovering a poisoned guard rather than
-/// propagating it.
+/// How many fixture builds may be under way at once.
 ///
-/// No Rust state is at stake: `LinkableTryBuilder` holds a `TempDir` and no
-/// method mutates it. The directory is: staging deletes an entry before writing
-/// its replacement, so a panic can leave one missing, or half-copied under
-/// `KEEP_TEMPDIRS`. What makes that recoverable is that every build re-stages
-/// the entries it needs by name before using them. An entry can still go stale
-/// when nothing produces that filename - but staging is silent about that
-/// whether the preceding test panicked or passed, so the poison is not what was
-/// guarding against it. Propagating it only replaces one real failure with a
-/// `PoisonError` from every test that follows.
-fn lock_builder() -> MutexGuard<'static, LinkableTryBuilder> {
-    static INSTANCE: OnceCell<Mutex<LinkableTryBuilder>> = OnceCell::new();
-    INSTANCE
-        .get_or_init(|| Mutex::new(LinkableTryBuilder::new()))
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+/// Not the thread count, because a lane is not free: it is a cargo build
+/// directory of its own, holding its own copy of the fixture dependencies. Two
+/// lanes cannot share one, for two independent reasons - cargo takes an
+/// exclusive lock on a build directory, so the second build would wait rather
+/// than overlap, and trybuild runs `cargo clean --package` before each fixture,
+/// which in a shared directory would delete a build another lane was in the
+/// middle of.
+///
+/// Four is a compromise between the two costs, capped at the number of threads
+/// there are to use them, and [`LANES_VAR`] overrides it for anyone whose
+/// machine has a different one.
+const DEFAULT_LANES: usize = 4;
+
+/// Overrides [`DEFAULT_LANES`]. `1` restores the single serialized builder this
+/// harness had before lanes existed, which is the first thing to try if a
+/// fixture build ever looks like it is interfering with another.
+const LANES_VAR: &str = "AUTOCXX_FIXTURE_LANES";
+
+/// The lanes not currently building something, and whoever is waiting for one.
+struct LanePool {
+    free: Mutex<Vec<LinkableTryBuilder>>,
+    freed: Condvar,
 }
 
-/// TryBuild which maintains a directory of libraries to link.
-/// This is desirable because otherwise, if we alter the rustc flags
-/// then trybuild rebuilds *everything* including all the dev-dependencies.
-/// This object exists purely so that we use the same flags for every
-/// test case.
+/// Takes a lane, waiting for one if all of them are busy.
+///
+/// Poisoning is recovered rather than propagated, as it was when this was a
+/// single mutex around the one builder. Nothing that panics leaves a lane in a
+/// state the next build minds. This mutex guards a `Vec` which is only ever
+/// pushed and popped, so it cannot be torn; the lane itself is put back by
+/// [`Lane`]'s `Drop`, which runs while the panic unwinds. What a panic can
+/// leave behind is in the lane's staging directory - staging deletes an entry
+/// before writing its replacement, so one can go missing, or be half-copied
+/// under `KEEP_TEMPDIRS` - and that is recoverable because every build re-stages
+/// the entries it needs, by name, before using them. An entry can still go
+/// stale when nothing produces that filename, but staging is equally silent
+/// about that whether the preceding test panicked or passed, so the poison was
+/// never what guarded against it. Propagating it only replaces one real failure
+/// with a `PoisonError` from every test that follows.
+fn acquire_lane() -> Lane {
+    static POOL: OnceCell<LanePool> = OnceCell::new();
+    let pool = POOL.get_or_init(|| LanePool {
+        free: Mutex::new(LinkableTryBuilder::lanes()),
+        freed: Condvar::new(),
+    });
+    let mut free = pool.free.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        if let Some(builder) = free.pop() {
+            return Lane {
+                pool,
+                builder: Some(builder),
+            };
+        }
+        free = pool
+            .freed
+            .wait(free)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+/// One lane, held for the length of one fixture build.
+///
+/// Returned to the pool when dropped, so a test whose build panics gives its
+/// lane back rather than retiring it.
+struct Lane {
+    pool: &'static LanePool,
+    /// Taken out only by `Drop`, which is the one place it may be `None`.
+    builder: Option<LinkableTryBuilder>,
+}
+
+impl std::ops::Deref for Lane {
+    type Target = LinkableTryBuilder;
+    fn deref(&self) -> &LinkableTryBuilder {
+        self.builder
+            .as_ref()
+            .expect("a lane leaves its guard only as the guard is dropped")
+    }
+}
+
+impl Drop for Lane {
+    fn drop(&mut self) {
+        if let Some(builder) = self.builder.take() {
+            self.pool
+                .free
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(builder);
+            self.pool.freed.notify_one();
+        }
+    }
+}
+
+/// Holds the directory a fixture's library, headers and generated bindings are
+/// staged into.
+///
+/// Staging writes fixed filenames - `libautocxx-demo` and the rest - so only one
+/// build at a time can be using a given directory: whoever is building has to be
+/// the one whose files are in it.
+///
+/// It used to be here for a second reason, that every fixture should build with
+/// the same rustc flags, since a change in those rebuilds all of a fixture's
+/// dependencies. That is now true by construction - see [`fixture_rustflags`],
+/// which no longer names this directory or any other.
 struct LinkableTryBuilder {
     /// Directory in which we'll keep any linkable libraries
     temp_dir: TempDir,
+    /// The cargo build directory this lane's fixtures are built in, which is
+    /// this lane's alone. See [`DEFAULT_LANES`].
+    build_dir: PathBuf,
 }
 
 impl LinkableTryBuilder {
-    fn new() -> Self {
-        LinkableTryBuilder {
-            temp_dir: tempdir().unwrap(),
-        }
+    /// The lanes, built once for the process.
+    ///
+    /// The directories are named by number, not after the process, so that a
+    /// second test binary reuses what the first one built - which is the point,
+    /// since what is in them is the fixture dependencies.
+    ///
+    /// Two suite processes running at the same time against one target directory
+    /// therefore share a lane's trybuild project, where each fixture starts with
+    /// a `cargo clean --package`. Within one `cargo test` invocation that cannot
+    /// happen: cargo runs test binaries one after another, so this suite, the
+    /// `builder_e2e_test` binary and `autocxx-gen`'s `cmd_test` never overlap.
+    /// Independent invocations - two `cargo test`s at once, or a suite alongside
+    /// the mdbook preprocessor - are not covered by that, and fall back on
+    /// trybuild's own lock on the project directory (`Lock::acquire` in its
+    /// `run.rs`), held across the whole run. That lock is best-effort: a lock
+    /// file with a heartbeat, broken by anyone who finds it 1.5 seconds stale,
+    /// and skipped entirely where the filesystem will not support it
+    /// (`flock.rs`). So two suites at once against one target directory is
+    /// unsupported here rather than merely slow.
+    fn lanes() -> Vec<LinkableTryBuilder> {
+        let count = match std::env::var(LANES_VAR) {
+            Ok(count) => count
+                .parse()
+                .unwrap_or_else(|err| panic!("{LANES_VAR} is not a number of lanes: {err}")),
+            Err(_) => DEFAULT_LANES.min(
+                std::thread::available_parallelism()
+                    .map(|threads| threads.get())
+                    .unwrap_or(1),
+            ),
+        };
+        assert!(count > 0, "{LANES_VAR} has to leave at least one lane");
+        // Beside the fixture project trybuild will create, so that emptying the
+        // suite's `tests` directory - which is what anyone short of disk space
+        // does - empties these too.
+        let lanes = workspace_target_dir().join("tests").join("fixture-lanes");
+        (0..count)
+            .map(|lane| {
+                let build_dir = lanes.join(lane.to_string());
+                std::fs::create_dir_all(&build_dir).unwrap();
+                LinkableTryBuilder {
+                    temp_dir: tempdir().unwrap(),
+                    build_dir,
+                }
+            })
+            .collect()
     }
 
     fn move_items_into_temp_dir<P1: AsRef<Path>>(&self, src_path: &P1, pattern: &str) {
@@ -352,10 +477,53 @@ impl LinkableTryBuilder {
         let asan = std::env::var_os("AUTOCXX_ASAN").is_some();
         run_trybuild(
             rs_path,
-            &fixture_rustflags(self.temp_dir.path(), asan),
+            &fixture_rustflags(asan),
+            self.temp_dir.path(),
+            &self.build_dir,
             &rs_find_env(rs_find_mode, self.temp_dir.path()),
         )
     }
+}
+
+/// Where cargo puts this workspace's build output.
+///
+/// Asked of cargo rather than worked out from `CARGO_TARGET_DIR` and the
+/// workspace root, because those two are not the whole answer - `build.target-dir`
+/// in a cargo config is a third - and because this is the same question trybuild
+/// asks, the same way, so the lane directories land beside the fixture project
+/// rather than somewhere cargo has been configured out of.
+///
+/// Asked from the fixture package's directory, not this process's, because the
+/// harness is also run from the mdbook preprocessor, whose working directory is
+/// wherever the book is being built.
+fn workspace_target_dir() -> &'static Path {
+    static TARGET_DIR: OnceCell<PathBuf> = OnceCell::new();
+    TARGET_DIR.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let output = std::process::Command::new(&cargo)
+            .args(["metadata", "--no-deps", "--format-version=1"])
+            .current_dir(FIXTURE_PACKAGE_DIR)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "the fixtures need a build directory of their own, and {cargo:?} could \
+                     not be run in {FIXTURE_PACKAGE_DIR} to find out where it goes: {err}"
+                )
+            });
+        assert!(
+            output.status.success(),
+            "the fixtures need a build directory of their own, and `cargo metadata` in \
+             {FIXTURE_PACKAGE_DIR} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|err| panic!("`cargo metadata` was not readable JSON: {err}"));
+        match metadata["target_directory"].as_str() {
+            Some(dir) => PathBuf::from(dir),
+            None => panic!("`cargo metadata` named no target_directory"),
+        }
+    })
 }
 
 /// The rustc flags a fixture builds with, one command-line argument per
@@ -371,12 +539,16 @@ impl LinkableTryBuilder {
 /// build; its fixtures get `=1` like everyone else's, which only lets a
 /// sanitizer report name a line.
 ///
-/// The search path is a separate element from the `-L` introducing it, which is
-/// what lets it contain a space; see [`encoded_rustflags`]. `--cfg trybuild -A
-/// dead_code` is trybuild's own contribution, restated here for the reason
-/// given there.
-fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
-    let mut flags = vec!["-L".into(), temp_dir.into(), "-Cdebuginfo=1".into()];
+/// Every element here is the same for every fixture in every process, which is
+/// the property that matters: cargo fingerprints these flags, so anything that
+/// varied would rebuild each fixture's dependencies before compiling it. The
+/// staging directory used to be here, as a `-L`, and it varies - see
+/// [`FIXTURE_LINK_SEARCH_VAR`] for where it went instead.
+///
+/// `--cfg trybuild -A dead_code` is trybuild's own contribution, restated here
+/// for the reason given in [`encoded_rustflags`].
+fn fixture_rustflags(asan: bool) -> Vec<OsString> {
+    let mut flags = vec![OsString::from("-Cdebuginfo=1")];
     if asan {
         flags.extend(
             [
@@ -395,10 +567,13 @@ fn fixture_rustflags(temp_dir: &Path, asan: bool) -> Vec<OsString> {
 /// Joins flags with the `0x1f` separator `CARGO_ENCODED_RUSTFLAGS` uses.
 ///
 /// That variable rather than `RUSTFLAGS`, which cargo splits on whitespace with
-/// no quoting or escaping of any kind - so the `-L` naming the temporary
-/// directory cannot be expressed there at all once that path contains a space.
-/// A Windows profile under `C:\Users\First Last` or a `TMPDIR` with a space in
-/// it gave `error: multiple input filenames provided`, every fixture, always.
+/// no quoting or escaping of any kind. That used to be the whole reason: the
+/// `-L` naming the staging directory could not be expressed there at all once
+/// the path contained a space, and a Windows profile under `C:\Users\First
+/// Last` or a `TMPDIR` with a space in it gave `error: multiple input filenames
+/// provided`, every fixture, always. No path goes through here any more - see
+/// [`FIXTURE_LINK_SEARCH_VAR`] - but the second reason below stands on its own,
+/// and a channel with no splitting rule keeps the question from coming back.
 ///
 /// Cargo takes extra flags from exactly one of four sources - the first of
 /// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, `target.*.rustflags`,
@@ -422,11 +597,10 @@ fn encoded_rustflags(flags: &[OsString]) -> OsString {
         encoded.push(flag);
     }
     // Cargo reads this one as a `String` and ignores it otherwise, falling
-    // through to sources this deliberately replaced - so a temporary directory
-    // whose path is not Unicode would lose every flag here, including the `-L`,
-    // and fail somewhere much further along. Said here instead. The spelling
-    // this replaced could not carry such a path either: it went through
-    // `to_str().unwrap()`.
+    // through to sources this deliberately replaced - so a flag that is not
+    // Unicode would lose every flag here and fail somewhere much further along.
+    // Said here instead. Nothing composed today can be anything but ASCII; this
+    // is what says so if that stops being true.
     assert!(
         encoded.to_str().is_some(),
         "the fixture's rustc flags are not valid Unicode, which \
@@ -470,6 +644,41 @@ const TRYBUILD_CHILD_BIN_NAME: &str = "autocxx-trybuild-child";
 /// Carries the path of the Rust file to build. Its presence is what puts the
 /// child binary into build mode.
 const TRYBUILD_CHILD_RS_PATH: &str = "AUTOCXX_TRYBUILD_CHILD_RS_PATH";
+
+/// The package whose `[dependencies]` become every fixture's.
+///
+/// trybuild builds a fixture as a crate of its own, and composes that crate's
+/// manifest out of the dependencies of the package `CARGO_MANIFEST_DIR` names.
+/// Unset, that is whichever package is running the test - this harness, or
+/// `autocxx-gen`, or the mdbook preprocessor - so each fixture was built
+/// against that package's entire dependency set. For this harness that meant
+/// the engine and the bindgen vendored into it, `syn`, `cc`, `tempfile`,
+/// `env_logger`; for `autocxx-gen`, `clap` and `miette`. No fixture names any
+/// of them, and each caller paid for its own copy in its own trybuild project
+/// directory.
+///
+/// `autocxx-fixture-deps` lists what a fixture does name, so pointing every
+/// caller at it both shrinks that build and makes it one build rather than
+/// three.
+///
+/// Taken from this crate's manifest directory at compile time. The runtime
+/// value cannot be used: it belongs to whoever is running.
+const FIXTURE_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixture-deps");
+
+/// Tells the fixture where the library staged for it is.
+///
+/// Read by `autocxx-fixture-deps`'s build script, which turns it into a
+/// `rustc-link-search`; the name is declared in both places and nowhere else.
+///
+/// It goes this way round rather than as a `-L` in [`fixture_rustflags`]
+/// because cargo fingerprints rustc flags and does not fingerprint one crate's
+/// link search path into another's. The staging directory is a fresh temporary
+/// one per process, so as a flag it made every fixture's dependencies stale in
+/// every new process - and every fixture build began by rebuilding them.
+/// Emitted from a build script it invalidates that one build script and nothing
+/// else, so the flags are now identical for every fixture everywhere and the
+/// dependencies are compiled once.
+const FIXTURE_LINK_SEARCH_VAR: &str = "AUTOCXX_FIXTURE_LINK_SEARCH";
 
 /// Printed by the child the moment it enters build mode, so that the parent can
 /// tell "the build ran and succeeded" apart from "whatever ran under that name
@@ -532,14 +741,31 @@ pub fn run_trybuild_child_if_requested() -> bool {
 fn run_trybuild(
     rs_path: &Path,
     rustflags: &[OsString],
+    link_search: &Path,
+    build_dir: &Path,
     rs_find_env: &[(String, OsString)],
 ) -> Result<(), String> {
     let child_bin = match find_trybuild_child_bin() {
         Ok(child_bin) => child_bin,
-        Err(reason) => return build_in_process(rs_path, rustflags, rs_find_env, &reason),
+        Err(reason) => {
+            return build_in_process(
+                rs_path,
+                rustflags,
+                link_search,
+                build_dir,
+                rs_find_env,
+                &reason,
+            )
+        }
     };
     let mut cmd = std::process::Command::new(child_bin);
     cmd.env(TRYBUILD_CHILD_RS_PATH, rs_path)
+        .env("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR)
+        .env(FIXTURE_LINK_SEARCH_VAR, link_search)
+        // What makes this lane's builds independent of the others': trybuild
+        // takes its project directory, and the build directory under it, from
+        // what cargo reports here.
+        .env("CARGO_TARGET_DIR", build_dir)
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags))
         .env_remove("RUSTFLAGS")
         .stdin(std::process::Stdio::null())
@@ -559,6 +785,8 @@ fn run_trybuild(
             return build_in_process(
                 rs_path,
                 rustflags,
+                link_search,
+                build_dir,
                 rs_find_env,
                 &format!("the `{TRYBUILD_CHILD_BIN_NAME}` helper could not be run ({err})"),
             )
@@ -572,6 +800,8 @@ fn run_trybuild(
         return build_in_process(
             rs_path,
             rustflags,
+            link_search,
+            build_dir,
             rs_find_env,
             &format!(
                 "the executable found as `{TRYBUILD_CHILD_BIN_NAME}` did not announce \
@@ -662,6 +892,8 @@ fn find_bin_in_ancestors(dir: &Path, file_name: &str) -> Option<PathBuf> {
 fn build_in_process(
     rs_path: &Path,
     rustflags: &[OsString],
+    link_search: &Path,
+    build_dir: &Path,
     rs_find_env: &[(String, OsString)],
     reason: &str,
 ) -> Result<(), String> {
@@ -684,21 +916,38 @@ fn build_in_process(
              the compiler's diagnostics, because {reason}."
         );
     });
-    // Unlike the child, this has to go through the process environment. Callers
-    // hold the builder mutex, so two of these cannot overlap, but the variables
-    // are visible to the rest of the process for as long as this takes - so both
-    // rustflags variables are put back afterwards, on the panicking path too.
-    // Leaving `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving
-    // `RUSTFLAGS` behind, which is what this used to do: it outranks `RUSTFLAGS`,
-    // so a later unrelated build that set its own would silently keep getting
-    // these instead.
-    let restore_rustflags = [
+    // Unlike the child, this has to go through the process environment, which
+    // there is only one of - so this path takes a lock of its own. Holding a
+    // lane is not enough: lanes are what let two fixture builds overlap, and two
+    // of these overlapping would each see the other's variables.
+    static IN_PROCESS: OnceCell<Mutex<()>> = OnceCell::new();
+    let _serialized = IN_PROCESS
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // The variables are visible to the rest of the process for as long as this
+    // takes, so each is put back afterwards, on the panicking path too. Leaving
+    // `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving `RUSTFLAGS`
+    // behind, which is what this used to do: it outranks `RUSTFLAGS`, so a later
+    // unrelated build that set its own would silently keep getting these
+    // instead. `CARGO_MANIFEST_DIR` is on the list for the same reason - it is
+    // what the rest of this process is told its own package is.
+    let restore_env = [
         (
             "CARGO_ENCODED_RUSTFLAGS",
             std::env::var_os("CARGO_ENCODED_RUSTFLAGS"),
         ),
         ("RUSTFLAGS", std::env::var_os("RUSTFLAGS")),
+        ("CARGO_MANIFEST_DIR", std::env::var_os("CARGO_MANIFEST_DIR")),
+        (
+            FIXTURE_LINK_SEARCH_VAR,
+            std::env::var_os(FIXTURE_LINK_SEARCH_VAR),
+        ),
+        ("CARGO_TARGET_DIR", std::env::var_os("CARGO_TARGET_DIR")),
     ];
+    std::env::set_var("CARGO_MANIFEST_DIR", FIXTURE_PACKAGE_DIR);
+    std::env::set_var(FIXTURE_LINK_SEARCH_VAR, link_search);
+    std::env::set_var("CARGO_TARGET_DIR", build_dir);
     std::env::set_var("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(rustflags));
     std::env::remove_var("RUSTFLAGS");
     for key in RS_FIND_KEYS {
@@ -713,7 +962,7 @@ fn build_in_process(
         let test_cases = trybuild::TestCases::new();
         test_cases.pass(rs_path);
     }));
-    for (key, value) in restore_rustflags {
+    for (key, value) in restore_env {
         match value {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
@@ -1339,7 +1588,7 @@ pub fn do_run_test_manual(
         println!("Generated .rs files: {generated_rs_files:?}");
     }
     // Step 8: use the trybuild crate to build the Rust file.
-    let r = lock_builder().build(
+    let r = acquire_lane().build(
         &target_dir,
         "autocxx-demo",
         &tdir.path(),
@@ -1400,8 +1649,9 @@ impl BuilderModifierFns for ForceWrapperGeneration {
 mod tests {
     use super::{
         encoded_rustflags, find_bin_in_ancestors, find_trybuild_child_bin, fixture_rustflags,
-        OsString, Path, TRYBUILD_CHILD_SEARCH_DEPTH,
+        OsString, TRYBUILD_CHILD_SEARCH_DEPTH,
     };
+    use std::path::MAIN_SEPARATOR;
     use tempfile::tempdir;
 
     /// Lays out `dirs` under a temporary root and puts `helper` in the root's
@@ -1487,47 +1737,70 @@ mod tests {
             .collect()
     }
 
-    /// The whole point of the encoded channel: a search path containing a space
-    /// arrives as ONE argument. Through `$RUSTFLAGS`, which cargo splits on
-    /// whitespace, the tail of the path became a second input filename and
-    /// every fixture failed to build.
+    /// An argument containing a space survives the encoding as ONE argument.
+    ///
+    /// Nothing the harness composes today contains a space - see
+    /// [`the_flags_name_no_path`] - so this pins the encoder rather than any
+    /// present caller. It is here because the test it replaces covered this
+    /// property incidentally, by putting a path with a space through it: through
+    /// `$RUSTFLAGS`, which cargo splits on whitespace with no quoting of any
+    /// kind, the tail of that path became a second input filename and every
+    /// fixture failed to build. An encoder which started splitting its
+    /// arguments again would pass every other test here, because they are all
+    /// single words.
     #[test]
-    fn a_search_path_containing_a_space_stays_one_argument() {
-        let args = decoded(&fixture_rustflags(
-            Path::new("/tmp/space dir/.tmp01"),
-            false,
-        ));
-        let l = args.iter().position(|a| a == "-L").unwrap();
-        assert_eq!(args[l + 1], "/tmp/space dir/.tmp01");
+    fn an_argument_containing_a_space_stays_one_argument() {
+        let args = decoded(&[
+            OsString::from("-Clink-arg=--script=/tmp/space dir/link.x"),
+            OsString::from("-Cdebuginfo=1"),
+        ]);
+        assert_eq!(
+            args,
+            ["-Clink-arg=--script=/tmp/space dir/link.x", "-Cdebuginfo=1"]
+        );
         assert!(
-            !args.iter().any(|a| a == "dir/.tmp01"),
-            "the path was split on its space: {args:?}"
+            !args.iter().any(|arg| arg == "dir/link.x"),
+            "the argument was split on its space: {args:?}"
         );
     }
 
-    /// A path without a space produces exactly the arguments this harness
-    /// passed when it composed `$RUSTFLAGS` by hand and cargo split it again -
-    /// including the two trybuild used to append for us, which the encoded
-    /// channel makes cargo ignore.
+    /// The flags carry no filesystem path, which is what keeps them the same
+    /// for every fixture in every process - and so keeps cargo's fingerprints
+    /// for a fixture's dependencies valid across processes and across runs.
+    ///
+    /// The staging directory now travels in
+    /// [`super::FIXTURE_LINK_SEARCH_VAR`], one environment variable holding one
+    /// value, which no layer splits. That channel's own end-to-end behaviour
+    /// with a space in the path is not asserted here - see the note in the pull
+    /// request which introduced it.
     #[test]
-    fn a_space_free_path_gives_the_flags_it_always_did() {
+    fn the_flags_name_no_path() {
+        for asan in [false, true] {
+            let args = decoded(&fixture_rustflags(asan));
+            assert!(
+                !args.iter().any(|arg| arg == "-L"),
+                "a search path is back in the fixture's flags: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg.contains(MAIN_SEPARATOR)),
+                "a path is back in the fixture's flags: {args:?}"
+            );
+        }
+    }
+
+    /// Exactly the arguments this harness passed when it composed `$RUSTFLAGS`
+    /// by hand and cargo split it again, less the search path - including the
+    /// two trybuild used to append for us, which the encoded channel makes
+    /// cargo ignore.
+    #[test]
+    fn the_flags_are_the_ones_a_fixture_always_built_with() {
         assert_eq!(
-            decoded(&fixture_rustflags(Path::new("/tmp/plain"), false)),
-            [
-                "-L",
-                "/tmp/plain",
-                "-Cdebuginfo=1",
-                "--cfg",
-                "trybuild",
-                "-A",
-                "dead_code"
-            ]
+            decoded(&fixture_rustflags(false)),
+            ["-Cdebuginfo=1", "--cfg", "trybuild", "-A", "dead_code"]
         );
         assert_eq!(
-            decoded(&fixture_rustflags(Path::new("/tmp/plain"), true)),
+            decoded(&fixture_rustflags(true)),
             [
-                "-L",
-                "/tmp/plain",
                 "-Cdebuginfo=1",
                 "-Z",
                 "sanitizer=address",
