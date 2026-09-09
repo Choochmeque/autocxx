@@ -35,7 +35,7 @@ use crate::{
         parse::CppRefQualifier,
         type_helpers::extract_pinned_mutable_reference_type,
         type_helpers::{
-            cpp_array_element, denotes_indirect_cpp_array, is_volatile_qualified,
+            cpp_array_element, denotes_cpp_array_behind_pointer, is_volatile_qualified,
             type_is_reference, unwrap_has_opaque,
         },
         CppEffectiveName, CppOriginalName,
@@ -4943,12 +4943,13 @@ impl FnAnalyzer<'_> {
     /// through.
     ///
     /// Two different refusals, neither of which is about the array standing on
-    /// its own: [`denotes_indirect_cpp_array`] is the C++ type autocxx cannot
-    /// tell apart from a `std::array` once it is behind a reference, and
-    /// [`Self::permissible_array_element`] is the element cxx will not hold in
-    /// one.
+    /// its own: [`denotes_cpp_array_behind_pointer`] is the array autocxx will
+    /// not put a pointer to, and [`Self::permissible_array_element`] is the
+    /// element which cannot cross by value. A reference is decided before
+    /// this, while the marker saying which of the two C++ array types it is
+    /// can still be read; see `TypeConverter::check_array_referent`.
     fn check_signature_array(&self, ty: &Type) -> Result<(), ConvertErrorFromCpp> {
-        if denotes_indirect_cpp_array(ty) {
+        if denotes_cpp_array_behind_pointer(ty) {
             return Err(ConvertErrorFromCpp::CppArrayInSignature(
                 ty.to_token_stream().to_string(),
             ));

@@ -51,6 +51,12 @@ pub(crate) struct TypedefAnalysis {
     /// later names this alias would otherwise never learn that C++ made it
     /// unassignable.
     pub(crate) target_is_const: bool,
+    /// Whether the target is the array a `std::array<T, N>` was lowered to.
+    /// Kept for the same reason as `target_is_const`: converting strips the
+    /// marker which said so, and `[T; N]` is what bindgen writes for the C
+    /// array `T[N]` as well, so a reference which later names this alias would
+    /// otherwise have no way to tell the two C++ types apart.
+    pub(crate) target_is_std_array: bool,
     pub(crate) deps: HashSet<QualifiedName>,
 }
 
@@ -103,6 +109,7 @@ pub(crate) fn convert_typedef_targets(
                         // couldn't read off the type itself.
                         target_kind: TypeKind::Regular,
                         target_is_const: false,
+                        target_is_std_array: false,
                         deps: HashSet::new(),
                     },
                 },
@@ -241,6 +248,7 @@ fn get_replacement_typedef(
                 // have wrapped the `Option<..>` and `function_pointer` would
                 // not have recognised it.
                 target_is_const: false,
+                target_is_std_array: false,
                 deps: HashSet::new(),
             },
         });
@@ -307,6 +315,7 @@ fn get_replacement_typedef(
                     kind: TypedefKind::Type(Box::new(converted_type.into())),
                     target_kind: final_type.kind,
                     target_is_const: final_type.is_const,
+                    target_is_std_array: final_type.is_std_array,
                     deps: final_type.types_encountered,
                 },
             })

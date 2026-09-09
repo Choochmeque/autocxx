@@ -259,11 +259,32 @@ fn main() {
 
 ## `std::array`
 
-A `std::array<T, N>` crosses as a Rust `[T; N]`, by value, in either direction:
-`cxx` spells a Rust array as `std::array<T, N>`, so what the bridge declares is
-the type the header was written with, and there is no wrapper in between.
+A `std::array<T, N>` crosses as a Rust `[T; N]`: `cxx` spells a Rust array as
+`std::array<T, N>`, so what the bridge declares is the type the header was
+written with, and there is no wrapper in between.
 
-The element can be any type which crosses by value itself:
+By value it crosses in either direction, as a copy. Behind a reference it
+crosses as the array itself, `const std::array<T, N>&` arriving as `&[T; N]`
+and `std::array<T, N>&` as `Pin<&mut [T; N]>` - the same spellings every other
+C++ reference gets - so what C++ writes through one is what Rust reads back.
+Returning a reference works the same way, with the lifetime taken from the
+receiver as usual.
+
+```cpp
+uint32_t sum(const std::array<uint8_t, 4>& a);
+void bump(std::array<uint8_t, 4>& a);
+```
+
+```rust,ignore
+let a = [1u8, 2, 3, 4];
+assert_eq!(ffi::sum(&a), 5);
+let mut b = [10u8, 20, 30, 40];
+ffi::bump(std::pin::Pin::new(&mut b));
+assert_eq!(b, [11u8, 21, 31, 41]);
+```
+
+The element can be any type which crosses by value itself, and the rule is the
+same by value and behind a reference:
 
 * one of `cxx`'s own atoms - `uint8_t` or `int8_t`, a `float` or a `double`, a
   `bool`, a `char`;
@@ -274,18 +295,20 @@ The element can be any type which crosses by value itself:
 * a class or enum `autocxx` passes by value, which for a class means one
   `generate_pod!` accepts.
 
-Two things do not cross:
+Three things do not cross:
 
 * An element `autocxx` will not pass by value, which is a class it can hold
   only behind a pointer. An array of those is not a run of bytes to be moved
   whole.
-* A `std::array` behind a reference or a pointer. `const T (&)[N]` and `const
-  std::array<T, N>&` reach `autocxx` as the same Rust type, and `cxx` writes
-  the second for either, so binding one would silently be binding the other.
-  By value there is no such pair: no C++ function takes or returns a plain
-  array that way.
+* A reference to a C array - `const T (&)[N]` rather than `const
+  std::array<T, N>&`. Both reach `autocxx` as `&[T; N]`, but they are different
+  C++ types and `cxx` writes the `std::array` for either, so only the
+  `std::array` is bound. An array parameter written without a reference is
+  unaffected: C++ decays it to a pointer before `autocxx` sees it, and it is
+  bound as that pointer.
+* Either of them behind a pointer.
 
-Both get a refusal which says so. `std::array<T, 0>` gets one too: C++ gives
+Each gets a refusal which says so. `std::array<T, 0>` gets one too: C++ gives
 the empty array a size and Rust's `[T; 0]` has none, so they are not the same
 object.
 

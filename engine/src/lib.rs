@@ -376,14 +376,23 @@ impl IncludeCppEngine {
         // and then stripped, so what they are declared *as* only has to keep
         // the bindgen mod compiling until then.
         //
-        // `Const` is declared as a transparent alias rather than a newtype
-        // because it is the one marker which lands on types in positions that
-        // also carry a value: a `const` variable's type sits beside the
-        // initializer bindgen emits for it, and a `const` bitfield's accessors
-        // cast between the field type and the allocation unit's integer
-        // (`self.x() as u32`). A newtype makes both of those `error[E0605]:
-        // non-primitive cast`. An alias is invisible to all of it and just as
-        // visible to us, since we match on the type bindgen printed.
+        // `Const`, `Volatile` and `StdArray` are declared as transparent
+        // aliases rather than newtypes, being the ones which land on types in
+        // positions that also carry a value. `Volatile`'s own case is beside
+        // the list below; the other two are these.
+        //
+        // A `const` variable's type sits beside the initializer bindgen emits
+        // for it, and a `const` bitfield's accessors cast between the field
+        // type and the allocation unit's integer (`self.x() as u32`). A
+        // newtype makes both of those `error[E0605]: non-primitive cast`.
+        //
+        // A `std::array` is a POD struct's field, and a POD struct is emitted
+        // for Rust to build and read: a newtype leaves the caller holding a
+        // `__bindgen_marker_StdArray<[u8; 4]>` where the array is what they
+        // wrote and what they compare against.
+        //
+        // An alias is invisible to all of it and just as visible to us, since
+        // we match on the type bindgen printed.
         let bindgen_marker_newtypes = [
             "Opaque",
             "Reference",
@@ -396,7 +405,13 @@ impl IncludeCppEngine {
         // accessors cast between the field type and the allocation unit's
         // integer, so they return `__bindgen_marker_Volatile<u32>` out of a
         // `... as u32 as _`, which a newtype makes `error[E0605]`.
-        let bindgen_marker_aliases = ["Const", "Volatile"];
+        //
+        // `StdArray` is one for a value-carrying position of its own: it lands
+        // on a POD struct's field, and a POD struct is emitted for Rust to
+        // build and read, so a newtype leaves the caller holding a
+        // `__bindgen_marker_StdArray<[u8; 4]>` where the array is what they
+        // wrote and what they compare against.
+        let bindgen_marker_aliases = ["Const", "Volatile", "StdArray"];
         let raw_line = bindgen_marker_newtypes
             .iter()
             .map(|t| {
@@ -470,6 +485,7 @@ impl IncludeCppEngine {
             .use_float128_newtype_wrapper(true)
             .represent_cxx_operators(true)
             .represent_std_array(true)
+            .use_std_array_newtype_wrapper(true)
             .use_distinct_char16_t(true)
             .use_distinct_wchar_t(true)
             .use_distinct_char32_t(true)

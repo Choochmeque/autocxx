@@ -20,7 +20,9 @@ use crate::{
         apivec::ApiVec,
         convert_error::{ErrorContext, UnrepresentableMember},
         parse::CppRefQualifier,
-        type_helpers::{is_pointer_like, is_volatile_qualified, strip_const_markers},
+        type_helpers::{
+            is_pointer_like, is_volatile_qualified, strip_const_markers, strip_layout_markers,
+        },
         ConvertErrorFromCpp, CppOriginalName,
     },
     known_types::known_types,
@@ -362,7 +364,7 @@ fn member_shape(
     ) {
         return Err(Refusal::Kind(UnrepresentableMember::Reference));
     }
-    if matches!(strip_const_markers(&field.ty), Type::Array(_))
+    if matches!(strip_layout_markers(&field.ty), Type::Array(_))
         || matches!(&field_info.ty, Type::Array(_))
     {
         return Err(Refusal::Kind(UnrepresentableMember::Array));
