@@ -10796,8 +10796,11 @@ fn test_volatile_member_of_builtin_type_keeps_its_getter() {
 /// `Inner` is given a copy constructor taking `const volatile Inner&` so that
 /// this test is about the accessor and nothing else. Without one, a `volatile`
 /// member of class type deletes `Outer`'s own implicitly declared copy and move
-/// constructors - C++ has no way to copy the member - and autocxx synthesizes
-/// them regardless, which is a separate problem in the constructor analysis.
+/// constructors - C++ has no way to copy the member - which the constructor
+/// analysis now reports; see
+/// `test_volatile_class_member_deletes_copy_and_move`. That `Inner` declares
+/// the one constructor which can copy such a member is what keeps `Outer`
+/// copyable here.
 #[test]
 fn test_volatile_member_needing_a_borrowed_getter_is_refused() {
     let hdr = indoc! {"
@@ -11555,6 +11558,568 @@ fn test_non_volatile_pointer_and_reference_unaffected() {
         assert_eq!(unsafe { *p }, 3);
     };
     run_test(cxx, hdr, rs, &["plain", "take"], &[]);
+}
+
+/// A `volatile` member of class type deletes the enclosing class's implicitly
+/// declared copy and move constructors. C++ copies a member by
+/// direct-initializing it from the corresponding member of the source
+/// ([class.copy.ctor]/15.3), so the source subobject here is a `const volatile
+/// Inner` lvalue; `Inner`'s own implicit copy constructor takes `const Inner&`,
+/// which will not bind to one, and overload resolution finds no usable
+/// candidate at all - which is what defines the enclosing constructor as
+/// deleted ([class.copy.ctor]/10.1).
+///
+/// autocxx synthesizes a copy constructor as a placement new, `::new (this)
+/// Outer((*other))`, so claiming one here emitted C++ which would not compile:
+/// "call to implicitly-deleted copy constructor of 'Outer'".
+///
+/// The default constructor and the destructor are untouched by the qualifier,
+/// so the class keeps those.
+#[test]
+fn test_volatile_class_member_deletes_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner { uint32_t a; };
+        struct Outer {
+            Outer() : inner(), plain(2) {}
+            volatile Inner inner;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Outer: moveit::CopyNew, moveit::MoveNew);
+        // The qualifier deletes those two and nothing else.
+        let outer = ffi::Outer::new().within_unique_ptr();
+        assert_eq!(outer.plain(), 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Outer", "Inner"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["`volatile` field `inner` of type `Inner`"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// C++ folds the qualifier into the array: an array whose element type is
+/// `volatile` is itself `volatile`, and `[class.copy.ctor]/10.1` says
+/// "possibly multidimensional array thereof" for exactly this. So an array of
+/// a `volatile` class type deletes the same two constructors.
+#[test]
+fn test_volatile_class_array_member_deletes_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner { uint32_t a; };
+        struct Outer {
+            Outer() : inner{}, plain(2) {}
+            volatile Inner inner[2];
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Outer: moveit::CopyNew, moveit::MoveNew);
+        let outer = ffi::Outer::new().within_unique_ptr();
+        assert_eq!(outer.plain(), 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Outer", "Inner"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["`volatile` field `inner` of type `Inner`"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// The one constructor shape which can copy a `volatile` member is one taking
+/// a `const volatile` source: that is the only reference which binds to the
+/// `const volatile Inner` lvalue a copy of the enclosing class reads.
+/// [class.copy.ctor]/7 names it alongside `const M&` when deciding the form of
+/// the enclosing implicit copy constructor, so the rule has to ask which shape
+/// the member's class declared rather than refuse every `volatile` member of
+/// class type.
+///
+/// The *move* is not rescued with it. A move reads a `volatile Inner` xvalue,
+/// and an lvalue reference binds to an rvalue only where it is const-qualified
+/// and not volatile-qualified ([dcl.init.ref]/5.2), so `Inner(const volatile
+/// Inner&)` does not take one, and C++ deletes this class's move constructor.
+/// See `test_volatile_class_member_move_is_not_rescued_by_the_copy` for why
+/// claiming it anyway would be worse than useless, and
+/// `test_volatile_class_member_conservative_where_cpp_keeps_more` for the
+/// spelling which does keep a move in C++ and is not looked for.
+#[test]
+fn test_volatile_class_member_with_const_volatile_copy_constructor_keeps_the_copy() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner {
+            uint32_t a;
+            Inner() : a(1) {}
+            Inner(const volatile Inner& o) : a(o.a) {}
+        };
+        struct Outer {
+            Outer() : inner(), plain(2) {}
+            volatile Inner inner;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Outer: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::Outer: moveit::MoveNew);
+        let outer = ffi::Outer::new().within_unique_ptr();
+        assert_eq!(outer.plain(), 2);
+        moveit! { let copied = autocxx::moveit::new::copy(outer); }
+        assert_eq!(copied.plain(), 2);
+    };
+    run_test("", hdr, rs, &["Outer", "Inner"], &[]);
+}
+
+/// Why the move goes even where the copy is rescued, which is not obvious: C++
+/// deletes the enclosing move constructor, and a defaulted move constructor
+/// defined as deleted is excluded from overload resolution
+/// ([over.match.funcs.general]/9) rather than being an error to name. So where
+/// the class has a usable copy constructor, the `std::move` a synthesized move
+/// emits quietly resolves to it, and a class whose copy was rescued would
+/// appear to move while copying.
+///
+/// It is the mixed case which shows the cost. `Second` has a usable move
+/// constructor and a deleted copy, so `Mixed` has no copy constructor for that
+/// fallback to land on, and the placement new a synthesized move emits compiles
+/// under neither compiler: "call to implicitly-deleted copy constructor of
+/// 'Mixed'". A per-field fallback to the copy is therefore wrong, and the move
+/// is withdrawn for every `volatile` member of class type.
+#[test]
+fn test_volatile_class_member_move_is_not_rescued_by_the_copy() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner {
+            uint32_t a;
+            Inner() : a(1) {}
+            Inner(const volatile Inner& o) : a(o.a) {}
+        };
+        struct Second {
+            uint32_t b;
+            Second() : b(2) {}
+            Second(Second&& o) : b(o.b) {}
+            Second(const Second&) = delete;
+        };
+        struct Mixed {
+            Mixed() {}
+            volatile Inner inner;
+            Second second;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Mixed: moveit::CopyNew, moveit::MoveNew);
+        let _ = ffi::Mixed::new().within_unique_ptr();
+    };
+    run_test("", hdr, rs, &["Mixed", "Inner", "Second"], &[]);
+}
+
+/// A `volatile std::array` member is a `volatile` member of class type, and has
+/// to be answered as one. `--represent-std-array` renders `std::array<T, N>` as
+/// the bare `[T; N]` that a C array `T[N]` is also rendered as, so the element
+/// alone does not say which C++ wrote - and the two are not copied alike. A C
+/// array of a `volatile` scalar is copied element by element, by reading each,
+/// and keeps both constructors; a `std::array` is a class, whose copy
+/// constructor takes `const std::array&` and binds to no `volatile` one.
+///
+/// The field metadata carries the distinction for this reason.
+#[test]
+fn test_volatile_std_array_member_deletes_copy_and_move() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstdint>
+        struct Regs {
+            Regs() : banks{}, plain(2) {}
+            volatile std::array<uint32_t, 2> banks;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Regs: moveit::CopyNew, moveit::MoveNew);
+        let regs = ffi::Regs::new().within_unique_ptr();
+        assert_eq!(regs.plain(), 2);
+    };
+    run_test("", hdr, rs, &["Regs"], &[]);
+}
+
+/// The `const volatile M&` constructor which rescues an ordinary `volatile`
+/// member does not rescue a `volatile std::array` of that same `M`, and the
+/// distinction is easy to lose: the analysis asks about a field's *element*
+/// type, which is what a C array is copied through, while a `std::array` is
+/// copied by calling its own constructor. `std::array`'s copy constructor takes
+/// `const std::array&`, and binds to no volatile source however the element is
+/// declared.
+///
+/// A `volatile std::array` reached through an alias, and a C array of them, are the
+/// same class member wearing different spellings, and neither channel sees both:
+/// conversion flattens the C array layers away, while the type bindgen wrote spells
+/// the alias rather than its `std::array` target. The fact is taken from both.
+#[test]
+fn test_volatile_std_array_member_is_not_rescued_by_its_element() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstdint>
+        struct Inner {
+            uint32_t a;
+            Inner() : a(1) {}
+            Inner(const volatile Inner& o) : a(o.a) {}
+        };
+        struct Direct {
+            Direct() {}
+            volatile std::array<Inner, 2> banks;
+        };
+        struct Nested {
+            Nested() : banks{} {}
+            volatile std::array<Inner, 2> banks[2];
+        };
+        struct NestedScalar {
+            NestedScalar() : banks{} {}
+            volatile std::array<uint32_t, 2> banks[2];
+        };
+        using Bank = std::array<uint32_t, 2>;
+        struct Aliased {
+            Aliased() : bank{} {}
+            volatile Bank bank;
+        };
+        static_assert(!__is_constructible(Direct, const Direct&), \"deleted\");
+        static_assert(!__is_constructible(Nested, const Nested&), \"deleted\");
+        static_assert(!__is_constructible(NestedScalar, const NestedScalar&), \"deleted\");
+        static_assert(!__is_constructible(Aliased, const Aliased&), \"deleted\");
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Direct: moveit::CopyNew, moveit::MoveNew);
+        static_assertions::assert_not_impl_any!(ffi::Nested: moveit::CopyNew, moveit::MoveNew);
+        static_assertions::assert_not_impl_any!(
+            ffi::NestedScalar: moveit::CopyNew, moveit::MoveNew
+        );
+        static_assertions::assert_not_impl_any!(ffi::Aliased: moveit::CopyNew, moveit::MoveNew);
+        let _ = ffi::Direct::new().within_unique_ptr();
+        let _ = ffi::Nested::new().within_unique_ptr();
+        let _ = ffi::NestedScalar::new().within_unique_ptr();
+        let _ = ffi::Aliased::new().within_unique_ptr();
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["Direct", "Nested", "NestedScalar", "Aliased", "Inner"],
+        &[],
+    );
+}
+
+/// A `const volatile` member is answered by the `volatile` half of the rule,
+/// not the `const` half. A `const` member of class type falls back to an
+/// `M(const M&&)` where the class declared one, because a const xvalue binds to
+/// it; a `const volatile` one does not, that constructor dropping the other
+/// qualifier exactly as `M(const M&)` does. So both constructors go, and the
+/// `const volatile` source is the only thing which brings them back.
+#[test]
+fn test_const_volatile_class_member_is_answered_by_the_volatile_rule() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner {
+            uint32_t a;
+            Inner() : a(1) {}
+            Inner(const Inner&&) {}
+            Inner(const Inner&) {}
+        };
+        struct Inner2 {
+            uint32_t a;
+            Inner2() : a(1) {}
+            Inner2(const volatile Inner2&) {}
+        };
+        struct Outer {
+            Outer() {}
+            const volatile Inner inner;
+        };
+        struct Rescued {
+            Rescued() {}
+            const volatile Inner2 inner;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Outer: moveit::CopyNew, moveit::MoveNew);
+        static_assertions::assert_impl_all!(ffi::Rescued: moveit::CopyNew);
+        static_assertions::assert_not_impl_any!(ffi::Rescued: moveit::MoveNew);
+        let _ = ffi::Outer::new().within_unique_ptr();
+        let _ = ffi::Rescued::new().within_unique_ptr();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["Outer", "Rescued", "Inner", "Inner2"], &[], None),
+        None,
+        Some(make_string_finder(
+            ["`const volatile` field `inner` of type `Inner`"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )),
+        None,
+    );
+}
+
+/// A `volatile` member of *scalar* type deletes nothing. C++ copies a scalar
+/// by reading it, and reading a `const volatile uint32_t` glvalue is an
+/// ordinary lvalue-to-rvalue conversion - a volatile access, which is what the
+/// qualifier asks for, and well-formed. So the class keeps both constructors,
+/// and the copy goes through the `volatile` read in the generated C++.
+#[test]
+fn test_volatile_scalar_member_keeps_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Regs {
+            Regs() : status(1), plain(2) {}
+            volatile uint32_t status;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Regs: moveit::CopyNew, moveit::MoveNew);
+        let regs = ffi::Regs::new().within_unique_ptr();
+        moveit! { let copied = autocxx::moveit::new::copy(regs); }
+        assert_eq!(copied.status(), 1);
+        assert_eq!(copied.plain(), 2);
+    };
+    run_test("", hdr, rs, &["Regs"], &[]);
+}
+
+/// An array of a `volatile` scalar is copied element by element, each by a
+/// read, so it deletes nothing either. The array is what tells the two halves
+/// of the rule apart: the element type decides, not the array.
+#[test]
+fn test_volatile_scalar_array_member_keeps_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Ports {
+            Ports() : gpio{1, 2, 3, 4}, plain(5) {}
+            volatile uint32_t gpio[4];
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Ports: moveit::CopyNew, moveit::MoveNew);
+        let ports = ffi::Ports::new().within_unique_ptr();
+        moveit! { let copied = autocxx::moveit::new::copy(ports); }
+        assert_eq!(copied.plain(), 5);
+    };
+    run_test("", hdr, rs, &["Ports"], &[]);
+}
+
+/// A `volatile` pointer member - `T* volatile`, the pointer itself qualified -
+/// is a scalar too, so it keeps both constructors.
+#[test]
+fn test_volatile_pointer_member_keeps_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Dev {
+            Dev() : reg(nullptr), plain(2) {}
+            int* volatile reg;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Dev: moveit::CopyNew, moveit::MoveNew);
+        let dev = ffi::Dev::new().within_unique_ptr();
+        moveit! { let copied = autocxx::moveit::new::copy(dev); }
+        assert_eq!(copied.plain(), 2);
+    };
+    run_test("", hdr, rs, &["Dev"], &[]);
+}
+
+/// An enumeration has no special member functions at all, so a `volatile` one
+/// is copied by reading it, like any other scalar.
+#[test]
+fn test_volatile_enum_member_keeps_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum Mode { ModeOff, ModeOn };
+        struct Sw {
+            Sw() : mode(ModeOn), plain(2) {}
+            volatile Mode mode;
+            uint32_t plain;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Sw: moveit::CopyNew, moveit::MoveNew);
+        let sw = ffi::Sw::new().within_unique_ptr();
+        moveit! { let copied = autocxx::moveit::new::copy(sw); }
+        assert_eq!(copied.plain(), 2);
+    };
+    run_test("", hdr, rs, &["Sw", "Mode"], &[]);
+}
+
+/// The two things `volatile` can qualify in a pointer field are different
+/// facts, and only one of them reaches the constructors - the same distinction
+/// `test_const_pointee_does_not_delete_default_constructor` draws for the other
+/// qualifier. `volatile Inner*` is an ordinary pointer at something whose reads
+/// have to happen; copying the *pointer* copies an address.
+///
+/// The pointer is private because a public one of this type earns a field
+/// accessor whose generated C++ drops the qualifier from the pointee - `inline
+/// Inner* ...(const Outer&) { return autocxx_gen_this.p; }`, which will not
+/// compile against a `volatile Inner* const` member. That is the accessor's
+/// own gate, not this rule; see the note where `field_accessors` answers for a
+/// pointer member.
+#[test]
+fn test_pointer_to_volatile_class_member_keeps_copy_and_move() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner { uint32_t a; };
+        struct Outer {
+            Outer() : plain(2), p(nullptr) {}
+            bool unset() const { return p == nullptr; }
+            uint32_t plain;
+          private:
+            volatile Inner* p;
+        };
+    "};
+    let rs = quote! {
+        static_assertions::assert_impl_all!(ffi::Outer: moveit::CopyNew, moveit::MoveNew);
+        let outer = ffi::Outer::new().within_unique_ptr();
+        assert!(outer.unset());
+        moveit! { let copied = autocxx::moveit::new::copy(outer); }
+        assert_eq!(copied.plain(), 2);
+        assert!(copied.unset());
+    };
+    run_test("", hdr, rs, &["Outer", "Inner"], &[]);
+}
+
+/// Two shapes where C++ keeps a constructor and autocxx does not, recorded so
+/// that the conservative direction is a decision rather than an accident.
+///
+/// `M(volatile M&&)` binds the xvalue a move of the enclosing class reads, so
+/// C++ gives `Outer` a working move constructor. The only slot which records a
+/// `volatile`-accepting source is the copy one, so the move is withdrawn here.
+///
+/// A constructor *template* on the member's type can initialize the member from
+/// anything, including a `const volatile` source, so C++ keeps both of
+/// `Holder`'s constructors. Nothing reports a constructor template as a copy
+/// constructor - it is not one - so the analysis cannot see that it applies.
+///
+/// Both are losses of a binding rather than broken C++, which is the direction
+/// to fail in: a class which claimed a constructor C++ had deleted emitted a
+/// placement new that did not compile, and that is what this rule exists to
+/// stop.
+#[test]
+fn test_volatile_class_member_conservative_where_cpp_keeps_more() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct MovableFromVolatile {
+            uint32_t a;
+            MovableFromVolatile() : a(1) {}
+            MovableFromVolatile(volatile MovableFromVolatile&& o) : a(o.a) {}
+        };
+        struct Outer {
+            Outer() {}
+            volatile MovableFromVolatile m;
+        };
+        struct TemplateConstructed {
+            uint32_t a;
+            TemplateConstructed() : a(1) {}
+            template<class T> TemplateConstructed(T&&) : a(2) {}
+        };
+        struct Holder {
+            Holder() {}
+            volatile TemplateConstructed m;
+        };
+        // A movable member with no copy constructor, so that constructing the
+        // holder below from an rvalue cannot be a copy in disguise.
+        struct MoveOnly {
+            MoveOnly() {}
+            MoveOnly(MoveOnly&&) {}
+            MoveOnly(const MoveOnly&) = delete;
+        };
+        struct MoveProof {
+            MoveProof() {}
+            volatile TemplateConstructed m;
+            MoveOnly proof;
+        };
+        // The premise: C++ keeps what this test records autocxx as not
+        // offering. Without these, a fixture which stopped keeping them would
+        // leave the test passing and saying nothing. `MoveProof` is asserted
+        // rather than `Holder` for the move, because a deleted move falls back
+        // to the copy constructor and `Holder` has one.
+        static_assert(__is_constructible(Outer, Outer&&), \"C++ keeps this move\");
+        static_assert(__is_constructible(Holder, const Holder&), \"C++ keeps this copy\");
+        static_assert(!__is_constructible(MoveProof, const MoveProof&), \"no copy to fall back on\");
+        static_assert(__is_constructible(MoveProof, MoveProof&&), \"C++ keeps this move\");
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Outer: moveit::MoveNew);
+        static_assertions::assert_not_impl_any!(ffi::Holder: moveit::CopyNew, moveit::MoveNew);
+        static_assertions::assert_not_impl_any!(ffi::MoveProof: moveit::MoveNew);
+        // The classes are otherwise bound as usual.
+        let _ = ffi::Outer::new().within_unique_ptr();
+        let _ = ffi::Holder::new().within_unique_ptr();
+        let _ = ffi::MoveProof::new().within_unique_ptr();
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "Outer",
+            "Holder",
+            "MoveProof",
+            "MoveOnly",
+            "MovableFromVolatile",
+            "TemplateConstructed",
+        ],
+        &[],
+    );
+}
+
+/// `= default` on the copy constructor of such a class does not rescue it: C++
+/// defines an explicitly defaulted member as deleted under the same rules it
+/// uses for an implicit one, so the declaration bindgen reports is a deleted
+/// function and calling it does not compile. The analysis has to withdraw the
+/// binding it would otherwise have generated from that declaration.
+///
+/// clang warns `-Wdefaulted-function-deleted` for that declaration, and the
+/// harness builds fixtures with `-Werror`. The warning is this test's subject
+/// rather than something wrong with it - a declaration which did not provoke it
+/// would not be defaulted-but-deleted, and there would be nothing to withdraw -
+/// so it is turned off for the one declaration which earns it, and only for the
+/// compiler which issues it. GCC and MSVC have no such warning enabled at the
+/// levels the harness builds with.
+#[test]
+fn test_volatile_class_member_defaulted_copy_constructor_is_deleted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct Inner { uint32_t a; };
+        #ifdef __clang__
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored \"-Wdefaulted-function-deleted\"
+        #endif
+        struct Outer {
+            Outer() : inner(), plain(2) {}
+            Outer(const Outer&) = default;
+            volatile Inner inner;
+            uint32_t plain;
+        };
+        #ifdef __clang__
+        #pragma clang diagnostic pop
+        #endif
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::Outer: moveit::CopyNew);
+        let outer = ffi::Outer::new().within_unique_ptr();
+        assert_eq!(outer.plain(), 2);
+    };
+    run_test("", hdr, rs, &["Outer", "Inner"], &[]);
 }
 
 /// A concrete instantiation autocxx names in C++ by writing its arguments out
