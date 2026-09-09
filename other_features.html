@@ -305,6 +305,30 @@ no part of a function's type, so <code>void f(volatile int)</code> and <code>voi
 one function.</p>
 <p>A struct with a <code>volatile</code> member is still usable, whichever of these applies;
 it simply cannot be <code>generate_pod!</code>.</p>
+<p>Its <em>constructors</em> depend on what the member is, though, because C++'s do. A
+<code>volatile</code> member of scalar type changes nothing: C++ copies a scalar by reading
+it. A <code>volatile</code> member of <strong>class</strong> type deletes the enclosing class's
+implicitly declared copy and move constructors unless some constructor of the
+member's type accepts the qualified source, because copying the member means
+direct-initializing it from a <code>const volatile</code> source and an implicitly declared
+<code>M(const M&amp;)</code> will not bind to one. <code>autocxx</code> reports that rather than offering
+constructors whose generated C++ could not compile, and says which member is
+responsible.</p>
+<p>The copy can be had back: declare a constructor on the member's own type taking
+<code>const volatile M&amp;</code>, which is the one reference the source of a copy binds to.
+That constructor does not bring the move back with it. A move reads a <code>volatile M</code> <em>rvalue</em>, and an lvalue reference binds to an rvalue only where it is <code>const</code>
+and not <code>volatile</code>, so <code>M(const volatile M&amp;)</code> cannot take one.</p>
+<p><code>autocxx</code> withdraws the move in every case, which is more conservative than C++:
+a member type declaring <code>M(volatile M&amp;&amp;)</code>, or a constructor template which would
+accept the source, does keep the enclosing move constructor in C++, and neither
+is something <code>autocxx</code> can see. The reason for withdrawing anyway is that
+claiming the move is not the safe error. Writing <code>std::move</code> on a class whose
+move constructor C++ has deleted is not itself an error - a <em>defaulted</em> move
+constructor defined as deleted is skipped during overload resolution, and the
+copy constructor runs instead where the class has a usable one - so a wrongly
+claimed move compiles
+quietly, performs a copy, and stops compiling as soon as another member has no
+copy constructor to fall back on.</p>
 <p><strong>Bound through a handle - a pointer or reference <em>to</em> something <code>volatile</code>.</strong>
 <code>volatile int*</code> and <code>volatile int&amp;</code> are where the qualifier is most often used
 in real headers, and they are the one position in which <em>Rust</em> performs the
