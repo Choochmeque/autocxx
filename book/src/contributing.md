@@ -163,9 +163,12 @@ Instead:
   checked out at a release tag. Nothing in it is edited, and no upstream code is committed to
   this repository.
 * `engine/third_party/patches/*.patch` is autocxx's delta, one file per feature, applied in
-  filename order. Each patch applies to the submodule's `bindgen/` directory. Two patches
-  that landed in parallel share a number under letter suffixes (`12a`, `12b`) rather than
-  renumbering the tail, which would churn every later patch and every branch citing one.
+  filename order. Each patch applies to the submodule's `bindgen/` directory. A patch's
+  number is its position in that order and carries nothing else, so two patches landing in
+  parallel take the next two free numbers rather than sharing one under a letter suffix.
+  Relabelling the series is therefore safe where reordering it is not: a new number may not
+  move a patch relative to the patches whose output it applies to. Comments in the engine and
+  in the tests cite patches by filename, so a relabelling has to update those as well.
 * `engine/build.rs` copies the submodule sources into `OUT_DIR`, applies the patches, and
   rewrites the result so it compiles as a module rather than a crate: bindgen's cargo
   features become fixed `cfg`s, macros reached through `#[macro_use] extern crate` become

@@ -1030,7 +1030,7 @@ impl<'a> TypeConverter<'a> {
     /// `std::array<T, N>`, so it is the class the bridge would name, and only
     /// one of the two is therefore bindable. Which one this is, the type no
     /// longer says; [`Annotated::is_std_array`] does, carrying the marker
-    /// `36-std-array-marker.patch` puts on the class.
+    /// `37-std-array-marker.patch` puts on the class.
     ///
     /// A struct field is exempt. No reference reaches Rust from one - a struct
     /// with a reference member is never POD, so it is opaque and its fields are
@@ -1726,7 +1726,7 @@ impl<'a> TypeConverter<'a> {
     /// argument's `TypeKind::ResolvedTypeRef` past the node the qualifier was
     /// on, so `std::shared_ptr<const Foo>` arrived indistinguishable from
     /// `std::shared_ptr<Foo>`.
-    /// `third_party/patches/18-const-template-argument.patch` carries the
+    /// `third_party/patches/19-const-template-argument.patch` carries the
     /// qualifier across that resolution, so every argument C++ wrote `const`
     /// is one [`Self::arg_is_const_qualified`] can see.
     fn generic_args_are_const_qualified(

@@ -242,7 +242,7 @@ fn test_return_uint128() {
 
 /// The type which used to share that token. bindgen renders a `__float128` as
 /// `u128` because that is the right size and Rust has no 128-bit float, so
-/// without the marker `34-float128-newtype-marker.patch` puts round it the
+/// without the marker `35-float128-newtype-marker.patch` puts round it the
 /// signature would be bound as the integer beside it and read as a different
 /// kind of number on both sides. Refused by name instead.
 ///
@@ -7265,7 +7265,7 @@ fn test_two_type_constructors() {
 
 // `value_type` now has its real type rather than a blob, and the bound on
 // `STRING_TYPE` is satisfied - see
-// `engine/third_party/patches/32-dependent-qualified-types.patch`, the bug
+// `engine/third_party/patches/33-dependent-qualified-types.patch`, the bug
 // reported upstream as https://github.com/rust-lang/rust-bindgen/issues/1924,
 // and the inner types `known_types` declares on the `std::string` stand-in. The
 // other two tests of this shape pass on that alone.
@@ -9767,7 +9767,7 @@ fn test_issues_217_222() {
 // with DidNotGenerateAnythingUsable("take_string_view",
 // IgnoredDependent({MyStringView})).
 //
-// `engine/third_party/patches/32-dependent-qualified-types.patch` gives it one,
+// `engine/third_party/patches/33-dependent-qualified-types.patch` gives it one,
 // rebasing the bug reported upstream as
 // https://github.com/rust-lang/rust-bindgen/issues/1924: the member becomes an
 // associated type of a trait, and the template parameter carries a bound saying
@@ -10015,7 +10015,7 @@ fn test_take_array() {
 /// `&[u32; 4]`, and cxx writes a Rust `[T; N]` as `std::array<T, N>`, so the
 /// bridge would declare a parameter the function has not got. autocxx turns it
 /// down instead, and can say so specifically now that
-/// `36-std-array-marker.patch` tells it which of the two C++ array types a
+/// `37-std-array-marker.patch` tells it which of the two C++ array types a
 /// `[T; N]` came from - `test_std_array_const_reference_param` is the one it
 /// binds. Part of the arrays request reported upstream as google/autocxx#266;
 /// `test_take_array` is the decayed parameter, which is unaffected.
@@ -10085,7 +10085,7 @@ fn test_array_pointer_through_alias_refused() {
 /// `T[N]`, and `N` is not a type - so every specialization used to arrive as an
 /// opaque blob of bytes, and a signature mentioning one was refused for
 /// carrying a type C++ never wrote.
-/// `third_party/patches/35-std-array-as-rust-array.patch` says what the class
+/// `third_party/patches/36-std-array-as-rust-array.patch` says what the class
 /// is laid out as instead, and cxx spells a Rust `[T; N]` back as
 /// `std::array<T, N>` - so the bridge names the type the header declared, and
 /// the value crosses in both directions with no wrapper of autocxx's in
@@ -10938,7 +10938,7 @@ fn test_volatile_array_member_refused() {
 /// A reference to a `volatile std::array` is not bound, and the reason is one
 /// layer further down than the reference. A `cv`-qualified `std::array` is a
 /// specialization `[T; N]` cannot spell the qualifier of, so
-/// `35-std-array-as-rust-array.patch` leaves it the opaque blob it always was,
+/// `36-std-array-as-rust-array.patch` leaves it the opaque blob it always was,
 /// and a blob in a signature is refused. Opening the reference position does
 /// not open this one - which is the point, cxx having nothing to write in
 /// `std::array<T, N> const&` that would say the object is volatile.
@@ -11705,7 +11705,7 @@ fn test_array_like_user_template_still_refused() {
 /// the same `&[T; N]` - bindgen writes `[T; N]` for the class and for the C
 /// array alike - and cxx spells that back as the `std::array`, so binding one
 /// would silently have been binding the other.
-/// `third_party/patches/36-std-array-marker.patch` keeps the two apart, and
+/// `third_party/patches/37-std-array-marker.patch` keeps the two apart, and
 /// `test_array_reference_param_refused` is the one still turned down.
 #[test]
 fn test_std_array_const_reference_param() {
@@ -16025,7 +16025,7 @@ fn test_shared_ptr_const_pointer_payload() {
 }
 
 /// The same lowering, with a class payload. This is what
-/// `18-const-template-argument.patch` unlocked: bindgen used to resolve a
+/// `19-const-template-argument.patch` unlocked: bindgen used to resolve a
 /// class argument's `TypeKind::ResolvedTypeRef` past the node its `const` sat
 /// on, so `std::shared_ptr<const fx_Held>` arrived indistinguishable from
 /// `std::shared_ptr<fx_Held>`, was spelled `SharedPtr<fx_Held>`, and the C++
@@ -25067,8 +25067,8 @@ fn test_issue_1125() {
 //    `CXType_Char32 => TypeKind::Int(IntKind::U32)` in `build_builtin_ty`;
 //    `wchar_t` kept an `IntKind::WChar` of its own but codegen rendered it
 //    through `Layout::known_type_for_size`, so it too came out as a bare
-//    `u16`/`u32`. `23-distinct-char32-t.patch` and
-//    `22-distinct-wchar-t.patch` add the option and the marker rendering,
+//    `u16`/`u32`. `24-distinct-char32-t.patch` and
+//    `23-distinct-wchar-t.patch` add the option and the marker rendering,
 //    which is the same edit `char16_t` already had.
 //
 //    `wchar_t` has a second problem the others do not: its width *and* its
@@ -25082,7 +25082,7 @@ fn test_issue_1125() {
 //    run `CXType_UChar = 5`, `CXType_Char16 = 6`, `CXType_Char32 = 7` - so
 //    `build_builtin_ty` returned `None` for `char8_t` and bindgen fell back to
 //    an opaque type of the right layout. It does not need the enumerator:
-//    clang spells the type `char8_t`, and `24-distinct-char8-t.patch`
+//    clang spells the type `char8_t`, and `25-distinct-char8-t.patch`
 //    recognises it that way. This was recorded as gated below bindgen, on an
 //    LLVM C-API addition; it was not.
 //
@@ -25094,7 +25094,7 @@ fn test_issue_1125() {
 //    an 80-bit x87 float (x86-64 System V) or an IEEE binary128 (AArch64
 //    Linux), and Rust has no type for either. So the answer is not a newtype
 //    but a refusal, and what was missing was the means to refuse precisely:
-//    `25-long-double-newtype-marker.patch` marks the type so that autocxx can
+//    `26-long-double-newtype-marker.patch` marks the type so that autocxx can
 //    name what it is turning down. See `test_long_double`.
 //
 // Before all this, cases 1 and 2 failed the same way as each other: autocxx
@@ -34133,7 +34133,7 @@ fn test_method_named_like_a_constructor_overload() {
 /// derive from the same empty class holds two copies of it and the Itanium ABI
 /// makes it two bytes. bindgen wrote such a class out as its one `_address`
 /// byte whatever the target said, which is smaller than the object C++ hands
-/// over - see the patch series' `16-empty-class-size.patch`.
+/// over - see the patch series' `17-empty-class-size.patch`.
 #[test]
 fn test_empty_diamond_is_as_wide_as_cpp_makes_it() {
     let hdr = indoc! {"

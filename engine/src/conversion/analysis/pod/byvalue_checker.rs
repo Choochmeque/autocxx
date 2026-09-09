@@ -644,7 +644,7 @@ impl ByValueChecker {
     /// Whether bindgen replaced this struct's base-class fields with the one
     /// opaque field it writes when the target's layout does not leave the
     /// bases room for their own types - see `third_party/patches/
-    /// 17-base-class-extent.patch`.
+    /// 18-base-class-extent.patch`.
     fn bases_are_opaque_bytes(def: &ItemStruct) -> bool {
         def.fields.iter().any(|f| {
             f.ident

@@ -16,7 +16,7 @@
 //! and the Rust codegen, which copies the bound onto its own wrapper, read the
 //! bound through this module so that they agree on what one is.
 //!
-//! Written by `engine/third_party/patches/32-dependent-qualified-types.patch`,
+//! Written by `engine/third_party/patches/33-dependent-qualified-types.patch`,
 //! which rebases the bug reported upstream as
 //! <https://github.com/rust-lang/rust-bindgen/issues/1924>.
 
