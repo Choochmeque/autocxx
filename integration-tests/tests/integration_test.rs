@@ -1004,7 +1004,9 @@ fn test_negative_take_as_pod_with_destructor() {
         &[
             "CppBuild",
             "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!",
-            "in C++ to be used as an argument of `take_bob` in Rust",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type Bob should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
         ],
     );
 }
@@ -1039,7 +1041,9 @@ fn test_negative_take_as_pod_with_move_constructor() {
         &[
             "CppBuild",
             "type Bob should be trivially move constructible and trivially destructible to be used with generate_pod!",
-            "in C++ to be used as an argument of `take_bob` in Rust",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type Bob should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
         ],
     );
 }
@@ -13909,7 +13913,9 @@ fn test_error_generated_for_pod_with_nontrivial_destructor() {
         &[
             "CppBuild",
             "type A should be trivially move constructible and trivially destructible to be used with generate_pod!",
-            "in C++ to be used as an argument of `take_a` in Rust",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type A should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
         ],
     );
 }
@@ -13961,7 +13967,9 @@ fn test_error_generated_for_pod_with_nontrivial_move_constructor() {
         &[
             "CppBuild",
             "type A should be trivially move constructible and trivially destructible to be used with generate_pod!",
-            "in C++ to be used as an argument of `take_a` in Rust",
+            // Not the function's name: forced wrapper generation replaces it
+            // with a hashed shim. The type is what this is about.
+            "type A should be trivially move constructible and trivially destructible in C++ to be used as an argument of",
         ],
     );
 }
