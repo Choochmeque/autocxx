@@ -1,0 +1,785 @@
+Subject: Keep a struct as wide as the object C++ builds in it where a field is written narrower than its member
+
+A struct is padded out to the size clang measured, from a tracker told how many
+bytes each field takes up. What it is told is how wide the *emitted* field is:
+the type codegen writes, which is the type C++ declared for most fields and is
+not for a `replaces=` substitution, an array of one, or an instantiation of a
+class template. Where that width cannot be worked out the tracker is told the
+size clang measured for the member instead, and wherever the emitted field is
+narrower than that, the struct is left short of the object C++ builds in it with
+nothing to say so: the tracker counts the bytes the target gave the member, pads
+the struct out as though the field had covered them, and writes a type narrower
+than the run it believed was filled. A caller who asks C++ to construct one in
+storage sized from the Rust type gets it built past the end.
+
+An instantiation of a class template is the shape this is about. codegen writes
+every instantiation of one template as the same Rust struct - the one bindgen
+wrote for the definition, given whichever of the arguments that struct takes -
+so the layout clang measured for the instantiation is what the field is only
+where that struct happens to be as wide as it. Lay the definition out instead,
+with the instantiation's arguments standing in for its parameters, which is what
+a member declared with a parameter is written as and the whole of why an
+instantiation's width follows its arguments. `struct Holder { Box<std::string>
+m; uint32_t n; }` over `template <typename T> struct Box { T value; }` was
+sixteen bytes on an LP64 target against C++'s thirty-two, because the string a
+`replaces=` substitute stands in for is three pointers and the substitute is
+one; laying `Box` out with the substitute as `T` gives eight, and the class is
+padded out around it.
+
+Where the definition cannot be laid out, what happens next turns on whether it
+is the definition clang instantiated. Two shapes say it is not, and for those
+there is no measurement to fall back on: a `replaces=` annotation stands another
+template in for this one, so what is written is an instantiation of a different
+type from the one clang measured; and a definition which takes none of the
+arguments is one Rust struct standing for every instantiation of the template,
+which cannot be as wide as more than one of them.
+`std::unordered_map<std::string, uint32_t>` is such an instantiation on libc++
+and on the Microsoft standard library both - the definition bindgen writes for
+it holds one member it kept opaque and comes to a single byte, against the forty
+the target gives the instantiation - so a class holding one was a byte wide.
+Write the field as a blob of the layout clang measured for those, which is that
+layout by construction, whatever the arithmetic could not work out. Everything
+else is the definition clang instantiated, whose width follows its arguments,
+and is left measured as clang measured the instantiation.
+
+The substitution is read off the definition's own annotation rather than off the
+type ref which reaches it, because a type ref is resolved for other reasons too
+- a template forward-declared where it is used, say - and a definition reached
+that way is the one clang instantiated after all.
+
+A base class is written as a field of the base's own type and takes every route
+to a substitution a member takes, so it reaches the same blob by the same walk.
+Inside a packed class the blob is asked for at the alignment that class gives
+its members, which is never more than the class's own: `blob` asks for
+`repr(align(N))` above four-byte alignment, and a packed struct may not
+transitively hold such a type at all.
+
+Then the runs of bytes no field covers. A packed class got no padding field
+written for one at all, on the grounds that its fields are contiguous - which is
+true of a gap worked out from an alignment, and not of a gap the member's own
+offset reports. The target really left that one, and the only way a packed class
+comes by one is a field written narrower than the member C++ declared:
+`#pragma pack(1) struct P { std::string m[3]; int n; };` counted the forty-eight
+bytes between the emitted array and `n`, wrote no field for them, and came out
+twenty-eight bytes wide against the target's seventy-six. Write that run out, in
+bytes, where the class is packed to a single byte - which is where the offset it
+is measured from is the offset the emitted struct has. `#pragma pack(N)` for a
+wider `N` still aligns each field to the smaller of its own alignment and `N`,
+which this tracker does not model, so there the run stays where Rust's own
+alignment has always closed it.
+
+And every run of bytes is now written at whatever alignment makes the field the
+run: `blob` hands back a whole number of units of the alignment it is asked for,
+so a run which is not a whole number of them came back longer than itself and
+put the field after it past the offset the target gave it. `pad_struct` already
+asked for byte units in that case; `saw_field` did not.
+
+Along with those, `blob` itself: below eight-byte alignment it divided the size
+by the alignment and dropped the remainder, so a layout whose size is not a whole
+number of its own alignment came back shorter than the layout it was asked for.
+Round up instead, which is what a Rust type of that layout comes to and what a
+tracker counting one counts. Only an `aligned` attribute reaches such a layout;
+anything C++ laid out is already a whole number of its alignment.
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -1738,125 +1738,306 @@
+     item
+ }
+ 
+-/// The layout of the Rust type written for a field which resolved to `item`.
++/// The Rust type codegen writes for a field which resolved to `item`.
++pub(crate) struct FieldRepresentation {
++    /// How wide that type is.
++    pub(crate) layout: Layout,
++    /// Set where the field is written as a blob of `layout` rather than as its
++    /// own type. See [`field_representation_layout`].
++    pub(crate) blob: bool,
++}
++
++/// What codegen writes for a field which resolved to `item`, and how wide it
++/// is.
+ ///
+-/// Usually that is the layout of what `field_representation` named, because what
+-/// codegen writes for the field is that item's type. Two shapes are written as
+-/// something else. `[T; N]` is written by converting the element and repeating
+-/// it, so its size is `N` times the size of the type the *element* is written
+-/// as - and a substituted element does not share a size with the element C++
+-/// declared, which is the size clang measured for the array. An instantiation
+-/// of a class template a `replaces=` annotation substituted another template
+-/// for is written as an instantiation of the substitute, whose size is the
+-/// substitute's and not the one clang measured for the template it stands in
+-/// for.
++/// Usually the field is written as what `field_representation` named, and is as
++/// wide as clang measured that. Two shapes are written as something else. `[T;
++/// N]` is written by converting the element and repeating it, so its size is
++/// `N` times the size of the type the *element* is written as - and a
++/// substituted element does not share a size with the element C++ declared,
++/// which is the size clang measured for the array. An instantiation of a class
++/// template is written as the Rust struct bindgen wrote for that template,
++/// whose size is that struct's and not the one clang measured for the
++/// instantiation.
++///
++/// Where nothing establishes how wide that type would be *and* nothing measured
++/// it either - which is an instantiation written as a definition clang did not
++/// instantiate - the field is written as a blob of the layout clang measured
++/// instead, which is that layout by construction. Leaving it as its own type
++/// would leave the struct holding it short of the object C++ builds there,
++/// silently: the tracker would count the bytes the target gave the member, pad
++/// the struct out as if the field had covered them, and emit a type narrower
++/// than the run it believed was filled.
+ fn field_representation_layout(
++    ctx: &BindgenContext,
++    item: &Item,
++) -> Option<FieldRepresentation> {
++    let measured = || item.as_type().and_then(|ty| ty.layout(ctx));
++    match written_width(ctx, item, &mut HashSet::default()) {
++        WrittenWidth::OfItsOwn(layout) => Some(FieldRepresentation {
++            layout,
++            blob: false,
++        }),
++        WrittenWidth::AsMeasured => measured().map(|layout| {
++            FieldRepresentation {
++                layout,
++                blob: false,
++            }
++        }),
++        // Nothing to write a blob *of* where clang measured nothing either;
++        // the field is left as it was, which is where it was before any of
++        // this.
++        WrittenWidth::Unestablished => measured().map(|layout| {
++            FieldRepresentation { layout, blob: true }
++        }),
++    }
++}
++
++/// How wide the Rust type codegen writes for an item is.
++enum WrittenWidth {
++    /// As wide as the layout clang measured for the item, which is what
++    /// codegen writes for anything it does not stand another type in for - and
++    /// what the blob it writes for a type it keeps opaque is too.
++    AsMeasured,
++    /// A width of its own, because codegen writes some other type.
++    OfItsOwn(Layout),
++    /// Codegen writes some other type and nothing here says how wide it is.
++    Unestablished,
++}
++
++/// The width of the emitted field, blob or not, for a caller in the middle of
++/// laying out a struct of its own.
++fn representation_layout(
+     ctx: &BindgenContext,
+     item: &Item,
++    measuring: &mut HashSet<ItemId>,
+ ) -> Option<Layout> {
+-    representation_layout(ctx, item, &mut HashSet::default())
++    match written_width(ctx, item, measuring) {
++        WrittenWidth::OfItsOwn(layout) => Some(layout),
++        // A blob of the layout clang measured is as wide as that layout, and
++        // so is a type written as itself.
++        _ => item.as_type().and_then(|ty| ty.layout(ctx)),
++    }
+ }
+ 
+ /// The recursion behind `field_representation_layout`, carrying the items it is
+ /// in the middle of measuring.
+ ///
+-/// Every stop leaves the type sized as clang measured it, which is what it was
+-/// sized as before any of this. An item already on the way down is one: C++ has
+-/// no type which contains itself, but `replaces=` declarations that are each
+-/// fine on their own can build one between them - an array whose element is an
+-/// array of itself, or a substitute holding an instantiation of the template it
++/// An item already on the way down is left as clang measured it: C++ has no
++/// type which contains itself, but `replaces=` declarations that are each fine
++/// on their own can build one between them - an array whose element is an array
++/// of itself, or a substitute holding an instantiation of the template it
+ /// substitutes for - and a walk with no memory would not come back.
+-fn representation_layout(
++fn written_width(
+     ctx: &BindgenContext,
+     item: &Item,
+     measuring: &mut HashSet<ItemId>,
+-) -> Option<Layout> {
+-    let ty = item.as_type()?;
++) -> WrittenWidth {
++    let Some(ty) = item.as_type() else {
++        return WrittenWidth::AsMeasured;
++    };
+     if !measuring.insert(item.id()) {
+-        return ty.layout(ctx);
++        return WrittenWidth::AsMeasured;
+     }
+-    let written = written_layout(ctx, item, ty, measuring);
++    let written = match *ty.kind() {
++        TypeKind::Array(element, len) => {
++            array_width(ctx, element, len, measuring)
++        }
++        TypeKind::TemplateInstantiation(ref inst) => {
++            instantiation_width(ctx, item, inst, measuring)
++        }
++        _ => WrittenWidth::AsMeasured,
++    };
+     measuring.remove(&item.id());
+-    written.or_else(|| ty.layout(ctx))
++    written
+ }
+ 
+-/// The layout of what codegen writes for `item` where that is not the layout
+-/// clang measured, and `None` to leave it as clang measured it.
+-fn written_layout(
++/// How wide `[T; N]` is written, which is `N` of what the element is written
++/// as.
++///
++/// Not what clang measured for the array, wherever the element is written as
++/// something else: the element resolves to the type it is written as, and clang
++/// measured the array over the type it stands in for.
++fn array_width(
+     ctx: &BindgenContext,
+-    item: &Item,
+-    ty: &Type,
++    element: TypeId,
++    len: usize,
+     measuring: &mut HashSet<ItemId>,
+-) -> Option<Layout> {
+-    match *ty.kind() {
+-        TypeKind::Array(element, len) => {
+-            let element = field_representation(ctx, element);
+-            let element = representation_layout(ctx, element, measuring)?;
+-            // A product no `usize` holds is not a size, and a substitute wider
+-            // than what it stands in for can reach one from a declaration clang
+-            // accepted.
+-            let stride = checked_align_to(element.size, element.align)?;
+-            Some(Layout::new(stride.checked_mul(len)?, element.align))
++) -> WrittenWidth {
++    let element = field_representation(ctx, element);
++    let width = match written_width(ctx, element, measuring) {
++        // `N` of a type of no established width is no established width
++        // either, and the blob written in its place spans the whole array.
++        WrittenWidth::Unestablished => return WrittenWidth::Unestablished,
++        WrittenWidth::OfItsOwn(layout) => Some(layout),
++        WrittenWidth::AsMeasured => {
++            element.as_type().and_then(|ty| ty.layout(ctx))
+         }
+-        TypeKind::TemplateInstantiation(ref inst) => {
+-            substitute_layout(ctx, item, inst, measuring)
++    };
++    let Some(element) = width else {
++        return WrittenWidth::AsMeasured;
++    };
++    // A product no `usize` holds is not a size, and a substitute wider than
++    // what it stands in for can reach one from a declaration clang accepted.
++    let Some(stride) = checked_align_to(element.size, element.align) else {
++        return WrittenWidth::AsMeasured;
++    };
++    match stride.checked_mul(len) {
++        Some(size) => {
++            WrittenWidth::OfItsOwn(Layout::new(size, element.align))
+         }
+-        _ => None,
++        None => WrittenWidth::AsMeasured,
+     }
+ }
+ 
+-/// The layout of the Rust type written for an instantiation of a class template
+-/// which a `replaces=` annotation substituted another template for.
++/// How wide the Rust type written for an instantiation of a class template is.
+ ///
+-/// The annotation is recorded against the item the replaced name resolves to,
+-/// which for a class template is the template itself. An instantiation of it is
+-/// an item of its own, carrying the layout clang measured for the type C++
+-/// declared, and resolving *it* through type refs finds no substitution at all.
+-/// Its template definition is where the substitution sits, and what codegen
+-/// writes for the field is the substitute instantiated with these same
+-/// arguments, so the substitute's layout is the one the tracker wants.
++/// clang measures each instantiation, but codegen writes them all as one Rust
++/// struct: the one bindgen wrote for the template definition, given whichever
++/// of the arguments that struct takes. So the layout clang measured for the
++/// instantiation is the width of what is written only where that struct is as
++/// wide as it, which is not something the instantiation's own measurement says.
+ ///
+-/// What keys this is the definition codegen writes, not the annotation: a
+-/// definition reached through a type ref resolved for any other reason - a
+-/// template forward-declared where it is used, say - is equally the one written,
+-/// and is equally the layout to take.
++/// So `template_pattern_layout` is asked to lay the definition out, with the
++/// instantiation's arguments standing in for its parameters. Where it answers,
++/// that is the width, and the struct holding the field is padded out around it.
+ ///
+-/// `None` where codegen writes something else: an instantiation bindgen was told
+-/// to keep opaque is a blob of the layout clang measured, and so is one whose
+-/// substitute has no parameters to take the arguments. `None` is also the answer
+-/// wherever the substitute's layout cannot be established; the field is then
+-/// measured as the type C++ declared, as it was before any of this, which leaves
+-/// its struct short wherever the substitute is the narrower of the two.
+-fn substitute_layout(
++/// Where it declines, what happens next turns on whether the definition is the
++/// one clang instantiated. Two shapes say it is not, and for those there is no
++/// measurement to fall back on, so the field is written as a blob instead. A
++/// `replaces=` annotation stands another template in for this one, and what is
++/// written is an instantiation of *that* - a different type from the one clang
++/// measured. And a definition which takes none of the arguments is one Rust
++/// struct standing for every instantiation of the template, which cannot be the
++/// width of more than one of them. Everything else is the definition clang
++/// instantiated, whose width follows the arguments, and is left measured as
++/// clang measured the instantiation.
++///
++/// The substitution is read off the definition's own annotation rather than off
++/// the type ref which reaches it, because a type ref is resolved for other
++/// reasons too - a template forward-declared where it is used, say - and a
++/// definition reached that way is the one clang instantiated after all.
++///
++/// Measured as clang measured it where codegen writes a blob of that
++/// measurement anyway: an instantiation bindgen was told to keep opaque, and
++/// one whose definition has no parameters at all to take the arguments.
++fn instantiation_width(
+     ctx: &BindgenContext,
+     item: &Item,
+     inst: &TemplateInstantiation,
+     measuring: &mut HashSet<ItemId>,
+-) -> Option<Layout> {
++) -> WrittenWidth {
+     let declared = ctx.resolve_item(inst.template_definition());
+     let written = inst
+         .template_definition()
+         .into_resolver()
+         .through_type_refs()
+         .resolve(ctx);
+-    if written.id() == declared.id() ||
+-        written.self_template_params(ctx).is_empty() ||
+-        item.is_opaque(ctx, &())
++    let params = written.self_template_params(ctx);
++    if params.is_empty() || item.is_opaque(ctx, &()) {
++        return WrittenWidth::AsMeasured;
++    }
++    let substituted = written.id() != declared.id() &&
++        written.annotations().use_instead_of().is_some();
++    let takes_an_argument = params
++        .iter()
++        .any(|param| ctx.uses_template_parameter(written.id(), *param));
++    let Some(pattern) = written.as_type() else {
++        return WrittenWidth::AsMeasured;
++    };
++    let arguments: Vec<(TypeId, TypeId)> = params
++        .iter()
++        .copied()
++        .zip(inst.template_arguments().iter().copied())
++        .collect();
++    match template_pattern_layout(ctx, written, pattern, &arguments, measuring)
+     {
++        Some(layout) => WrittenWidth::OfItsOwn(layout),
++        None if substituted || !takes_an_argument => {
++            WrittenWidth::Unestablished
++        }
++        None => WrittenWidth::AsMeasured,
++    }
++}
++
++/// `written`, held to what a packed class gives a member of it.
++///
++/// A packed class aligns each of its members to the smaller of the member's own
++/// alignment and the class's, so a member of one is never more strictly aligned
++/// than the class is, and a blob written for one is asked for at that
++/// alignment. Where even that is more than `blob` can write without
++/// `repr(align)`, no blob can be written here at all: a packed struct may not
++/// transitively hold such a type and rustc rejects the whole struct. The field
++/// is left as its own type there, short of the object C++ builds in it as it
++/// was before any of this.
++///
++/// A field which was not going to be a blob keeps the layout it was measured
++/// at, which is the one the tracker has always been told.
++fn packed_field(
++    ctx: &BindgenContext,
++    parent: &CompInfo,
++    parent_item: &Item,
++    written: FieldRepresentation,
++) -> FieldRepresentation {
++    let parent_layout = parent_item.expect_type().layout(ctx);
++    if !written.blob || !parent.is_packed(ctx, parent_layout.as_ref()) {
++        return written;
++    }
++    let align = written
++        .layout
++        .align
++        .min(parent_layout.map_or(1, |parent| parent.align));
++    if align > helpers::MAX_ALIGN_WITHOUT_REPR_ALIGN {
++        return FieldRepresentation {
++            blob: false,
++            ..written
++        };
++    }
++    FieldRepresentation {
++        layout: Layout::new(written.layout.size, align),
++        ..written
++    }
++}
++
++/// The argument standing in for `ty`, where `ty` is one of the parameters
++/// `arguments` pairs with the instantiation's own.
++///
++/// A member declared with a template parameter is written as whatever the
++/// argument is written as, which is the whole of why an instantiation's width
++/// follows its arguments.
++fn substituted_argument(
++    ctx: &BindgenContext,
++    ty: TypeId,
++    arguments: &[(TypeId, TypeId)],
++) -> Option<TypeId> {
++    let item = ty.into_resolver().through_type_refs().resolve(ctx);
++    if !matches!(*item.as_type()?.kind(), TypeKind::TypeParam) {
+         return None;
+     }
+-    template_pattern_layout(ctx, written, written.as_type()?, measuring)
++    arguments
++        .iter()
++        .find(|(param, _)| {
++            param.into_resolver().through_type_refs().resolve(ctx).id() ==
++                item.id()
++        })
++        .map(|(_, argument)| *argument)
+ }
+ 
+ /// The layout of the Rust struct bindgen writes for a class template.
+ ///
+ /// clang lays a class template out only where something instantiates it, and
+-/// nothing instantiates a substitute: the header declares it to be given to Rust
+-/// in place of the name its annotation points at. Where clang did measure one,
+-/// codegen pads the struct out to that measurement and it is the answer.
+-/// Otherwise the members are, since a member sized by a template parameter has
+-/// no layout to read here and stops this.
++/// what reaches here is a definition nothing instantiated: a substitute, which
++/// the header declares to be given to Rust in place of the name its annotation
++/// points at, or a definition whose instantiations are all written as one
++/// struct. Where clang did measure one, codegen pads the struct out to that
++/// measurement and it is the answer. Otherwise the members are, a member
++/// declared with one of the definition's own parameters being laid out as the
++/// argument standing in for it and one with no layout at all stopping this.
+ ///
++/// A member declared with one of the definition's own template parameters is
++/// laid out as the argument standing in for it, which is what codegen writes
++/// there and the whole of why an instantiation's width follows its arguments.
++///
+ /// So lay the members out the way `repr(C)` will, guarded on the members being
+ /// the whole of what the struct holds. A base class, a vtable pointer, a
+ /// bitfield allocation unit and the address byte an empty class is given are
+@@ -1871,10 +2052,16 @@
+ /// A union is declined before the layout question is even asked, because
+ /// `CompInfo::layout` answers it for one by taking the widest member without
+ /// rounding up to the alignment, which is not the size Rust gives it.
++///
++/// A decline is not always a shrug: where the definition is not the one clang
++/// instantiated, it is what makes the field holding the instantiation get
++/// written as a blob of the layout clang measured, which is as wide as the
++/// object C++ builds there whatever this could not work out.
+ fn template_pattern_layout(
+     ctx: &BindgenContext,
+     item: &Item,
+     ty: &Type,
++    arguments: &[(TypeId, TypeId)],
+     measuring: &mut HashSet<ItemId>,
+ ) -> Option<Layout> {
+     let TypeKind::Comp(ref comp) = *ty.kind() else {
+@@ -1901,7 +2088,9 @@
+         let Field::DataMember(field) = field else {
+             return None;
+         };
+-        let field = field_representation(ctx, field.ty());
++        let field = substituted_argument(ctx, field.ty(), arguments)
++            .unwrap_or_else(|| field.ty());
++        let field = field_representation(ctx, field);
+         // A vector is written as the array of its elements, whose alignment is
+         // the element's and not the vector's, so the layout clang reported for
+         // it is not the one the emitted member has.
+@@ -1956,10 +2145,22 @@
+         let field_item =
+             self.ty().into_resolver().through_type_refs().resolve(ctx);
+         let field_ty = field_item.expect_type();
+-        let ty = self
+-            .ty()
+-            .to_rust_ty_or_opaque(ctx, &())
+-            .with_implicit_template_params(ctx, field_item);
++        // What is written for the field, and how wide it is. The tracker is
++        // told the same thing below, so the bytes it counts for the field are
++        // the bytes the field has.
++        let representation = field_representation(ctx, self.ty());
++        let written = field_representation_layout(ctx, representation)
++            .map(|written| packed_field(ctx, parent, parent_item, written));
++        let ty = match written {
++            Some(FieldRepresentation {
++                layout,
++                blob: true,
++            }) => helpers::blob(ctx, layout, true),
++            _ => self
++                .ty()
++                .to_rust_ty_or_opaque(ctx, &())
++                .with_implicit_template_params(ctx, field_item),
++        };
+ 
+         // NB: If supported, we use proper `union` types.
+         let ty = if parent.is_union() {
+@@ -2030,12 +2231,15 @@
+         let field_name = field_name.as_str();
+         let field_ident = ctx.rust_ident_raw(field_name);
+ 
+-        if let Some(padding_field) = struct_layout.saw_field(
+-            field_name,
+-            field_representation(ctx, self.ty()),
+-            self.offset(),
+-        ) {
+-            fields.extend(Some(padding_field));
++        if let Some(written) = written {
++            if let Some(padding_field) = struct_layout.saw_field(
++                field_name,
++                representation.expect_type(),
++                written.layout,
++                self.offset(),
++            ) {
++                fields.extend(Some(padding_field));
++            }
+         }
+ 
+         let visibility = compute_visibility(
+@@ -2943,13 +3147,13 @@
+             // them. The difference is a run
+             // of bytes no field covers, and it is written out where the bases
+             // end rather than left to the member after them. `saw_field` does
+-            // close such a gap in front of an ordinary member, but at that
+-            // member's alignment rather than in bytes, so a run which is not a
+-            // whole number of them comes back longer than itself; a packed
+-            // class has that padding suppressed altogether; and a bitfield
++            // close such a gap in front of an ordinary member, but a class need
++            // not have one: it may declare nothing of its own, and a bitfield
+             // allocation unit is laid out from where the tracker has reached
+             // rather than from an offset of its own, so nothing is written in
+-            // front of one at all.
++            // front of one at all. A class packed to more than a byte gets
++            // nothing there either, its emitted fields being laid out at
++            // offsets this tracker does not model.
+             let bases_padding = if opaque_bases.is_none() &&
+                 bases_end < declared_bases_end
+             {
+@@ -2997,12 +3201,29 @@
+                 }
+ 
+                 let inner_item = ctx.resolve_item(base.ty);
+-                let inner = inner_item
+-                    .to_rust_ty_or_opaque(ctx, &())
+-                    .with_implicit_template_params(ctx, inner_item);
++                // A base is written as a field of the base's own type and takes
++                // every route to a substitution a member does, so it reaches
++                // the same blob where nothing establishes the width of what
++                // would otherwise be written.
++                let written = field_representation_layout(
++                    ctx,
++                    field_representation(ctx, base.ty),
++                )
++                .map(|written| packed_field(ctx, self, item, written));
++                let inner = match written {
++                    Some(FieldRepresentation {
++                        layout,
++                        blob: true,
++                    }) => helpers::blob(ctx, layout, true),
++                    _ => inner_item
++                        .to_rust_ty_or_opaque(ctx, &())
++                        .with_implicit_template_params(ctx, inner_item),
++                };
+                 let field_name = ctx.rust_ident(&base.field_name);
+ 
+-                struct_layout.saw_base(field_representation(ctx, base.ty));
++                if let Some(written) = written {
++                    struct_layout.saw_base_with_layout(written.layout);
++                }
+ 
+                 let visibility = match (
+                     base.is_public(),
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -43,7 +43,9 @@
+         return size;
+     }
+ 
+-    size + align - rem
++    // Saturating: a size no `usize` can round up is not a size any type has,
++    // and wrapping it to nothing would be a smaller lie than leaving it.
++    size.saturating_add(align - rem)
+ }
+ 
+ #[test]
+@@ -115,12 +117,13 @@
+     /// The bytes the field written for a base class takes up, which is the
+     /// size of the type that field is *written* as: the substitute, where a
+     /// `replaces=` annotation stood one in for the type the class was declared
+-    /// to derive from, and that declared type otherwise.
++    /// to derive from, the layout clang measured where the field is written as
++    /// a blob of it, and that declared type otherwise.
+     pub(crate) fn saw_base(&mut self, base_item: &Item) {
+-        if let Some(layout) =
++        if let Some(written) =
+             super::field_representation_layout(self.ctx, base_item)
+         {
+-            self.saw_base_with_layout(layout);
++            self.saw_base_with_layout(written.layout);
+         }
+     }
+ 
+@@ -168,20 +171,18 @@
+ 
+     /// Returns a padding field if necessary for a given new field _before_
+     /// adding that field.
++    ///
++    /// `field_layout` is the width of what is *written* for the field, which
++    /// the caller has in hand because it decided what to write.
+     pub(crate) fn saw_field(
+         &mut self,
+         field_name: &str,
+-        field_item: &Item,
++        field_ty: &Type,
++        mut field_layout: Layout,
+         field_offset: Option<usize>,
+     ) -> Option<proc_macro2::TokenStream> {
+-        // The size the *emitted* field has, which is the size clang measured
+-        // for all but an array of a substituted element and an instantiation of
+-        // a substituted class template.
+-        let mut field_layout =
+-            super::field_representation_layout(self.ctx, field_item)?;
+-
+         if matches!(
+-            *field_item.expect_type().canonical_type(self.ctx).kind(),
++            *field_ty.canonical_type(self.ctx).kind(),
+             TypeKind::Array(..)
+         ) && field_layout.align > MAX_GUARANTEED_ALIGN
+         {
+@@ -206,11 +207,13 @@
+         let will_merge_with_bitfield = self.align_to_latest_field(field_layout);
+ 
+         let is_union = self.comp.is_union();
+-        let padding_bytes = match field_offset {
++        // Where the gap in front of the field came from, which decides whether
++        // a packed class gets a field written for it below.
++        let (padding_bytes, from_the_offset) = match field_offset {
+             Some(offset) if offset / 8 > self.latest_offset => {
+-                offset / 8 - self.latest_offset
++                (offset / 8 - self.latest_offset, true)
+             }
+-            _ => {
++            _ => (
+                 if will_merge_with_bitfield ||
+                     field_layout.align == 0 ||
+                     is_union
+@@ -225,14 +228,37 @@
+                     self.padding_bytes(l)
+                 } else {
+                     0
+-                }
+-            }
++                },
++                false,
++            ),
+         };
+ 
+         self.latest_offset += padding_bytes;
+ 
+-        let padding_layout = if self.is_packed || is_union {
++        let padding_layout = if is_union {
+             None
++        } else if self.is_packed {
++            // A packed class's fields are contiguous, so a gap worked out from
++            // an alignment is not a gap it has and nothing is written for one.
++            // A gap the member's own offset reports is a run of bytes the
++            // target left, and the only way a packed class comes by one is a
++            // field written narrower than the member C++ declared. Write that
++            // one out, in bytes: a packed class does not align its fields, so
++            // the run need not be a whole number of anything.
++            //
++            // Only where the class is packed to a single byte, which is where
++            // the offset this is measured from is the offset the emitted struct
++            // has. `#pragma pack(N)` for a wider `N` still aligns each field to
++            // the smaller of its own alignment and `N`, and this tracker does
++            // not model that - it skips aligning a packed class's fields and
++            // bases at all - so the offset it has reached can be behind the one
++            // Rust lays the field out at, and a run written from the difference
++            // would push every field after it along. There, Rust's own
++            // alignment closes the gap as it did before this.
++            (from_the_offset &&
++                padding_bytes != 0 &&
++                self.known_type_layout.is_none_or(|l| l.align == 1))
++            .then(|| Layout::new(padding_bytes, 1))
+         } else {
+             let force_padding = self.ctx.options().force_explicit_padding;
+ 
+@@ -258,6 +284,17 @@
+             } else {
+                 cmp::min(field_layout.align, MAX_GUARANTEED_ALIGN)
+             };
++            // `blob` hands back a whole number of units of the alignment it is
++            // asked for, so a run which is not a whole number of them does not
++            // come back as itself and puts the field after it past the offset
++            // the target gave it. Byte units are the run exactly, and the
++            // struct's alignment is `requires_explicit_align`'s business rather
++            // than this field's. A field of no alignment at all is left as it
++            // was: `blob` reads that as one byte, which is the run exactly too.
++            let padding_align = match padding_bytes.checked_rem(padding_align) {
++                Some(remainder) if remainder != 0 => 1,
++                _ => padding_align,
++            };
+ 
+             if need_padding && padding_bytes != 0 {
+                 Some(Layout::new(padding_bytes, padding_align))
+@@ -364,13 +401,11 @@
+             } else if padding_bytes % layout.align == 0 {
+                 Layout::new(padding_bytes, layout.align)
+             } else {
+-                // `blob` hands back whole units of the alignment it is asked
+-                // for, so a run of bytes which is not a whole number of them
+-                // does not come back as itself: up to 4-byte alignment the
+-                // type is short by the remainder, and at 8 the wrapper rounds
+-                // its own size up and the type is longer than the run instead.
+-                // Byte units are the run exactly, and the struct's alignment
+-                // is `requires_explicit_align`'s business rather than this
++                // `blob` hands back a whole number of units of the alignment it
++                // is asked for, so a run of bytes which is not a whole number
++                // of them comes back longer than itself. Byte units are the run
++                // exactly, and the struct's alignment is
++                // `requires_explicit_align`'s business rather than this
+                 // field's.
+                 Layout::new(padding_bytes, 1)
+             };
+--- a/codegen/helpers.rs
++++ b/codegen/helpers.rs
+@@ -95,17 +95,28 @@
+ }
+ 
+ /// The blob type itself, without the marker wrapper `blob` may put round it.
++/// The widest alignment `blob` writes a type for without `repr(align)`, above
++/// which what it hands back may not go in a packed struct at all.
++pub(crate) const MAX_ALIGN_WITHOUT_REPR_ALIGN: usize = 4;
++
+ pub(crate) fn blob_inner(
+     ctx: &BindgenContext,
+     layout: Layout,
+     ffi_safe: bool,
+ ) -> syn::Type {
+     let align = layout.align.max(1);
++    // A Rust type is a whole number of its own alignment wide, so a layout
++    // whose size is not one is written out as the next multiple up - which is
++    // what a Rust type of that layout comes to, and what a tracker counting one
++    // counts. Rounding down instead left the type short of the layout it was
++    // asked for. Only an `aligned` attribute reaches such a layout; anything
++    // C++ laid out is already a whole number of its alignment.
++    let size = super::struct_layout::align_to(layout.size, align);
+     // For alignments <= 4, it holds that the integer type of the same size aligns to that same
+     // size. For bigger alignments that's not guaranteed, e.g. on x86 u64 is aligned to 4 bytes.
+-    if align <= 4 {
++    if align <= MAX_ALIGN_WITHOUT_REPR_ALIGN {
+         let ty = Layout::known_type_for_size(align).unwrap();
+-        let len = layout.size / align;
++        let len = size / align;
+         return if len == 1 {
+             ty
+         } else if !ffi_safe && len <= RUST_DERIVE_IN_ARRAY_LIMIT {
+@@ -122,7 +133,6 @@
+ 
+     ctx.generated_opaque_array(align);
+     let ident = format_ident!("__BindgenOpaqueArray{align}");
+-    let size = layout.size;
+     if ctx.options().enable_cxx_namespaces {
+         syn::parse_quote! { root::#ident<[u8; #size]> }
+     } else {

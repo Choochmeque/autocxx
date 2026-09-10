@@ -15291,15 +15291,24 @@ fn test_string_view_member_does_not_shrink_its_class() {
 /// array whose C++ element is also one pointer, and an array of no substituted
 /// type at all.
 ///
-/// Two shapes are left out, because they are wrong for reasons no array sizing
-/// reaches and pinning them would only record the wrong number. A member
-/// declared `alignas` more strictly than its class needs is one: the padding
-/// bindgen writes for the gap in front of such a member takes up more room than
-/// the gap, which puts `alignas(16) std::string m` at 64 bytes against C++'s
-/// 48 with no array in sight. The other is a *packed* class whose array comes
-/// first, which stays short: the tracker does follow the C++ offset of the
-/// member after the array, but a packed class gets no padding field written for
-/// the gap it counted. The same class with the array last comes out right.
+/// Then the packed rows. A packed class's fields are contiguous, so a gap the
+/// tracker works out from an alignment is not a gap the class has and nothing
+/// is written for one - but a gap the member's own offset reports is a run of
+/// bytes the target left, and the only way a packed class comes by one is a
+/// field written narrower than the member C++ declared. Both directions are
+/// here, the array first and the array last, and the same gap without an array
+/// at all. The last of them is packed to two bytes rather than one, where the
+/// run may not be written: the tracker does not align a packed class's bases
+/// and Rust aligns each to the smaller of its own alignment and two, so the
+/// offset the tracker has reached is behind the one the emitted struct has, and
+/// a run measured from it would push every field after it along.
+///
+/// One shape is left out, because it is wrong for reasons no array sizing
+/// reaches and pinning it would only record the wrong number. A member declared
+/// `alignas` more strictly than its class needs: the padding bindgen writes for
+/// the gap in front of such a member takes up more room than the gap, which
+/// puts `alignas(16) std::string m` at 64 bytes against C++'s 48 with no array
+/// in sight.
 ///
 /// A `std::array<std::string, 3>` member was a third of these until the element
 /// recorded for a lowered `std::array` was resolved through the substitution
@@ -15331,6 +15340,29 @@ fn test_array_of_substituted_type_does_not_shrink_its_class() {
         struct fx_Same { uint32_t n; std::unique_ptr<uint32_t> m[3]; };
         // No substitution at all: the arithmetic has to leave this alone.
         struct fx_Plain { uint32_t n; uint64_t m[3]; };
+        #pragma pack(push, 1)
+        // A packed class whose array comes first, with a member after it whose
+        // offset reports the run the emitted array leaves. Views rather than
+        // strings, so that nothing in a packed class needs its destructor run
+        // at an alignment the target did not give it.
+        struct fx_PackedLeading { std::string_view m[3]; uint32_t n; };
+        // And the array last, which only tail padding can put right.
+        struct fx_PackedTrailing { uint32_t n; std::string_view m[3]; };
+        // The same run without an array: one substituted member, then another.
+        struct fx_PackedScalar { std::string_view s; uint32_t n; };
+        // No substitution at all: no run, and nothing to write.
+        struct fx_PackedPlain { uint64_t a; uint32_t n; };
+        #pragma pack(pop)
+        // Packed to two bytes rather than one, with two bases. There the
+        // tracker's offset is behind the one Rust lays the field out at - it
+        // does not align a packed class's bases, and Rust aligns each to the
+        // smaller of its own alignment and two - so no run may be written from
+        // the difference, and Rust's own alignment closes it.
+        struct fx_TwoA { char a; };
+        struct fx_TwoB { int b; };
+        #pragma pack(push, 2)
+        struct fx_TwoPacked : fx_TwoA, fx_TwoB { char c; int d; };
+        #pragma pack(pop)
         inline size_t fx_size(size_t which) {
             switch (which) {
                 case 0: return sizeof(fx_Trailing);
@@ -15341,7 +15373,12 @@ fn test_array_of_substituted_type_does_not_shrink_its_class() {
                 case 5: return sizeof(fx_Union);
                 case 6: return sizeof(fx_BareUnion);
                 case 7: return sizeof(fx_Same);
-                default: return sizeof(fx_Plain);
+                case 8: return sizeof(fx_Plain);
+                case 9: return sizeof(fx_PackedLeading);
+                case 10: return sizeof(fx_PackedTrailing);
+                case 11: return sizeof(fx_PackedScalar);
+                case 12: return sizeof(fx_PackedPlain);
+                default: return sizeof(fx_TwoPacked);
             }
         }
         inline size_t fx_align(size_t which) {
@@ -15354,7 +15391,12 @@ fn test_array_of_substituted_type_does_not_shrink_its_class() {
                 case 5: return alignof(fx_Union);
                 case 6: return alignof(fx_BareUnion);
                 case 7: return alignof(fx_Same);
-                default: return alignof(fx_Plain);
+                case 8: return alignof(fx_Plain);
+                case 9: return alignof(fx_PackedLeading);
+                case 10: return alignof(fx_PackedTrailing);
+                case 11: return alignof(fx_PackedScalar);
+                case 12: return alignof(fx_PackedPlain);
+                default: return alignof(fx_TwoPacked);
             }
         }
     "};
@@ -15385,6 +15427,11 @@ fn test_array_of_substituted_type_does_not_shrink_its_class() {
         check!(6, ffi::fx_BareUnion, "a std::string_view[3] in a bare union");
         check!(7, ffi::fx_Same, "a std::unique_ptr<uint32_t>[3]");
         check!(8, ffi::fx_Plain, "a uint64_t[3]");
+        check!(9, ffi::fx_PackedLeading, "a leading array in a packed class");
+        check!(10, ffi::fx_PackedTrailing, "a trailing array in a packed class");
+        check!(11, ffi::fx_PackedScalar, "a leading view in a packed class");
+        check!(12, ffi::fx_PackedPlain, "no substitution in a packed class");
+        check!(13, ffi::fx_TwoPacked, "two bases in a class packed to two bytes");
         assert!(
             report.is_empty(),
             "Rust's idea of a class with an array member disagrees with C++:{report}"
@@ -15407,13 +15454,26 @@ fn test_array_of_substituted_type_does_not_shrink_its_class() {
                 "fx_BareUnion",
                 "fx_Same",
                 "fx_Plain",
+                "fx_PackedLeading",
+                "fx_PackedTrailing",
+                "fx_PackedScalar",
+                "fx_PackedPlain",
+                "fx_TwoPacked",
                 "fx_size",
                 "fx_align",
             ],
             &[],
             None,
         ),
-        make_cpp17_adder(),
+        combine_modifiers(
+            make_cpp17_adder(),
+            // C4121 is cl saying a member's alignment was sensitive to
+            // packing, which is what every packed row here is: a class whose
+            // members the target lays out at offsets their own alignment would
+            // not put them at. Take the packing away and the rows are not the
+            // rows.
+            make_msvc_warning_scope(&[4121]),
+        ),
         None,
         None,
     );
@@ -15888,6 +15948,306 @@ fn test_member_of_own_substituted_template_does_not_shrink_its_class() {
     );
 }
 
+/// A substitute whose own layout the arithmetic cannot work out leaves the
+/// field written as a blob of the layout clang measured, and the class holding
+/// it the width C++ gives it.
+///
+/// Laying a substitute out means laying its members out the way `repr(C)` will,
+/// and that only answers where the members are the whole of what the struct
+/// holds. A base class, a vtable pointer, a bitfield allocation unit and the
+/// address byte an empty class is given are each something else in it, and a
+/// packed class is not laid out that way at all. Every one of those declines
+/// used to leave the field measured as the type the substitute stood in for -
+/// which is not the type written - and the class short by the difference.
+/// Writing the field as a blob of that measurement makes it the measurement by
+/// construction, whatever the arithmetic could not work out.
+///
+/// One row per decline, then three which decline nothing: a substitute the
+/// arithmetic does work out, which stays a typed field with the class padded
+/// out around it, a member of no substituted template at all, and an
+/// instantiation of an ordinary class template, whose definition is the one
+/// clang instantiated and takes its argument. That last row is the one a size
+/// comparison cannot check on its own - blobbing it would leave the size right
+/// and take the field's type away - so the generated Rust is read for the field
+/// as well.
+#[test]
+fn test_substitute_of_unworkable_layout_does_not_shrink_its_class() {
+    /// The ordinary class template's member is still written as its own type.
+    struct GenericStaysTyped;
+    impl CodeCheckerFns for GenericStaysTyped {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if !text.contains("m : root :: fx_Generic < u64 >") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "the member of an ordinary class template was not written as its own type"
+                        .into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        struct fx_Bs { void* q; };
+        // A substitute with a base class.
+        template <typename T> struct fx_BaseReal { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_BaseReal\"></div> */
+        template <typename T> struct fx_BaseStand : fx_Bs { T* p; };
+        struct fx_HoldsBase { uint32_t n; fx_BaseReal<uint32_t> m; };
+        // A packed substitute.
+        template <typename T> struct fx_PackReal { uint64_t a; uint64_t b; uint64_t c; };
+        #pragma pack(push, 1)
+        /** <div rustbindgen replaces=\"fx_PackReal\"></div> */
+        template <typename T> struct fx_PackStand { T* p; uint8_t q; };
+        #pragma pack(pop)
+        struct fx_HoldsPack { uint32_t n; fx_PackReal<uint32_t> m; };
+        // A substitute holding a bitfield, which is an allocation unit rather
+        // than a member of its own.
+        template <typename T> struct fx_BitReal { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_BitReal\"></div> */
+        template <typename T> struct fx_BitStand { T* p; unsigned x : 3; unsigned y : 5; };
+        struct fx_HoldsBit { uint32_t n; fx_BitReal<uint32_t> m; };
+        // An empty substitute, whose one byte is an address rather than a
+        // member.
+        template <typename T> struct fx_EmptyReal { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_EmptyReal\"></div> */
+        template <typename T> struct fx_EmptyStand { };
+        struct fx_HoldsEmpty { uint32_t n; fx_EmptyReal<uint32_t> m; };
+        // A substitute the arithmetic does work out: a typed field, and the
+        // class padded out around it.
+        template <typename T> struct fx_WorkedReal { uint64_t a; uint64_t b; uint64_t c; };
+        /** <div rustbindgen replaces=\"fx_WorkedReal\"></div> */
+        template <typename T> struct fx_WorkedStand { T* p; };
+        struct fx_HoldsWorked { uint32_t n; fx_WorkedReal<uint32_t> m; };
+        // No substitution at all: the arithmetic has to leave this alone.
+        template <typename T> struct fx_PlainReal { uint64_t a; uint64_t b; uint64_t c; };
+        struct fx_HoldsPlain { uint32_t n; fx_PlainReal<uint32_t> m; };
+        // An ordinary class template whose definition takes its argument, so
+        // the member is written as an instantiation of it and stays that way.
+        template <typename T> struct fx_Generic { T a; T b; };
+        struct fx_HoldsGeneric { uint32_t n; fx_Generic<uint64_t> m; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_HoldsBase);
+                case 1: return sizeof(fx_HoldsPack);
+                case 2: return sizeof(fx_HoldsBit);
+                case 3: return sizeof(fx_HoldsEmpty);
+                case 4: return sizeof(fx_HoldsWorked);
+                case 5: return sizeof(fx_HoldsPlain);
+                default: return sizeof(fx_HoldsGeneric);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_HoldsBase);
+                case 1: return alignof(fx_HoldsPack);
+                case 2: return alignof(fx_HoldsBit);
+                case 3: return alignof(fx_HoldsEmpty);
+                case 4: return alignof(fx_HoldsWorked);
+                case 5: return alignof(fx_HoldsPlain);
+                default: return alignof(fx_HoldsGeneric);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_HoldsBase, "a substitute with a base class");
+        check!(1, ffi::fx_HoldsPack, "a packed substitute");
+        check!(2, ffi::fx_HoldsBit, "a substitute holding a bitfield");
+        check!(3, ffi::fx_HoldsEmpty, "an empty substitute");
+        check!(4, ffi::fx_HoldsWorked, "a substitute of one pointer");
+        check!(5, ffi::fx_HoldsPlain, "no substitution at all");
+        check!(6, ffi::fx_HoldsGeneric, "an ordinary class template");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class holding a substituted instantiation disagrees with C++:{report}"
+        );
+        // Placement construction into Rust-provided storage of that size.
+        let _ = ffi::fx_HoldsBase::new().within_box();
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "fx_HoldsBase",
+                "fx_HoldsPack",
+                "fx_HoldsBit",
+                "fx_HoldsEmpty",
+                "fx_HoldsWorked",
+                "fx_HoldsPlain",
+                "fx_HoldsGeneric",
+                "fx_size",
+                "fx_align",
+            ],
+            &[],
+            None,
+        ),
+        None,
+        Some(Box::new(GenericStaysTyped)),
+        None,
+    );
+}
+
+/// A class holding a type bindgen could not render is sized in Rust the way C++
+/// sizes it.
+///
+/// bindgen writes every instantiation of a class template as one Rust struct -
+/// the one it wrote for the template definition, given whichever of the
+/// arguments that struct takes - so where the definition takes none of them,
+/// that struct stands for every instantiation and cannot be as wide as more
+/// than one of them. `std::unordered_map<std::string, uint32_t>` is such an
+/// instantiation on libc++ and on the Microsoft standard library both: the
+/// definition bindgen writes for it holds a single member it kept opaque and
+/// comes to one byte, against the forty the target gives the instantiation. A
+/// class holding one was a byte wide, and `within_box` had C++ construct a
+/// forty-byte object into it - this addresses the bug reported upstream as
+/// google/autocxx#1491.
+///
+/// The field is written as a blob of the layout clang measured instead, which
+/// is that layout by construction. One row per position the member can be in -
+/// alone, before another member, after one, in an array, and as a base class -
+/// and one for `std::map`, whose definition bindgen renders the same way. Then
+/// a class template of the header's own whose nested class is the member, and
+/// the instantiation itself as a member, neither of which depends on a standard
+/// library at all.
+///
+/// A definition which *does* take its arguments is laid out with them rather
+/// than blobbed, and the two rows after those are that: an instantiation of the
+/// header's own template holding a `std::string`, which is three pointers in
+/// C++ and one in the Rust the prelude substitutes, so the class is padded out
+/// around a field a third its size; and `std::vector<uint32_t>`, which
+/// reaches the same arithmetic through the prelude's own substitute for the
+/// vector.
+#[test]
+fn test_member_bindgen_could_not_render_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <map>
+        #include <string>
+        #include <unordered_map>
+        #include <vector>
+        struct fx_Alone { std::unordered_map<std::string, uint32_t> m; };
+        struct fx_MapFirst { std::unordered_map<std::string, uint32_t> m; uint32_t n; };
+        struct fx_MapLast { uint32_t n; std::unordered_map<std::string, uint32_t> m; };
+        struct fx_MapArray { std::unordered_map<std::string, uint32_t> m[2]; uint32_t n; };
+        struct fx_MapBase : std::unordered_map<std::string, uint32_t> { uint32_t n; };
+        struct fx_Ordered { std::map<std::string, uint32_t> m; uint32_t n; };
+        // The header's own, so that this says nothing about a standard library.
+        template <typename T> class fx_Beta {
+        public:
+            class Cursor { public: T v; uint64_t w; };
+            Cursor c;
+        };
+        struct fx_HoldsCursor { fx_Beta<int>::Cursor c; uint32_t n; };
+        struct fx_HoldsBeta { fx_Beta<int> b; uint32_t n; };
+        // An instantiation whose definition takes its argument, and whose
+        // argument is a type the prelude substitutes: laid out with the
+        // substitute rather than blobbed.
+        template <typename T> struct fx_Box { T value; };
+        struct fx_HoldsBox { fx_Box<std::string> b; uint32_t n; };
+        // The same arithmetic through the prelude's own substitute for the
+        // vector.
+        struct fx_Vector { std::vector<uint32_t> v; uint32_t n; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_Alone);
+                case 1: return sizeof(fx_MapFirst);
+                case 2: return sizeof(fx_MapLast);
+                case 3: return sizeof(fx_MapArray);
+                case 4: return sizeof(fx_MapBase);
+                case 5: return sizeof(fx_Ordered);
+                case 6: return sizeof(fx_HoldsCursor);
+                case 7: return sizeof(fx_HoldsBeta);
+                case 8: return sizeof(fx_HoldsBox);
+                default: return sizeof(fx_Vector);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_Alone);
+                case 1: return alignof(fx_MapFirst);
+                case 2: return alignof(fx_MapLast);
+                case 3: return alignof(fx_MapArray);
+                case 4: return alignof(fx_MapBase);
+                case 5: return alignof(fx_Ordered);
+                case 6: return alignof(fx_HoldsCursor);
+                case 7: return alignof(fx_HoldsBeta);
+                case 8: return alignof(fx_HoldsBox);
+                default: return alignof(fx_Vector);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_Alone, "an unordered_map and nothing else");
+        check!(1, ffi::fx_MapFirst, "an unordered_map before a member");
+        check!(2, ffi::fx_MapLast, "an unordered_map after a member");
+        check!(3, ffi::fx_MapArray, "an array of unordered_maps");
+        check!(4, ffi::fx_MapBase, "an unordered_map base class");
+        check!(5, ffi::fx_Ordered, "a std::map member");
+        check!(6, ffi::fx_HoldsCursor, "a class nested in an instantiation");
+        check!(7, ffi::fx_HoldsBeta, "an instantiation of the header's own");
+        check!(8, ffi::fx_HoldsBox, "an instantiation holding a std::string");
+        check!(9, ffi::fx_Vector, "a std::vector<uint32_t> member");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class holding a type bindgen could not render disagrees with C++:{report}"
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_Alone",
+            "fx_MapFirst",
+            "fx_MapLast",
+            "fx_MapArray",
+            "fx_MapBase",
+            "fx_Ordered",
+            "fx_HoldsCursor",
+            "fx_HoldsBeta",
+            "fx_HoldsBox",
+            "fx_Vector",
+            "fx_size",
+            "fx_align",
+        ],
+        &[],
+    );
+}
+
 /// A `replaces=` annotation which puts an instantiation of the replaced template
 /// inside the substitute is a cycle, and the generator comes back from it.
 ///
@@ -15998,11 +16358,10 @@ fn test_base_of_substituted_type_does_not_shrink_its_class() {
         struct fx_PlainBase { uint64_t a; uint64_t b; uint64_t c; };
         struct fx_Plain : fx_PlainBase { uint32_t n; };
         #pragma pack(push, 1)
-        // A packed class gets no padding written for a gap `saw_field`
-        // counted, so the run in front of its member has to be written where
-        // the bases end. The second is a gap of one byte, smaller than the
-        // alignment of what follows it, which a class that was not packed
-        // would close on its own.
+        // A packed class, where the run in front of the member is written
+        // where the bases end rather than left to `saw_field`. The second is a
+        // gap of one byte, smaller than the alignment of what follows it,
+        // which a class that was not packed would close on its own.
         struct fx_Packed : fx_WideReal { uint32_t n; };
         struct fx_NineReal { char a[9]; };
         struct fx_PackedTight : fx_NineReal { uint32_t n; };
