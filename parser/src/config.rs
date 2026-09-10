@@ -699,6 +699,19 @@ mod parse_tests {
         );
     }
 
+    /// Only `super` leads a path, and only at the front of one.
+    #[test]
+    fn test_no_other_keyword_is_a_path_segment() {
+        for directive in [
+            quote::quote! { extern_rust_type!(fn::T) },
+            quote::quote! { extern_rust_type!(T::fn) },
+            quote::quote! { extern_rust_type!(T::super::U) },
+        ] {
+            syn::parse2::<IncludeCppConfig>(directive.clone())
+                .expect_err(&format!("accepted {directive}"));
+        }
+    }
+
     fn enum_style_parse_error(directive: proc_macro2::TokenStream) -> String {
         syn::parse2::<IncludeCppConfig>(directive)
             .expect_err("expected the enum_style! directive to be rejected")

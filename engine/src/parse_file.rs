@@ -54,13 +54,13 @@ pub enum ParseError {
     AutocxxCodegenError(EngineError),
     /// There are two or more `include_cpp` macros with the same
     /// mod name.
-    #[error("two include_cpp! blocks in one file are both named {name} (one in {first}, one in {second}). Give each its own name!(...). Being in different mods does not separate them: the generated bindings file and the C++ header are named after the block, and the macro which reads the bindings back computes that name without being told which mod it was written in.")]
+    #[error("two include_cpp! blocks in one file are both named {name} (one in {first}, one in {second}). Every block in a file has to have its own name!(...), whatever mods they sit in: a file of bindings and its C++ header are named after the block by default, and the macro which reads the bindings back computes that name without being told which mod it was written in.")]
     ConflictingModNames {
         name: String,
         first: String,
         second: String,
     },
-    #[error("this file has more than one include_cpp! block which generates bindings, so there is no telling which of them the #[extern_rust_function], #[extern_rust_type] or #[subclass] items outside them were meant to join. Move the discovered items into a file with a single block, or list them in one block with extern_rust_fun!/subclass!")]
+    #[error("this file has more than one include_cpp! block which generates bindings, so there is no telling which of them the things found outside them - #[extern_rust_function], #[extern_rust_type] and #[subclass] items, and with auto_allowlist the C++ names used by the Rust - were meant to join. Discovery needs a file with one such block; otherwise name what you want in a block, with extern_rust_function!, extern_rust_type!, subclass! or generate!.")]
     MultipleModsForDynamicDiscovery,
     #[error("a problem occurred while discovering C++ APIs used within the Rust: {0}")]
     Discovery(DiscoveryErr),
@@ -235,8 +235,8 @@ fn parse_file_contents(
         // Nothing to attach to when every block in the file only parses; that
         // file generates nothing either way.
         let mut candidates = Vec::new();
-        all_blocks_mut_with_scopes(&mut results, &[], &mut candidates);
-        if let Some((scope, engine)) = candidates
+        all_blocks_mut_with_depth(&mut results, 0, &mut candidates);
+        if let Some((depth, engine)) = candidates
             .into_iter()
             .find(|(_, block)| !block.get_config().parse_only)
         {
@@ -244,7 +244,6 @@ fn parse_file_contents(
             // for one climbs a single mod, out of the generated bindings and
             // into the mod holding the block, so a block written inside mods
             // has to climb back out of those too.
-            let depth = scope.len();
             for fun in &mut discoveries.extern_rust_funs {
                 fun.path = fun.path.from_within_mods(depth);
             }
@@ -325,20 +324,16 @@ fn all_blocks_mut(segments: &mut [Segment]) -> impl Iterator<Item = &mut Include
         })
 }
 
-/// Every block paired with the `mod` scope it was written in, mutably.
-fn all_blocks_mut_with_scopes<'a>(
+/// Every block paired with how many `mod`s deep it was written, mutably.
+fn all_blocks_mut_with_depth<'a>(
     segments: &'a mut [Segment],
-    scope: &[String],
-    found: &mut Vec<(Vec<String>, &'a mut IncludeCppEngine)>,
+    depth: usize,
+    found: &mut Vec<(usize, &'a mut IncludeCppEngine)>,
 ) {
     for segment in segments.iter_mut() {
         match segment {
-            Segment::Autocxx(includecpp) => found.push((scope.to_vec(), includecpp)),
-            Segment::Mod(ident, segments) => {
-                let mut inner = scope.to_vec();
-                inner.push(ident.to_string());
-                all_blocks_mut_with_scopes(segments, &inner, found)
-            }
+            Segment::Autocxx(includecpp) => found.push((depth, includecpp)),
+            Segment::Mod(_, segments) => all_blocks_mut_with_depth(segments, depth + 1, found),
             _ => {}
         }
     }
@@ -420,14 +415,14 @@ impl ParsedFile {
         all_blocks_mut(&mut self.0)
     }
 
-    /// Refuse two blocks which would generate over each other's output.
+    /// Require every block in the file to have its own name.
     ///
-    /// The generated file is named after the block (`name!`, defaulting to
-    /// `ffi`), and so is its C++ header. A block cannot be named after the
-    /// `mod` it sits in instead: the macro half of autocxx has to compute the
-    /// same name to `include!`, and a macro is not told which `mod` it was
-    /// written in. Two same-named blocks therefore collide however Rust scopes
-    /// them.
+    /// By default a block's generated file is named after it (`name!`,
+    /// defaulting to `ffi`), and so is its C++ header. A block cannot be named
+    /// after the `mod` it sits in instead: the macro half of autocxx has to
+    /// compute the same name to `include!`, and a macro is not told which
+    /// `mod` it was written in. So the names are required to differ whatever
+    /// mods Rust scopes the blocks into.
     fn check_mod_names(&self) -> Result<(), ParseError> {
         let mut blocks = Vec::new();
         all_blocks_with_scopes(&self.0, "", &mut blocks);

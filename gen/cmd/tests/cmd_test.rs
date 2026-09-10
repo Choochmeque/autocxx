@@ -409,6 +409,15 @@ fn test_gen_nested_mod_with_discovered_extern_rust_fn() -> Result<(), Box<dyn st
     files.insert("input.h", INPUT_H.as_bytes());
     files.insert("main.rs", NESTED_MOD_EXTERN_RUST_FN_RS.as_bytes());
     base_test_ex(&tmp_dir, RsGenMode::Single, |_| {}, files, vec!["main.rs"])?;
+    // The block these bindings are for is the nested one - there is no other -
+    // so the discovered function has reached it. Had it gone to a block
+    // synthesised beside it, this file would be that block's and would not
+    // name the function.
+    let bindings = std::fs::read_to_string(tmp_dir.path().join("autocxx-ffi-default-gen.rs"))?;
+    assert!(
+        bindings.contains("called_from_cpp"),
+        "the discovered function did not reach the block"
+    );
     std::env::set_var("OUT_DIR", tmp_dir.path().to_str().unwrap());
     let r = build_from_folder(
         tmp_dir.path(),

@@ -9,7 +9,6 @@
 use crate::ParseResult;
 use proc_macro2::{Ident, Span};
 use quote::{quote, ToTokens, TokenStreamExt};
-use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 
 /// A little like [`syn::Path`] but simpler - contains only identifiers,
@@ -25,10 +24,6 @@ impl RustPath {
     #[must_use]
     pub fn append(&self, id: Ident) -> Self {
         Self(self.0.iter().cloned().chain(std::iter::once(id)).collect())
-    }
-
-    pub fn segments(&self) -> impl Iterator<Item = &Ident> {
-        self.0.iter()
     }
 
     pub fn get_final_ident(&self) -> &Ident {
@@ -74,15 +69,23 @@ impl ToTokens for RustPath {
 
 impl Parse for RustPath {
     fn parse(input: ParseStream) -> ParseResult<Self> {
-        // `parse_any`, because a path written for use from inside a mod starts
-        // with `super`, which is a keyword and not an ordinary identifier. A
-        // reproduction case has to read back what autocxx wrote.
-        let id = Ident::parse_any(input)?;
-        let mut p = RustPath::new_from_ident(id);
-        while input.parse::<Option<syn::token::PathSep>>()?.is_some() {
-            let id = Ident::parse_any(input)?;
-            p = p.append(id);
+        // A path written for use from inside a mod starts with a run of
+        // `super`, which is a keyword rather than an ordinary identifier. A
+        // reproduction case has to read back what autocxx wrote - but only
+        // `super` leads a path autocxx writes, so no other keyword is
+        // accepted anywhere.
+        let mut segments = Vec::new();
+        while input.peek(syn::Token![super]) {
+            let kw = input.parse::<syn::Token![super]>()?;
+            segments.push(Ident::new("super", kw.span));
+            input.parse::<syn::token::PathSep>()?;
         }
-        Ok(p)
+        let id: Ident = input.parse()?;
+        segments.push(id);
+        while input.parse::<Option<syn::token::PathSep>>()?.is_some() {
+            let id: Ident = input.parse()?;
+            segments.push(id);
+        }
+        Ok(Self(segments))
     }
 }
