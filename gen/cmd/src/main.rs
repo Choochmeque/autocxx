@@ -23,6 +23,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::{cell::Cell, fs::File, path::Path};
+use tempfile::NamedTempFile;
 
 pub(crate) static BLANK: &str = "// Blank autocxx placeholder";
 
@@ -535,8 +536,15 @@ impl FileWriter<'_> {
                     }
                 }
             }
-            let mut f = File::create(&destination).into_diagnostic()?;
+            // A rename is atomic where a truncate-then-write is not, so a run
+            // killed mid-write leaves the previous output in place rather than
+            // a half-written header for the next compile to read. The temp
+            // file is staged where the rename will land, since a rename across
+            // filesystems is not atomic - it fails.
+            let staging_dir = destination.parent().unwrap_or(self.outdir);
+            let mut f = new_output_file(staging_dir, &destination)?;
             f.write_all(&output.content).into_diagnostic()?;
+            f.persist(&destination).into_diagnostic()?;
         }
         Ok(())
     }
@@ -579,6 +587,54 @@ fn follow_links(path: &Path) -> miette::Result<PathBuf> {
         "the output '{}' is a symlink which leads back to itself",
         path.display()
     )))
+}
+
+/// A file to stage an output in, in the directory the rename will land in.
+///
+/// A temp file is created readable only by its owner and the rename carries
+/// that mode along, where `File::create` left an existing file's mode alone and
+/// let the umask decide a new one. So the mode is chosen at `open` time, which
+/// is both what the umask applies to and early enough that a destination
+/// narrower than the umask is never briefly a wider file with contents in it.
+///
+/// The rename installs a new inode, so the destination's owner and group are
+/// reapplied where this process is allowed to; an ACL or extended attribute set
+/// on the destination itself is not carried across at all. What the output
+/// directory confers - set-group-id, a default ACL - reaches the replacement as
+/// it reached the original.
+#[cfg(unix)]
+fn new_output_file(staging_dir: &Path, destination: &Path) -> miette::Result<NamedTempFile> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let existing = std::fs::metadata(destination).ok();
+    let mode = existing
+        .as_ref()
+        .map(|metadata| metadata.permissions().mode() & 0o777);
+    let f = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(mode.unwrap_or(0o666)))
+        .tempfile_in(staging_dir)
+        .into_diagnostic()?;
+    if let Some(mode) = mode {
+        // `open` subtracted the umask, which must not narrow a mode the
+        // destination already had.
+        f.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .into_diagnostic()?;
+    }
+    if let Some(existing) = existing {
+        // Reassigning an owner takes privilege this process need not have, and
+        // a build `File::create` completed must not start failing over it. So
+        // the owner and group are restored where that is permitted and left
+        // alone where it is not.
+        let _ = std::os::unix::fs::fchown(f.as_file(), Some(existing.uid()), Some(existing.gid()));
+    }
+    Ok(f)
+}
+
+/// Windows has no mode to carry: a temp file inherits the directory's ACL
+/// exactly as `File::create` did.
+#[cfg(not(unix))]
+fn new_output_file(staging_dir: &Path, _destination: &Path) -> miette::Result<NamedTempFile> {
+    NamedTempFile::new_in(staging_dir).into_diagnostic()
 }
 
 struct RecordIntoDepfile(Rc<RefCell<Depfile>>);

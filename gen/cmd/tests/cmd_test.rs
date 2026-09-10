@@ -1117,6 +1117,121 @@ fn test_unchanged_rerun_leaves_the_output_alone() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Outputs are written through a temp file renamed into place, and a temp file
+/// is created readable only by its owner. Whoever compiles the generated code
+/// need not be whoever generated it, so a fresh output has to keep the mode the
+/// caller's umask would have given it - and a rebuild has to keep the mode the
+/// file already has, rather than handing back one the caller had narrowed.
+#[cfg(unix)]
+#[test]
+fn test_output_permissions_survive_the_rename() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+    let path = tmp_dir.path().join(DEFAULT_GEN_RS);
+
+    // What this umask lets an ordinary create produce here, which is what the
+    // outputs used to get; asserting a fixed mode instead would only say what
+    // the umask running the tests happens to be.
+    let probe = tmp_dir.path().join("umask-probe");
+    File::create(&probe)?;
+    let created_by_umask = std::fs::metadata(&probe)?.permissions().mode() & 0o777;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(success, "the first run failed: {stderr}");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        created_by_umask,
+        "a freshly generated file did not get the mode the umask allows"
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    // The other input writes the same filename with different contents, so this
+    // run really does replace the file.
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["second.rs"])?;
+    assert!(success, "the second run failed: {stderr}");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        0o600,
+        "rewriting the file widened the mode it had been given"
+    );
+
+    // The other direction, which only holds if the mode is restored after the
+    // umask has had its say: a bit the umask strips has to survive a rewrite.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664))?;
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(success, "the third run failed: {stderr}");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        0o664,
+        "rewriting the file dropped mode bits the umask would have stripped"
+    );
+    Ok(())
+}
+
+/// An output name which is a symlink was written through, so a build which
+/// publishes its generated files that way kept working. A rename replaces the
+/// link instead, unless the link is followed first.
+#[cfg(unix)]
+#[test]
+fn test_a_symlinked_output_is_written_through() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+    let target_dir = tmp_dir.path().join("published");
+    std::fs::create_dir(&target_dir)?;
+    let target = target_dir.join("bindings.rs");
+    File::create(&target)?;
+    let link = tmp_dir.path().join(DEFAULT_GEN_RS);
+    std::os::unix::fs::symlink(&target, &link)?;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(
+        success,
+        "generating over a symlinked output failed: {stderr}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)?.file_type().is_symlink(),
+        "the generated file replaced the symlink"
+    );
+    assert!(
+        std::fs::read_to_string(&target)?.contains("DoMath"),
+        "the symlink's target was left as it was"
+    );
+    Ok(())
+}
+
+/// A symlinked output whose target does not exist yet: `File::create` made the
+/// target through the link, and `canonicalize` refuses a link that leads
+/// nowhere, so the link has to be walked by hand for the rename to land on the
+/// same file the old code did.
+#[cfg(unix)]
+#[test]
+fn test_a_symlink_to_an_absent_file_is_created_through() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+    let target_dir = tmp_dir.path().join("published");
+    std::fs::create_dir(&target_dir)?;
+    let target = target_dir.join("bindings.rs");
+    let link = tmp_dir.path().join(DEFAULT_GEN_RS);
+    std::os::unix::fs::symlink(&target, &link)?;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(
+        success,
+        "generating over a dangling symlink failed: {stderr}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)?.file_type().is_symlink(),
+        "the generated file replaced the symlink"
+    );
+    assert!(
+        std::fs::read_to_string(&target)?.contains("DoMath"),
+        "the symlink's target was not created"
+    );
+    Ok(())
+}
+
 /// Two outputs whose names differ but which reach one file - here through a
 /// symlink, on a filesystem which ignores case through the case alone. The
 /// names alone cannot tell, so the check is made against what each name

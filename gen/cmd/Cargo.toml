@@ -29,10 +29,10 @@ env_logger = "0.11"
 miette = { version = "5", features = ["fancy"] }
 pathdiff = "0.2.1"
 indexmap = "1.8"
+tempfile = "3.10"
 
 [dev-dependencies]
 assert_cmd = "2"
-tempfile = "3.1"
 # This is necessary for building the projects created
 # by the trybuild test system...
 autocxx = { path = "../.." }
