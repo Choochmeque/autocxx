@@ -9910,13 +9910,18 @@ fn test_issues_217_222() {
     let rs = quote! {
         ffi::GURL::new().within_unique_ptr();
     };
-    // The block! directives here are to avoid running into
-    // https://github.com/rust-lang/rust-bindgen/pull/1975
+    // The block! directive here is to avoid running into
+    // https://github.com/rust-lang/rust-bindgen/pull/1975. A second one
+    // naming "StringPiece" used to sit beside it, and this header declares no
+    // such type - the sibling tests which do have a
+    // `typedef BasicStringPiece<...> StringPiece`, and this one only ever had
+    // the template. It was doing nothing, which is what
+    // `confirm_name_matching_directives_matched` now says out loud.
     run_test_ex(
         "",
         hdr,
         rs,
-        quote! { generate!("GURL") block!("StringPiece") block!("Replacements") },
+        quote! { generate!("GURL") block!("Replacements") },
         None,
         None,
         None,
@@ -40367,6 +40372,406 @@ fn test_forward_declaration_asserts_no_layout() {
         directives_from_lists(&["fx_Declared", "fx_get_declared"], &[], None),
         None,
         Some(Box::new(NoAssertion)),
+        None,
+    );
+}
+
+// --- Confirmation that a name-matching directive matched something ---------
+//
+// `generate!`, `smart_pointer!` and `derive!` each already refuse a directive
+// which named nothing. These pin the same treatment for the four which match
+// by name and used to be silent about it: `throws!`, `block!`,
+// `block_constructors!` and `instantiable!`. Every refusal test has a
+// correctly-spelled sibling, because a confirmation which fires on a directive
+// that did its job is worse than no confirmation at all.
+
+/// An unmatched `throws!` is the expensive one. The binding stays declared as
+/// never throwing, cxx puts `noexcept` on the boundary, and the first
+/// exception to escape terminates the process - so a misspelling has to be a
+/// build failure rather than a runtime surprise.
+#[test]
+fn test_throws_directive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        inline void fx_might_throw() { throw std::runtime_error(\"boom\"); }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_might_throw")
+            throws!("fx_might_thrwo")
+        },
+        None,
+        &["DirectiveMatchedNothing", "throws", "fx_might_thrwo"],
+    );
+}
+
+/// `generate_all!()` is where an unmatched designation is likeliest to hide:
+/// there is no per-name `generate!` to fail first, so this pass is the only
+/// thing which could say anything. The designation here is correct, and has to
+/// be left alone.
+#[test]
+fn test_throws_directive_confirmed_under_generate_all() {
+    // Defined rather than declared here, so that `generate_all!()` sweeps up
+    // these two functions and not a standard library.
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void fx_ga_throws() { throw std::runtime_error(\"boom\"); }
+        void fx_ga_quiet() {}
+    "};
+    let hdr = indoc! {"
+        void fx_ga_throws();
+        void fx_ga_quiet();
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            assert!(ffi::fx_ga_throws().is_err());
+            ffi::fx_ga_quiet();
+        },
+        quote! {
+            generate_all!()
+            throws!("fx_ga_throws")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `block!` fails the other way round - the type the user asked to be kept out
+/// is generated anyway - and the evidence that it matched is destroyed by the
+/// blocking itself, which is why a match is recorded where the blocklist is
+/// consulted rather than looked for once analysis is over.
+#[test]
+fn test_block_directive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_BlkWanted { uint32_t a; };
+        struct fx_BlkUnwanted { uint32_t b; };
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_all!()
+            block!("fx_BlkUnwantd")
+        },
+        None,
+        &["DirectiveMatchedNothing", "block", "fx_BlkUnwantd"],
+    );
+}
+
+/// `block_constructors!` is removal-shaped too: unmatched, the constructors
+/// the user asked to withhold are generated.
+#[test]
+fn test_block_constructors_directive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_BcThing { fx_BcThing() {} uint32_t a; };
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_BcThing")
+            block_constructors!("fx_BcThign")
+        },
+        None,
+        &[
+            "DirectiveMatchedNothing",
+            "block_constructors",
+            "fx_BcThign",
+        ],
+    );
+}
+
+/// `instantiable!` names a template instantiation, so a directive which names
+/// none gets nothing: no allocators, no constructors, and none of the
+/// template's own members.
+#[test]
+fn test_instantiable_directive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        template<typename T>
+        class fx_InstA {
+        public:
+            uint32_t foo() { return 12; }
+        private:
+            T a[2];
+        };
+        typedef fx_InstA<uint32_t> fx_InstB;
+        inline uint32_t fx_take_inst(const fx_InstB&) { return 3; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_InstB")
+            generate!("fx_take_inst")
+            instantiable!("fx_InstC")
+        },
+        None,
+        &["DirectiveMatchedNothing", "instantiable", "fx_InstC"],
+    );
+}
+
+/// Three directives at once, each written with every namespace and class in
+/// front of it. A name is matched against several spellings - a nested class
+/// answers both to the `Outer::Inner` C++ uses and to the `Outer_Inner`
+/// bindgen flattened it into - and the confirmation has to accept whichever
+/// one the conversion actually asked about.
+#[test]
+fn test_directives_confirmed_when_written_qualified() {
+    // The throw lives here so that `generate_all!()` sweeps up this header and
+    // not `<stdexcept>` behind it.
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void fx_qns::fx_QOuter::fx_QInner::boom() const {
+            throw std::runtime_error(\"boom\");
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_qns {
+            struct fx_QOuter {
+                struct fx_QInner {
+                    uint32_t a;
+                    void boom() const;
+                };
+            };
+            struct fx_QGuarded {
+                fx_QGuarded() {}
+                uint32_t b;
+            };
+            struct fx_QUnwanted { uint32_t c; };
+        }
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            let inner = ffi::fx_qns::fx_QOuter_fx_QInner { a: 1 };
+            assert!(inner.boom().is_err());
+        },
+        quote! {
+            generate_all!()
+            pod!("fx_qns::fx_QOuter::fx_QInner")
+            throws!("fx_qns::fx_QOuter::fx_QInner::boom")
+            block_constructors!("fx_qns::fx_QGuarded")
+            block!("fx_qns::fx_QUnwanted")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A directive which names a *holder* - the concrete type a smart pointer's
+/// instantiation becomes - is inert by design and has nonetheless named
+/// exactly what its author meant. Recorded as matched, or everyone who writes
+/// one would be told their directive matched nothing.
+#[test]
+fn test_instantiable_directive_on_a_holder_is_confirmed() {
+    let hdr = indoc! {"
+        #include <memory>
+        typedef std::shared_ptr<const int> fx_HeldHandle;
+        inline fx_HeldHandle fx_make_held() { return std::make_shared<const int>(3); }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::fx_make_held();
+            let _: &ffi::fx_HeldHandle = a.as_ref().unwrap();
+        },
+        quote! {
+            generate!("fx_make_held")
+            generate!("fx_HeldHandle")
+            instantiable!("fx_HeldHandle")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A designation autocxx matched but declined to honour counts as matched. A
+/// copy constructor becomes `moveit::CopyNew`, whose `copy_new` returns
+/// nothing, so `designation_can_be_honoured` drops the designation - and this
+/// class has no other constructor for it to land on. Saying it matched nothing
+/// would be untrue: it named the one constructor there is. That autocxx cannot
+/// make such a function fallible is a separate fact, pinned by
+/// `test_throwing_copy_constructor_terminates_the_process`.
+#[test]
+fn test_throws_directive_matched_but_not_honoured_is_confirmed() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        class fx_CopyOnly {
+        public:
+            fx_CopyOnly(const fx_CopyOnly&) { throw std::runtime_error(\"boom\"); }
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a = 1;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_CopyOnly")
+            throws!("fx_CopyOnly::fx_CopyOnly")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Two designations for one method, written with the two spellings a nested
+/// class answers to. Each works on its own, so neither may be reported as
+/// matching nothing when they are written together - which means every
+/// spelling has to be asked about rather than only those up to the first which
+/// answers.
+#[test]
+fn test_throws_directives_in_two_spellings_are_both_confirmed() {
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void fx_TwoOuter::fx_TwoInner::boom() const {
+            throw std::runtime_error(\"boom\");
+        }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_TwoOuter {
+            struct fx_TwoInner {
+                uint32_t a;
+                void boom() const;
+            };
+        };
+    "};
+    run_test_ex(
+        cxx,
+        hdr,
+        quote! {
+            let inner = ffi::fx_TwoOuter_fx_TwoInner { a: 1 };
+            assert!(inner.boom().is_err());
+        },
+        quote! {
+            generate_pod!("fx_TwoOuter::fx_TwoInner")
+            throws!("fx_TwoOuter_fx_TwoInner::boom")
+            throws!("fx_TwoOuter::fx_TwoInner::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `exclude_impls!()` withholds every synthesized impl, which makes a
+/// `block_constructors!` beside it redundant rather than wrong. The class it
+/// names is right there, so it must not be reported as naming nothing.
+#[test]
+fn test_block_constructors_confirmed_alongside_exclude_impls() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_ExclBc { uint32_t a; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_ExclBc")
+            exclude_impls!()
+            block_constructors!("fx_ExclBc")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// `block!` and `block_constructors!` on the one type. The second is
+/// redundant, since the first removed the type before anything could
+/// synthesize a constructor for it, and it named a type which is right there -
+/// so neither may be reported as naming nothing.
+#[test]
+fn test_block_and_block_constructors_on_one_type_are_both_confirmed() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_BothBlocked { uint32_t a; };
+        struct fx_BothKept { uint32_t b; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_all!()
+            block!("fx_BothBlocked")
+            block_constructors!("fx_BothBlocked")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Blocking a type autocxx refuses for its own reasons is what `block!` is
+/// for. Such a type never reaches the point where the blocklist would be
+/// consulted - its name is turned down first - so a directive naming one has
+/// to count as matched where the name is met.
+#[test]
+fn test_block_of_a_type_with_a_refused_name_is_confirmed() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx__Reserved { uint32_t a; };
+        struct fx_Fine { uint32_t b; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_all!()
+            block!("fx__Reserved")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// An alias to an enum reaches autocxx as a `use` rather than a `type`, which
+/// is a second place a type's name is met and so a second place a directive
+/// naming it has to be noted.
+#[test]
+fn test_block_of_an_enum_alias_is_confirmed() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum class fx_AliasedEnum : uint32_t { FX_ONE };
+        using fx_EnumAlias = fx_AliasedEnum;
+        struct fx_AliasKeeper { uint32_t a; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_all!()
+            block!("fx_EnumAlias")
+        },
+        None,
+        None,
         None,
     );
 }
