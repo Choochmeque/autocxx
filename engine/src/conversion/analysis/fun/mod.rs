@@ -2772,30 +2772,43 @@ impl<'a> FnAnalyzer<'a> {
         // C++ itself uses, and the designation is written by whoever wrote the
         // C++. See google/autocxx#1422 for the same two spellings in
         // `generate!`.
-        let designated_as_throwing = self
+        //
+        // Every name below is asked about, and no `||` short-circuits past
+        // one, because the config records a designation as matched where it
+        // answers the question. Stopping at the first name which answers would
+        // leave a second designation naming this same function by another of
+        // its spellings looking as though it matched nothing, and
+        // `confirm_name_matching_directives_matched` would refuse it.
+        let designated_by_own_name = self
             .config
-            .is_on_throws_list(&diagnostic_name.to_cpp_name())
-            || match &kind {
-                FnKind::Method { impl_for, .. } | FnKind::TraitMethod { impl_for, .. } => {
-                    self.nested_cpp_names.spellings(impl_for).any(|spelling| {
-                        self.config.is_on_throws_list(&format!(
-                            "{spelling}::{}",
-                            diagnostic_name.get_final_item()
-                        ))
-                    })
+            .is_on_throws_list(&diagnostic_name.to_cpp_name());
+        let designated_by_class = match &kind {
+            FnKind::Method { impl_for, .. } | FnKind::TraitMethod { impl_for, .. } => {
+                let mut designated = false;
+                for spelling in self.nested_cpp_names.spellings(impl_for) {
+                    if self.config.is_on_throws_list(&format!(
+                        "{spelling}::{}",
+                        diagnostic_name.get_final_item()
+                    )) {
+                        designated = true;
+                    }
                 }
-                FnKind::Function => false,
+                designated
             }
-            || match &fun.synthetic_cpp {
-                // A member imported from a base class, which the C++ author
-                // designates under the name they wrote it with - the base's.
-                // The check above sees only the class it was imported into,
-                // which the author never wrote at all.
-                Some((CppFunctionBody::BaseClassMethodCall(base, name, _), _)) => self
-                    .config
-                    .is_on_throws_list(&format!("{base}::{}", name.to_string_for_cpp_generation())),
-                _ => false,
-            };
+            FnKind::Function => false,
+        };
+        let designated_by_base = match &fun.synthetic_cpp {
+            // A member imported from a base class, which the C++ author
+            // designates under the name they wrote it with - the base's. The
+            // checks above see only the class it was imported into, which the
+            // author never wrote at all.
+            Some((CppFunctionBody::BaseClassMethodCall(base, name, _), _)) => self
+                .config
+                .is_on_throws_list(&format!("{base}::{}", name.to_string_for_cpp_generation())),
+            _ => false,
+        };
+        let designated_as_throwing =
+            designated_by_own_name || designated_by_class || designated_by_base;
         // A designation cannot be honoured for a function whose Rust shape is
         // fixed by a trait we do not own. Every one of these implements a
         // `moveit` trait, `Drop` or `MakeCppStorage`, and none of those has a
@@ -4066,16 +4079,21 @@ impl<'a> FnAnalyzer<'a> {
         // annotates each struct, so that codegen can assert what we assumed.
         let mut destructors_omitted_as_trivial: HashSet<QualifiedName> = HashSet::new();
         for (self_ty, items_found) in all_items_found.iter() {
+            // Asked before `exclude_impls` bows out, so that a
+            // `block_constructors!` naming this class counts as matched
+            // whichever of the two reasons stops the synthesis below. It is
+            // redundant beside `exclude_impls!`, not wrong, and the class it
+            // names is right here.
+            let constructors_blocked = self
+                .config
+                .is_on_constructor_blocklist(&self_ty.to_cpp_name());
             if self.config.exclude_impls {
                 // Only the synthesis below is skipped. The analysis above runs
                 // either way, because withdrawing the special members C++
                 // deletes is right whether or not we go on to add any.
                 continue;
             }
-            if self
-                .config
-                .is_on_constructor_blocklist(&self_ty.to_cpp_name())
-            {
+            if constructors_blocked {
                 continue;
             }
             // `enum_style!(NewtypeEnum, ...)` and its bitfield sibling make

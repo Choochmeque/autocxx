@@ -141,6 +141,29 @@ fn main() {
 )
 ```
 
+### A designation which matches nothing
+
+A `throws!` which names no function autocxx met is a build error. There is
+nothing useful it could mean: the function it was written for stays declared as
+never throwing, cxx puts `noexcept` on the boundary, and the first exception to
+escape it terminates the process rather than arriving as an `Err`. A
+misspelling, a name written with a namespace the item does not have, or a
+designation left behind after the C++ it named was renamed all land here.
+
+A designation autocxx matched and then could not honour counts as matched: a
+copy constructor becomes a `moveit` trait method with nowhere to put a
+`Result`, and naming one is not a mistake - see below.
+
+The same is true of `block!`, `block_constructors!` and `instantiable!`, each
+of which quietly did nothing when it matched nothing. The first two name a
+type, and a type they name is a match whether or not autocxx could act on it;
+what they catch is a name which fits nothing autocxx saw at all.
+`instantiable!` names an alias or a `concrete!` type, and a name which is
+neither is refused. Write all three as `bindgen` does - namespaces, and any
+enclosing class flattened into the type, so `ns::Outer_Inner` - which is the
+spelling all three accept. `throws!` and `smart_pointer!` take the C++
+spelling as well.
+
 ## Constructors
 
 A constructor is named in `throws!` the way C++ names it - `Class::Class`:

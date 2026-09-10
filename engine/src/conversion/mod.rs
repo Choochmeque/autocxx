@@ -27,7 +27,7 @@ mod utilities;
 pub(crate) use super::parse_callbacks::CppOriginalName;
 use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use analysis::fun::FnAnalyzer;
-use autocxx_parser::{name_matches_directive, IncludeCppConfig};
+use autocxx_parser::{name_matches_directive, IncludeCppConfig, UnmatchedDirective};
 pub(crate) use codegen_cpp::CppCodeGenerator;
 pub(crate) use convert_error::ConvertError;
 use convert_error::{ConvertErrorFromCpp, ConvertErrorWithContext, ErrorContext};
@@ -140,6 +140,10 @@ impl<'a> BridgeConverter<'a> {
         match &bindgen_mod.content {
             None => Err(ConvertError::NoContent),
             Some((_, items)) => {
+                // `generate` may be called again after a conversion has failed
+                // part way through, and what that attempt matched is not
+                // evidence about this one.
+                self.config.clear_directive_matches();
                 // Note which type names C++ won't look up unqualified because a
                 // variable or function of the same name hides them. This has to
                 // happen before parsing, which discards the hiding declaration.
@@ -256,6 +260,13 @@ impl<'a> BridgeConverter<'a> {
                 let derive_requests =
                     derives::resolve_derive_directives(self.config, &analyzed_apis)
                         .map_err(ConvertError::Cpp)?;
+                // Everything else which matches by name is settled here,
+                // against what the conversion recorded as it consulted each
+                // directive. Last of the four, so that a directive with a more
+                // specific complaint to make - `generate!` naming something
+                // which generated nothing *usable*, say - gets to make it
+                // first.
+                confirm_name_matching_directives_matched(self.config).map_err(ConvertError::Cpp)?;
                 // And finally pass them to the code gen phases, which outputs
                 // code suitable for cxx to consume.
                 let cxxgen_header_name = codegen_options
@@ -511,7 +522,7 @@ fn confirm_smart_pointer_directives_obeyed(
             _ => None,
         })
         .collect();
-    for directive in &config.smart_pointers {
+    for directive in config.smart_pointers.iter() {
         // Matched by the same rule the conversion used to decide which
         // instantiations got a surface, so that this cannot report a directive
         // as unmatched which did in fact take effect.
@@ -521,11 +532,38 @@ fn confirm_smart_pointer_directives_obeyed(
             .peekable();
         if matched.peek().is_none() {
             return Err(ConvertErrorFromCpp::SmartPointerDirectiveMatchedNothing(
-                directive.clone(),
+                directive.to_string(),
             ));
         }
     }
     Ok(())
+}
+
+/// Check every name-matching directive which nothing else confirms against
+/// what the conversion made of it.
+///
+/// The three passes above each re-derive their directive's match from the
+/// finished `ApiVec`. That cannot work here. `block!` and
+/// `block_constructors!` *remove* what they match, so by now the evidence is
+/// gone; and `throws!` is asked three different ways at three spellings, so a
+/// second implementation of the rule could disagree with the one the
+/// conversion used. Instead [`IncludeCppConfig`] records each match where it
+/// answers the query, and this reports what was never asked for.
+///
+/// A `throws!` which matched a function autocxx then declined to make
+/// fallible, which is every `FnKind::TraitMethod` per
+/// `designation_can_be_honoured`, counts as matched here. It named something
+/// real; that autocxx cannot honour it is a separate fact deserving a separate
+/// diagnostic, and saying "matched nothing" about it would be untrue.
+fn confirm_name_matching_directives_matched(
+    config: &IncludeCppConfig,
+) -> Result<(), ConvertErrorFromCpp> {
+    match config.unmatched_directives().into_iter().next() {
+        Some(UnmatchedDirective { directive, request }) => {
+            Err(ConvertErrorFromCpp::DirectiveMatchedNothing { directive, request })
+        }
+        None => Ok(()),
+    }
 }
 
 /// Some attributes indicate we can never handle a given item. Check for those.

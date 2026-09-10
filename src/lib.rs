@@ -211,6 +211,11 @@ macro_rules! pretty {
 /// which take or return such a type will _also_ be blocked.
 /// See also [`opaque`].
 ///
+/// Name the type with its namespaces, and with any enclosing class flattened
+/// into it the way `bindgen` writes it - `Outer_Inner`, not `Outer::Inner`.
+/// A directive which matches nothing autocxx met is a build error, since it
+/// withheld nothing.
+///
 /// A directive to be included inside
 /// [include_cpp] - see [include_cpp] for general information.
 #[macro_export]
@@ -251,6 +256,9 @@ macro_rules! opaque {
 /// The rules for when to generate C++ implicit constructors
 /// are complex, and if autocxx gets it wrong, you can block
 /// such constructors using this.
+///
+/// A directive which matches no type autocxx met is a build error, since it
+/// withheld nothing.
 ///
 /// A directive to be included inside
 /// [include_cpp] - see [include_cpp] for general information.
@@ -499,6 +507,9 @@ macro_rules! subclass {
 /// The syntax is:
 /// `instantiable!("CppNameGoesHere")`
 ///
+/// A directive which names no alias and no concrete type autocxx met is a
+/// build error, since it permitted nothing.
+///
 /// A directive to be included inside
 /// [include_cpp] - see [include_cpp] for general information.
 #[macro_export]
@@ -610,6 +621,13 @@ macro_rules! smart_pointer {
 /// * `throws!("do_something")` - matches any function named `do_something`
 /// * `throws!("MyClass::do_something")` - matches method `do_something` on `MyClass`
 /// * `throws!("my_namespace::do_something")` - matches `do_something` in `my_namespace`
+///
+/// A designation which matches no function autocxx met is a build error. It
+/// would otherwise leave that function declared as never throwing, and an
+/// exception escaping it terminates the process instead of arriving as an
+/// `Err`. A designation autocxx matched and then could not honour - on a copy
+/// constructor, whose Rust shape has nowhere to put a `Result` - counts as
+/// matched.
 ///
 /// # Constructors
 ///

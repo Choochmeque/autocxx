@@ -122,6 +122,13 @@ pub enum ConvertErrorFromCpp {
     DeriveDirectiveMatchedNothing(String),
     #[error("The 'smart_pointer' directive for '{0}' matched no template instantiation. Name the class template - 'smart_pointer!(\"MyPtr\")', not 'MyPtr<Widget>' - and check that something autocxx generates uses an instantiation of it; a directive which matches nothing would leave you without the accessor you asked for.")]
     SmartPointerDirectiveMatchedNothing(String),
+    #[error("The '{directive}' directive for '{request}' matched nothing autocxx saw, so it did nothing. Perhaps it was mis-spelled, or written without the namespace which declares the item, or names something no 'generate' directive brings in?")]
+    DirectiveMatchedNothing {
+        /// The directive as written in `include_cpp!`, without its `!`.
+        directive: &'static str,
+        /// The name it asked about.
+        request: String,
+    },
     #[error("The 'smart_pointer' directive names {}, and this instantiation of it has no type as its first template argument, so there is nothing for 'get' to point at.", .0.to_cpp_name())]
     SmartPointerWithoutTypeArgument(QualifiedName),
     #[error("The 'smart_pointer' directive names {}, and the first template argument of this instantiation ({}) is not a named type. autocxx writes the accessor's return type as a pointer to that argument, and it has no C++ name to write.", .0.to_cpp_name(), .1)]

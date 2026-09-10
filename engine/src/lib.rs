@@ -652,7 +652,7 @@ impl IncludeCppEngine {
             };
         }
 
-        for item in &self.config.opaquelist {
+        for item in self.config.get_opaquelist() {
             builder = builder.opaque_type(item);
         }
 

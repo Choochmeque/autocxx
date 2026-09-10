@@ -23,6 +23,7 @@ use crate::config::AllowlistErr;
 #[cfg(feature = "reproduction_case")]
 use crate::config::Allowlist;
 
+use crate::config::DirectiveList;
 use crate::derives::DeriveError;
 use crate::directive_names::{EXTERN_RUST_FUN, EXTERN_RUST_TYPE, SUBCLASS};
 use crate::enum_style::{EnumStyle, EnumStyleError};
@@ -325,15 +326,17 @@ fn allowlist_err_to_syn_err(err: AllowlistErr, span: &Span) -> syn::Error {
     syn::Error::new(*span, format!("{err}"))
 }
 
+/// A directive taking one string per invocation, accumulated into one of the
+/// config's [`DirectiveList`]s.
 struct StringList<SET, GET>(SET, GET)
 where
-    SET: Fn(&mut IncludeCppConfig) -> &mut Vec<String>,
-    GET: Fn(&IncludeCppConfig) -> &Vec<String>;
+    SET: Fn(&mut IncludeCppConfig) -> &mut DirectiveList,
+    GET: Fn(&IncludeCppConfig) -> &DirectiveList;
 
 impl<SET, GET> Directive for StringList<SET, GET>
 where
-    SET: Fn(&mut IncludeCppConfig) -> &mut Vec<String> + Sync + Send,
-    GET: Fn(&IncludeCppConfig) -> &Vec<String> + Sync + Send,
+    SET: Fn(&mut IncludeCppConfig) -> &mut DirectiveList + Sync + Send,
+    GET: Fn(&IncludeCppConfig) -> &DirectiveList + Sync + Send,
 {
     fn parse(
         &self,

@@ -217,7 +217,6 @@ impl ByValueChecker {
             .collect();
         let pod_requests = config
             .get_pod_requests()
-            .iter()
             .map(|ty| {
                 names_by_spelling
                     .get(ty)
