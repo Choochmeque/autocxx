@@ -239,35 +239,53 @@ fn hash_of(content: &[u8]) -> u64 {
 /// can be learnt about answers that as well as it can be answered; a path
 /// which cannot be opened at all fails at the write with the reason.
 pub(crate) fn resolve_destination(path: &Path) -> PathBuf {
+    resolve(path).unwrap_or_else(|| path.to_path_buf())
+}
+
+/// The file to write, which unlike the key above cannot be guessed at: a
+/// rename does not follow the link it lands on, so a chain which does not end
+/// would have its first link replaced by a file rather than being reported.
+pub(crate) fn destination_to_write(path: &Path) -> std::io::Result<PathBuf> {
+    resolve(path).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "it is a symlink which leads back to itself",
+        )
+    })
+}
+
+/// `None` where a symlink chain does not end.
+fn resolve(path: &Path) -> Option<PathBuf> {
     if let Ok(resolved) = std::fs::canonicalize(path) {
-        return resolved;
+        return Some(resolved);
     }
     // Not there to be resolved, which is the ordinary case of a file not
     // written yet. Its directory is, and a link whose target does not exist
     // yet still has to be followed.
-    let path = follow_links(path);
-    path.parent()
-        .zip(path.file_name())
-        .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)))
-        .unwrap_or(path)
+    let path = follow_links(path)?;
+    Some(
+        path.parent()
+            .zip(path.file_name())
+            .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)))
+            .unwrap_or(path),
+    )
 }
 
 /// A symlink chain walked by hand, which is what `canonicalize` will not do
-/// for a link whose target does not exist yet.
-fn follow_links(path: &Path) -> PathBuf {
+/// for a link whose target does not exist yet. `None` where it does not end.
+fn follow_links(path: &Path) -> Option<PathBuf> {
     let mut path = path.to_path_buf();
-    // Linux gives up at 40 too; a chain longer than that is a loop, and the
-    // write which follows fails on it.
+    // Linux gives up at 40 too; a chain longer than that is a loop.
     for _ in 0..40 {
         let Ok(target) = std::fs::read_link(&path) else {
-            return path; // not a link, or not there at all
+            return Some(path); // not a link, or not there at all
         };
         path = match path.parent() {
             Some(parent) if target.is_relative() => parent.join(target),
             _ => target,
         };
     }
-    path
+    None
 }
 
 fn canonical(path: &Path) -> PathBuf {

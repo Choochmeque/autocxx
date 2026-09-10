@@ -42,6 +42,8 @@ mod rust_pretty_printer;
 mod types;
 
 #[cfg(any(test, feature = "build"))]
+mod atomic_write;
+#[cfg(any(test, feature = "build"))]
 mod builder;
 #[cfg(any(test, feature = "build"))]
 mod cxx_version_parity;

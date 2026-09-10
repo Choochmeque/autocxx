@@ -10,13 +10,12 @@ use autocxx_parser::file_locations::FileLocationStrategy;
 use miette::Diagnostic;
 use thiserror::Error;
 
+use crate::atomic_write::write_atomically;
 use crate::output_registry::OutputRegistry;
 use crate::{generate_rs_single, CodegenOptions, CxxgenHeaderNamer};
 use crate::{get_cxx_header_bytes, CppCodegenOptions, ParseError, RebuildDependencyRecorder};
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::Write;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -548,7 +547,7 @@ fn write_to_file(
             return Ok(path);
         }
     }
-    try_write_to_file(&path, content).map_err(|e| {
+    write_atomically(&path, content).map_err(|e| {
         // The record said this file would be written and it was not, so it
         // must not be held against a caller which handles the failure and
         // writes it again.
@@ -556,11 +555,6 @@ fn write_to_file(
         BuilderError::FileWriteFail(e, path.clone())
     })?;
     Ok(path)
-}
-
-fn try_write_to_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mut f = File::create(path)?;
-    f.write_all(content)
 }
 
 fn rust_version_check() {
