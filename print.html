@@ -292,7 +292,6 @@ miette = { version = "5", features = ["fancy"] } # optional but gives nicer erro
     let mut b = autocxx_build::Builder::new("src/main.rs", &amp;[&amp;include_path]).build()?;
     b.std("c++14")
      .compile("autocxx-demo"); // arbitrary library name, pick anything
-    println!("cargo:rerun-if-changed=src/main.rs");
 
     // Add instructions to link to any C++ libraries you need.
 
@@ -454,9 +453,19 @@ see the chapter on <a href="cpp_types.html">C++ types</a>.</li>
         .unwrap();
     b.std("c++17") // cc picks the separator per compiler: `-std=c++17`, or `-std:c++17` for cl
         .compile("autocxx-demo"); // arbitrary library name, pick anything
-    println!("cargo:rerun-if-changed=src/main.rs");
     // Add instructions to link to any C++ libraries you need.
 }</code></pre>
+<h2 id="rebuilding"><a class="header" href="#rebuilding">Rebuilding</a></h2>
+<p><code>autocxx-build</code> tells cargo to rerun your build script when the <code>.rs</code> file it
+parsed changes, and when any header the C++ preprocessor opened while reading
+it changes - which includes headers reached indirectly. You do not need to
+name any of those yourself. Do name anything else your build script reads: the
+<code>.cc</code> files you hand to <code>cc</code>, and any file you generate from.</p>
+<p>Cargo stops scanning your package directory as a whole once a build script
+names a single file. Your build script's own sources are still tracked, but
+any other file it reads and nobody names is one that can change without
+rerunning it - leaving both the generated Rust bindings and the C++ built
+from them as they were.</p>
 <h2 id="keeping-cxx-and-cxx-gen-level"><a class="header" href="#keeping-cxx-and-cxx-gen-level">Keeping <code>cxx</code> and <code>cxx-gen</code> level</a></h2>
 <p><code>autocxx</code> writes the C++ half of each generated function using <code>cxx-gen</code>, while
 the Rust half comes from the <code>cxx</code> crate your own crate depends on. Since cxx

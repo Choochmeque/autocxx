@@ -208,7 +208,6 @@ miette = { version = "5", features = ["fancy"] } # optional but gives nicer erro
     let mut b = autocxx_build::Builder::new("src/main.rs", &amp;[&amp;include_path]).build()?;
     b.std("c++14")
      .compile("autocxx-demo"); // arbitrary library name, pick anything
-    println!("cargo:rerun-if-changed=src/main.rs");
 
     // Add instructions to link to any C++ libraries you need.
 
