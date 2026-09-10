@@ -283,6 +283,25 @@ fn main() {
     assert!(result.is_err());
 }
 </code></pre>
+<h3 id="a-designation-which-matches-nothing"><a class="header" href="#a-designation-which-matches-nothing">A designation which matches nothing</a></h3>
+<p>A <code>throws!</code> which names no function autocxx met is a build error. There is
+nothing useful it could mean: the function it was written for stays declared as
+never throwing, cxx puts <code>noexcept</code> on the boundary, and the first exception to
+escape it terminates the process rather than arriving as an <code>Err</code>. A
+misspelling, a name written with a namespace the item does not have, or a
+designation left behind after the C++ it named was renamed all land here.</p>
+<p>A designation autocxx matched and then could not honour counts as matched: a
+copy constructor becomes a <code>moveit</code> trait method with nowhere to put a
+<code>Result</code>, and naming one is not a mistake - see below.</p>
+<p>The same is true of <code>block!</code>, <code>block_constructors!</code> and <code>instantiable!</code>, each
+of which quietly did nothing when it matched nothing. The first two name a
+type, and a type they name is a match whether or not autocxx could act on it;
+what they catch is a name which fits nothing autocxx saw at all.
+<code>instantiable!</code> names an alias or a <code>concrete!</code> type, and a name which is
+neither is refused. Write all three as <code>bindgen</code> does - namespaces, and any
+enclosing class flattened into the type, so <code>ns::Outer_Inner</code> - which is the
+spelling all three accept. <code>throws!</code> and <code>smart_pointer!</code> take the C++
+spelling as well.</p>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <p>A constructor is named in <code>throws!</code> the way C++ names it - <code>Class::Class</code>:</p>
 <h4 id="c-header-3"><a class="header" href="#c-header-3">C++ header:</a></h4>
