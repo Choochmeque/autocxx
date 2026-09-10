@@ -754,6 +754,14 @@ impl IncludeCppEngine {
             State::Generated(_) => panic!("Only call generate once"),
         }
 
+        // Everything downstream reads the allowlist as settled; an unsettled
+        // one is a state those readers treat as impossible. This is the last
+        // point at which a directive or a discovered item could still have been
+        // added, so settle it here rather than relying on every caller to.
+        // Doing so does not move the archive key, which is a hash of the block
+        // as written, taken when it was parsed.
+        self.config.confirm_complete();
+
         if matches!(
             self.config.unsafe_policy,
             UnsafePolicy::ReferencesWrappedAllFunctionsSafe

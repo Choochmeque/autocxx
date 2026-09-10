@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use crate::ParseResult;
-use proc_macro2::Ident;
+use proc_macro2::{Ident, Span};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::parse::{Parse, ParseStream};
 
@@ -37,6 +37,19 @@ impl RustPath {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// The same path, written from `depth` mods further in. A path recorded
+    /// while walking a file is relative to that file's root; code generated for
+    /// an `include_cpp!` inside a `mod` has to climb back out to use it.
+    #[must_use]
+    pub fn from_within_mods(&self, depth: usize) -> Self {
+        Self(
+            std::iter::repeat_with(|| Ident::new("super", Span::call_site()))
+                .take(depth)
+                .chain(self.0.iter().cloned())
+                .collect(),
+        )
+    }
 }
 
 impl ToTokens for RustPath {
@@ -56,12 +69,23 @@ impl ToTokens for RustPath {
 
 impl Parse for RustPath {
     fn parse(input: ParseStream) -> ParseResult<Self> {
+        // A path written for use from inside a mod starts with a run of
+        // `super`, which is a keyword rather than an ordinary identifier. A
+        // reproduction case has to read back what autocxx wrote - but only
+        // `super` leads a path autocxx writes, so no other keyword is
+        // accepted anywhere.
+        let mut segments = Vec::new();
+        while input.peek(syn::Token![super]) {
+            let kw = input.parse::<syn::Token![super]>()?;
+            segments.push(Ident::new("super", kw.span));
+            input.parse::<syn::token::PathSep>()?;
+        }
         let id: Ident = input.parse()?;
-        let mut p = RustPath::new_from_ident(id);
+        segments.push(id);
         while input.parse::<Option<syn::token::PathSep>>()?.is_some() {
             let id: Ident = input.parse()?;
-            p = p.append(id);
+            segments.push(id);
         }
-        Ok(p)
+        Ok(Self(segments))
     }
 }

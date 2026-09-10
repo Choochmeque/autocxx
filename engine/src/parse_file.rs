@@ -15,8 +15,9 @@ use crate::{
 use crate::{proc_macro_span_to_miette_span, CodegenOptions, CppCodegenOptions, LocatedSynError};
 use autocxx_parser::directive_names::SUBCLASS;
 use autocxx_parser::{AllowlistEntry, RustPath, Subclass, SubclassAttrs};
-use indexmap::set::IndexSet as HashSet;
+use indexmap::map::IndexMap as HashMap;
 use miette::{Diagnostic, SourceSpan};
+use proc_macro2::Ident;
 use quote::ToTokens;
 use std::{io::Read, path::PathBuf};
 use std::{panic::UnwindSafe, path::Path, rc::Rc};
@@ -53,9 +54,13 @@ pub enum ParseError {
     AutocxxCodegenError(EngineError),
     /// There are two or more `include_cpp` macros with the same
     /// mod name.
-    #[error("there are two or more include_cpp! mods with the same mod name")]
-    ConflictingModNames,
-    #[error("dynamic discovery was enabled but multiple mods were found")]
+    #[error("two include_cpp! blocks in one file are both named {name} (one in {first}, one in {second}). Every block in a file has to have its own name!(...), whatever mods they sit in: a file of bindings and its C++ header are named after the block by default, and the macro which reads the bindings back computes that name without being told which mod it was written in.")]
+    ConflictingModNames {
+        name: String,
+        first: String,
+        second: String,
+    },
+    #[error("this file has more than one include_cpp! block which generates bindings, so there is no telling which of them the things found outside them - #[extern_rust_function], #[extern_rust_type] and #[subclass] items, and with auto_allowlist the C++ names used by the Rust - were meant to join. Discovery needs a file with one such block; otherwise name what you want in a block, with extern_rust_function!, extern_rust_type!, subclass! or generate!.")]
     MultipleModsForDynamicDiscovery,
     #[error("a problem occurred while discovering C++ APIs used within the Rust: {0}")]
     Discovery(DiscoveryErr),
@@ -137,7 +142,7 @@ fn parse_file_contents(
                         }
                         self.extra_superclasses.extend(mod_state.extra_superclasses);
                         self.discoveries.extend(mod_state.discoveries);
-                        Segment::Mod(mod_state.results)
+                        Segment::Mod(itm.ident, mod_state.results)
                     } else {
                         Segment::Other
                     }
@@ -214,52 +219,62 @@ fn parse_file_contents(
     // We do not want to enter this 'if' block unless the above conditions are true,
     // since we may emit errors.
     if must_handle_discovered_things {
-        // If we have to handle discovered things but there was no include_cpp! macro,
-        // fake one.
-        if !results.iter().any(|seg| matches!(seg, Segment::Autocxx(_))) {
-            results.push(Segment::Autocxx(IncludeCppEngine::new_for_autodiscover()));
-        }
-        let mut autocxx_seg_iterator = results.iter_mut().filter_map(|seg| match seg {
-            Segment::Autocxx(engine) => Some(engine),
-            _ => None,
-        });
-        let our_seg = autocxx_seg_iterator.next();
-        match our_seg {
-            None => panic!("We should have just added a fake mod but apparently didn't"),
-            Some(engine) => {
-                engine
-                    .config_mut()
-                    .subclasses
-                    .append(&mut extra_superclasses);
-                if auto_allowlist {
-                    for cpp in discoveries.cpp_list {
-                        engine
-                            .config_mut()
-                            .allowlist
-                            .push(AllowlistEntry::Item(cpp))
-                            .map_err(|_| ParseError::ConflictingAllowlist)?;
-                    }
-                }
-                engine
-                    .config_mut()
-                    .extern_rust_funs
-                    .append(&mut discoveries.extern_rust_funs);
-                engine
-                    .config_mut()
-                    .rust_types
-                    .append(&mut discoveries.extern_rust_types);
-            }
-        }
-        if autocxx_seg_iterator.next().is_some() {
+        // A `parse_only!` block generates nothing, so a discovered item has no
+        // bridge to join there, and its config is frozen against writes in any
+        // case. It is not a candidate.
+        let generating_blocks = all_blocks(&results)
+            .filter(|block| !block.get_config().parse_only)
+            .count();
+        if generating_blocks > 1 {
             return Err(ParseError::MultipleModsForDynamicDiscovery);
         }
+        if generating_blocks == 0 && all_blocks(&results).next().is_none() {
+            // Discovered items with no block at all to join: make one for them.
+            results.push(Segment::Autocxx(IncludeCppEngine::new_for_autodiscover()));
+        }
+        // Nothing to attach to when every block in the file only parses; that
+        // file generates nothing either way.
+        let mut candidates = Vec::new();
+        all_blocks_mut_with_depth(&mut results, 0, &mut candidates);
+        if let Some((depth, engine)) = candidates
+            .into_iter()
+            .find(|(_, block)| !block.get_config().parse_only)
+        {
+            // Discovered paths are relative to the file. The generated `use`
+            // for one climbs a single mod, out of the generated bindings and
+            // into the mod holding the block, so a block written inside mods
+            // has to climb back out of those too.
+            for fun in &mut discoveries.extern_rust_funs {
+                fun.path = fun.path.from_within_mods(depth);
+            }
+            for path in &mut discoveries.extern_rust_types {
+                *path = path.from_within_mods(depth);
+            }
+            engine
+                .config_mut()
+                .subclasses
+                .append(&mut extra_superclasses);
+            if auto_allowlist {
+                for cpp in discoveries.cpp_list {
+                    engine
+                        .config_mut()
+                        .allowlist
+                        .push(AllowlistEntry::Item(cpp))
+                        .map_err(|_| ParseError::ConflictingAllowlist)?;
+                }
+            }
+            engine
+                .config_mut()
+                .extern_rust_funs
+                .append(&mut discoveries.extern_rust_funs);
+            engine
+                .config_mut()
+                .rust_types
+                .append(&mut discoveries.extern_rust_types);
+        }
     }
-    let autocxx_seg_iterator = results.iter_mut().filter_map(|seg| match seg {
-        Segment::Autocxx(engine) => Some(engine),
-        _ => None,
-    });
-    for seg in autocxx_seg_iterator {
-        seg.config.confirm_complete();
+    for block in all_blocks_mut(&mut results) {
+        block.config.confirm_complete();
     }
     Ok(ParsedFile(results))
 }
@@ -274,8 +289,85 @@ pub struct ParsedFile(Vec<Segment>);
 enum Segment {
     Autocxx(IncludeCppEngine),
     Cxx(CxxBridge),
-    Mod(Vec<Segment>),
+    /// An inline `mod`, keeping its name so a diagnostic can say which one an
+    /// `include_cpp!` was written in.
+    Mod(Ident, Vec<Segment>),
     Other,
+}
+
+/// Every `include_cpp!` block in these segments, at whatever `mod` depth.
+/// Everything which acts on the blocks of a file walks them through this: a
+/// pass which stopped at the top level would treat a block inside a `mod` as
+/// absent, and the two halves would then disagree about how many blocks the
+/// file has.
+fn all_blocks(segments: &[Segment]) -> impl Iterator<Item = &IncludeCppEngine> {
+    segments
+        .iter()
+        .flat_map(|s| -> Box<dyn Iterator<Item = &IncludeCppEngine>> {
+            match s {
+                Segment::Autocxx(includecpp) => Box::new(std::iter::once(includecpp)),
+                Segment::Mod(_, segments) => Box::new(all_blocks(segments)),
+                _ => Box::new(std::iter::empty()),
+            }
+        })
+}
+
+fn all_blocks_mut(segments: &mut [Segment]) -> impl Iterator<Item = &mut IncludeCppEngine> {
+    segments
+        .iter_mut()
+        .flat_map(|s| -> Box<dyn Iterator<Item = &mut IncludeCppEngine>> {
+            match s {
+                Segment::Autocxx(includecpp) => Box::new(std::iter::once(includecpp)),
+                Segment::Mod(_, segments) => Box::new(all_blocks_mut(segments)),
+                _ => Box::new(std::iter::empty()),
+            }
+        })
+}
+
+/// Every block paired with how many `mod`s deep it was written, mutably.
+fn all_blocks_mut_with_depth<'a>(
+    segments: &'a mut [Segment],
+    depth: usize,
+    found: &mut Vec<(usize, &'a mut IncludeCppEngine)>,
+) {
+    for segment in segments.iter_mut() {
+        match segment {
+            Segment::Autocxx(includecpp) => found.push((depth, includecpp)),
+            Segment::Mod(_, segments) => all_blocks_mut_with_depth(segments, depth + 1, found),
+            _ => {}
+        }
+    }
+}
+
+/// Every block paired with the `mod` path it was written in, for diagnostics.
+fn all_blocks_with_scopes<'a>(
+    segments: &'a [Segment],
+    scope: &str,
+    found: &mut Vec<(String, &'a IncludeCppEngine)>,
+) {
+    for segment in segments {
+        match segment {
+            Segment::Autocxx(includecpp) => found.push((scope.to_string(), includecpp)),
+            Segment::Mod(ident, segments) => {
+                let inner = if scope.is_empty() {
+                    ident.to_string()
+                } else {
+                    format!("{scope}::{ident}")
+                };
+                all_blocks_with_scopes(segments, &inner, found)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How to name a block's location in a diagnostic.
+fn describe_scope(scope: &str) -> String {
+    if scope.is_empty() {
+        "the top level of the file".to_string()
+    } else {
+        format!("mod {scope}")
+    }
 }
 
 pub trait CppBuildable {
@@ -288,19 +380,7 @@ pub trait CppBuildable {
 impl ParsedFile {
     /// Get all the autocxx `include_cpp` macros found in this file.
     pub fn get_autocxxes(&self) -> impl Iterator<Item = &IncludeCppEngine> {
-        fn do_get_autocxxes(segments: &[Segment]) -> impl Iterator<Item = &IncludeCppEngine> {
-            segments
-                .iter()
-                .flat_map(|s| -> Box<dyn Iterator<Item = &IncludeCppEngine>> {
-                    match s {
-                        Segment::Autocxx(includecpp) => Box::new(std::iter::once(includecpp)),
-                        Segment::Mod(segments) => Box::new(do_get_autocxxes(segments)),
-                        _ => Box::new(std::iter::empty()),
-                    }
-                })
-        }
-
-        do_get_autocxxes(&self.0)
+        all_blocks(&self.0)
     }
 
     /// Get all the areas of Rust code which need to be built for these bindings.
@@ -322,7 +402,7 @@ impl ParsedFile {
                         Segment::Cxx(cxxbridge) => {
                             Box::new(std::iter::once(cxxbridge as &dyn CppBuildable))
                         }
-                        Segment::Mod(segments) => Box::new(do_get_cpp_buildables(segments)),
+                        Segment::Mod(_, segments) => Box::new(do_get_cpp_buildables(segments)),
                         _ => Box::new(std::iter::empty()),
                     }
                 })
@@ -332,21 +412,32 @@ impl ParsedFile {
     }
 
     fn get_autocxxes_mut(&mut self) -> impl Iterator<Item = &mut IncludeCppEngine> {
-        fn do_get_autocxxes_mut(
-            segments: &mut [Segment],
-        ) -> impl Iterator<Item = &mut IncludeCppEngine> {
-            segments
-                .iter_mut()
-                .flat_map(|s| -> Box<dyn Iterator<Item = &mut IncludeCppEngine>> {
-                    match s {
-                        Segment::Autocxx(includecpp) => Box::new(std::iter::once(includecpp)),
-                        Segment::Mod(segments) => Box::new(do_get_autocxxes_mut(segments)),
-                        _ => Box::new(std::iter::empty()),
-                    }
-                })
-        }
+        all_blocks_mut(&mut self.0)
+    }
 
-        do_get_autocxxes_mut(&mut self.0)
+    /// Require every block in the file to have its own name.
+    ///
+    /// By default a block's generated file is named after it (`name!`,
+    /// defaulting to `ffi`), and so is its C++ header. A block cannot be named
+    /// after the `mod` it sits in instead: the macro half of autocxx has to
+    /// compute the same name to `include!`, and a macro is not told which
+    /// `mod` it was written in. So the names are required to differ whatever
+    /// mods Rust scopes the blocks into.
+    fn check_mod_names(&self) -> Result<(), ParseError> {
+        let mut blocks = Vec::new();
+        all_blocks_with_scopes(&self.0, "", &mut blocks);
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for (scope, block) in blocks {
+            let name = block.get_mod_name();
+            if let Some(first) = seen.insert(name.clone(), scope.clone()) {
+                return Err(ParseError::ConflictingModNames {
+                    name,
+                    first: describe_scope(&first),
+                    second: describe_scope(&scope),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Determines the include dirs that were set for each include_cpp, so they can be
@@ -359,7 +450,7 @@ impl ParsedFile {
                 .flat_map(|s| -> Box<dyn Iterator<Item = &PathBuf>> {
                     match s {
                         Segment::Autocxx(includecpp) => Box::new(includecpp.include_dirs()),
-                        Segment::Mod(segments) => Box::new(do_get_include_dirs(segments)),
+                        Segment::Mod(_, segments) => Box::new(do_get_include_dirs(segments)),
                         _ => Box::new(std::iter::empty()),
                     }
                 })
@@ -375,7 +466,10 @@ impl ParsedFile {
         dep_recorder: Option<Box<dyn RebuildDependencyRecorder>>,
         codegen_options: &CodegenOptions,
     ) -> Result<(), ParseError> {
-        let mut mods_found = HashSet::new();
+        // Before generating anything: a name collision is a property of the
+        // file, and reporting it after the first block has been generated would
+        // bury it behind whatever that generation had to say.
+        self.check_mod_names()?;
         let inner_dep_recorder: Option<Rc<dyn RebuildDependencyRecorder>> =
             dep_recorder.map(Rc::from);
         for include_cpp in self.get_autocxxes_mut() {
@@ -387,9 +481,6 @@ impl ParsedFile {
                     inner_dep_recorder.clone(),
                 ))),
             };
-            if !mods_found.insert(include_cpp.get_mod_name()) {
-                return Err(ParseError::ConflictingModNames);
-            }
             include_cpp
                 .generate(
                     autocxx_inc.clone(),
@@ -424,10 +515,21 @@ impl RebuildDependencyRecorder for CompositeDepRecorder {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_file_contents;
+    use super::{parse_file_contents, ParseError, ParsedFile};
     use autocxx_parser::IncludeCpp;
     use proc_macro2::Span;
+    use quote::ToTokens;
     use syn::parse_quote;
+
+    fn parse(src: &str) -> ParsedFile {
+        parse_file_contents(syn::parse_file(src).unwrap(), false, src).expect("parse failed")
+    }
+
+    fn parse_err(src: &str) -> ParseError {
+        parse_file_contents(syn::parse_file(src).unwrap(), false, src)
+            .err()
+            .expect("parse unexpectedly succeeded")
+    }
 
     /// The key the codegen files an archive entry under has to be the key the
     /// macro looks it up by, and the codegen augments its copy of the config -
@@ -443,8 +545,7 @@ mod tests {
             #[autocxx::extern_rust::extern_rust_function]
             pub fn called_from_cpp() {}
         "#;
-        let parsed =
-            parse_file_contents(syn::parse_file(src).unwrap(), false, src).expect("parse failed");
+        let parsed = parse(src);
         let engine = parsed
             .get_autocxxes()
             .next()
@@ -456,5 +557,279 @@ mod tests {
             #hexathorpe include "a.h"
         };
         assert_eq!(engine.config_hash(), macro_side.config_hash());
+    }
+
+    /// A block inside a `mod` has to have its config completed like any other:
+    /// an allowlist left `Unspecified` is a state `bindgen_allowlist` treats as
+    /// impossible, and it panics rather than returning.
+    #[test]
+    fn nested_block_config_is_completed() {
+        let src = r#"
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                }
+            }
+        "#;
+        let parsed = parse(src);
+        let engine = parsed
+            .get_autocxxes()
+            .next()
+            .expect("no include_cpp! found");
+        assert!(engine.get_config().bindgen_allowlist().is_some());
+    }
+
+    /// Discovered items belong to the file's one block wherever it sits. A
+    /// second, synthesised block would generate a bridge nothing includes.
+    #[test]
+    fn discoveries_reach_a_nested_block() {
+        let src = r#"
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                    generate_all!()
+                }
+            }
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn called_from_cpp() {}
+        "#;
+        let parsed = parse(src);
+        assert_eq!(parsed.get_autocxxes().count(), 1);
+        let engine = parsed.get_autocxxes().next().unwrap();
+        assert!(!engine.get_config().extern_rust_funs.is_empty());
+    }
+
+    /// Two blocks are two candidate homes for a discovered item, whichever
+    /// scopes they sit in, so the ambiguity is reported rather than resolved by
+    /// position.
+    #[test]
+    fn discoveries_with_a_nested_and_a_top_level_block_are_ambiguous() {
+        let src = r#"
+            autocxx::include_cpp! {
+                #include "a.h"
+                generate_all!()
+            }
+
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                    name!(ffi_inner)
+                    generate_all!()
+                }
+            }
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn called_from_cpp() {}
+        "#;
+        assert!(matches!(
+            parse_err(src),
+            ParseError::MultipleModsForDynamicDiscovery
+        ));
+    }
+
+    /// `parse_only!` generates nothing, so it is no home for a discovered item
+    /// - and its config is frozen, so writing to it panics.
+    #[test]
+    fn discoveries_skip_a_parse_only_block() {
+        let src = r#"
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                    parse_only!()
+                }
+            }
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn called_from_cpp() {}
+        "#;
+        let parsed = parse(src);
+        // No block was synthesised beside the parse-only one, which would have
+        // generated a bridge nothing includes.
+        assert_eq!(parsed.get_autocxxes().count(), 1);
+        assert!(parsed
+            .get_autocxxes()
+            .next()
+            .unwrap()
+            .get_config()
+            .extern_rust_funs
+            .is_empty());
+    }
+
+    /// Nested and top-level blocks coexist when nothing is discovered; both get
+    /// completed configs.
+    #[test]
+    fn nested_and_top_level_blocks_coexist() {
+        let src = r#"
+            autocxx::include_cpp! {
+                #include "a.h"
+            }
+
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                    name!(ffi_inner)
+                }
+            }
+        "#;
+        let parsed = parse(src);
+        assert_eq!(parsed.get_autocxxes().count(), 2);
+        for engine in parsed.get_autocxxes() {
+            assert!(engine.get_config().bindgen_allowlist().is_some());
+        }
+    }
+
+    /// The generated file name and the C++ header name both derive from
+    /// `name!` alone - a macro cannot know which `mod` it was written in - so
+    /// two blocks sharing a name collide however they are scoped, and the
+    /// diagnostic has to name what collided.
+    #[test]
+    fn same_name_in_two_scopes_is_refused_by_name() {
+        let src = r#"
+            mod a {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                }
+            }
+
+            mod b {
+                autocxx::include_cpp! {
+                    #include "b.h"
+                }
+            }
+        "#;
+        let parsed = parse(src);
+        let err = parsed
+            .check_mod_names()
+            .expect_err("colliding names accepted");
+        let msg = err.to_string();
+        assert!(msg.contains("ffi"), "{msg}");
+        assert!(msg.contains("mod a") && msg.contains("mod b"), "{msg}");
+    }
+
+    /// Distinct names in distinct scopes are the supported nested shape.
+    #[test]
+    fn distinct_names_in_two_scopes_are_accepted() {
+        let src = r#"
+            mod a {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                    name!(ffi_a)
+                }
+            }
+
+            mod b {
+                autocxx::include_cpp! {
+                    #include "b.h"
+                    name!(ffi_b)
+                }
+            }
+        "#;
+        parse(src)
+            .check_mod_names()
+            .expect("distinct names refused");
+    }
+
+    /// A collision between a top-level block and a nested one names both ends.
+    #[test]
+    fn collision_between_scopes_names_both_ends() {
+        let src = r#"
+            autocxx::include_cpp! {
+                #include "a.h"
+            }
+
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "b.h"
+                }
+            }
+        "#;
+        let msg = parse(src)
+            .check_mod_names()
+            .expect_err("colliding names accepted")
+            .to_string();
+        assert!(msg.contains("the top level of the file"), "{msg}");
+        assert!(msg.contains("mod inner"), "{msg}");
+    }
+
+    /// A discovered item's path is recorded relative to the file, and the
+    /// bindings which `use` it are generated inside the block's own mod, so a
+    /// nested block's copy has to climb back out.
+    #[test]
+    fn discovered_paths_climb_out_of_nested_mods() {
+        let src = r#"
+            mod outer {
+                mod inner {
+                    autocxx::include_cpp! {
+                        #include "a.h"
+                        generate_all!()
+                    }
+                }
+            }
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn called_from_cpp() {}
+
+            #[autocxx::extern_rust::extern_rust_type]
+            pub struct UsedFromCpp;
+        "#;
+        let parsed = parse(src);
+        let config = parsed.get_autocxxes().next().unwrap().get_config();
+        assert_eq!(
+            config.extern_rust_funs[0]
+                .path
+                .to_token_stream()
+                .to_string(),
+            "super :: super :: called_from_cpp"
+        );
+        assert_eq!(
+            config.rust_types[0].to_token_stream().to_string(),
+            "super :: super :: UsedFromCpp"
+        );
+    }
+
+    /// The same paths from a top-level block, which is already in the file's
+    /// own scope.
+    #[test]
+    fn discovered_paths_from_a_top_level_block_do_not_climb() {
+        let src = r#"
+            autocxx::include_cpp! {
+                #include "a.h"
+                generate_all!()
+            }
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn called_from_cpp() {}
+        "#;
+        let parsed = parse(src);
+        let config = parsed.get_autocxxes().next().unwrap().get_config();
+        assert_eq!(
+            config.extern_rust_funs[0]
+                .path
+                .to_token_stream()
+                .to_string(),
+            "called_from_cpp"
+        );
+    }
+
+    /// A `#[subclass]` struct is discovered wherever it sits, and reaches a
+    /// block written inside a mod.
+    #[test]
+    fn subclass_beside_a_nested_block_is_accepted() {
+        let src = r#"
+            mod inner {
+                autocxx::include_cpp! {
+                    #include "a.h"
+                    generate_all!()
+                }
+
+                #[autocxx::subclass::subclass(superclass("Observer"))]
+                pub struct MyObserver;
+            }
+        "#;
+        let parsed = parse_file_contents(syn::parse_file(src).unwrap(), true, src)
+            .expect("matching scopes refused");
+        let config = parsed.get_autocxxes().next().unwrap().get_config();
+        assert_eq!(config.subclasses.len(), 1);
     }
 }

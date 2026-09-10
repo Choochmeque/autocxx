@@ -408,7 +408,11 @@ impl IncludeCppConfig {
                             .flat_map(|sc| [format!("{}Cpp", sc.subclass), sc.superclass.clone()]),
                     ),
             )),
-            Allowlist::Unspecified(_) => unreachable!(),
+            // `IncludeCppEngine::generate` settles the allowlist before
+            // anything reads it.
+            Allowlist::Unspecified(_) => {
+                unreachable!("the allowlist was read before it was settled")
+            }
         }
     }
 
@@ -450,7 +454,9 @@ impl IncludeCppConfig {
             || self.is_rust_type_name(cpp_name)
             || self.is_concrete_type(cpp_name)
             || match &self.allowlist {
-                Allowlist::Unspecified(_) => panic!("Eek no allowlist yet"),
+                Allowlist::Unspecified(_) => {
+                    unreachable!("the allowlist was read before it was settled")
+                }
                 Allowlist::All => true,
                 Allowlist::Specific(items) => items.iter().any(|entry| match entry {
                     AllowlistEntry::Item(i) => i == cpp_name,
@@ -667,6 +673,43 @@ mod parse_tests {
             Some(EnumStyle::BitfieldEnum)
         );
         assert_eq!(reparsed.enum_style("Other"), Some(EnumStyle::NewtypeEnum));
+    }
+
+    /// A discovered item is recorded by the path from which the block's own
+    /// mod can reach it, which for a block inside a mod starts with `super`.
+    /// A reproduction case has to read that back.
+    #[cfg(feature = "reproduction_case")]
+    #[test]
+    fn test_paths_out_of_a_mod_round_trip() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            extern_rust_function!(super::super::called_from_cpp, fn called_from_cpp())
+            extern_rust_type!(super::UsedFromCpp)
+        };
+        let reparsed: IncludeCppConfig =
+            syn::parse2(quote::ToTokens::to_token_stream(&config)).unwrap();
+        assert_eq!(reparsed.extern_rust_funs.len(), 1);
+        assert_eq!(
+            quote::ToTokens::to_token_stream(&reparsed.extern_rust_funs[0].path).to_string(),
+            "super :: super :: called_from_cpp"
+        );
+        assert_eq!(
+            quote::ToTokens::to_token_stream(&reparsed.rust_types[0]).to_string(),
+            "super :: UsedFromCpp"
+        );
+    }
+
+    /// Only `super` leads a path, and only at the front of one.
+    #[test]
+    fn test_no_other_keyword_is_a_path_segment() {
+        for directive in [
+            quote::quote! { extern_rust_type!(fn::T) },
+            quote::quote! { extern_rust_type!(T::fn) },
+            quote::quote! { extern_rust_type!(T::super::U) },
+        ] {
+            syn::parse2::<IncludeCppConfig>(directive.clone())
+                .expect_err(&format!("accepted {directive}"));
+        }
     }
 
     fn enum_style_parse_error(directive: proc_macro2::TokenStream) -> String {
