@@ -10,18 +10,15 @@
 //! sides of the bridge.
 
 use indexmap::map::IndexMap;
-use indexmap::set::IndexSet;
 
 use crate::conversion::{
     analysis::{
         fun::{FnPhase, PodAndDepAnalysis},
         pod::PodAnalysis,
-        tdef::{resolve_typedefs, typedef_targets},
     },
     api::{Api, TypeKind},
     apivec::ApiVec,
 };
-use crate::known_types::known_types;
 use crate::types::QualifiedName;
 
 /// What is to be asserted about one type's layout.
@@ -68,18 +65,25 @@ pub(crate) struct LayoutAssertion {
 /// other place autocxx would name one is refused for the same reason - see
 /// `ConvertErrorFromCpp::MethodInAnonymousNamespace`.
 ///
-/// The Rust half is written only for the types in
-/// [`names_with_a_reliable_rust_size`].
+/// The Rust half is withheld from an abstract class, whose Rust side is a cxx
+/// `type T;` and holds no storage at all: autocxx never lets one be
+/// constructed in Rust memory, so there is nothing for the C++ size to be the
+/// size of. An abstract class nested in another class is written the way every
+/// other opaque type is - a wrapper round the bindgen struct - but the two are
+/// not told apart here.
 ///
-/// The types autocxx hands bindgen a `replaces=` substitute for need no
-/// exception: `parse_bindgen` drops the substitute itself, and a class holding
-/// one is padded out to the size clang reported for the class, so the
-/// assertion is the check that the padding was computed right rather than a
-/// complaint that a stand-in is a stand-in.
+/// Nothing else is left out. Every other type autocxx generates is either the
+/// bindgen struct or a `repr(transparent)` wrapper round it, so the C++ size is
+/// the size the Rust type has to come to, whatever autocxx made of the fields:
+/// a member bindgen wrote a narrower type for than the one C++ declared is
+/// padded out to the layout clang measured where it is written, so the
+/// assertion checks that the padding was computed right rather than complaining
+/// that a stand-in is a stand-in. The types autocxx hands bindgen a `replaces=`
+/// substitute for are the same story - `parse_bindgen` drops the substitute
+/// itself and the class holding one is padded out around it.
 pub(crate) fn layout_assertions(
     apis: &ApiVec<FnPhase>,
 ) -> IndexMap<QualifiedName, LayoutAssertion> {
-    let reliable = names_with_a_reliable_rust_size(apis);
     apis.iter()
         .filter_map(|api| match api {
             Api::Struct {
@@ -89,6 +93,7 @@ pub(crate) fn layout_assertions(
                     PodAndDepAnalysis {
                         pod:
                             PodAnalysis {
+                                kind,
                                 num_generics: 0,
                                 in_anonymous_namespace,
                                 ..
@@ -101,7 +106,7 @@ pub(crate) fn layout_assertions(
                     LayoutAssertion {
                         size: layout.size,
                         align: layout.align,
-                        assert_rust: reliable.contains(&name.name),
+                        assert_rust: !matches!(kind, TypeKind::Abstract),
                         assert_cpp: !in_anonymous_namespace,
                     },
                 )
@@ -109,99 +114,4 @@ pub(crate) fn layout_assertions(
             _ => None,
         })
         .collect()
-}
-
-/// The types whose Rust rendering can be held to the size clang measured for
-/// the C++ one, reached by closure over what each holds by value.
-///
-/// A struct qualifies when every type it holds - a field's, or a base class's -
-/// is one bindgen rendered faithfully. Three things count as that: a type
-/// `known_types` provided the rendering for, whose stand-in is padded out to
-/// the C++ type's size wherever it is held; an enumeration, which is the
-/// integer clang gave it; and another struct which itself qualifies. Each name
-/// is resolved through any typedefs first, because bindgen reports a base
-/// class by the name the derived class was written with and a `using` alias
-/// there is that name.
-///
-/// Everything else disqualifies the struct holding it, and there is one reason
-/// for all of them: bindgen wrote a field of a type which is not the C++
-/// member, and nothing made up the difference. That happens where autocxx
-/// generated nothing for the member's type - it was never allowlisted, or it
-/// was dropped for a name collision - and where the Rust side is cxx's opaque
-/// stand-in, which is zero-sized on purpose: an abstract class, a template
-/// instantiation autocxx invented a holder for, a forward declaration, an
-/// opaque typedef, an `extern_cpp_type!`, a subclass's C++ peer class. The
-/// enclosing class is then short of the object C++ builds in it, which is a
-/// defect of its own: the field wants writing as a blob of the layout clang
-/// measured, a change to what bindgen emits rather than to how it is measured.
-/// Until that lands there is no size for the Rust half to be held to, and
-/// asserting one would fail on every such class.
-///
-/// A struct whose fields are not all converted disqualifies itself, whatever
-/// the ones which were converted turned out to be. A field autocxx could not
-/// convert reaches none of the sets read here, so a class holding one is
-/// indistinguishable from a class not holding it - and what bindgen wrote for
-/// that field is exactly the kind of stand-in the paragraph above is about.
-/// `std::unordered_map<std::string, uint32_t>` is one on the MSVC standard
-/// library, where bindgen writes fewer template parameters than C++ declared
-/// and autocxx will not name a specialization from what is left.
-fn names_with_a_reliable_rust_size(apis: &ApiVec<FnPhase>) -> IndexSet<QualifiedName> {
-    let targets = typedef_targets(apis);
-    let enums: IndexSet<QualifiedName> = apis
-        .iter()
-        .filter(|api| matches!(api, Api::Enum { .. }))
-        .map(|api| api.name().clone())
-        .collect();
-    let mut reliable = IndexSet::new();
-    // Each pass can only add, and only from a finite set of names, so this
-    // terminates however the types refer to one another. What bounds the
-    // number of passes is the depth of by-value nesting, not the number of
-    // types: the garbage collector emits a type before the types it holds, so
-    // nothing here can rely on an order which settles a chain in one pass. A
-    // pass is a scan of every API either way.
-    loop {
-        let mut grew = false;
-        for api in apis.iter() {
-            let Api::Struct {
-                name,
-                analysis:
-                    PodAndDepAnalysis {
-                        pod:
-                            PodAnalysis {
-                                kind,
-                                num_generics: 0,
-                                all_fields_converted: true,
-                                field_definition_deps,
-                                bases,
-                                ..
-                            },
-                        ..
-                    },
-                ..
-            } = api
-            else {
-                continue;
-            };
-            if matches!(kind, TypeKind::Abstract) || reliable.contains(&name.name) {
-                continue;
-            }
-            if field_definition_deps
-                .iter()
-                .chain(bases.iter())
-                .map(|held| resolve_typedefs(&targets, held))
-                .all(|held| {
-                    known_types().is_known_type(&held)
-                        || enums.contains(&held)
-                        || reliable.contains(&held)
-                })
-            {
-                reliable.insert(name.name.clone());
-                grew = true;
-            }
-        }
-        if !grew {
-            break;
-        }
-    }
-    reliable
 }
