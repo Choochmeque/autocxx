@@ -233,13 +233,15 @@ const AUTOCXX_CLANG_ARGS: &[&str; 8] = &[
     "-DBINDGEN",
 ];
 
-/// Implement to learn of header files which get included
-/// by this build process, such that your build system can choose
-/// to rerun the build process if any such file changes in future.
+/// Implement to learn of the files this build process reads - the Rust
+/// source containing `include_cpp!` and every header the preprocessor
+/// opened while parsing it - such that your build system can choose to
+/// rerun the build process if any of them changes in future.
 pub trait RebuildDependencyRecorder: std::fmt::Debug {
-    /// Records that this autocxx build depends on the given
-    /// header file. Full paths will be provided.
-    fn record_header_file_dependency(&self, filename: &str);
+    /// Records that this autocxx build read the given file, so that a
+    /// change to it invalidates what this build produced. Headers arrive
+    /// as full paths; the Rust input arrives as the caller named it.
+    fn record_dependency(&self, filename: &str);
 }
 
 /// Core of the autocxx engine.

@@ -857,7 +857,7 @@ impl UnwindSafe for AutocxxParseCallbacks {}
 impl ParseCallbacks for AutocxxParseCallbacks {
     fn include_file(&self, filename: &str) {
         if let Some(rebuild_dependency_recorder) = &self.rebuild_dependency_recorder {
-            rebuild_dependency_recorder.record_header_file_dependency(filename);
+            rebuild_dependency_recorder.record_dependency(filename);
         }
     }
 

@@ -31,3 +31,7 @@ indexmap = "1.8"
 [dependencies.syn]
 version = "2.0"
 features = ["full"]
+
+[dev-dependencies]
+# The rerun-tracking tests run a real codegen over fixture sources on disk.
+tempfile = "3.4"

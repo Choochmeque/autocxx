@@ -148,6 +148,7 @@ dependencies = [
  "env_logger",
  "indexmap 1.9.3",
  "syn 2.0.98",
+ "tempfile",
 ]
 
 [[package]]

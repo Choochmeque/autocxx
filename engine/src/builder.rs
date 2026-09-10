@@ -174,6 +174,13 @@ pub trait BuilderContext {
 
     /// Create a dependency recorder, if any.
     fn get_dependency_recorder() -> Option<Box<dyn RebuildDependencyRecorder>>;
+
+    /// Record that this build read the environment, for a build system which
+    /// can invalidate on it. Called when a build runs, not when a builder is
+    /// constructed: telling a build system about a dependency is what makes it
+    /// stop watching everything it was watching by default, so a builder which
+    /// is made and never built must not do it.
+    fn record_environment_dependencies() {}
 }
 
 /// An object to allow building of bindings from a `build.rs` file.
@@ -376,6 +383,18 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         let autocxx_inc = build_autocxx_inc(self.autocxx_incs, &incdir);
         gen_location_strategy.set_cargo_env_vars_for_build();
 
+        // The file the whole build is definitionally reading. Recording the
+        // headers and not this one is worse than recording nothing: a build
+        // system told about any dependency at all stops watching everything
+        // else (cargo's `rerun-if-changed` replaces its whole-package scan),
+        // so an edit to `include_cpp!` which touches no header would leave
+        // the previous generation in place and be compiled against.
+        // Recorded before the parse, so that a file which fails to parse is
+        // still watched for the edit which fixes it.
+        if let Some(dep_recorder) = &self.dependency_recorder {
+            dep_recorder.record_dependency(&self.rs_file.to_string_lossy());
+        }
+        CTX::record_environment_dependencies();
         let mut parsed_file = crate::parse_file(self.rs_file, self.auto_allowlist)
             .map_err(BuilderError::ParseError)?;
         parsed_file
