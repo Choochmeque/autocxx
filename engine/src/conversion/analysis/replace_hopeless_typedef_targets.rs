@@ -88,9 +88,7 @@ pub(crate) fn replace_hopeless_typedef_targets(
                 } else {
                     Api::OpaqueTypedef {
                         name: api.name_info().clone(),
-                        forward_declaration: !config
-                            .instantiable
-                            .contains(&name.name.to_cpp_name()),
+                        forward_declaration: !config.is_instantiable(&name.name.to_cpp_name()),
                         reason: Some(blame),
                     }
                 }

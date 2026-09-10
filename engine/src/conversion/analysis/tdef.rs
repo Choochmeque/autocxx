@@ -288,7 +288,7 @@ fn get_replacement_typedef(
                 reason: Box::new(err),
             };
             Ok(Api::OpaqueTypedef {
-                forward_declaration: !config.instantiable.contains(&name.name.to_cpp_name()),
+                forward_declaration: !config.is_instantiable(&name.name.to_cpp_name()),
                 name,
                 reason: Some(reason),
             })
@@ -396,25 +396,53 @@ fn instantiates_smart_pointer(
         .is_some_and(|template| config.is_smart_pointer_template(&template.to_cpp_name()))
 }
 
+/// One template instantiation autocxx made a concrete type for, as
+/// [`instantiable_concrete_types`] needs to see it.
+struct ConcreteInstantiation<'a> {
+    /// The C++ expression the instantiation was built from, which is one of
+    /// the names a directive may use for it.
+    cpp_definition: &'a str,
+    /// Whether an `instantiable!` naming this can do anything. False for a
+    /// holder, whose surface is its accessor alone.
+    can_be_instantiable: bool,
+}
+
 pub(crate) fn instantiable_concrete_types<P: AnalysisPhase<TypedefAnalysis = TypedefAnalysis>>(
     apis: &ApiVec<P>,
     config: &IncludeCppConfig,
 ) -> HashSet<QualifiedName> {
+    // Every instantiation autocxx made a concrete type for, with whether an
+    // `instantiable!` can do anything for it. A holder - a smart pointer's
+    // instantiation, or one which reaches Rust only inside a `UniquePtr` -
+    // carries its accessor and nothing else, so the directive is inert on one.
+    // Holders are nonetheless asked about below rather than filtered out here,
+    // because a directive naming one named exactly what its author meant and
+    // must not be reported as matching nothing.
+    //
     // A `concrete!` type answers to the C++ expression the user wrote for it
     // as well as to the Rust name they gave it, since they wrote both in the
     // one directive.
-    let concrete: HashMap<QualifiedName, Option<&str>> = apis
+    let concrete: HashMap<QualifiedName, ConcreteInstantiation<'_>> = apis
         .iter()
         .filter_map(|api| match api {
             Api::ConcreteType {
                 name,
                 rs_definition,
                 cpp_definition,
-                holder_surface: None,
+                holder_surface,
                 ..
-            } if !instantiates_smart_pointer(config, rs_definition.as_deref(), cpp_definition) => {
-                Some((name.name.clone(), Some(cpp_definition.as_str())))
-            }
+            } => Some((
+                name.name.clone(),
+                ConcreteInstantiation {
+                    cpp_definition,
+                    can_be_instantiable: holder_surface.is_none()
+                        && !instantiates_smart_pointer(
+                            config,
+                            rs_definition.as_deref(),
+                            cpp_definition,
+                        ),
+                },
+            )),
             _ => None,
         })
         .collect();
@@ -435,29 +463,48 @@ pub(crate) fn instantiable_concrete_types<P: AnalysisPhase<TypedefAnalysis = Typ
     // otherwise be lifted by a permission written against another.
     let mut instantiable: HashSet<QualifiedName> = HashSet::new();
     let mut blocked: HashSet<QualifiedName> = HashSet::new();
-    let mut consider = |target: &QualifiedName, spellings: Vec<String>| {
-        if spellings
-            .iter()
-            .any(|spelling| config.instantiable.contains(spelling))
+    let named_by = |spellings: &[String], ask: &dyn Fn(&str) -> bool| {
+        // Every spelling is asked about, not just up to the first which
+        // answers, so that two directives naming one instantiation through two
+        // different aliases are both recorded as having matched.
+        let mut named = false;
+        for spelling in spellings {
+            if ask(spelling) {
+                named = true;
+            }
+        }
+        named
+    };
+    let mut consider = |target: &QualifiedName, spellings: Vec<String>, can_be_instantiable| {
+        // Asked whatever will be done with the answer: a holder cannot take an
+        // `instantiable!`, and the directive still matched.
+        if named_by(&spellings, &|spelling| config.is_instantiable(spelling)) && can_be_instantiable
         {
             instantiable.insert(target.clone());
         }
-        if spellings
-            .iter()
-            .any(|spelling| config.is_on_constructor_blocklist(spelling))
-        {
+        if named_by(&spellings, &|spelling| {
+            config.is_on_constructor_blocklist(spelling)
+        }) {
             blocked.insert(target.clone());
         }
     };
-    for (name, cpp_definition) in &concrete {
-        consider(name, spellings(name, *cpp_definition));
+    for (name, instantiation) in &concrete {
+        consider(
+            name,
+            spellings(name, Some(instantiation.cpp_definition)),
+            instantiation.can_be_instantiable,
+        );
     }
     let targets = typedef_targets(apis);
     for api in apis.iter() {
         if let Api::Typedef { name, .. } = api {
             let target = resolve_typedefs(&targets, &name.name);
-            if concrete.contains_key(&target) {
-                consider(&target, spellings(&name.name, None));
+            if let Some(instantiation) = concrete.get(&target) {
+                consider(
+                    &target,
+                    spellings(&name.name, None),
+                    instantiation.can_be_instantiable,
+                );
             }
         }
     }

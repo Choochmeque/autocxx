@@ -164,7 +164,7 @@ impl<'a> ParseBindgen<'a> {
     /// We do this last, _after_ we've parsed all the APIs, because we might want to actually
     /// replace some of the existing APIs (structs/enums/etc.) with replacements.
     fn replace_extern_cpp_types(&mut self) {
-        let pod_requests: HashSet<_> = self.config.get_pod_requests().iter().collect();
+        let pod_requests: HashSet<_> = self.config.get_pod_requests().collect();
         // Which API each spelling a user might have written names. A nested
         // type has two - see [`cpp_spellings`] - and the one C++ itself uses
         // is the one a person is most likely to write, so it has to work.
@@ -198,7 +198,7 @@ impl<'a> ParseBindgen<'a> {
                     });
                 let pod = name
                     .cpp_spellings()
-                    .any(|spelling| pod_requests.contains(&spelling));
+                    .any(|spelling| pod_requests.contains(spelling.as_str()));
                 (
                     name.name.clone(),
                     Api::ExternCppType {
@@ -246,6 +246,31 @@ impl<'a> ParseBindgen<'a> {
         mod_converter.finished(&mut self.apis);
     }
 
+    /// Tell the config which directives name this type, before anything can
+    /// remove or refuse it. See [`IncludeCppConfig::note_type_named`].
+    fn note_directives_naming_type(&self, ns: &Namespace, id: &Ident) {
+        // The types autocxx substitutes for bindgen's are noted along with
+        // everything else. A directive naming one is then satisfied by a type
+        // no header declared, which is the lesser of the two mistakes
+        // available here: `is_known_substitute_type` also declines a global
+        // `struct string`, so excluding by that predicate would refuse a
+        // directive which named a type the header really has.
+        self.config.note_type_named(
+            &api_name(ns, id.clone(), self.parse_callback_results)
+                .name
+                .to_cpp_name(),
+        );
+    }
+
+    /// As [`Self::note_directives_naming_type`], for an alias.
+    fn note_directives_naming_alias(&self, ns: &Namespace, id: &Ident) {
+        self.config.note_alias_named(
+            &api_name(ns, id.clone(), self.parse_callback_results)
+                .name
+                .to_cpp_name(),
+        );
+    }
+
     fn parse_item(
         &mut self,
         item: &Item,
@@ -258,6 +283,7 @@ impl<'a> ParseBindgen<'a> {
                 Ok(())
             }
             Item::Struct(s) => {
+                self.note_directives_naming_type(ns, &s.ident);
                 if s.ident.to_string().ends_with("__bindgen_vtable") {
                     return Ok(());
                 }
@@ -315,6 +341,7 @@ impl<'a> ParseBindgen<'a> {
                 Ok(())
             }
             Item::Enum(e) => {
+                self.note_directives_naming_type(ns, &e.ident);
                 let api = UnanalyzedApi::Enum {
                     name: api_name_qualified(ns, e.ident.clone(), self.parse_callback_results)?,
                     item: e.clone().into(),
@@ -356,6 +383,11 @@ impl<'a> ParseBindgen<'a> {
                         UseTree::Rename(urn) => {
                             let old_id = &urn.ident;
                             let new_id = &urn.rename;
+                            // An alias to an enum arrives as a `use` rather
+                            // than a `type`, so it is noted here as well -
+                            // ahead of the character-type test below, which
+                            // goes by the identifier alone.
+                            self.note_directives_naming_alias(ns, new_id);
                             // The `use` autocxx itself injects to bind a C++
                             // character type's bindgen-invented name; it is
                             // not a typedef the header declared.
@@ -419,6 +451,7 @@ impl<'a> ParseBindgen<'a> {
                 Ok(())
             }
             Item::Type(ity) => {
+                self.note_directives_naming_alias(ns, &ity.ident);
                 // It's known that sometimes bindgen will give us duplicate typedefs with the
                 // same name - see test_issue_264.
                 self.apis.push(UnanalyzedApi::Typedef {
@@ -428,6 +461,19 @@ impl<'a> ParseBindgen<'a> {
                     analysis: (),
                 });
                 Ok(())
+            }
+            Item::Union(u) => {
+                // Nothing is made of this: autocxx binds a union through the
+                // struct bindgen usually renders one as, and a union whose
+                // members are all bitfields arrives as a Rust `union`
+                // instead, which the catch-all below declines. It is still a
+                // type the header declared, so a directive naming it has
+                // named something.
+                self.note_directives_naming_type(ns, &u.ident);
+                Err(ConvertErrorWithContext(
+                    ConvertErrorFromCpp::UnexpectedItemInMod,
+                    None,
+                ))
             }
             // The trait through which bindgen renders a dependent qualified
             // name. Nothing here needs an `Api` for it: it is emitted with the

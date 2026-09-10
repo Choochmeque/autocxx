@@ -20,8 +20,8 @@ mod stable_hash;
 mod subclass_attrs;
 
 pub use config::{
-    name_matches_directive, AllowlistEntry, ConfigHash, ExternCppType, IncludeCppConfig, RustFun,
-    Subclass, UnsafePolicy,
+    name_matches_directive, AllowlistEntry, ConfigHash, DirectiveList, ExternCppType,
+    IncludeCppConfig, RustFun, Subclass, UnmatchedDirective, UnsafePolicy,
 };
 pub use derives::DeriveMap;
 pub use enum_style::EnumStyle;

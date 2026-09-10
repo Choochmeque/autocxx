@@ -9,7 +9,8 @@
 use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 use std::borrow::Cow;
-use std::hash::Hash;
+use std::cell::Cell;
+use std::hash::{Hash, Hasher};
 
 use itertools::Itertools;
 use proc_macro2::Span;
@@ -157,6 +158,113 @@ pub fn name_matches_directive(cpp_name: &str, directive: &str) -> bool {
     })
 }
 
+/// The names one name-matching directive asked about, and which of them
+/// matched something.
+///
+/// A directive which names nothing autocxx met - a misspelling, a name written
+/// without the namespace which declares it, a name which used to exist - does
+/// not do what it was written to do, and autocxx used to say nothing about it.
+/// The most expensive silence is `throws!`: an
+/// unmatched designation leaves the binding declared non-throwing, and the
+/// first exception to escape meets cxx's `noexcept` boundary and terminates
+/// the process.
+///
+/// Whether a request matched is recorded here, as each query is answered,
+/// rather than derived afterwards from the APIs. Two reasons, both decisive.
+/// `block!` and `block_constructors!` *remove* what they match, so by the time
+/// analysis is over there is nothing left for a later pass to find. And a
+/// confirmation written separately from the consumer can disagree with it -
+/// `throws!` alone is asked three different ways at three spellings - which is
+/// the failure `confirm_smart_pointer_directives_obeyed` avoids by hand and
+/// this avoids by construction.
+#[derive(Debug, Default)]
+pub struct DirectiveList(Vec<DirectiveRequest>);
+
+#[derive(Debug)]
+struct DirectiveRequest {
+    text: String,
+    /// `Cell` because every consumer holds a shared `&IncludeCppConfig`; the
+    /// config is threaded through the whole conversion and never held across
+    /// threads.
+    matched: Cell<bool>,
+}
+
+impl Hash for DirectiveList {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // The same byte stream `Vec<String>` feeds a hasher which takes the
+        // default `write_length_prefix` - `crate::stable_hash`'s does - because
+        // this list used to be a `Vec<String>` and [`ConfigHash`] keys archives
+        // already on disk. What matched is an observation about one conversion,
+        // not part of the block the user wrote, so it is deliberately not
+        // hashed; `test_config_hash_ignores_what_matched` pins that.
+        self.0.len().hash(state);
+        for request in &self.0 {
+            request.text.hash(state);
+        }
+    }
+}
+
+impl DirectiveList {
+    pub(crate) fn push(&mut self, request: String) {
+        self.0.push(DirectiveRequest {
+            text: request,
+            matched: Cell::new(false),
+        });
+    }
+
+    /// Every request, without recording anything.
+    ///
+    /// For callers which hand the whole list somewhere rather than ask it
+    /// about a name - `bindgen`, a reproduction case - since handing a request
+    /// on is not evidence that anything answered to it.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|request| request.text.as_str())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether any request matches `is_match`, recording those which do.
+    ///
+    /// Every request is tried rather than stopping at the first hit: a second
+    /// request which also matches has equally done its job, and short-circuiting
+    /// would leave it looking unmatched.
+    fn matches(&self, mut is_match: impl FnMut(&str) -> bool) -> bool {
+        let mut matched_any = false;
+        for request in &self.0 {
+            if is_match(&request.text) {
+                request.matched.set(true);
+                matched_any = true;
+            }
+        }
+        matched_any
+    }
+
+    fn clear_matches(&self) {
+        for request in &self.0 {
+            request.matched.set(false);
+        }
+    }
+
+    /// The requests which nothing matched during this conversion.
+    fn unmatched(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .filter(|request| !request.matched.get())
+            .map(|request| request.text.as_str())
+    }
+}
+
+/// A name-matching directive request which nothing answered to. See
+/// [`IncludeCppConfig::unmatched_directives`].
+pub struct UnmatchedDirective {
+    /// The directive as written in `include_cpp!`, without its `!`.
+    pub directive: &'static str,
+    /// The name it asked about.
+    pub request: String,
+}
+
 /// Allowlist configuration.
 #[derive(Hash, Debug)]
 pub enum Allowlist {
@@ -282,15 +390,15 @@ pub struct IncludeCppConfig {
     pub parse_only: bool,
     pub exclude_impls: bool,
     pub prettify: bool,
-    pub(crate) pod_requests: Vec<String>,
+    pub(crate) pod_requests: DirectiveList,
     pub allowlist: Allowlist,
-    pub(crate) blocklist: Vec<String>,
-    pub(crate) constructor_blocklist: Vec<String>,
-    pub instantiable: Vec<String>,
+    pub(crate) blocklist: DirectiveList,
+    pub(crate) constructor_blocklist: DirectiveList,
+    pub(crate) instantiable: DirectiveList,
     /// The class templates a `smart_pointer!` directive says hold a pointer to
     /// their argument, named as C++ names them. Every instantiation of one gets
     /// an accessor for what it points at.
-    pub smart_pointers: Vec<String>,
+    pub smart_pointers: DirectiveList,
     pub(crate) exclude_utilities: bool,
     pub(crate) mod_name: Option<Ident>,
     pub rust_types: Vec<RustPath>,
@@ -298,8 +406,8 @@ pub struct IncludeCppConfig {
     pub extern_rust_funs: Vec<RustFun>,
     pub concretes: ConcretesMap,
     pub externs: ExternCppTypeMap,
-    pub opaquelist: Vec<String>,
-    pub(crate) throws_list: Vec<String>,
+    pub(crate) opaquelist: DirectiveList,
+    pub(crate) throws_list: DirectiveList,
     pub(crate) enum_styles: EnumStyleMap,
     pub(crate) derives: DeriveMap,
 }
@@ -345,8 +453,8 @@ impl Parse for IncludeCppConfig {
 }
 
 impl IncludeCppConfig {
-    pub fn get_pod_requests(&self) -> &[String] {
-        &self.pod_requests
+    pub fn get_pod_requests(&self) -> impl Iterator<Item = &str> {
+        self.pod_requests.iter()
     }
 
     pub fn get_mod_name(&self) -> Ident {
@@ -370,14 +478,14 @@ impl IncludeCppConfig {
                 items
                     .iter()
                     .filter_map(|i| match i {
-                        AllowlistEntry::Item(i) => Some(i),
+                        AllowlistEntry::Item(i) => Some(i.as_str()),
                         AllowlistEntry::Namespace(_) => None,
                     })
                     .chain(self.pod_requests.iter())
-                    .cloned(),
+                    .map(ToString::to_string),
             )
         } else {
-            Box::new(self.pod_requests.iter().cloned())
+            Box::new(self.pod_requests.iter().map(ToString::to_string))
         }
     }
 
@@ -392,7 +500,7 @@ impl IncludeCppConfig {
                     .chain(
                         self.pod_requests
                             .iter()
-                            .cloned()
+                            .map(ToString::to_string)
                             .flat_map(bindgen_spellings),
                     )
                     .chain(self.active_utilities())
@@ -466,11 +574,18 @@ impl IncludeCppConfig {
     }
 
     pub fn is_on_blocklist(&self, cpp_name: &str) -> bool {
-        self.blocklist.contains(&cpp_name.to_string())
+        self.blocklist.matches(|request| request == cpp_name)
     }
 
     pub fn is_on_constructor_blocklist(&self, cpp_name: &str) -> bool {
-        self.constructor_blocklist.contains(&cpp_name.to_string())
+        self.constructor_blocklist
+            .matches(|request| request == cpp_name)
+    }
+
+    /// Whether an `instantiable!` directive named this template instantiation,
+    /// which is the user promising that C++ can make one.
+    pub fn is_instantiable(&self, cpp_name: &str) -> bool {
+        self.instantiable.matches(|request| request == cpp_name)
     }
 
     /// Whether a `smart_pointer!` directive named this class template.
@@ -482,6 +597,10 @@ impl IncludeCppConfig {
     /// `smart_pointer!("Outer::MyPtr")` is what C++ calls it - and may leave the
     /// namespaces off, as `throws!` may for a function.
     pub fn is_smart_pointer_template(&self, cpp_name: &str) -> bool {
+        // Deliberately not recorded: `confirm_smart_pointer_directives_obeyed`
+        // already reports an unmatched `smart_pointer!`, and it asks a
+        // different question - which *instantiations* got a surface - than
+        // this, which is also asked about templates autocxx went on to refuse.
         self.smart_pointers
             .iter()
             .any(|entry| name_matches_directive(cpp_name, entry))
@@ -489,8 +608,39 @@ impl IncludeCppConfig {
 
     pub fn is_on_throws_list(&self, cpp_name: &str) -> bool {
         self.throws_list
-            .iter()
-            .any(|entry| cpp_name == entry || cpp_name.ends_with(&format!("::{}", entry)))
+            .matches(|entry| cpp_name == entry || cpp_name.ends_with(&format!("::{entry}")))
+    }
+
+    /// Note the directives which name a C++ type autocxx met, whatever it
+    /// goes on to do with the type.
+    ///
+    /// Called where bindgen's output is parsed, before the name is validated
+    /// and before the item is filtered. `block!` and `block_constructors!` are
+    /// confirmed against what they matched, and what they match is removed or
+    /// never synthesized: a type autocxx then refuses for a reason of its own -
+    /// a reserved name, say, which is exactly what `block!` is written for -
+    /// or one another directive had already withheld would otherwise reach no
+    /// consumer at all and look as though the directive named nothing.
+    ///
+    /// So for these two the rule is that the directive named a type bindgen
+    /// reported. That is weaker than "the directive took effect": a `block!`
+    /// naming a type autocxx has no way to block is recorded as matched and
+    /// stays silent. It is the misspelling and the missing namespace this is
+    /// here to catch, and a name nothing reported is still a name which did
+    /// nothing.
+    pub fn note_type_named(&self, cpp_name: &str) {
+        // Asked for the record they keep; the answers are the consumers'
+        // business, not this one's.
+        let _ = self.is_on_blocklist(cpp_name);
+        let _ = self.is_on_constructor_blocklist(cpp_name);
+    }
+
+    /// As [`Self::note_type_named`], plus `instantiable!`, which names an alias
+    /// to a template instantiation and so is only ever written for a typedef
+    /// or a `concrete!` name.
+    pub fn note_alias_named(&self, cpp_name: &str) {
+        self.note_type_named(cpp_name);
+        let _ = self.is_instantiable(cpp_name);
     }
 
     /// The `enum_style!` a given C++ type was given, if any.
@@ -514,11 +664,17 @@ impl IncludeCppConfig {
         !self.derives.is_empty()
     }
 
-    pub fn get_blocklist(&self) -> impl Iterator<Item = &String> {
+    /// Every `block!` request, for a caller which acts on all of them rather
+    /// than asking about a name. Deliberately not recorded as a match: see
+    /// [`DirectiveList::iter`].
+    pub fn get_blocklist(&self) -> impl Iterator<Item = &str> {
         self.blocklist.iter()
     }
 
-    pub fn get_opaquelist(&self) -> impl Iterator<Item = &String> {
+    /// Every `opaque!` request, to hand on to `bindgen`. Not recorded as a
+    /// match for the same reason as [`Self::get_blocklist`], and see
+    /// [`Self::unmatched_directives`] for why `opaque!` is unconfirmed.
+    pub fn get_opaquelist(&self) -> impl Iterator<Item = &str> {
         self.opaquelist.iter()
     }
 
@@ -590,6 +746,104 @@ impl IncludeCppConfig {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "ffi-default".into())
         )
+    }
+
+    /// Each name-matching directive this confirms, with the requests made of
+    /// it.
+    ///
+    /// The destructure below has no `..`. A field added to
+    /// [`IncludeCppConfig`] is therefore `error[E0027]` here until somebody
+    /// writes down what confirmation the directive behind it needs - which is
+    /// the whole mechanism. Nothing else forces a directive invented tomorrow
+    /// to be confirmed, and six of them reached this codebase unconfirmed,
+    /// among them `throws!`, whose silence costs a `std::terminate` rather
+    /// than a missing binding.
+    fn name_matching_directives(&self) -> [(&'static str, &DirectiveList); 4] {
+        let IncludeCppConfig {
+            // Confirmed here, each against the query the conversion itself
+            // asked. Two of these remove what they match, so this is the only
+            // place the evidence still exists.
+            throws_list,
+            blocklist,
+            constructor_blocklist,
+            instantiable,
+
+            // Confirmed elsewhere, and left alone here so that one directive
+            // cannot draw two different complaints:
+            // `confirm_all_generate_directives_still_obeyed` settles
+            // `generate!`/`generate_pod!`/`pod!` against what survived
+            // analysis, which says more than "matched nothing" can;
+            // `confirm_smart_pointer_directives_obeyed` settles
+            // `smart_pointer!` against the instantiations which got a surface.
+            allowlist: _,
+            pod_requests: _,
+            smart_pointers: _,
+            // `derive!`, settled by `derives::resolve_derive_directives`.
+            derives: _,
+
+            // Matched inside `bindgen`: `opaque!` becomes
+            // `Builder::opaque_type` and `enum_style!` one of `Builder`'s
+            // enum-style calls. bindgen records which of its regexes matched,
+            // for every set, but reports the unused ones only for its four
+            // allowlist sets and only into its log - so confirming these two
+            // needs bindgen to hand the fact back. Unconfirmed until it does.
+            opaquelist: _,
+            enum_styles: _,
+
+            // Directives which create something unconditionally rather than
+            // match a name, so there is nothing for them to fail to match; a
+            // definition which is wrong is the C++ compiler's to reject.
+            concretes: _,
+            externs: _,
+            subclasses: _,
+            rust_types: _,
+            extern_rust_funs: _,
+
+            // Not name-matching at all: settings, flags and the header list.
+            inclusions: _,
+            unsafe_policy: _,
+            parse_only: _,
+            exclude_impls: _,
+            prettify: _,
+            exclude_utilities: _,
+            mod_name: _,
+        } = self;
+        [
+            ("throws", throws_list),
+            ("block", blocklist),
+            ("block_constructors", constructor_blocklist),
+            ("instantiable", instantiable),
+        ]
+    }
+
+    /// Every request made by a name-matching directive which, by the end of a
+    /// conversion, matched nothing.
+    ///
+    /// A `Vec` rather than an iterator so that the borrow of the `Cell`s ends
+    /// here: the caller reports what is already decided, not a view which
+    /// could still change under it.
+    pub fn unmatched_directives(&self) -> Vec<UnmatchedDirective> {
+        self.name_matching_directives()
+            .into_iter()
+            .flat_map(|(directive, list)| {
+                list.unmatched().map(move |request| UnmatchedDirective {
+                    directive,
+                    request: request.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    /// Forget which requests matched.
+    ///
+    /// Called as a conversion begins, because `IncludeCppEngine::generate` may
+    /// be called again after one has failed part way through: what an
+    /// abandoned attempt matched is not evidence about this one, whose headers
+    /// or clang arguments may differ.
+    pub fn clear_directive_matches(&self) {
+        for (_, list) in self.name_matching_directives() {
+            list.clear_matches();
+        }
     }
 
     pub fn confirm_complete(&mut self) {
@@ -957,5 +1211,40 @@ mod parse_tests {
         assert!(!with_syn_types.extern_rust_funs.is_empty());
         assert!(!with_syn_types.rust_types.is_empty());
         assert!(with_syn_types.mod_name.is_some());
+
+        // And a third for the name-matching directive lists the two above
+        // leave empty. They are `DirectiveList`s with a hand-written
+        // `Hash`, so a change to that impl - or to the fields it walks - moves
+        // this literal and nothing else in the crate would have noticed.
+        let directive_lists: IncludeCppConfig = parse_quote! {
+            #hexathorpe include "a.h"
+            generate_all!()
+            throws!("Foo::bar")
+            block!("Blocked")
+            block_constructors!("Foo")
+            instantiable!("Conc")
+            smart_pointer!("MyPtr")
+            opaque!("Blob")
+        };
+        assert_eq!(directive_lists.get_hash(), ConfigHash(0x8efe2d1687b7b717));
+    }
+
+    /// The hash is an archive key for the block as written. What a conversion
+    /// found the block to match is not part of that, so recording a match must
+    /// not move it.
+    #[test]
+    fn test_config_hash_ignores_what_matched() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            throws!("Foo::bar")
+            block!("Blocked")
+        };
+        let before = config.get_hash();
+        assert!(config.is_on_throws_list("Foo::bar"));
+        assert!(config.is_on_blocklist("Blocked"));
+        // The point of the assertion below, so it is worth knowing the matches
+        // really were recorded rather than the queries having missed.
+        assert!(config.unmatched_directives().is_empty());
+        assert_eq!(config.get_hash(), before);
     }
 }
