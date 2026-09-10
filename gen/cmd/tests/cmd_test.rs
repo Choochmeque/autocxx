@@ -60,6 +60,58 @@ fn main() {
     "#[link(name = \"autocxx-demo\")]\nextern \"C\" {}"
 );
 
+/// The fixture for [`test_gen_nested_mod`]: an `include_cpp!` written inside a
+/// `mod`, which the file's `include!` has to reach.
+///
+/// The generated file is named after the block, not after where the block sits,
+/// so the name a nested block computes is the name the codegen wrote - this is
+/// the shape which proves it.
+static NESTED_MOD_RS: &str = concat!(
+    "
+mod inner {
+    autocxx::include_cpp! {
+        #include \"input.h\"
+        safety!(unsafe_ffi)
+        generate!(\"DoMath\")
+    }
+    pub use ffi::DoMath;
+}
+
+fn main() {
+    assert_eq!(inner::DoMath(4), 12);
+}
+",
+    "#[link(name = \"autocxx-demo\")]\nextern \"C\" {}"
+);
+
+/// The fixture for [`test_gen_nested_mod_with_discovered_extern_rust_fn`]: the
+/// same nested block, plus an `extern_rust_function` outside it for the codegen
+/// to discover.
+///
+/// A discovery pass which only looked at the top level would conclude this file
+/// has no block at all and make one, which is a second block named `ffi` beside
+/// the real one - and bindings nothing includes.
+static NESTED_MOD_EXTERN_RUST_FN_RS: &str = concat!(
+    "
+mod inner {
+    autocxx::include_cpp! {
+        #include \"input.h\"
+        safety!(unsafe_ffi)
+        generate!(\"DoMath\")
+    }
+    pub use ffi::DoMath;
+}
+
+#[autocxx::extern_rust::extern_rust_function]
+pub fn called_from_cpp() {}
+
+fn main() {
+    assert_eq!(inner::DoMath(4), 12);
+}
+",
+    "#[link(name = \"autocxx-demo\")]\nextern \"C\" {}"
+);
+
 const KEEP_TEMPDIRS: bool = true;
 
 /// The fixture for [`test_asan_working_as_expected_for_cpp_from_folder`]: a
@@ -320,6 +372,50 @@ fn test_gen_archive_with_discovered_extern_rust_fn() -> Result<(), Box<dyn std::
         vec![tmp_dir.path().join("gen.rs.json")],
         &["gen0.cc"],
         RsFindMode::AutocxxRsArchive,
+    );
+    if KEEP_TEMPDIRS {
+        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+    }
+    r.unwrap();
+    Ok(())
+}
+
+#[test]
+fn test_gen_nested_mod() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let mut files = HashMap::new();
+    files.insert("input.h", INPUT_H.as_bytes());
+    files.insert("main.rs", NESTED_MOD_RS.as_bytes());
+    base_test_ex(&tmp_dir, RsGenMode::Single, |_| {}, files, vec!["main.rs"])?;
+    std::env::set_var("OUT_DIR", tmp_dir.path().to_str().unwrap());
+    let r = build_from_folder(
+        tmp_dir.path(),
+        &tmp_dir.path().join("demo/main.rs"),
+        vec![tmp_dir.path().join("autocxx-ffi-default-gen.rs")],
+        &["gen0.cc"],
+        RsFindMode::AutocxxRs,
+    );
+    if KEEP_TEMPDIRS {
+        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+    }
+    r.unwrap();
+    Ok(())
+}
+
+#[test]
+fn test_gen_nested_mod_with_discovered_extern_rust_fn() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let mut files = HashMap::new();
+    files.insert("input.h", INPUT_H.as_bytes());
+    files.insert("main.rs", NESTED_MOD_EXTERN_RUST_FN_RS.as_bytes());
+    base_test_ex(&tmp_dir, RsGenMode::Single, |_| {}, files, vec!["main.rs"])?;
+    std::env::set_var("OUT_DIR", tmp_dir.path().to_str().unwrap());
+    let r = build_from_folder(
+        tmp_dir.path(),
+        &tmp_dir.path().join("demo/main.rs"),
+        vec![tmp_dir.path().join("autocxx-ffi-default-gen.rs")],
+        &["gen0.cc"],
+        RsFindMode::AutocxxRs,
     );
     if KEEP_TEMPDIRS {
         println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
