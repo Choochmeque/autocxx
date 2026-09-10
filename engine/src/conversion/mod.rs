@@ -19,6 +19,7 @@ mod derives;
 mod doc_attr;
 mod error_reporter;
 mod inner_type_traits;
+mod layout_assertions;
 mod parse;
 mod type_helpers;
 mod utilities;

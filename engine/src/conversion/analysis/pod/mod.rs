@@ -116,6 +116,16 @@ pub(crate) struct PodAnalysis {
     pub(crate) bitfields: Vec<DataMember>,
     pub(crate) num_generics: usize,
     pub(crate) in_anonymous_namespace: bool,
+    /// Whether every field C++ declared for this struct was converted, so that
+    /// `field_info` and the two dependency sets describe the whole of what the
+    /// struct holds. A field whose type could not be converted leaves no trace
+    /// in any of them, and the struct then looks exactly like one which does
+    /// not hold it.
+    ///
+    /// Fields of bindgen's own invention do not count against it: padding, a
+    /// base class's storage, a vtable pointer and the rest are bindgen's to
+    /// size, and several have no Rust type to convert.
+    pub(crate) all_fields_converted: bool,
 }
 
 #[derive(std::fmt::Debug)]
@@ -258,16 +268,17 @@ fn analyze_struct(
     let using_declarations = parse_callback_results
         .using_declarations(&name.name)
         .to_vec();
-    let mut field_deps = HashSet::new();
-    let mut field_definition_deps = HashSet::new();
-    let mut field_info = Vec::new();
-    let field_conversion_errors = get_struct_field_types(
+    let FieldFacts {
+        deps: field_deps,
+        definition_deps: field_definition_deps,
+        info: mut field_info,
+        all_converted: all_fields_converted,
+        errors: field_conversion_errors,
+    } = get_struct_field_types(
         type_converter,
         name.name.get_namespace(),
         &details.item,
-        &mut field_deps,
-        &mut field_definition_deps,
-        &mut field_info,
+        data_members,
         extra_apis,
     );
     add_reported_field_facts(&mut field_info, data_members);
@@ -334,20 +345,65 @@ fn analyze_struct(
             bitfields,
             num_generics,
             in_anonymous_namespace,
+            all_fields_converted,
         },
     })))
+}
+
+/// Whether this is a field bindgen invented rather than one C++ declared.
+///
+/// bindgen writes several of its own: the padding it inserts, the storage it
+/// gives a base class, the vtable pointer, the byte an empty class needs to
+/// have an address, the allocation unit a run of bitfields shares, the blob it
+/// writes for a type it was told to keep opaque, and the marker on the struct
+/// it writes for a type it has only seen declared. Each is bindgen's own to
+/// size and is written to the extent clang measured.
+///
+/// Decided by asking which fields bindgen reported as data members rather than
+/// by the names bindgen gives its own, because those names are not reserved:
+/// a C++ class may declare a member called `vtable_`, and a list of spellings
+/// would exempt it. `denote_data_member` reports every member bindgen laid
+/// out, under the name of the field it generated for it - so a field not among
+/// them is one C++ did not declare. A bitfield is reported under its accessor's
+/// name rather than the allocation unit's, which leaves the unit here, where it
+/// belongs.
+fn is_bindgens_own_field(f: &syn::Field, data_members: &[DataMember]) -> bool {
+    match f.ident.as_ref() {
+        None => true,
+        Some(id) => {
+            let id = id.to_string();
+            !data_members
+                .iter()
+                .any(|member| member.name.as_deref() == Some(id.as_str()))
+        }
+    }
+}
+
+/// What `get_struct_field_types` makes of the fields bindgen wrote for a
+/// struct. The three collections and the flag all end up on the
+/// [`PodAnalysis`], which documents each; the errors are read on the spot.
+struct FieldFacts {
+    deps: HashSet<QualifiedName>,
+    definition_deps: HashSet<QualifiedName>,
+    info: Vec<FieldInfo>,
+    all_converted: bool,
+    errors: Vec<ConvertErrorFromCpp>,
 }
 
 fn get_struct_field_types(
     type_converter: &mut TypeConverter,
     ns: &Namespace,
     s: &ItemStruct,
-    field_deps: &mut HashSet<QualifiedName>,
-    field_definition_deps: &mut HashSet<QualifiedName>,
-    field_info: &mut Vec<FieldInfo>,
+    data_members: &[DataMember],
     extra_apis: &mut ApiVec<NullPhase>,
-) -> Vec<ConvertErrorFromCpp> {
-    let mut convert_errors = Vec::new();
+) -> FieldFacts {
+    let mut facts = FieldFacts {
+        deps: HashSet::new(),
+        definition_deps: HashSet::new(),
+        info: Vec::new(),
+        all_converted: true,
+        errors: Vec::new(),
+    };
     let struct_type_params = s
         .generics
         .type_params()
@@ -361,6 +417,11 @@ fn get_struct_field_types(
                 extra_apis.append(&mut r.extra_apis);
                 // Skip base classes represented as fields. Anything which wants to include bases can chain
                 // those to the list we're building.
+                //
+                // A narrower test than `is_bindgens_own_field`, and deliberately
+                // so: an `_address` byte, a vtable pointer and an opaque blob
+                // are recorded here, and `bindgen_opaque_data` below is read
+                // off the blob's entry.
                 if !f
                     .ident
                     .as_ref()
@@ -370,7 +431,7 @@ fn get_struct_field_types(
                     })
                     .unwrap_or(false)
                 {
-                    field_deps.extend(r.types_encountered);
+                    facts.deps.extend(r.types_encountered);
                     if let Type::Path(typ) = array_element_type(&r.ty) {
                         // Later analyses need to know about the field
                         // types where we need full definitions, as opposed
@@ -378,9 +439,11 @@ fn get_struct_field_types(
                         // type path - and, for an array, its element type,
                         // since holding N of something by value needs its
                         // definition just as much as holding one does.
-                        field_definition_deps.insert(QualifiedName::from_type_path(typ));
+                        facts
+                            .definition_deps
+                            .insert(QualifiedName::from_type_path(typ));
                     }
-                    field_info.push(FieldInfo {
+                    facts.info.push(FieldInfo {
                         name: f.ident.as_ref().map(|id| id.to_string()),
                         ty: r.ty,
                         type_kind: r.kind,
@@ -407,10 +470,17 @@ fn get_struct_field_types(
                     });
                 }
             }
-            Err(e) => convert_errors.push(e),
+            Err(e) => {
+                // A field of bindgen's own invention is bindgen's to size, and
+                // several of them have no Rust type autocxx can convert at
+                // all; a C++ member is a different matter. See
+                // `PodAnalysis::all_fields_converted`.
+                facts.all_converted &= is_bindgens_own_field(f, data_members);
+                facts.errors.push(e)
+            }
         };
     }
-    convert_errors
+    facts
 }
 
 /// Fills in what bindgen reported about each member rather than rendered into

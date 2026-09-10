@@ -13,8 +13,8 @@ use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
     ExceptionSpecification, ExceptionSpecifications, Explicitness, MemberFunctionTemplateInfo,
-    MethodKind, RefQualifier, SpecialMemberKind, TemplateMemberFunctionInfo, UsingDeclarationInfo,
-    Visibility,
+    MethodKind, RefQualifier, SpecialMemberKind, TemplateMemberFunctionInfo, TypeLayout,
+    UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -410,6 +410,7 @@ pub(crate) struct UnindexedParseCallbackResults {
     using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<DiscoveredItemId, Vec<TemplateMemberFunction>>,
     member_function_templates: HashMap<DiscoveredItemId, Vec<MemberFunctionTemplate>>,
+    layouts: HashMap<DiscoveredItemId, TypeLayout>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -734,6 +735,20 @@ impl ParseCallbackResults {
             .map(Vec::as_slice)
     }
 
+    /// The size and alignment bindgen laid this type out to, which is what
+    /// clang measured for it for all but a union whose members clang could not
+    /// lay out. bindgen answers for one of those with the widest member it can
+    /// measure, not rounded up to the alignment; a class template is the only
+    /// shape which reaches that, and nothing asserts anything about one.
+    ///
+    /// `None` for a name bindgen reported no layout for: a forward
+    /// declaration, a class template's own pattern, and anything which is not
+    /// a struct, union or enum.
+    pub(crate) fn get_layout(&self, name: &QualifiedName) -> Option<TypeLayout> {
+        self.id_by_name(name)
+            .and_then(|id| self.results.layouts.get(&id).copied())
+    }
+
     pub(crate) fn discards_template_param(&self, name: &QualifiedName) -> bool {
         self.id_by_name(name)
             .map(|id| self.results.discards_template_param.contains(&id))
@@ -961,6 +976,10 @@ impl ParseCallbacks for AutocxxParseCallbacks {
 
     fn denote_method_kind(&self, id: DiscoveredItemId, kind: MethodKind) {
         self.results.borrow_mut().method_kinds.insert(id, kind);
+    }
+
+    fn denote_layout(&self, id: DiscoveredItemId, layout: TypeLayout) {
+        self.results.borrow_mut().layouts.insert(id, layout);
     }
 
     fn denote_exception_specification(

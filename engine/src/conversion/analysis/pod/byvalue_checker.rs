@@ -677,6 +677,7 @@ mod tests {
             details: Box::new(ApiStructDetails {
                 item,
                 has_rvalue_reference_fields: false,
+                layout: None,
             }),
             analysis: (),
         }
