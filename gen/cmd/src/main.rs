@@ -16,7 +16,7 @@ use autocxx_engine::{
 };
 use clap::{crate_authors, crate_version, Arg, ArgGroup, Command};
 use depfile::Depfile;
-use indexmap::IndexSet;
+use indexmap::IndexMap;
 use miette::IntoDiagnostic;
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -285,10 +285,12 @@ fn main() -> miette::Result<()> {
         if let Some(depfile) = &depfile {
             depfile.borrow_mut().add_dependency(&PathBuf::from(input));
         }
-        parsed_files.push(parsed_file);
+        // Kept alongside the parsed file so a name two inputs both claim can be
+        // reported against the inputs which claimed it.
+        parsed_files.push((input.to_string(), parsed_file));
     }
 
-    for parsed_file in parsed_files.iter_mut() {
+    for (_, parsed_file) in parsed_files.iter_mut() {
         // Now actually handle all the include_cpp directives we found,
         // which is the complex bit where we interpret all the C+.
         let dep_recorder: Option<Box<dyn RebuildDependencyRecorder>> = depfile
@@ -315,16 +317,16 @@ fn main() -> miette::Result<()> {
     let mut writer = FileWriter {
         depfile: &depfile,
         outdir: &outdir,
-        written: IndexSet::new(),
+        pending: IndexMap::new(),
     };
     if matches.is_present("gen-cpp") {
         let cpp = matches.value_of("cpp-extension").unwrap();
         let name_cc_file = |counter| format!("gen{counter}.{cpp}");
         let mut counter = 0usize;
-        for include_cxx in parsed_files
-            .iter()
-            .flat_map(|file| file.get_cpp_buildables())
-        {
+        for (input, include_cxx) in parsed_files.iter().flat_map(|(input, file)| {
+            file.get_cpp_buildables()
+                .map(move |buildable| (input.as_str(), buildable))
+        }) {
             // This is where cxx rejects the bridge we built for it. Some of
             // those rejections are our user's C++ tripping over cxx's reserved
             // vocabulary - a C++ class called `String`, for instance - which
@@ -335,20 +337,24 @@ fn main() -> miette::Result<()> {
                 .map_err(report_cxx_rejection)?;
             for pair in generations.0 {
                 let cppname = name_cc_file(counter);
-                writer.write_to_file(cppname, &pair.implementation.unwrap_or_default())?;
-                writer.write_to_file(pair.header_name, &pair.header)?;
+                writer.add_output(
+                    cppname,
+                    pair.implementation.unwrap_or_default(),
+                    Some(input),
+                )?;
+                writer.add_output(pair.header_name, pair.header, Some(input))?;
                 counter += 1;
             }
         }
         drop(codegen_options);
-        // Write placeholders to ensure we always make exactly 'n' of each file type.
-        writer.write_placeholders(counter, desired_number, name_cc_file)?;
-        writer.write_placeholders(
+        // Add placeholders to ensure we always make exactly 'n' of each file type.
+        writer.add_placeholders(counter, desired_number, name_cc_file)?;
+        writer.add_placeholders(
             cxxgen_header_counter.into_inner(),
             desired_number,
             name_cxxgen_h,
         )?;
-        writer.write_placeholders(
+        writer.add_placeholders(
             autocxxgen_header_counter.into_inner(),
             desired_number,
             name_autocxxgen_h,
@@ -356,9 +362,10 @@ fn main() -> miette::Result<()> {
     }
 
     if matches.is_present("generate-cxx-h") {
-        writer.write_to_file(
+        writer.add_output(
             "cxx.h".to_string(),
-            &get_cxx_header_bytes(suppress_system_headers),
+            get_cxx_header_bytes(suppress_system_headers),
+            None,
         )?;
     }
 
@@ -369,28 +376,31 @@ fn main() -> miette::Result<()> {
             ));
         }
         let mut counter = 0usize;
-        let rust_buildables = parsed_files
-            .iter()
-            .flat_map(|parsed_file| parsed_file.get_rs_outputs());
-        for include_cxx in rust_buildables {
+        let rust_buildables = parsed_files.iter().flat_map(|(input, parsed_file)| {
+            parsed_file
+                .get_rs_outputs()
+                .map(move |output| (input.as_str(), output))
+        });
+        for (input, include_cxx) in rust_buildables {
             let rs_code = generate_rs_single(include_cxx);
             let fname = if matches.is_present("fix-rs-include-name") {
                 name_include_rs(counter)
             } else {
                 rs_code.filename
             };
-            writer.write_to_file(fname, rs_code.code.as_bytes())?;
+            writer.add_output(fname, rs_code.code.into_bytes(), Some(input))?;
             counter += 1;
         }
-        writer.write_placeholders(counter, desired_number, name_include_rs)?;
+        writer.add_placeholders(counter, desired_number, name_include_rs)?;
     }
     if matches.is_present("gen-rs-archive") {
         let rust_buildables = parsed_files
             .iter()
-            .flat_map(|parsed_file| parsed_file.get_rs_outputs());
+            .flat_map(|(_, parsed_file)| parsed_file.get_rs_outputs());
         let json = generate_rs_archive(rust_buildables).into_diagnostic()?;
-        writer.write_to_file("gen.rs.json".into(), json.as_bytes())?;
+        writer.add_output("gen.rs.json".into(), json.into_bytes(), None)?;
     }
+    writer.write_all()?;
     if let Some(depfile) = depfile {
         depfile.borrow_mut().write().into_diagnostic()?;
     }
@@ -426,14 +436,29 @@ fn get_option_string(option: &str, matches: &clap::ArgMatches) -> Option<String>
     cxx_impl_annotations
 }
 
+/// A file we are going to write, held until every output name is known.
+struct PendingOutput {
+    content: Vec<u8>,
+    /// The input `.rs` this came from, where one input owns it.
+    origin: Option<String>,
+}
+
+/// Collects the whole output set, then writes it.
+///
+/// None of these files reaches the filesystem until every name is registered,
+/// because two inputs claiming one name have to be refused before either is
+/// written:
+/// `write_all` leaves a file alone whose contents already match, so on a
+/// rebuild the first claimant would be skipped and the second would take its
+/// filename with nothing to report.
 struct FileWriter<'a> {
     depfile: &'a Option<Rc<RefCell<Depfile>>>,
     outdir: &'a Path,
-    written: IndexSet<String>,
+    pending: IndexMap<String, PendingOutput>,
 }
 
 impl FileWriter<'_> {
-    fn write_placeholders<F: FnOnce(usize) -> String + Copy>(
+    fn add_placeholders<F: FnOnce(usize) -> String + Copy>(
         &mut self,
         mut counter: usize,
         desired_number: Option<usize>,
@@ -445,36 +470,115 @@ impl FileWriter<'_> {
             }
             while counter < desired_number {
                 let fname = filename(counter);
-                self.write_to_file(fname, BLANK.as_bytes())?;
+                self.add_output(fname, BLANK.as_bytes().to_vec(), None)?;
                 counter += 1;
             }
         }
         Ok(())
     }
 
-    fn write_to_file(&mut self, filename: String, content: &[u8]) -> miette::Result<()> {
-        let path = self.outdir.join(&filename);
-        if let Some(depfile) = self.depfile {
-            depfile.borrow_mut().add_output(&path);
-        }
-        {
-            let f = File::open(&path);
-            if let Ok(mut f) = f {
-                let mut existing_content = Vec::new();
-                let r = f.read_to_end(&mut existing_content);
-                if r.is_ok() && existing_content == content {
-                    return Ok(()); // don't change timestamp on existing file unnecessarily
-                }
+    fn add_output(
+        &mut self,
+        filename: String,
+        content: Vec<u8>,
+        origin: Option<&str>,
+    ) -> miette::Result<()> {
+        if let Some(existing) = self.pending.get(&filename) {
+            // Identical bytes are not a conflict: whichever of the two claims
+            // the name, the file says the same thing.
+            if existing.content == content {
+                return Ok(());
             }
+            return Err(miette::Report::msg(match (&existing.origin, origin) {
+                (Some(first), Some(second)) => format!("autocxx_gen would write two files entitled '{filename}' which would have conflicting contents, one from {first} and one from {second}. Give each include_cpp! its own name!, or use --generate-exact."),
+                _ => format!("autocxx_gen would write two files entitled '{filename}' which would have conflicting contents. Consider using --generate-exact."),
+            }));
         }
-        let mut f = File::create(&path).into_diagnostic()?;
-        f.write_all(content).into_diagnostic()?;
-        if self.written.contains(&filename) {
-            return Err(miette::Report::msg(format!("autocxx_gen would write two files entitled '{filename}' which would have conflicting contents. Consider using --generate-exact.")));
-        }
-        self.written.insert(filename);
+        self.pending.insert(
+            filename,
+            PendingOutput {
+                content,
+                origin: origin.map(str::to_owned),
+            },
+        );
         Ok(())
     }
+
+    fn write_all(self) -> miette::Result<()> {
+        // A second registry, of the files the names reach rather than of the
+        // names: a filesystem which ignores case, or a symlink, makes one file
+        // out of two names, and the second output would take the first's place
+        // exactly as a repeated name would. Only the filesystem knows, so this
+        // one cannot be settled before writing starts - but it is settled
+        // before the file the two names share is overwritten.
+        let mut published: IndexMap<PathBuf, String> = IndexMap::new();
+        for (filename, output) in self.pending {
+            let path = self.outdir.join(&filename);
+            if let Some(depfile) = self.depfile {
+                depfile.borrow_mut().add_output(&path);
+            }
+            let destination = resolve_destination(&path)?;
+            if let Some(first) = published.get(&destination) {
+                return Err(miette::Report::msg(format!(
+                    "autocxx_gen would write both '{first}' and '{filename}' to one file, '{}'. Give each include_cpp! its own name!, or use --generate-exact.",
+                    destination.display()
+                )));
+            }
+            published.insert(destination.clone(), filename);
+            {
+                let f = File::open(&destination);
+                if let Ok(mut f) = f {
+                    let mut existing_content = Vec::new();
+                    let r = f.read_to_end(&mut existing_content);
+                    if r.is_ok() && existing_content == output.content {
+                        continue; // don't change timestamp on existing file unnecessarily
+                    }
+                }
+            }
+            let mut f = File::create(&destination).into_diagnostic()?;
+            f.write_all(&output.content).into_diagnostic()?;
+        }
+        Ok(())
+    }
+}
+
+/// The file a name reaches: the spelling the filesystem itself gives it, since
+/// two spellings it treats as one name one output, and the far end of a
+/// symlink, since `File::create` wrote through one and a rename would replace
+/// the link instead.
+fn resolve_destination(path: &Path) -> miette::Result<PathBuf> {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return Ok(resolved);
+    }
+    // Not there to be resolved, which is the ordinary case of an output not
+    // written yet. Its directory is, and a link whose target does not exist
+    // yet still has to be followed.
+    let path = follow_links(path)?;
+    let resolved = path
+        .parent()
+        .zip(path.file_name())
+        .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)));
+    Ok(resolved.unwrap_or(path))
+}
+
+/// A symlink chain walked by hand, which is what `canonicalize` will not do
+/// for a link whose target does not exist yet.
+fn follow_links(path: &Path) -> miette::Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    // Linux gives up at 40 too; a chain longer than that is a loop.
+    for _ in 0..40 {
+        let Ok(target) = std::fs::read_link(&path) else {
+            return Ok(path); // not a link, or not there at all
+        };
+        path = match path.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+    }
+    Err(miette::Report::msg(format!(
+        "the output '{}' is a symlink which leads back to itself",
+        path.display()
+    )))
 }
 
 struct RecordIntoDepfile(Rc<RefCell<Depfile>>);
