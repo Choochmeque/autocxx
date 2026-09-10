@@ -10,7 +10,8 @@ use autocxx_parser::file_locations::FileLocationStrategy;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::{generate_rs_single, CodegenOptions};
+use crate::output_registry::OutputRegistry;
+use crate::{generate_rs_single, CodegenOptions, CxxgenHeaderNamer};
 use crate::{get_cxx_header_bytes, CppCodegenOptions, ParseError, RebuildDependencyRecorder};
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -18,6 +19,7 @@ use std::fs::File;
 use std::io::Write;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Errors returned during creation of a [`cc::Build`] from an include_cxx
 /// macro.
@@ -35,6 +37,12 @@ pub enum BuilderError {
     NoIncludeCxxMacrosFound,
     #[error("could not create a directory {1}: {0}")]
     UnableToCreateDirectory(std::io::Error, PathBuf),
+    #[error("two sets of generated code would both be written to {}: one for the bindings in {}, one for the bindings in {}. Every autocxx builder in one build script writes into the same directory and names its files after the include_cpp! block they came from, so two blocks sharing a name!(...) - or bearing names this filesystem cannot tell apart - share their files too, and each block's macro then reads whichever of them was generated last. Give each block a name of its own. Where the file is cxx.h, which no block names, the two builders instead disagree about suppress_system_headers and have to be made to agree.", path.display(), first.display(), second.display())]
+    ConflictingGeneratedFiles {
+        path: PathBuf,
+        first: PathBuf,
+        second: PathBuf,
+    },
     #[error("this build links cxx {cxx_version}, but autocxx generates its C++ with a cxx-gen which names symbols for {cxx_gen_mangling}. Since cxx 1.0.189 the patch level is part of every generated symbol name, so the two halves of each function would not find each other and the link would fail. Update the lockfile so that cxx and cxx-gen agree - `cargo update -p cxx -p cxx-gen` normally does it, since both crates are released together.")]
     CxxVersionMismatch {
         cxx_version: String,
@@ -365,12 +373,18 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         ensure_created(&cxxdir)?;
         let rsdir = gen_location_strategy.get_rs_dir();
         ensure_created(&rsdir)?;
+        // The three directories share a parent, and that parent is what one
+        // builder shares with the next: cargo gives every builder in a build
+        // script the same OUT_DIR without telling any of them so.
+        let gen_root = rsdir.parent().unwrap_or(&rsdir).to_path_buf();
+        let registry = Rc::new(OutputRegistry::open(&gen_root, &self.rs_file));
         // We are incredibly unsophisticated in our directory arrangement here
         // compared to cxx. I have no doubt that we will need to replicate just
         // about everything cxx does, in due course...
         // Write cxx.h to that location, as it may be needed by
         // some of our generated code.
         write_to_file(
+            &registry,
             &incdir,
             "cxx.h",
             &get_cxx_header_bytes(
@@ -395,6 +409,43 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
             dep_recorder.record_dependency(&self.rs_file.to_string_lossy());
         }
         CTX::record_environment_dependencies();
+        let mut codegen_options = self.codegen_options;
+        // The names autocxx chooses for its own C++ - `cxxgen.h` and its
+        // numbered siblings - are numbered from zero by each builder, so the
+        // second builder in a build script would write over the first's with
+        // no `name!` able to separate them. The namer is asked for the next
+        // name it would give rather than replaced, so a caller which supplied
+        // one of its own still decides the names.
+        let inner_namer = std::mem::replace(
+            &mut codegen_options.cpp_codegen_options.cxxgen_header_namer,
+            CxxgenHeaderNamer(Box::new(String::new)),
+        );
+        codegen_options.cpp_codegen_options.cxxgen_header_namer = {
+            let registry = registry.clone();
+            let incdir = incdir.clone();
+            CxxgenHeaderNamer(Box::new(move || {
+                let mut offered = Vec::new();
+                loop {
+                    let name = inner_namer.name_header();
+                    let path = incdir.join(&name);
+                    if registry.claim(&path) {
+                        break name;
+                    }
+                    // A namer which offers a file it has already offered is
+                    // out of names, and has made its choice: the write then
+                    // refuses it and says whose file it is. One which keeps
+                    // offering new ones reaches a free one, there being only
+                    // as many taken as there are builders. Compared as files
+                    // rather than as names, so that two spellings of one file
+                    // are not read as progress.
+                    let file = crate::output_registry::resolve_destination(&path);
+                    if offered.contains(&file) {
+                        break name;
+                    }
+                    offered.push(file);
+                }
+            }))
+        };
         let mut parsed_file = crate::parse_file(self.rs_file, self.auto_allowlist)
             .map_err(BuilderError::ParseError)?;
         parsed_file
@@ -402,7 +453,7 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
                 autocxx_inc,
                 clang_args,
                 self.dependency_recorder,
-                &self.codegen_options,
+                &codegen_options,
             )
             .map_err(BuilderError::ParseError)?;
         let mut counter = 0;
@@ -415,24 +466,37 @@ impl<CTX: BuilderContext> Builder<'_, CTX> {
         builder.includes(parsed_file.include_dirs());
         for include_cpp in parsed_file.get_cpp_buildables() {
             let generated_code = include_cpp
-                .generate_h_and_cxx(&self.codegen_options.cpp_codegen_options)
+                .generate_h_and_cxx(&codegen_options.cpp_codegen_options)
                 .map_err(BuilderError::InvalidCxx)?;
             for filepair in generated_code.0 {
-                let fname = format!("gen{counter}.cxx");
-                counter += 1;
+                // Numbered by autocxx, not named after anything the user
+                // wrote, so a number another builder in this build script has
+                // taken is stepped over rather than reported.
+                let fname = loop {
+                    let candidate = format!("gen{counter}.cxx");
+                    counter += 1;
+                    if registry.claim(&cxxdir.join(&candidate)) {
+                        break candidate;
+                    }
+                };
                 if let Some(implementation) = &filepair.implementation {
-                    let gen_cxx_path = write_to_file(&cxxdir, &fname, implementation)?;
+                    let gen_cxx_path = write_to_file(&registry, &cxxdir, &fname, implementation)?;
                     builder.file(&gen_cxx_path);
                     generated_cpp.push(gen_cxx_path);
                 }
-                write_to_file(&incdir, &filepair.header_name, &filepair.header)?;
+                write_to_file(&registry, &incdir, &filepair.header_name, &filepair.header)?;
                 generated_cpp.push(incdir.join(filepair.header_name));
             }
         }
 
         for rs_output in parsed_file.get_rs_outputs() {
             let rs = generate_rs_single(rs_output);
-            generated_rs.push(write_to_file(&rsdir, &rs.filename, rs.code.as_bytes())?);
+            generated_rs.push(write_to_file(
+                &registry,
+                &rsdir,
+                &rs.filename,
+                rs.code.as_bytes(),
+            )?);
         }
         if counter == 0 {
             Err(BuilderError::NoIncludeCxxMacrosFound)
@@ -459,8 +523,24 @@ where
         .collect()
 }
 
-fn write_to_file(dir: &Path, filename: &str, content: &[u8]) -> Result<PathBuf, BuilderError> {
+fn write_to_file(
+    registry: &OutputRegistry,
+    dir: &Path,
+    filename: &str,
+    content: &[u8],
+) -> Result<PathBuf, BuilderError> {
     let path = dir.join(filename);
+    // Registered before the write, and before the decision not to write:
+    // a file whose contents already match is left alone so as not to move its
+    // timestamp, and a check made after that decision would never see the
+    // first of two builders at all.
+    registry.record(&path, content).map_err(|collision| {
+        BuilderError::ConflictingGeneratedFiles {
+            path: collision.path,
+            first: collision.first,
+            second: collision.second,
+        }
+    })?;
     if let Ok(existing_contents) = std::fs::read(&path) {
         // Avoid altering timestamps on disk if the file already exists,
         // to stop downstream build steps recurring.
@@ -468,7 +548,13 @@ fn write_to_file(dir: &Path, filename: &str, content: &[u8]) -> Result<PathBuf, 
             return Ok(path);
         }
     }
-    try_write_to_file(&path, content).map_err(|e| BuilderError::FileWriteFail(e, path.clone()))?;
+    try_write_to_file(&path, content).map_err(|e| {
+        // The record said this file would be written and it was not, so it
+        // must not be held against a caller which handles the failure and
+        // writes it again.
+        registry.forget(&path);
+        BuilderError::FileWriteFail(e, path.clone())
+    })?;
     Ok(path)
 }
 
