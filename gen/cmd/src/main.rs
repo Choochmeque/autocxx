@@ -381,7 +381,7 @@ fn main() -> miette::Result<()> {
         let rust_buildables = parsed_files
             .iter()
             .flat_map(|parsed_file| parsed_file.get_rs_outputs());
-        let json = generate_rs_archive(rust_buildables);
+        let json = generate_rs_archive(rust_buildables).into_diagnostic()?;
         writer.write_to_file("gen.rs.json".into(), json.as_bytes())?;
     }
     if let Some(depfile) = depfile {

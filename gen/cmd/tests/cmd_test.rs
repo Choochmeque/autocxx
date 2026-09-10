@@ -35,6 +35,31 @@ static CXX_VOCABULARY_RS: &str = include_str!("data/cxx_vocabulary.rs");
 static RESERVED_RUST_TYPE_H: &str = include_str!("data/reserved_rust_type.h");
 static RESERVED_RUST_TYPE_RS: &str = include_str!("data/reserved_rust_type.rs");
 
+/// The fixture for [`test_gen_archive_with_discovered_extern_rust_fn`]: an
+/// ordinary `include_cpp!` plus an `extern_rust_function` outside it, which the
+/// codegen discovers and appends to the block's config.
+///
+/// The archive is keyed on that config, so this is the shape which proves the
+/// key the codegen files bindings under is the key the macro looks them up by.
+static EXTERN_RUST_FN_RS: &str = concat!(
+    "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    safety!(unsafe_ffi)
+    generate!(\"DoMath\")
+}
+
+#[autocxx::extern_rust::extern_rust_function]
+pub fn called_from_cpp() {}
+
+fn main() {
+    assert_eq!(ffi::DoMath(4), 12);
+}
+",
+    "#[link(name = \"autocxx-demo\")]\nextern \"C\" {}"
+);
+
 const KEEP_TEMPDIRS: bool = true;
 
 /// The fixture for [`test_asan_working_as_expected_for_cpp_from_folder`]: a
@@ -262,6 +287,33 @@ fn test_asan_working_as_expected_for_cpp_from_folder() -> Result<(), Box<dyn std
 fn test_gen_archive() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_dir = tempdir()?;
     base_test(&tmp_dir, RsGenMode::Archive, |_| {})?;
+    let r = build_from_folder(
+        tmp_dir.path(),
+        &tmp_dir.path().join("demo/main.rs"),
+        vec![tmp_dir.path().join("gen.rs.json")],
+        &["gen0.cc"],
+        RsFindMode::AutocxxRsArchive,
+    );
+    if KEEP_TEMPDIRS {
+        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+    }
+    r.unwrap();
+    Ok(())
+}
+
+/// An archive build of a file whose `include_cpp!` the codegen augments before
+/// writing the archive - here with a discovered `extern_rust_function`.
+///
+/// The other archive tests all use `demo/src/main.rs`, whose config the codegen
+/// leaves exactly as written, so they say nothing about which version of the
+/// config the key is taken from.
+#[test]
+fn test_gen_archive_with_discovered_extern_rust_fn() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let mut files = HashMap::new();
+    files.insert("input.h", INPUT_H.as_bytes());
+    files.insert("main.rs", EXTERN_RUST_FN_RS.as_bytes());
+    base_test_ex(&tmp_dir, RsGenMode::Archive, |_| {}, files, vec!["main.rs"])?;
     let r = build_from_folder(
         tmp_dir.path(),
         &tmp_dir.path().join("demo/main.rs"),

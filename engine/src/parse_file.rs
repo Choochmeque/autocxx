@@ -421,3 +421,40 @@ impl RebuildDependencyRecorder for CompositeDepRecorder {
         self.0.record_header_file_dependency(filename);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_file_contents;
+    use autocxx_parser::IncludeCpp;
+    use proc_macro2::Span;
+    use syn::parse_quote;
+
+    /// The key the codegen files an archive entry under has to be the key the
+    /// macro looks it up by, and the codegen augments its copy of the config -
+    /// `confirm_complete`, discovered `extern_rust_function`s - before it
+    /// writes the archive.
+    #[test]
+    fn archive_key_survives_augmentation() {
+        let src = r#"
+            autocxx::include_cpp! {
+                #include "a.h"
+            }
+
+            #[autocxx::extern_rust::extern_rust_function]
+            pub fn called_from_cpp() {}
+        "#;
+        let parsed =
+            parse_file_contents(syn::parse_file(src).unwrap(), false, src).expect("parse failed");
+        let engine = parsed
+            .get_autocxxes()
+            .next()
+            .expect("no include_cpp! found");
+        // The config really was augmented, so this is not a vacuous comparison.
+        assert!(!engine.get_config().extern_rust_funs.is_empty());
+        let hexathorpe = syn::token::Pound(Span::call_site());
+        let macro_side: IncludeCpp = parse_quote! {
+            #hexathorpe include "a.h"
+        };
+        assert_eq!(engine.config_hash(), macro_side.config_hash());
+    }
+}
