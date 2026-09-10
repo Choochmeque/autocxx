@@ -42,9 +42,13 @@ mod rust_pretty_printer;
 mod types;
 
 #[cfg(any(test, feature = "build"))]
+mod atomic_write;
+#[cfg(any(test, feature = "build"))]
 mod builder;
 #[cfg(any(test, feature = "build"))]
 mod cxx_version_parity;
+#[cfg(any(test, feature = "build"))]
+mod output_registry;
 
 // Public because `Error::Bindgen` carries one and a caller matching on it has
 // to be able to name the payload. It used to be nameable as

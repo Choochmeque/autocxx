@@ -289,3 +289,218 @@ fn main() {
         assert!(CargoBuilderContext::get_dependency_recorder().is_some());
     }
 }
+
+/// What two `Builder`s in one build script do to one another's files.
+///
+/// Cargo hands every builder in a build script the same `OUT_DIR`, so the
+/// second one writes into a directory the first one has already filled, and
+/// nothing about a `build.rs` says how many builders it holds. These tests
+/// drive that shape directly: two input files, one generation directory, both
+/// codegens run.
+///
+/// They stop after codegen, as the tests above do, so what they do *not* cover
+/// is the compile and link which would follow - that a bridge whose C++ was
+/// taken by another builder fails to link is left to the build systems which
+/// would suffer it.
+#[cfg(test)]
+mod output_collision_tests {
+    use super::{BuilderContext, RebuildDependencyRecorder};
+    use autocxx_engine::BuilderSuccess;
+    use std::path::{Path, PathBuf};
+
+    /// No dependency recording: these tests are about the files codegen
+    /// writes, not the ones it reads.
+    struct SilentContext;
+
+    impl BuilderContext for SilentContext {
+        fn get_dependency_recorder() -> Option<Box<dyn RebuildDependencyRecorder>> {
+            None
+        }
+    }
+
+    const INPUT_H: &str = "
+inline int give_four() { return 4; }
+inline int give_five() { return 5; }
+";
+
+    /// An `include_cpp!` naming one of the two functions, and its block named
+    /// or left to default to `ffi`.
+    fn input_rs(function: &str, name: Option<&str>) -> String {
+        let name = name.map(|n| format!("name!({n})")).unwrap_or_default();
+        format!(
+            "
+use autocxx::prelude::*;
+include_cpp! {{
+    #include \"input.h\"
+    safety!(unsafe_ffi)
+    {name}
+    generate!(\"{function}\")
+}}
+"
+        )
+    }
+
+    /// A directory of C++ and Rust inputs, and the one generation directory
+    /// every builder here writes into.
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        src: PathBuf,
+        gendir: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("src");
+            std::fs::create_dir(&src).unwrap();
+            std::fs::write(src.join("input.h"), INPUT_H).unwrap();
+            let gendir = tmp.path().join("gen");
+            Self {
+                _tmp: tmp,
+                src,
+                gendir,
+            }
+        }
+
+        fn input(&self, filename: &str, contents: String) -> PathBuf {
+            let path = self.src.join(filename);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+
+        fn build(&self, rs_file: &Path) -> Result<BuilderSuccess, autocxx_engine::BuilderError> {
+            autocxx_engine::Builder::<SilentContext>::new(rs_file, [&self.src])
+                .custom_gendir(self.gendir.clone())
+                .build_listing_files()
+        }
+    }
+
+    fn contents(path: &Path) -> String {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{} could not be read back: {e}", path.display()))
+    }
+
+    /// The diagnostic a build was supposed to produce.
+    /// [`BuilderSuccess`] has no `Debug`, so `expect_err` cannot be used.
+    fn refusal(
+        result: Result<BuilderSuccess, autocxx_engine::BuilderError>,
+        what_it_did_instead: &str,
+    ) -> String {
+        match result {
+            Ok(_) => panic!("{what_it_did_instead}"),
+            Err(e) => format!("{e}"),
+        }
+    }
+
+    /// Two input files whose `include_cpp!` blocks are both left to default to
+    /// `ffi` name one generated file between them, `autocxx-ffi-default-gen.rs`.
+    /// Both blocks expand to an `include!` of that one path, so whichever
+    /// builder runs second decides what *both* of them get - and the first
+    /// file's bindings are gone. Only the user can settle it, by naming a
+    /// block, so it has to be said rather than silently resolved.
+    #[test]
+    fn two_builders_cannot_take_one_anothers_bindings() {
+        let fixture = Fixture::new();
+        let first_rs = fixture.input("first.rs", input_rs("give_four", None));
+        let second_rs = fixture.input("second.rs", input_rs("give_five", None));
+
+        let first = fixture.build(&first_rs).expect("first codegen failed");
+        let first_bindings = first.1.first().expect("no bindings generated").clone();
+        assert!(contents(&first_bindings).contains("give_four"));
+
+        let msg = refusal(
+            fixture.build(&second_rs),
+            "the second builder wrote over the first builder's bindings",
+        );
+        // `autocxxgen_ffi.h` rather than `autocxx-ffi-default-gen.rs`: both
+        // are named after the block, and the header is written first, so it
+        // is the one the two blocks are found to be sharing.
+        for expected in [
+            "autocxxgen_ffi.h".to_string(),
+            first_rs.to_string_lossy().into_owned(),
+            second_rs.to_string_lossy().into_owned(),
+        ] {
+            assert!(
+                msg.contains(&expected),
+                "the diagnostic does not mention {expected}: {msg}"
+            );
+        }
+        // Refused before the write, not after it: the file the first builder
+        // made still says what the first builder generated.
+        assert!(
+            contents(&first_bindings).contains("give_four"),
+            "the first builder's bindings were overwritten anyway"
+        );
+    }
+
+    /// Named blocks are the supported way to have two of them, and the C++
+    /// files have to follow: a builder which is given a name to work with must
+    /// not still write its C++ over the C++ of the builder before it, since
+    /// those filenames are autocxx's own and no `name!` can separate them.
+    ///
+    /// That the header name the namer chose is the one that was written falls
+    /// out of reading each listed file back: the list holds the name the
+    /// namer gave, so a name which was never written is a file which cannot
+    /// be read.
+    #[test]
+    fn two_builders_with_named_blocks_keep_their_own_cpp() {
+        let fixture = Fixture::new();
+        let first_rs = fixture.input("first.rs", input_rs("give_four", Some("ffi_a")));
+        let second_rs = fixture.input("second.rs", input_rs("give_five", Some("ffi_b")));
+
+        let first = fixture.build(&first_rs).expect("first codegen failed");
+        let second = fixture.build(&second_rs).expect("second codegen failed");
+
+        for path in &first.2 {
+            assert!(
+                !second.2.contains(path),
+                "{} was written by both builders",
+                path.display()
+            );
+        }
+        // Not merely that each builder's C++ mentions its own function
+        // somewhere, which a header alone would satisfy: none of the first
+        // builder's files may have become the second builder's.
+        for (built, own, other) in [
+            (&first, "give_four", "give_five"),
+            (&second, "give_five", "give_four"),
+        ] {
+            let implementation = built
+                .2
+                .iter()
+                .find(|path| path.extension().is_some_and(|e| e == "cxx"))
+                .expect("no C++ implementation was generated");
+            assert!(
+                contents(implementation).contains(own),
+                "{} does not declare {own}",
+                implementation.display()
+            );
+            for path in &built.2 {
+                assert!(
+                    !contents(path).contains(other),
+                    "{} holds the other builder's code",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// The same collision inside one file, which is the parser's to catch
+    /// before any codegen runs. Pinned here because the diagnostic is what
+    /// sends a user of the test above towards `name!`.
+    #[test]
+    fn two_blocks_in_one_file_are_refused_by_name() {
+        let fixture = Fixture::new();
+        let both = format!(
+            "{}{}",
+            input_rs("give_four", None),
+            input_rs("give_five", None)
+        );
+        let rs_file = fixture.input("both.rs", both);
+        let msg = refusal(
+            fixture.build(&rs_file),
+            "two blocks in one file both named ffi were accepted",
+        );
+        assert!(msg.contains("name!"), "{msg}");
+    }
+}
