@@ -54,7 +54,7 @@ pub enum ParseError {
     AutocxxCodegenError(EngineError),
     /// There are two or more `include_cpp` macros with the same
     /// mod name.
-    #[error("two include_cpp! blocks are both named {name} (one in {first}, one in {second}). The generated bindings file and C++ header are named after the block, and a macro cannot be named after the mod it sits in - it isn't told which mod that is - so each block needs its own name!(...)")]
+    #[error("two include_cpp! blocks in one file are both named {name} (one in {first}, one in {second}). Give each its own name!(...). Being in different mods does not separate them: the generated bindings file and the C++ header are named after the block, and the macro which reads the bindings back computes that name without being told which mod it was written in.")]
     ConflictingModNames {
         name: String,
         first: String,
@@ -62,12 +62,6 @@ pub enum ParseError {
     },
     #[error("this file has more than one include_cpp! block which generates bindings, so there is no telling which of them the #[extern_rust_function], #[extern_rust_type] or #[subclass] items outside them were meant to join. Move the discovered items into a file with a single block, or list them in one block with extern_rust_fun!/subclass!")]
     MultipleModsForDynamicDiscovery,
-    #[error("the #[subclass] struct {subclass} is written in {item_scope}, but the include_cpp! block it would join is in {block_scope}. autocxx generates the struct's C++ peer beside that block and refers to the struct as a neighbour of it, so the two have to share a mod.")]
-    SubclassOutsideBlockScope {
-        subclass: String,
-        item_scope: String,
-        block_scope: String,
-    },
     #[error("a problem occurred while discovering C++ APIs used within the Rust: {0}")]
     Discovery(DiscoveryErr),
 }
@@ -96,9 +90,7 @@ fn parse_file_contents(
     struct State {
         auto_allowlist: bool,
         results: Vec<Segment>,
-        /// Each `#[subclass]` struct discovered outside a block, with the
-        /// `mod` scope it was written in.
-        extra_superclasses: Vec<(String, Subclass)>,
+        extra_superclasses: Vec<Subclass>,
         discoveries: Discoveries,
     }
     let file_contents = Rc::new(file_contents.to_string());
@@ -183,13 +175,10 @@ fn parse_file_contents(
                                         ),
                                     );
                                 }
-                                self.extra_superclasses.push((
-                                    scope_of(&mod_path),
-                                    Subclass {
-                                        superclass,
-                                        subclass,
-                                    },
-                                ))
+                                self.extra_superclasses.push(Subclass {
+                                    superclass,
+                                    subclass,
+                                })
                             }
                         }
                     }
@@ -262,24 +251,10 @@ fn parse_file_contents(
             for path in &mut discoveries.extern_rust_types {
                 *path = path.from_within_mods(depth);
             }
-            // A subclass's peer is generated beside the block and names the
-            // struct as a plain `super::` neighbour, with no path to climb, so
-            // the two really do have to share a mod.
-            let block_scope = scope.join("::");
-            if let Some((item_scope, sc)) = extra_superclasses
-                .iter()
-                .find(|(item_scope, _)| *item_scope != block_scope)
-            {
-                return Err(ParseError::SubclassOutsideBlockScope {
-                    subclass: sc.subclass.to_string(),
-                    item_scope: describe_scope(item_scope),
-                    block_scope: describe_scope(&block_scope),
-                });
-            }
             engine
                 .config_mut()
                 .subclasses
-                .extend(extra_superclasses.drain(..).map(|(_, sc)| sc));
+                .append(&mut extra_superclasses);
             if auto_allowlist {
                 for cpp in discoveries.cpp_list {
                     engine
@@ -366,18 +341,6 @@ fn all_blocks_mut_with_scopes<'a>(
             }
             _ => {}
         }
-    }
-}
-
-/// The `mod` scope an item was found in, as a path from the file's root.
-fn scope_of(mod_path: &Option<RustPath>) -> String {
-    match mod_path {
-        None => String::new(),
-        Some(path) => path
-            .segments()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join("::"),
     }
 }
 
@@ -854,32 +817,8 @@ mod tests {
         );
     }
 
-    /// A `#[subclass]` struct is named as a neighbour of the block, so one
-    /// written in a different mod is refused rather than generated into code
-    /// which cannot name it.
-    #[test]
-    fn subclass_outside_the_block_scope_is_refused() {
-        let src = r#"
-            mod inner {
-                autocxx::include_cpp! {
-                    #include "a.h"
-                    generate_all!()
-                }
-            }
-
-            #[autocxx::subclass::subclass(superclass("Observer"))]
-            pub struct MyObserver;
-        "#;
-        let err = parse_file_contents(syn::parse_file(src).unwrap(), true, src)
-            .err()
-            .expect("mismatched scopes accepted");
-        let msg = err.to_string();
-        assert!(msg.contains("MyObserver"), "{msg}");
-        assert!(msg.contains("mod inner"), "{msg}");
-        assert!(msg.contains("the top level of the file"), "{msg}");
-    }
-
-    /// The same struct beside its block in the same mod is the supported shape.
+    /// A `#[subclass]` struct is discovered wherever it sits, and reaches a
+    /// block written inside a mod.
     #[test]
     fn subclass_beside_a_nested_block_is_accepted() {
         let src = r#"

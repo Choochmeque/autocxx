@@ -459,8 +459,9 @@ impl Directive for RustType {
         config: &mut IncludeCppConfig,
         _ident_span: &Span,
     ) -> ParseResult<()> {
-        let id: Ident = args.parse()?;
-        config.rust_types.push(RustPath::new_from_ident(id));
+        // A path, not a bare identifier: a discovered type is recorded by the
+        // path from which the block's own mod can reach it.
+        config.rust_types.push(args.parse::<RustPath>()?);
         Ok(())
     }
 

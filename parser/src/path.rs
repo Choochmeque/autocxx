@@ -9,6 +9,7 @@
 use crate::ParseResult;
 use proc_macro2::{Ident, Span};
 use quote::{quote, ToTokens, TokenStreamExt};
+use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 
 /// A little like [`syn::Path`] but simpler - contains only identifiers,
@@ -73,10 +74,13 @@ impl ToTokens for RustPath {
 
 impl Parse for RustPath {
     fn parse(input: ParseStream) -> ParseResult<Self> {
-        let id: Ident = input.parse()?;
+        // `parse_any`, because a path written for use from inside a mod starts
+        // with `super`, which is a keyword and not an ordinary identifier. A
+        // reproduction case has to read back what autocxx wrote.
+        let id = Ident::parse_any(input)?;
         let mut p = RustPath::new_from_ident(id);
         while input.parse::<Option<syn::token::PathSep>>()?.is_some() {
-            let id: Ident = input.parse()?;
+            let id = Ident::parse_any(input)?;
             p = p.append(id);
         }
         Ok(p)

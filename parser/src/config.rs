@@ -675,6 +675,30 @@ mod parse_tests {
         assert_eq!(reparsed.enum_style("Other"), Some(EnumStyle::NewtypeEnum));
     }
 
+    /// A discovered item is recorded by the path from which the block's own
+    /// mod can reach it, which for a block inside a mod starts with `super`.
+    /// A reproduction case has to read that back.
+    #[cfg(feature = "reproduction_case")]
+    #[test]
+    fn test_paths_out_of_a_mod_round_trip() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            extern_rust_function!(super::super::called_from_cpp, fn called_from_cpp())
+            extern_rust_type!(super::UsedFromCpp)
+        };
+        let reparsed: IncludeCppConfig =
+            syn::parse2(quote::ToTokens::to_token_stream(&config)).unwrap();
+        assert_eq!(reparsed.extern_rust_funs.len(), 1);
+        assert_eq!(
+            quote::ToTokens::to_token_stream(&reparsed.extern_rust_funs[0].path).to_string(),
+            "super :: super :: called_from_cpp"
+        );
+        assert_eq!(
+            quote::ToTokens::to_token_stream(&reparsed.rust_types[0]).to_string(),
+            "super :: UsedFromCpp"
+        );
+    }
+
     fn enum_style_parse_error(directive: proc_macro2::TokenStream) -> String {
         syn::parse2::<IncludeCppConfig>(directive)
             .expect_err("expected the enum_style! directive to be rejected")
