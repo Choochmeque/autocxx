@@ -191,6 +191,61 @@ include_cpp! {
 fn main() {}
 ";
 
+/// One half of the fixture for the output-collision tests: an `include_cpp!`
+/// with no `name!`, so it takes the default module name and hence the default
+/// output filename.
+static UNNAMED_DOMATH_RS: &str = "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    safety!(unsafe_ffi)
+    generate!(\"DoMath\")
+}
+
+fn main() {}
+";
+
+/// The other half: also unnamed, so it computes the same output filename, but
+/// generating a different API so the two files' contents differ.
+static UNNAMED_GOAT_RS: &str = "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    safety!(unsafe_ffi)
+    generate!(\"Goat\")
+}
+
+fn main() {}
+";
+
+/// One half of the fixture for [`test_output_names_which_reach_one_file_are_refused`]:
+/// a named block, so the two inputs compute plainly different filenames and only
+/// the filesystem can see that both reach one file.
+static NAMED_ALPHA_RS: &str = "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    name!(alpha)
+    safety!(unsafe_ffi)
+    generate!(\"DoMath\")
+}
+
+fn main() {}
+";
+
+/// The other half, named differently and generating a different API.
+static NAMED_BETA_RS: &str = "
+use autocxx::prelude::*;
+include_cpp! {
+    #include \"input.h\"
+    name!(beta)
+    safety!(unsafe_ffi)
+    generate!(\"Goat\")
+}
+
+fn main() {}
+";
+
 #[test]
 fn test_help() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("autocxx-gen")?;
@@ -889,6 +944,322 @@ fn test_depfile_names_the_rust_input() -> Result<(), Box<dyn std::error::Error>>
     assert!(
         contents.contains("demo/input.h"),
         "the parsed header is not a dependency; depfile reads:\n{contents}"
+    );
+    Ok(())
+}
+
+/// The default output filename, which every `include_cpp!` without a `name!`
+/// computes.
+static DEFAULT_GEN_RS: &str = "autocxx-ffi-default-gen.rs";
+
+/// Runs `autocxx-gen --gen-rs-include` over the named inputs in a directory
+/// prepared by the caller, so a test can run it twice over the same output
+/// directory.
+fn run_gen_over_inputs(
+    outdir: &Path,
+    code_dir: &Path,
+    inputs: &[&str],
+) -> Result<(bool, String), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin("autocxx-gen")?;
+    cmd.arg("--inc")
+        .arg(code_dir.to_str().unwrap())
+        .arg("--outdir")
+        .arg(outdir.to_str().unwrap())
+        .arg("--gen-rs-include");
+    for input in inputs {
+        cmd.arg(code_dir.join(input));
+    }
+    let output = cmd.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    eprintln!("Cmd stderr: {stderr}");
+    Ok((output.status.success(), stderr))
+}
+
+/// miette word-wraps a diagnostic into a bordered box, so a filename in one
+/// arrives split across two lines with a border character between the halves.
+/// Take the wrapping back out before matching. Which character draws that
+/// border depends on whether miette decides the terminal takes unicode, so
+/// both spellings go.
+fn unwrapped(stderr: &str) -> String {
+    stderr
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '│' && *c != '|')
+        .collect()
+}
+
+/// Writes the two unnamed-block inputs and the header they share.
+fn write_collision_fixture(tmp_dir: &TempDir) -> std::path::PathBuf {
+    let code_dir = tmp_dir.path().join("demo");
+    std::fs::create_dir(&code_dir).unwrap();
+    write_to_file(&code_dir, "input.h", INPUT_H.as_bytes());
+    write_to_file(&code_dir, "first.rs", UNNAMED_DOMATH_RS.as_bytes());
+    write_to_file(&code_dir, "second.rs", UNNAMED_GOAT_RS.as_bytes());
+    code_dir
+}
+
+/// Two input files whose `include_cpp!` blocks are both unnamed compute the
+/// same output filename. The engine's same-file check cannot see this: it
+/// compares the blocks within one parsed file, and these are in two.
+///
+/// The collision has to be caught before anything is written, because the
+/// writer skips a file whose contents are already on disk: on a rebuild the
+/// first block's output matched, so only the second block wrote, and the
+/// second block's bindings took the first block's filename with a successful
+/// exit. The first file's `include_cpp!` then includes the second's bindings.
+#[test]
+fn test_colliding_output_names_are_diagnosed_on_rebuild() -> Result<(), Box<dyn std::error::Error>>
+{
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(success, "generating the first input alone failed: {stderr}");
+    let after_first_run = std::fs::read_to_string(tmp_dir.path().join(DEFAULT_GEN_RS))?;
+    assert!(
+        after_first_run.contains("DoMath"),
+        "the first input's bindings were not written"
+    );
+
+    let (success, stderr) =
+        run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs", "second.rs"])?;
+    let after_second_run = std::fs::read_to_string(tmp_dir.path().join(DEFAULT_GEN_RS))?;
+    assert!(
+        !success,
+        "two inputs wrote the same filename and it was not reported"
+    );
+    assert_eq!(
+        after_second_run, after_first_run,
+        "the refused run replaced the first input's bindings"
+    );
+    let reported = unwrapped(&stderr);
+    assert!(
+        reported.contains("first.rs") && reported.contains("second.rs"),
+        "the collision was reported without naming both inputs: {stderr}"
+    );
+    Ok(())
+}
+
+/// The same collision on an empty output directory, which was always reported,
+/// but only after the second block had already truncated the first block's
+/// file: a build which stopped on the error had corrupted output to clean up.
+/// Nothing may be written by a run which refuses.
+#[test]
+fn test_colliding_output_names_leave_no_output() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+
+    let (success, stderr) =
+        run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs", "second.rs"])?;
+    assert!(
+        !success,
+        "two inputs wrote the same filename and it was not reported"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "autocxx-gen panicked instead of reporting an error"
+    );
+    // Not merely that it failed: a parse or libclang error would satisfy that
+    // and prove nothing about the collision.
+    let reported = unwrapped(&stderr);
+    assert!(
+        reported.contains(DEFAULT_GEN_RS)
+            && reported.contains("first.rs")
+            && reported.contains("second.rs")
+            && reported.contains(&unwrapped("would have conflicting contents")),
+        "the run failed for some reason other than the collision: {stderr}"
+    );
+    assert!(
+        !tmp_dir.path().join(DEFAULT_GEN_RS).exists(),
+        "the refused run left output behind"
+    );
+    Ok(())
+}
+
+/// The other side of the same coin: re-running over an unchanged input must
+/// stay a success, and must leave the file's timestamp alone. Build systems
+/// downstream of this one rebuild on that timestamp.
+#[test]
+fn test_unchanged_rerun_leaves_the_output_alone() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(success, "the first run failed: {stderr}");
+    let path = tmp_dir.path().join(DEFAULT_GEN_RS);
+    // Filesystem timestamps are coarse enough that a rewrite in the same tick
+    // would read back unchanged, so the first write is dated to a time no
+    // second run could produce. The value is read back rather than assumed,
+    // since the filesystem rounds it.
+    let backdated =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    File::options()
+        .write(true)
+        .open(&path)?
+        .set_times(std::fs::FileTimes::new().set_modified(backdated))?;
+    let first_written = std::fs::metadata(&path)?.modified()?;
+    let first_content = std::fs::read_to_string(&path)?;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(
+        success,
+        "re-running over an unchanged input failed: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path)?,
+        first_content,
+        "the re-run changed the output"
+    );
+    assert_eq!(
+        std::fs::metadata(&path)?.modified()?,
+        first_written,
+        "the re-run rewrote an unchanged output"
+    );
+    Ok(())
+}
+
+/// Outputs are written through a temp file renamed into place, and a temp file
+/// is created readable only by its owner. Whoever compiles the generated code
+/// need not be whoever generated it, so a fresh output has to keep the mode the
+/// caller's umask would have given it - and a rebuild has to keep the mode the
+/// file already has, rather than handing back one the caller had narrowed.
+#[cfg(unix)]
+#[test]
+fn test_output_permissions_survive_the_rename() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+    let path = tmp_dir.path().join(DEFAULT_GEN_RS);
+
+    // What this umask lets an ordinary create produce here, which is what the
+    // outputs used to get; asserting a fixed mode instead would only say what
+    // the umask running the tests happens to be.
+    let probe = tmp_dir.path().join("umask-probe");
+    File::create(&probe)?;
+    let created_by_umask = std::fs::metadata(&probe)?.permissions().mode() & 0o777;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(success, "the first run failed: {stderr}");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        created_by_umask,
+        "a freshly generated file did not get the mode the umask allows"
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    // The other input writes the same filename with different contents, so this
+    // run really does replace the file.
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["second.rs"])?;
+    assert!(success, "the second run failed: {stderr}");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        0o600,
+        "rewriting the file widened the mode it had been given"
+    );
+
+    // The other direction, which only holds if the mode is restored after the
+    // umask has had its say: a bit the umask strips has to survive a rewrite.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664))?;
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(success, "the third run failed: {stderr}");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        0o664,
+        "rewriting the file dropped mode bits the umask would have stripped"
+    );
+    Ok(())
+}
+
+/// An output name which is a symlink was written through, so a build which
+/// publishes its generated files that way kept working. A rename replaces the
+/// link instead, unless the link is followed first.
+#[cfg(unix)]
+#[test]
+fn test_a_symlinked_output_is_written_through() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+    let target_dir = tmp_dir.path().join("published");
+    std::fs::create_dir(&target_dir)?;
+    let target = target_dir.join("bindings.rs");
+    File::create(&target)?;
+    let link = tmp_dir.path().join(DEFAULT_GEN_RS);
+    std::os::unix::fs::symlink(&target, &link)?;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(
+        success,
+        "generating over a symlinked output failed: {stderr}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)?.file_type().is_symlink(),
+        "the generated file replaced the symlink"
+    );
+    assert!(
+        std::fs::read_to_string(&target)?.contains("DoMath"),
+        "the symlink's target was left as it was"
+    );
+    Ok(())
+}
+
+/// A symlinked output whose target does not exist yet: `File::create` made the
+/// target through the link, and `canonicalize` refuses a link that leads
+/// nowhere, so the link has to be walked by hand for the rename to land on the
+/// same file the old code did.
+#[cfg(unix)]
+#[test]
+fn test_a_symlink_to_an_absent_file_is_created_through() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = write_collision_fixture(&tmp_dir);
+    let target_dir = tmp_dir.path().join("published");
+    std::fs::create_dir(&target_dir)?;
+    let target = target_dir.join("bindings.rs");
+    let link = tmp_dir.path().join(DEFAULT_GEN_RS);
+    std::os::unix::fs::symlink(&target, &link)?;
+
+    let (success, stderr) = run_gen_over_inputs(tmp_dir.path(), &code_dir, &["first.rs"])?;
+    assert!(
+        success,
+        "generating over a dangling symlink failed: {stderr}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)?.file_type().is_symlink(),
+        "the generated file replaced the symlink"
+    );
+    assert!(
+        std::fs::read_to_string(&target)?.contains("DoMath"),
+        "the symlink's target was not created"
+    );
+    Ok(())
+}
+
+/// Two outputs whose names differ but which reach one file - here through a
+/// symlink, on a filesystem which ignores case through the case alone. The
+/// names alone cannot tell, so the check is made against what each name
+/// resolves to, and made before the shared file is overwritten.
+#[cfg(unix)]
+#[test]
+fn test_output_names_which_reach_one_file_are_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let code_dir = tmp_dir.path().join("demo");
+    std::fs::create_dir(&code_dir)?;
+    write_to_file(&code_dir, "input.h", INPUT_H.as_bytes());
+    write_to_file(&code_dir, "alpha.rs", NAMED_ALPHA_RS.as_bytes());
+    write_to_file(&code_dir, "beta.rs", NAMED_BETA_RS.as_bytes());
+
+    let alpha = tmp_dir.path().join("autocxx-alpha-gen.rs");
+    File::create(&alpha)?;
+    std::os::unix::fs::symlink(&alpha, tmp_dir.path().join("autocxx-beta-gen.rs"))?;
+
+    let (success, stderr) =
+        run_gen_over_inputs(tmp_dir.path(), &code_dir, &["alpha.rs", "beta.rs"])?;
+    assert!(
+        !success,
+        "two output names reaching one file was not reported"
+    );
+    let reported = unwrapped(&stderr);
+    assert!(
+        reported.contains("autocxx-alpha-gen.rs") && reported.contains("autocxx-beta-gen.rs"),
+        "the clash was reported without naming both outputs: {stderr}"
     );
     Ok(())
 }
