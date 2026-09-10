@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use crate::ParseResult;
-use proc_macro2::Ident;
+use proc_macro2::{Ident, Span};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::parse::{Parse, ParseStream};
 
@@ -26,6 +26,10 @@ impl RustPath {
         Self(self.0.iter().cloned().chain(std::iter::once(id)).collect())
     }
 
+    pub fn segments(&self) -> impl Iterator<Item = &Ident> {
+        self.0.iter()
+    }
+
     pub fn get_final_ident(&self) -> &Ident {
         self.0.last().unwrap()
     }
@@ -36,6 +40,19 @@ impl RustPath {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// The same path, written from `depth` mods further in. A path recorded
+    /// while walking a file is relative to that file's root; code generated for
+    /// an `include_cpp!` inside a `mod` has to climb back out to use it.
+    #[must_use]
+    pub fn from_within_mods(&self, depth: usize) -> Self {
+        Self(
+            std::iter::repeat_with(|| Ident::new("super", Span::call_site()))
+                .take(depth)
+                .chain(self.0.iter().cloned())
+                .collect(),
+        )
     }
 }
 

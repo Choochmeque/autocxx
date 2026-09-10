@@ -408,7 +408,11 @@ impl IncludeCppConfig {
                             .flat_map(|sc| [format!("{}Cpp", sc.subclass), sc.superclass.clone()]),
                     ),
             )),
-            Allowlist::Unspecified(_) => unreachable!(),
+            // `IncludeCppEngine::generate` settles the allowlist before
+            // anything reads it.
+            Allowlist::Unspecified(_) => {
+                unreachable!("the allowlist was read before it was settled")
+            }
         }
     }
 
@@ -450,7 +454,9 @@ impl IncludeCppConfig {
             || self.is_rust_type_name(cpp_name)
             || self.is_concrete_type(cpp_name)
             || match &self.allowlist {
-                Allowlist::Unspecified(_) => panic!("Eek no allowlist yet"),
+                Allowlist::Unspecified(_) => {
+                    unreachable!("the allowlist was read before it was settled")
+                }
                 Allowlist::All => true,
                 Allowlist::Specific(items) => items.iter().any(|entry| match entry {
                     AllowlistEntry::Item(i) => i == cpp_name,
