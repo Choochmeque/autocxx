@@ -35,6 +35,7 @@ use utils::{find_output_mod_root, generate_cxx_use_stmt, generate_cxx_use_stmt_f
 use crate::{
     conversion::array_witness::{array_element_witnesses, witness_name},
     conversion::codegen_rs::unqualify::{unqualify_params, unqualify_ret_type, unqualify_type},
+    conversion::layout_assertions::{layout_assertions, LayoutAssertion},
     minisyn::minisynize_punctuated,
     types::{make_ident, Namespace, QualifiedName},
 };
@@ -325,13 +326,14 @@ impl<'a> RsCodeGenerator<'a> {
         let concrete_typedefs = find_concrete_typedefs(&all_apis);
         let types_with_no_rust_storage = find_types_with_no_rust_storage(&all_apis);
         let array_element_witnesses = array_element_witnesses(&all_apis);
+        let layout_assertions = layout_assertions(&all_apis);
         // Now let's generate the Rust code.
         let (rs_codegen_results_and_namespaces, additional_cpp_needs): (Vec<_>, Vec<_>) = all_apis
             .into_iter()
             .map(|api| {
                 let more_cpp_needed = api.needs_cpp_codegen();
                 let name = api.name().clone();
-                let gen = self.generate_rs_for_api(
+                let mut gen = self.generate_rs_for_api(
                     api,
                     &methods_by_superclass,
                     &peer_constructors,
@@ -339,6 +341,12 @@ impl<'a> RsCodeGenerator<'a> {
                     &concrete_typedefs,
                     &types_with_no_rust_storage,
                 );
+                if let Some(assertion) = layout_assertions.get(&name) {
+                    if assertion.assert_rust {
+                        gen.output_mod_items
+                            .push(Self::generate_layout_assertion(&name, assertion));
+                    }
+                }
                 ((name, gen), more_cpp_needed)
             })
             .unzip();
@@ -381,7 +389,11 @@ impl<'a> RsCodeGenerator<'a> {
         // A witness is C++ autocxx writes, so the bridge has to include the
         // header it is written into even where nothing else needed one.
         let has_additional_cpp_needs = additional_cpp_needs.into_iter().any(std::convert::identity)
-            || !array_element_witnesses.is_empty();
+            || !array_element_witnesses.is_empty()
+            // Each type's C++ half is written into that header too.
+            || layout_assertions
+                .values()
+                .any(|assertion| assertion.assert_cpp);
         extern_c_mod_items.extend(self.build_include_foreign_items(has_additional_cpp_needs));
         // The by-value use which tells cxx an array element is trivially
         // movable. No Rust caller can reach one: the bridge mod is private and
@@ -2273,6 +2285,43 @@ impl<'a> RsCodeGenerator<'a> {
                     .is_some()
             })
             .unwrap_or(false)
+    }
+
+    /// Hold the generated Rust type to the size and alignment autocxx
+    /// measured for the C++ one.
+    ///
+    /// The C++ half of this asks the C++ compiler the same question. Both are
+    /// needed: this is the half a mistake in the layout arithmetic lands in -
+    /// a Rust type shorter than the object C++ builds in it - and it is the
+    /// only one which can see the type Rust actually ended up with.
+    fn generate_layout_assertion(name: &QualifiedName, assertion: &LayoutAssertion) -> Item {
+        let id = name.get_final_ident();
+        let cpp_name = name.to_cpp_name();
+        let size = assertion.size;
+        let align = assertion.align;
+        let size_message = format!(
+            "autocxx sized {cpp_name} at {size} bytes, from what clang measured \
+             when it read the header, and the Rust rendering of it came to \
+             something else. C++ constructs one of these in Rust storage of \
+             this type's size."
+        );
+        let align_message = format!(
+            "autocxx aligned {cpp_name} to {align} bytes, from what clang \
+             measured when it read the header, and the Rust rendering of it \
+             came to something else."
+        );
+        // `::std::assert!` rather than `assert!`: these bindings are
+        // `include!`d into a file the user wrote, where a `macro_rules! assert`
+        // of theirs is in scope and would take the call - and a definition
+        // which expands to nothing would leave both checks silently absent.
+        // `std` rather than `core` because it is the crate an edition-2015
+        // caller has without writing an `extern crate` for it.
+        Item::Verbatim(quote! {
+            const _: () = {
+                ::std::assert!(::std::mem::size_of::<#id>() == #size, #size_message);
+                ::std::assert!(::std::mem::align_of::<#id>() == #align, #align_message);
+            };
+        })
     }
 
     fn generate_extern_type_impl(&self, type_kind: TypeKind, tyname: &QualifiedName) -> Vec<Item> {

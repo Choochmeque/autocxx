@@ -296,11 +296,13 @@ impl<'a> ParseBindgen<'a> {
                     Some(UnanalyzedApi::ForwardDeclaration { name, err })
                 } else {
                     let has_rvalue_reference_fields = Self::spot_rvalue_reference_fields(&s.fields);
+                    let layout = self.parse_callback_results.get_layout(&name.name);
                     Some(UnanalyzedApi::Struct {
                         name,
                         details: Box::new(StructDetails {
                             item: s.clone().into(),
                             has_rvalue_reference_fields,
+                            layout,
                         }),
                         analysis: (),
                     })

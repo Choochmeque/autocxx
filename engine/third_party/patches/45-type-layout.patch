@@ -1,0 +1,118 @@
+Subject: Report the size and alignment each type was laid out to
+
+bindgen knows how big every type it writes is: it reads the size and alignment
+clang measured, pads the struct out to that size, and gives it that alignment.
+`--layout-tests` writes the two numbers into the bindings as an assertion, and
+that is the only place they appear. The switch is one switch over the whole
+output - there is no asking for the assertions on some types and not others -
+and a consumer which cannot use it has no way to learn the numbers at all.
+
+A consumer which renders the same C++ objects a second way needs them. Code
+which constructs a C++ object in storage a Rust caller owns has to size that
+storage, and the two renderings agreeing is the whole of what makes the write
+land inside it; nothing checks that today, and where they disagree the
+disagreement is silent. Report the layout through `ParseCallbacks`, for each
+struct, union and enum codegen writes out.
+
+The number reported is the one bindgen laid the type out to, which is what
+clang measured for all but a union whose members clang could not lay out:
+`CompInfo::layout` answers for one of those with the widest member it can
+measure, without rounding up to the alignment, and that is what bindgen writes
+as well as what it reports.
+
+Reported after the bail-out for a class with non-type template parameters, so
+that a layout reported is a layout something was written to. Not reported at
+all for a type with no layout, which is so for a forward declaration and for
+most of what a class template's own pattern can be.
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -356,6 +356,27 @@
+     ) {
+     }
+ 
++    /// Report the size and alignment bindgen laid a type out to.
++    ///
++    /// That is the number the generated Rust is padded and aligned to hold.
++    /// `--layout-tests` writes it into the bindings as an assertion, but that
++    /// is one switch over the whole output and the number itself reaches
++    /// nothing else. A consumer which renders the same objects a second way -
++    /// C++ of its own which constructs one in Rust-owned storage, or another
++    /// language's view - has no other way to check that its rendering and this
++    /// one agree about how big the object is.
++    ///
++    /// It is what clang measured wherever clang measured it, which is
++    /// everything but a union whose members clang could not lay out: for one
++    /// of those it is the widest member bindgen could measure, not rounded up
++    /// to the alignment, which is what bindgen itself lays the union out to.
++    ///
++    /// Called for each struct, union and enum codegen writes out, once, before
++    /// its fields; not called for a type with no layout at all, which is so
++    /// for a forward declaration and for most of what a class template's own
++    /// pattern can be.
++    fn denote_layout(&self, _id: DiscoveredItemId, _layout: TypeLayout) {}
++
+     /// Report a `using Base::foo;` written in a class.
+     ///
+     /// bindgen generates nothing for such a declaration: it has no signature
+@@ -675,6 +696,18 @@
+ 
+     /// The name of the field's type, if available.
+     pub field_type_name: Option<&'a str>,
++}
++
++/// The size and alignment of a type, as [`ParseCallbacks::denote_layout`]
++/// reports them, in bytes. See there for the one shape where they are
++/// bindgen's own answer rather than what C++'s `sizeof` and `alignof` say.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[non_exhaustive]
++pub struct TypeLayout {
++    /// The type's size in bytes, including any tail padding.
++    pub size: usize,
++    /// The type's alignment in bytes.
++    pub align: usize,
+ }
+ 
+ /// What [`ParseCallbacks::denote_data_member`] reports about one data member
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2707,6 +2707,22 @@
+             return;
+         }
+ 
++        // After the bail-out, because this says what the type codegen is about
++        // to write is meant to measure. Nothing is reported for a type with no
++        // layout - a forward declaration, or a class template's own pattern,
++        // which clang lays out only where something instantiates it.
++        if let Some(layout) = layout {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_layout(
++                    id,
++                    crate::callbacks::TypeLayout {
++                        size: layout.size,
++                        align: layout.align,
++                    },
++                );
++            });
++        }
++
+         // Generate the vtable from the method list if appropriate.
+         //
+         // TODO: I don't know how this could play with virtual methods that are
+@@ -4719,6 +4735,17 @@
+                 final_name: name.clone(),
+             }
+         });
++        if let Some(layout) = layout {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_layout(
++                    DiscoveredItemId::new(item.id().as_usize()),
++                    crate::callbacks::TypeLayout {
++                        size: layout.size,
++                        align: layout.align,
++                    },
++                );
++            });
++        }
+         utils::callback_with_cpp_name(
+             ctx,
+             item,

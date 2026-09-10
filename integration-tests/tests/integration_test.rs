@@ -40121,3 +40121,252 @@ fn test_subclass_peer_destroyed_during_ownership_removal() {
         }),
     );
 }
+
+/// Whether `text` holds an assertion which compares something with a literal
+/// number, written as `prefix` then digits then `suffix`.
+///
+/// The whole comparison, not just a mention of the type: an assertion weakened
+/// to something which cannot fail - a disjunction, a comparison against itself
+/// - would pass a check which only looked for the name.
+fn asserts_a_number(text: &str, prefix: &str, suffix: &str) -> bool {
+    text.split(prefix).skip(1).any(|rest| {
+        rest.split_once(suffix).is_some_and(|(number, _)| {
+            !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        })
+    })
+}
+
+/// Every type autocxx generates says, on both sides, how big it is - and the
+/// shapes whose layout autocxx and bindgen compute themselves agree with what
+/// clang measured.
+///
+/// The generated `unsafe` rests on one number. `within_box`, `within_cpp_pin`
+/// and stack emplacement each allocate Rust storage of the generated type's
+/// size and then ask C++ to construct one of its own objects there, so a Rust
+/// rendering shorter than the C++ object is a write past the end of that
+/// storage rather than a wrong answer. Everything between clang's measurement
+/// and the emitted type - bindgen's field and base tracking, the
+/// substituted-layout arithmetic, the padding written for an empty class - had
+/// no check of its own, so a mistake in any of it reached a user's process
+/// rather than a compiler.
+///
+/// So each type carries `static_assert(sizeof(T) == N)` in the generated C++
+/// and an `assert!(size_of::<T>() == N)` in the generated Rust, `N` being what
+/// clang reported. Both halves are needed: the Rust half is the one which sees
+/// the rendering a layout mistake lands in, and the C++ half is the one which
+/// sees the header being compiled under options, a standard library or an ABI
+/// clang was not given.
+///
+/// One shape per route through that arithmetic: a substituted member padded out
+/// to the class's real size, an array of those, a base class, an empty class -
+/// whose size is the target's rather than the one address byte - an
+/// over-aligned class, and a bitfield allocation unit. Building at all is the
+/// test, because the assertions are compiled; the checks below are on the
+/// assertions themselves, so that losing the net cannot pass silently.
+#[test]
+fn test_generated_types_assert_their_layout() {
+    struct BothHalvesPresent;
+    /// The types the header declares, each of which must carry both halves.
+    const TYPES: &[&str] = &[
+        "fx_Member",
+        "fx_Array",
+        "fx_Base",
+        "fx_Empty",
+        "fx_Aligned",
+        "fx_Bits",
+        "fx_Pod",
+    ];
+    impl CodeCheckerFns for BothHalvesPresent {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            for ty in TYPES {
+                for what in ["size_of", "align_of"] {
+                    if !asserts_a_number(
+                        &text,
+                        &format!(":: std :: assert ! (:: std :: mem :: {what} :: < {ty} > () == "),
+                        "usize , \"",
+                    ) {
+                        return Err(TestError::RsCodeExaminationFail(format!(
+                            "no Rust {what} assertion for {ty}"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn check_cpp(&self, cpp: &[std::path::PathBuf]) -> Result<(), TestError> {
+            let text = cpp
+                .iter()
+                .map(|filename| std::fs::read_to_string(filename).unwrap())
+                .collect::<String>();
+            for ty in TYPES {
+                for what in ["sizeof", "alignof"] {
+                    if !asserts_a_number(&text, &format!("static_assert({what}({ty}) == "), ", \"")
+                    {
+                        return Err(TestError::CppCodeExaminationFail);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        // A prelude-substituted member: one pointer in Rust, and the class is
+        // padded out to the size clang measured for it.
+        struct fx_Member { uint32_t n; std::string s; };
+        // An array of those, which is measured element by element.
+        struct fx_Array { uint32_t n; std::string s[2]; };
+        // A base class, whose extent the tracker advances by.
+        struct fx_Base : fx_Member { uint32_t m; };
+        // An empty class, which the target need not make one byte wide.
+        struct fx_Empty {};
+        struct alignas(16) fx_Aligned { double d; };
+        // A bitfield run, which survives as one allocation unit.
+        struct fx_Bits { uint32_t a : 3; uint32_t b : 5; uint32_t c; };
+        // A POD type, whose Rust side is bindgen's own struct rather than the
+        // opaque wrapper every row above gets.
+        struct fx_Pod { uint32_t a; uint64_t b; };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::fx_Member::new().within_unique_ptr();
+            let _ = ffi::fx_Base::new().within_box();
+            assert_eq!(ffi::fx_Pod { a: 1, b: 2 }.b, 2);
+        },
+        directives_from_lists(
+            &[
+                "fx_Member",
+                "fx_Array",
+                "fx_Base",
+                "fx_Empty",
+                "fx_Aligned",
+                "fx_Bits",
+            ],
+            &["fx_Pod"],
+            None,
+        ),
+        combine_modifiers(
+            // The over-aligned row needs C++17's aligned `operator new`, which
+            // is what allocates one of these.
+            make_cpp17_adder(),
+            // C4324 is cl saying `fx_Aligned` was padded because of an
+            // alignment specifier, which is the whole of what that row is
+            // here: a class the target aligns more strictly than its members
+            // need, and the tail padding that leaves. Take the `alignas` away
+            // and the row is not the row.
+            make_msvc_warning_scope(&[4324]),
+        ),
+        Some(Box::new(BothHalvesPresent)),
+        None,
+    );
+}
+
+/// An abstract class gets the C++ half of the assertion and not the Rust half.
+///
+/// Its Rust side is cxx's opaque stand-in, which is zero-sized on purpose: no
+/// Rust storage of that type ever holds the C++ object, and every route which
+/// would build one there is withdrawn. Asserting the C++ size against it would
+/// fail on every abstract class in every bridge. What autocxx measured is still
+/// worth saying in C++, where it is the number a shim writing into one of these
+/// would be sized from.
+#[test]
+fn test_abstract_type_asserts_its_layout_in_cpp_only() {
+    struct CppHalfOnly;
+    impl CodeCheckerFns for CppHalfOnly {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            for what in ["size_of", "align_of"] {
+                if text.contains(&format!("{what} :: < fx_Abstract > ()")) {
+                    return Err(TestError::RsCodeExaminationFail(format!(
+                        "a Rust {what} assertion was written against cxx's zero-sized stand-in"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        fn check_cpp(&self, cpp: &[std::path::PathBuf]) -> Result<(), TestError> {
+            let text = cpp
+                .iter()
+                .map(|filename| std::fs::read_to_string(filename).unwrap())
+                .collect::<String>();
+            for what in ["sizeof", "alignof"] {
+                if !asserts_a_number(
+                    &text,
+                    &format!("static_assert({what}(fx_Abstract) == "),
+                    ", \"",
+                ) {
+                    return Err(TestError::CppCodeExaminationFail);
+                }
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        class fx_Abstract {
+        public:
+            virtual int value() const = 0;
+            virtual ~fx_Abstract() {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["fx_Abstract"], &[], None),
+        None,
+        Some(Box::new(CppHalfOnly)),
+        None,
+    );
+}
+
+/// Nothing is asserted about a type clang never laid out.
+///
+/// A class this header only declares has no size to compare anything against,
+/// and `sizeof` of it in the generated C++ would not compile. bindgen reports
+/// no layout for one, which is what leaves it out; this says so, because the
+/// alternative - inventing a number - is what the net exists to catch.
+#[test]
+fn test_forward_declaration_asserts_no_layout() {
+    struct NoAssertion;
+    impl CodeCheckerFns for NoAssertion {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            if text.contains("size_of :: < fx_Declared > ()") {
+                return Err(TestError::RsCodeExaminationFail(
+                    "a layout assertion was written for a type nothing measured".into(),
+                ));
+            }
+            Ok(())
+        }
+        fn check_cpp(&self, cpp: &[std::path::PathBuf]) -> Result<(), TestError> {
+            for filename in cpp {
+                if std::fs::read_to_string(filename)
+                    .unwrap()
+                    .contains("sizeof(fx_Declared)")
+                {
+                    return Err(TestError::CppCodeExaminationFail);
+                }
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        struct fx_Declared;
+        inline const fx_Declared* fx_get_declared() { return nullptr; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::fx_get_declared();
+        },
+        directives_from_lists(&["fx_Declared", "fx_get_declared"], &[], None),
+        None,
+        Some(Box::new(NoAssertion)),
+        None,
+    );
+}

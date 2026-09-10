@@ -336,6 +336,7 @@ mod tests {
             details: Box::new(StructDetails {
                 item: parse_quote! { pub struct #ident { pub a: u32 } },
                 has_rvalue_reference_fields: false,
+                layout: None,
             }),
             analysis: (),
         }

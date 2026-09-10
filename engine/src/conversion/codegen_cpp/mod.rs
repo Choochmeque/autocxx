@@ -27,6 +27,7 @@ use type_to_cpp::CppNameMap;
 
 use crate::conversion::analysis::fun::ReceiverMutability;
 use crate::conversion::array_witness::{array_element_witnesses, witness_name};
+use crate::conversion::layout_assertions::layout_assertions;
 use crate::minisyn::Ident;
 
 use super::{
@@ -198,6 +199,7 @@ impl<'a> CppCodeGenerator<'a> {
         // end up out of sync with needs_cpp_codegen
         gen.add_needs(apis.iter().filter(|api| api.needs_cpp_codegen()))?;
         gen.generate_array_element_witnesses(apis);
+        gen.generate_layout_assertions(apis);
         Ok(gen.generate())
     }
 
@@ -465,6 +467,44 @@ impl<'a> CppCodeGenerator<'a> {
             let witness = witness_name(self.config, &name);
             self.additional_functions.push(ExtraCpp {
                 declaration: Some(format!("inline void {witness}({cpp_name}) {{}}")),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Say in C++ what autocxx measured each type to be.
+    ///
+    /// The size clang reported when it parsed the header is the size of the
+    /// Rust storage a caller allocates for one of these, and the generated C++
+    /// constructs the object in that storage. This is where the C++ compiler
+    /// which will do the constructing is asked whether it agrees - it is
+    /// reading the same declarations through its own options, its own standard
+    /// library and its own ABI rules, none of which have to be the ones clang
+    /// was given.
+    fn generate_layout_assertions(&mut self, apis: &ApiVec<FnPhase>) {
+        for (name, assertion) in layout_assertions(apis) {
+            if !assertion.assert_cpp {
+                continue;
+            }
+            let cpp_name = self.original_name_map.map(&name);
+            let size = assertion.size;
+            let align = assertion.align;
+            let size_message = format!(
+                "autocxx sized {cpp_name} at {size} bytes, which is what clang \
+                 measured when it read this header. This compiler makes it \
+                 something else, and Rust owns storage of the size autocxx \
+                 recorded."
+            );
+            let align_message = format!(
+                "autocxx aligned {cpp_name} to {align} bytes, which is what \
+                 clang measured when it read this header. This compiler makes \
+                 it something else."
+            );
+            self.additional_functions.push(ExtraCpp {
+                declaration: Some(format!(
+                    "static_assert(sizeof({cpp_name}) == {size}, \"{size_message}\");\n\
+                     static_assert(alignof({cpp_name}) == {align}, \"{align_message}\");"
+                )),
                 ..Default::default()
             })
         }

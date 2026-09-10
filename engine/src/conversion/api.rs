@@ -8,7 +8,7 @@
 
 use crate::vendored_bindgen::callbacks::{
     Deprecation, ExceptionSpecification, Explicitness, MethodKind as CppMethodKind,
-    SpecialMemberKind, Virtualness,
+    SpecialMemberKind, TypeLayout, Virtualness,
 };
 
 use syn::{
@@ -413,6 +413,9 @@ impl VectorShim {
 pub(crate) struct StructDetails {
     pub(crate) item: ItemStruct,
     pub(crate) has_rvalue_reference_fields: bool,
+    /// The size and alignment bindgen laid this struct out to, where bindgen
+    /// reported them. Read only by [`crate::conversion::layout_assertions`].
+    pub(crate) layout: Option<TypeLayout>,
 }
 
 #[derive(Clone, Copy, Debug)]
