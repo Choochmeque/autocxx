@@ -70,7 +70,7 @@ pub use volatile::{VolatileConstPtr, VolatilePtr};
 /// that's gone into the [cxx] crate, such bindings are pleasant and idiomatic to use
 /// from Rust, and usually don't require the `unsafe` keyword.
 ///
-/// For full documentation, see [the manual](https://google.github.io/autocxx/).
+/// For full documentation, see [the manual](https://autocxx.dev/).
 ///
 /// # The [`include_cpp`] macro
 ///

@@ -1,4 +1,4 @@
-This crate is a [component of autocxx](https://google.github.io/autocxx/).
+This crate is a [component of autocxx](https://autocxx.dev/).
 
 The published crate additionally carries a vendored, build-time-patched copy
 of [bindgen](https://github.com/rust-lang/rust-bindgen), which is
