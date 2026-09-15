@@ -62,7 +62,7 @@ bitflags = "2.2.1"
 cexpr = "0.6"
 clang-sys = { version = "1", features = ["clang_11_0"] }
 rustc-hash = "2.1.0"
-itertools = "0.10.3"
+itertools = "0.15.0"
 # Only to read BINDGEN_EXTRA_CLANG_ARGS exactly as bindgen reads it - see
 # src/clang_target.rs. Already in the tree: bindgen and cc both use it.
 shlex = "2"

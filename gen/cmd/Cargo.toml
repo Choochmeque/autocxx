@@ -38,4 +38,4 @@ assert_cmd = "2"
 autocxx = { path = "../.." }
 autocxx-integration-tests = { path = "../../integration-tests", version = "=0.30.0" }
 cxx = "1.0.161"
-itertools = "0.10.3"
+itertools = "0.15.0"
