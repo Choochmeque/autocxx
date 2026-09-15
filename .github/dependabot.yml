@@ -4,12 +4,8 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
-    groups:
-      actions:
-        patterns:
-          - '*'
 
-  # The root workspace: manifest floors plus the committed Cargo.lock.
+  # The root workspace: every member's manifest plus the committed Cargo.lock.
   - package-ecosystem: 'cargo'
     directory: '/'
     schedule:
@@ -20,25 +16,16 @@ updates:
       # the list would silently stop reaching fixtures - see the comment in
       # integration-tests/Cargo.toml.
       - dependency-name: 'trybuild'
-    groups:
-      minor-and-patch:
-        applies-to: version-updates
-        update-types:
-          - 'minor'
-          - 'patch'
 
-  # Crates excluded from the root workspace. parser/fuzz has its own
-  # committed Cargo.lock; the rest are manifest-only.
+  # Detached from the root workspace, with its own committed Cargo.lock.
+  #
+  # The other detached crates - examples/* and tools/stress-test - are
+  # deliberately absent: without grouping dependabot files one PR per
+  # directory, so a shared floor moving means ten near-identical PRs, and
+  # the engine-coupled floors (miette, cxx) can only move when the engine's
+  # do. All their floors - the handful of engine-independent ones included -
+  # are maintained by hand alongside the workspace's.
   - package-ecosystem: 'cargo'
-    directories:
-      - '/parser/fuzz'
-      - '/tools/stress-test'
-      - '/examples/*'
+    directory: '/parser/fuzz'
     schedule:
       interval: 'monthly'
-    groups:
-      minor-and-patch:
-        applies-to: version-updates
-        update-types:
-          - 'minor'
-          - 'patch'
