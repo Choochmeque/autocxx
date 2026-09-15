@@ -1,4 +1,4 @@
-Published automatically to https://google.github.io/autocxx/ from master branch.
+Published automatically to https://autocxx.dev/ from the main branch.
 
 To build and view locally:
 

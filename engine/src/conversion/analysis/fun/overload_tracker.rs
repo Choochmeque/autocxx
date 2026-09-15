@@ -27,8 +27,8 @@ struct ScopeNames {
 /// global across all functions, whereas ours is local within a given
 /// type.
 /// If bindgen adds a suffix it will be included in 'found_name'
-/// but not 'original_name' which is an annotation added by our autocxx-bindgen
-/// fork.
+/// but not 'original_name', which the patch series adds to the
+/// vendored bindgen.
 ///
 /// A generated suffix must not collide with the name of a real
 /// function elsewhere in the namespace (e.g. overloads of `byteSwap`

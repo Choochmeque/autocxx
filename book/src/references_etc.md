@@ -50,7 +50,7 @@ an unsafety policy, _all_ C++ APIs require `unsafe` so the discussion is moot.
 If you're given a C++ object by pointer, and you want to interact with it,
 you'll need to figure out the guarantees attached to the C++ object - most
 notably its lifetime. To see some of the decision making process involved
-see the [Steam example](https://github.com/google/autocxx/tree/main/examples/steam-mini/src/main.rs).
+see the [Steam example](https://github.com/Choochmeque/autocxx/tree/main/examples/steam-mini/src/main.rs).
 
 ## [`cxx::UniquePtr`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html)s tips
 

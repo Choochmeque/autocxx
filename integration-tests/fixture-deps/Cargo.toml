@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 edition = "2021"
 publish = false
 description = "The dependencies autocxx's test fixtures are built with"
-repository = "https://github.com/google/autocxx"
+repository = "https://github.com/Choochmeque/autocxx"
 build = "build.rs"
 
 # Every dependency here is unused by this crate's own (empty) library and is

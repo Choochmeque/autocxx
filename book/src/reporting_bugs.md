@@ -32,9 +32,10 @@ Once you have a minimal test case:
   this should generate just a few lines of Rust code and you can inspect it
   (or even build it) to see if it seems to be problematic.
 * If the problem is in `bindgen`, report it to `bindgen`.
-* If the problem is in `autocxx`, please report a bug to us. In order of preference:
+* If the problem is in `autocxx`, please report it at
+  <https://github.com/Choochmeque/autocxx/issues>. In order of preference:
   * Raise a pull request adding a new minimized failing integration test to
-    [`integration_test.rs`](https://github.com/google/autocxx/blob/main/integration-tests/tests/integration_test.rs)
+    [`integration_test.rs`](https://github.com/Choochmeque/autocxx/blob/main/integration-tests/tests/integration_test.rs)
   * Simply raise an issue with the minimized code.
 
 If you can't get minimization to work:

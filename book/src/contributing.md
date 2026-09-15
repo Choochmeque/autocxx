@@ -3,17 +3,11 @@
 We'd love to accept your patches and contributions to this project. There are
 just a few small guidelines you need to follow.
 
-## Contributor License Agreement
+## Licensing
 
-Contributions to this project must be accompanied by a Contributor License
-Agreement. You (or your employer) retain the copyright to your contribution;
-this simply gives us permission to use and redistribute your contributions as
-part of the project. Head over to <https://cla.developers.google.com/> to see
-your current agreements on file or to sign a new one.
-
-You generally only need to submit a CLA once, so if you've already submitted one
-(even if it was for a different project), you probably don't need to do it
-again.
+There is no contributor licence agreement. You keep the copyright in what you
+write; opening a pull request offers that work under the terms autocxx's own
+code carries, Apache-2.0 or MIT.
 
 ## Code reviews
 
@@ -22,10 +16,9 @@ use GitHub pull requests for this purpose. Consult
 [GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
 information on using pull requests.
 
-## Community Guidelines
+## Community guidelines
 
-This project follows [Google's Open Source Community
-Guidelines](https://opensource.google/conduct/).
+This project has a [code of conduct](code-of-conduct.md).
 
 ## Directory structure
 
@@ -92,11 +85,11 @@ such as in `index.md` to see how to do this.
 
 ## Maintenance responsibilities
 
-autocxx is currently in maintenance mode. In future, it may undergo further
-feature development, but for now the job is just to keep it stable
-and functional.
+autocxx is under active development: C++ constructs it could not bind get
+bound, bugs get fixed, and the existing bindings are kept working as Rust,
+`bindgen` and `cxx` change underneath them.
 
-Events may occur which nonetheless require changes:
+Work also arrives from outside:
 
 * Changes to Rust
 * Changes to `bindgen`
@@ -143,7 +136,7 @@ To make a new release of autocxx,
   cannot carry a directory containing a `Cargo.toml` and the submodule has two;
   see "Rolling bindgen" below. That directory is left untracked on purpose, so
   the publish runs `--allow-dirty`.
-* On [github releases](https://github.com/google/autocxx/releases),
+* On [github releases](https://github.com/Choochmeque/autocxx/releases),
   choose Draft a new release. Add a tag for `v0.X.Y`. Go through
   the process to automatically create release notes.
 
@@ -257,7 +250,8 @@ Without further ado, they are:
    since others are zero-sized. In `autocxx`, we give all types a size
    so they can be allocated on the stack, and so the problem is worse.
    (This is explained more
-   [here](https://github.com/google/autocxx/blob/main/engine/src/conversion/codegen_rs/non_pod_struct.rs#L41)).
+   in the comment above `generate_opaque_type` in
+   [`non_pod_struct.rs`](https://github.com/Choochmeque/autocxx/blob/main/engine/src/conversion/codegen_rs/non_pod_struct.rs)).
    The intended solution here is to cease to use Rust references to
    represent C++ references - instead using a newtype wrapper called
    `CppRef<T>`. `autocxx` can already work in this mode using
