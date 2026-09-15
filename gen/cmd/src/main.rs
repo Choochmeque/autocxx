@@ -14,7 +14,7 @@ use autocxx_engine::{
     generate_rs_archive, generate_rs_single, get_cxx_header_bytes, parse_file,
     AutocxxgenHeaderNamer, CxxgenHeaderNamer, RebuildDependencyRecorder,
 };
-use clap::{crate_authors, crate_version, Arg, ArgGroup, Command};
+use clap::{crate_authors, crate_version, value_parser, Arg, ArgAction, ArgGroup, Command};
 use depfile::Depfile;
 use indexmap::IndexMap;
 use miette::IntoDiagnostic;
@@ -95,49 +95,49 @@ fn main() -> miette::Result<()> {
             Arg::new("INPUT")
                 .help("Sets the input .rs files to use")
                 .required(true)
-                .multiple_occurrences(true)
+                .num_args(1..)
         )
         .arg(
             Arg::new("outdir")
                 .short('o')
                 .long("outdir")
-                .allow_invalid_utf8(true)
+                .value_parser(value_parser!(PathBuf))
                 .value_name("PATH")
                 .help("output directory path")
-                .takes_value(true)
                 .required(true),
         )
         .arg(
             Arg::new("inc")
                 .short('I')
                 .long("inc")
-                .multiple_occurrences(true)
-                .number_of_values(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .value_name("INCLUDE DIRS")
-                .help("include path")
-                .takes_value(true),
+                .help("include path"),
         )
         .arg(
             Arg::new("cpp-extension")
                 .long("cpp-extension")
                 .value_name("EXTENSION")
                 .default_value("cc")
-                .help("C++ filename extension")
-                .takes_value(true),
+                .help("C++ filename extension"),
         )
         .arg(
             Arg::new("gen-cpp")
                 .long("gen-cpp")
+                .action(ArgAction::SetTrue)
                 .help("whether to generate C++ implementation and header files")
         )
         .arg(
             Arg::new("gen-rs-include")
                 .long("gen-rs-include")
+                .action(ArgAction::SetTrue)
                 .help("whether to generate Rust files for inclusion using autocxx_macro")
         )
         .arg(
             Arg::new("gen-rs-archive")
                 .long("gen-rs-archive")
+                .action(ArgAction::SetTrue)
                 .help("whether to generate an archive of multiple sets of Rust bindings for use by autocxx_macro (suffix will be .rs.json)")
         )
         .group(ArgGroup::new("mode")
@@ -151,79 +151,79 @@ fn main() -> miette::Result<()> {
             Arg::new("generate-exact")
                 .long("generate-exact")
                 .value_name("NUM")
-                .help("assume and ensure there are exactly NUM bridge blocks in the file. Only applies for --gen-cpp or --gen-rs-include")
-                .takes_value(true),
+                .help("assume and ensure there are exactly NUM bridge blocks in the file. Only applies for --gen-cpp or --gen-rs-include"),
         )
         .arg(
             Arg::new("fix-rs-include-name")
                 .long("fix-rs-include-name")
+                .action(ArgAction::SetTrue)
                 .help("Make the name of the .rs file predictable (suffix will be .include.rs). You must set AUTOCXX_RS_FILE during Rust build time to educate autocxx_macro about your choice.")
                 .requires("gen-rs-include")
         )
         .arg(
             Arg::new("auto-allowlist")
                 .long("auto-allowlist")
+                .action(ArgAction::SetTrue)
                 .help("Dynamically construct allowlist from real uses of APIs.")
         )
         .arg(
             Arg::new("suppress-system-headers")
                 .long("suppress-system-headers")
+                .action(ArgAction::SetTrue)
                 .help("Do not refer to any system headers from generated code. May be useful for minimization.")
         )
         .arg(
             Arg::new("cxx-impl-annotations")
                 .long("cxx-impl-annotations")
                 .value_name("ANNOTATION")
-                .help("prefix for symbols to be exported from C++ bindings, e.g. __attribute__ ((visibility (\"default\")))")
-                .takes_value(true),
+                .help("prefix for symbols to be exported from C++ bindings, e.g. __attribute__ ((visibility (\"default\")))"),
         )
         .arg(
             Arg::new("generate-cxx-h")
                 .long("generate-cxx-h")
+                .action(ArgAction::SetTrue)
                 .help("whether to generate cxx.h header file. If you already knew where to find cxx.h, consider using --cxx-h-path")
         )
         .arg(
             Arg::new("cxx-h-path")
                 .long("cxx-h-path")
                 .value_name("PREFIX")
-                .help("prefix for path to cxx.h (from the cxx crate) within #include statements. Must end in /")
-                .takes_value(true),
+                .help("prefix for path to cxx.h (from the cxx crate) within #include statements. Must end in /"),
         )
         .arg(
             Arg::new("cxxgen-h-path")
                 .long("cxxgen-h-path")
                 .value_name("PREFIX")
-                .help("prefix for path to cxxgen.h (which we generate into the output directory) within #include statements. Must end in /")
-                .takes_value(true),
+                .help("prefix for path to cxxgen.h (which we generate into the output directory) within #include statements. Must end in /"),
         )
         .arg(
             Arg::new("depfile")
                 .long("depfile")
                 .value_name("DEPFILE")
-                .help("A .d file to write")
-                .takes_value(true),
+                .help("A .d file to write"),
         )
         .arg(
             Arg::new("clang-args")
                 .last(true)
-                .multiple_occurrences(true)
+                .num_args(1..)
                 .help("Extra arguments to pass to Clang"),
         )
         .get_matches();
 
     env_logger::builder().init();
     let incs = matches
-        .values_of("inc")
+        .get_many::<String>("inc")
         .unwrap_or_default()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let extra_clang_args: Vec<_> = matches
-        .values_of("clang-args")
+        .get_many::<String>("clang-args")
         .unwrap_or_default()
+        .map(String::as_str)
         .collect();
-    let suppress_system_headers = matches.is_present("suppress-system-headers");
+    let suppress_system_headers = matches.get_flag("suppress-system-headers");
     let desired_number = matches
-        .value_of("generate-exact")
+        .get_one::<String>("generate-exact")
         .map(|s| {
             s.parse::<usize>().map_err(|err| {
                 miette::Report::msg(format!("--generate-exact requires a number: {err}"))
@@ -262,7 +262,7 @@ fn main() -> miette::Result<()> {
         cpp_codegen_options,
         ..Default::default()
     };
-    let depfile = match matches.value_of("depfile") {
+    let depfile = match matches.get_one::<String>("depfile") {
         None => None,
         Some(depfile_path) => {
             let depfile_path = PathBuf::from(depfile_path);
@@ -271,10 +271,13 @@ fn main() -> miette::Result<()> {
             )))
         }
     };
-    let auto_allowlist = matches.is_present("auto-allowlist");
+    let auto_allowlist = matches.get_flag("auto-allowlist");
 
     let mut parsed_files = Vec::new();
-    for input in matches.values_of("INPUT").expect("No INPUT was provided") {
+    for input in matches
+        .get_many::<String>("INPUT")
+        .expect("No INPUT was provided")
+    {
         // Parse all the .rs files we're asked to process, first.
         // Spot any fundamental parsing or command line problems before we start
         // to do the complex processing.
@@ -306,7 +309,7 @@ fn main() -> miette::Result<()> {
     }
 
     // Finally start to write the C++ and Rust out.
-    let outdir: PathBuf = matches.value_of_os("outdir").unwrap().into();
+    let outdir: PathBuf = matches.get_one::<PathBuf>("outdir").unwrap().clone();
 
     if !outdir.exists() {
         use miette::WrapErr as _;
@@ -320,8 +323,8 @@ fn main() -> miette::Result<()> {
         outdir: &outdir,
         pending: IndexMap::new(),
     };
-    if matches.is_present("gen-cpp") {
-        let cpp = matches.value_of("cpp-extension").unwrap();
+    if matches.get_flag("gen-cpp") {
+        let cpp = matches.get_one::<String>("cpp-extension").unwrap();
         let name_cc_file = |counter| format!("gen{counter}.{cpp}");
         let mut counter = 0usize;
         for (input, include_cxx) in parsed_files.iter().flat_map(|(input, file)| {
@@ -362,7 +365,7 @@ fn main() -> miette::Result<()> {
         )?;
     }
 
-    if matches.is_present("generate-cxx-h") {
+    if matches.get_flag("generate-cxx-h") {
         writer.add_output(
             "cxx.h".to_string(),
             get_cxx_header_bytes(suppress_system_headers),
@@ -370,8 +373,8 @@ fn main() -> miette::Result<()> {
         )?;
     }
 
-    if matches.is_present("gen-rs-include") {
-        if !matches.is_present("fix-rs-include-name") && desired_number.is_some() {
+    if matches.get_flag("gen-rs-include") {
+        if !matches.get_flag("fix-rs-include-name") && desired_number.is_some() {
             return Err(miette::Report::msg(
                 "gen-rs-include and generate-exact requires fix-rs-include-name.",
             ));
@@ -384,7 +387,7 @@ fn main() -> miette::Result<()> {
         });
         for (input, include_cxx) in rust_buildables {
             let rs_code = generate_rs_single(include_cxx);
-            let fname = if matches.is_present("fix-rs-include-name") {
+            let fname = if matches.get_flag("fix-rs-include-name") {
                 name_include_rs(counter)
             } else {
                 rs_code.filename
@@ -394,7 +397,7 @@ fn main() -> miette::Result<()> {
         }
         writer.add_placeholders(counter, desired_number, name_include_rs)?;
     }
-    if matches.is_present("gen-rs-archive") {
+    if matches.get_flag("gen-rs-archive") {
         let rust_buildables = parsed_files
             .iter()
             .flat_map(|(_, parsed_file)| parsed_file.get_rs_outputs());
@@ -433,7 +436,7 @@ fn get_dependency_recorder(depfile: Rc<RefCell<Depfile>>) -> Box<dyn RebuildDepe
 }
 
 fn get_option_string(option: &str, matches: &clap::ArgMatches) -> Option<String> {
-    let cxx_impl_annotations = matches.value_of(option).map(|s| s.to_string());
+    let cxx_impl_annotations = matches.get_one::<String>(option).cloned();
     cxx_impl_annotations
 }
 

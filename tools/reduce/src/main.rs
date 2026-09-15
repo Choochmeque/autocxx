@@ -17,7 +17,7 @@ use std::{
 
 use autocxx_engine::{get_clang_path, make_clang_args, preprocess};
 use autocxx_parser::IncludeCppConfig;
-use clap::{crate_authors, crate_version, Arg, ArgMatches, Command};
+use clap::{crate_authors, crate_version, Arg, ArgAction, ArgMatches, Command};
 use indexmap::IndexSet;
 use indoc::indoc;
 use itertools::Itertools;
@@ -41,7 +41,7 @@ fn main() {
     let default_gen_cmd = our_dir.join("autocxx-gen").to_str().unwrap().to_string();
     let rust_libs_path1 = our_dir.to_str().unwrap().to_string();
     let rust_libs_path2 = our_dir.join("deps").to_str().unwrap().to_string();
-    let default_rlibs = &[rust_libs_path1.as_str(), rust_libs_path2.as_str()];
+    let default_rlibs = [rust_libs_path1, rust_libs_path2];
     let matches = Command::new("autocxx-reduce")
         .version(crate_version!())
         .author(crate_authors!())
@@ -54,42 +54,38 @@ fn main() {
                                         Arg::new("inc")
                                             .short('I')
                                             .long("inc")
-                                            .multiple_occurrences(true)
-                                            .number_of_values(1)
+                                            .action(ArgAction::Append)
+                                            .num_args(1)
                                             .value_name("INCLUDE DIRS")
-                                            .help("include path")
-                                            .takes_value(true),
+                                            .help("include path"),
                                     )
                                     .arg(
                                         Arg::new("define")
                                             .short('D')
                                             .long("define")
-                                            .multiple_occurrences(true)
-                                            .number_of_values(1)
+                                            .action(ArgAction::Append)
+                                            .num_args(1)
                                             .value_name("DEFINE")
-                                            .help("macro definition")
-                                            .takes_value(true),
+                                            .help("macro definition"),
                                     )
                                     .arg(
                                         Arg::new("header")
                                             .long("header")
-                                            .multiple_occurrences(true)
-                                            .number_of_values(1)
+                                            .action(ArgAction::Append)
+                                            .num_args(1)
                                             .required(true)
                                             .value_name("HEADER")
-                                            .help("header file name")
-                                            .takes_value(true),
+                                            .help("header file name"),
                                     )
 
                                 .arg(
                                     Arg::new("directive")
                                         .short('d')
                                         .long("directive")
-                                        .multiple_occurrences(true)
-                                        .number_of_values(1)
+                                        .action(ArgAction::Append)
+                                        .num_args(1)
                                         .value_name("DIRECTIVE")
-                                        .help("directives to put within include_cpp!")
-                                        .takes_value(true),
+                                        .help("directives to put within include_cpp!"),
                                 )
                             )
                             .subcommand(Command::new("repro")
@@ -100,17 +96,15 @@ fn main() {
                                                     .long("repro")
                                                     .required(true)
                                                     .value_name("REPRODUCTION CASE JSON")
-                                                    .help("reproduction case JSON file name")
-                                                    .takes_value(true),
+                                                    .help("reproduction case JSON file name"),
                                             )
                                             .arg(
                                         Arg::new("header")
                                             .long("header")
-                                            .multiple_occurrences(true)
-                                            .number_of_values(1)
+                                            .action(ArgAction::Append)
+                                            .num_args(1)
                                             .value_name("HEADER")
-                                            .help("header file name; specify to resume a part-completed run")
-                                            .takes_value(true),
+                                            .help("header file name; specify to resume a part-completed run"),
                                     )
                                         )
         .arg(
@@ -119,24 +113,21 @@ fn main() {
                 .long("problem")
                 .required(true)
                 .value_name("PROBLEM")
-                .help("problem string we're looking for... may be in logs, or in generated C++, or generated .rs")
-                .takes_value(true),
+                .help("problem string we're looking for... may be in logs, or in generated C++, or generated .rs"),
         )
         .arg(
             Arg::new("creduce")
                 .long("creduce")
                 .value_name("PATH")
                 .help("creduce binary location")
-                .default_value("creduce")
-                .takes_value(true),
+                .default_value("creduce"),
         )
         .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
                 .value_name("OUTPUT")
-                .help("where to write minimized output")
-                .takes_value(true),
+                .help("where to write minimized output"),
         )
         .arg(
             Arg::new("gen-cmd")
@@ -144,16 +135,14 @@ fn main() {
                 .long("gen-cmd")
                 .value_name("GEN-CMD")
                 .help("where to find autocxx-gen")
-                .default_value(&default_gen_cmd)
-                .takes_value(true),
+                .default_value(default_gen_cmd),
         )
         .arg(
             Arg::new("rustc")
                 .long("rustc")
                 .value_name("RUSTC")
                 .help("where to find rustc")
-                .default_value("rustc")
-                .takes_value(true),
+                .default_value("rustc"),
         )
         .arg(
             Arg::new("rlibs")
@@ -161,52 +150,52 @@ fn main() {
                 .value_name("LIBDIR")
                 .help("where to find rlibs/rmetas for cxx and autocxx")
                 .default_values(default_rlibs)
-                .multiple_values(true)
-                .takes_value(true),
+                .num_args(1..),
         )
         .arg(
             Arg::new("keep")
                 .short('k')
                 .long("keep-dir")
+                .action(ArgAction::SetTrue)
                 .help("keep the temporary directory for debugging purposes"),
         )
         .arg(
             Arg::new("clang-args")
                 .short('c')
                 .long("clang-arg")
-                .multiple_occurrences(true)
+                .action(ArgAction::Append)
                 .value_name("CLANG_ARG")
                 .help("Extra arguments to pass to Clang"),
         )
         .arg(
             Arg::new("creduce-args")
                 .long("creduce-arg")
-                .multiple_occurrences(true)
+                .action(ArgAction::Append)
                 .value_name("CREDUCE_ARG")
                 .help("Extra arguments to pass to Clang"),
         )
         .arg(
             Arg::new("no-precompile")
                 .long("no-precompile")
+                .action(ArgAction::SetTrue)
                 .help("Do not precompile the C++ header before passing to autocxxgen"),
         )
         .arg(
             Arg::new("no-postcompile")
                 .long("no-postcompile")
+                .action(ArgAction::SetTrue)
                 .help("Do not post-compile the C++ generated by autocxxgen"),
         )
         .arg(
             Arg::new("no-rustc")
                 .long("no-rustc")
+                .action(ArgAction::SetTrue)
                 .help("Do not compile the rust generated by autocxxgen"),
         )
         .arg(
             Arg::new("suppress-cxx-inclusions")
                 .long("suppress-cxx-inclusions")
-                .takes_value(true)
-                .possible_value("yes")
-                .possible_value("no")
-                .possible_value("auto")
+                .value_parser(["yes", "no", "auto"])
                 .default_value("auto")
                 .help("Whether the preprocessed header already includes cxx.h. If so, we'll try to suppress the natural behavior of cxx to include duplicate definitions of some of the types within gen0.cc.")
         )
@@ -223,7 +212,7 @@ fn main() {
 }
 
 fn run(matches: ArgMatches) -> Result<(), std::io::Error> {
-    let keep_tmp = matches.is_present("keep");
+    let keep_tmp = matches.get_flag("keep");
     let tmp_dir = TempDir::new()?;
     let r = do_run(matches, &tmp_dir);
     if keep_tmp {
@@ -248,12 +237,20 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
         None => {
             let submatches = matches.subcommand_matches("file").unwrap();
             let incs: Vec<_> = submatches
-                .values_of("inc")
+                .get_many::<String>("inc")
                 .unwrap_or_default()
                 .map(PathBuf::from)
                 .collect();
-            let defs: Vec<_> = submatches.values_of("define").unwrap_or_default().collect();
-            let headers: Vec<_> = submatches.values_of("header").unwrap_or_default().collect();
+            let defs: Vec<_> = submatches
+                .get_many::<String>("define")
+                .unwrap_or_default()
+                .map(String::as_str)
+                .collect();
+            let headers: Vec<_> = submatches
+                .get_many::<String>("header")
+                .unwrap_or_default()
+                .map(String::as_str)
+                .collect();
             assert!(!headers.is_empty());
             let listing_path = tmp_dir.path().join("listing.h");
             create_concatenated_header(&headers, &listing_path)?;
@@ -264,7 +261,7 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
             let directives: Vec<_> = std::iter::once("#include \"concat.h\"\n".to_string())
                 .chain(
                     submatches
-                        .values_of("directive")
+                        .get_many::<String>("directive")
                         .unwrap_or_default()
                         .map(|s| format!("{s}\n")),
                 )
@@ -273,7 +270,7 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
         }
         Some(submatches) => {
             let case: ReproCase = serde_json::from_reader(File::open(PathBuf::from(
-                submatches.value_of("repro").unwrap(),
+                submatches.get_one::<String>("repro").unwrap(),
             ))?)
             .unwrap();
             // Replace the headers in the config
@@ -283,7 +280,7 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
                 &rs_path,
                 &format!("autocxx::include_cpp!({});", config.to_token_stream()),
             )?;
-            if let Some(header) = submatches.value_of("header") {
+            if let Some(header) = submatches.get_one::<String>("header") {
                 std::fs::copy(PathBuf::from(header), &concat_path)?;
             } else {
                 create_file(&concat_path, &case.header)?
@@ -291,7 +288,11 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
         }
     }
 
-    let suppress_cxx_classes = match matches.value_of("suppress-cxx-inclusions").unwrap() {
+    let suppress_cxx_classes = match matches
+        .get_one::<String>("suppress-cxx-inclusions")
+        .unwrap()
+        .as_str()
+    {
         "yes" => true,
         "no" => false,
         "auto" => detect_cxx_h(&concat_path)?,
@@ -305,14 +306,14 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
     };
 
     let extra_clang_args: Vec<_> = matches
-        .values_of("clang-args")
+        .get_many::<String>("clang-args")
         .unwrap_or_default()
-        .map(Cow::Borrowed)
+        .map(|s| Cow::Borrowed(s.as_str()))
         .chain(cxx_suppressions.into_iter().map(Cow::Owned))
         .collect();
     let extra_clang_args: Vec<&str> = extra_clang_args.iter().map(|s| s.as_ref()).collect_vec();
 
-    let gen_cmd = matches.value_of("gen-cmd").unwrap();
+    let gen_cmd = matches.get_one::<String>("gen-cmd").unwrap().as_str();
     if !Path::new(gen_cmd).exists() {
         panic!(
             "autocxx-gen not found in {gen_cmd}. hint: autocxx-reduce --gen-cmd /path/to/autocxx-gen"
@@ -342,18 +343,21 @@ fn do_run(matches: ArgMatches, tmp_dir: &TempDir) -> Result<(), std::io::Error> 
         &matches,
         gen_cmd,
         &interestingness_test,
-        Some(matches.value_of("problem").unwrap()),
+        Some(matches.get_one::<String>("problem").unwrap().as_str()),
         &rs_path,
         &extra_clang_args,
     )?;
     run_creduce(
-        matches.value_of("creduce").unwrap(),
+        matches.get_one::<String>("creduce").unwrap().as_str(),
         &interestingness_test,
         &concat_path,
-        matches.values_of("creduce-args").unwrap_or_default(),
+        matches
+            .get_many::<String>("creduce-args")
+            .unwrap_or_default()
+            .map(String::as_str),
     )?;
     announce_progress("creduce completed");
-    let output_path = matches.value_of("output");
+    let output_path = matches.get_one::<String>("output");
     match output_path {
         None => print_minimized_case(&concat_path)?,
         Some(output_path) => {
@@ -641,11 +645,11 @@ fn create_interestingness_test(
     extra_clang_args: &[&str],
 ) -> Result<(), std::io::Error> {
     announce_progress("Creating interestingness test");
-    let precompile = !matches.is_present("no-precompile");
-    let postcompile = !matches.is_present("no-postcompile");
-    let rustc = !matches.is_present("no-rustc");
+    let precompile = !matches.get_flag("no-precompile");
+    let postcompile = !matches.get_flag("no-postcompile");
+    let rustc = !matches.get_flag("no-rustc");
 
-    let rustc_path = matches.value_of("rustc").unwrap();
+    let rustc_path = matches.get_one::<String>("rustc").unwrap();
 
     let rust_libs_path: Vec<String> = matches
         .get_many::<String>("rlibs")

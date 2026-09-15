@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::Error;
-use clap::{crate_authors, crate_version, Arg, ArgMatches, Command};
+use clap::{crate_authors, crate_version, Arg, ArgAction, ArgMatches, Command};
 use itertools::Itertools;
 use mdbook::{book::Book, preprocess::CmdPreprocessor};
 use proc_macro2::{Span, TokenStream};
@@ -65,12 +65,17 @@ fn main() {
         .arg(
             Arg::new("skip_tests")
                 .short('s')
+                .action(ArgAction::SetTrue)
                 .help("Skip running doctests"),
         )
         .get_matches();
     if let Some(supports_matches) = matches.subcommand_matches("supports") {
         // Only do our preprocessing and testing for the html renderer, not linkcheck.
-        if supports_matches.value_of("renderer") == Some("html") {
+        if supports_matches
+            .get_one::<String>("renderer")
+            .map(String::as_str)
+            == Some("html")
+        {
             process::exit(0);
         } else {
             process::exit(1);
@@ -98,7 +103,7 @@ fn preprocess(args: &ArgMatches) -> Result<(), Error> {
     });
 
     // Now run any test cases we accumulated.
-    if !args.is_present("skip_tests") {
+    if !args.get_flag("skip_tests") {
         let stdout_gag = gag::BufferRedirect::stdout().unwrap();
         let num_tests = test_cases.len();
         let fails: Vec<_> = test_cases
