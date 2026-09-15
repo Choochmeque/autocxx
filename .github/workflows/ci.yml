@@ -65,7 +65,7 @@ jobs:
       RUSTFLAGS: --cfg deny_warnings -Dwarnings -Cdebuginfo=1
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
@@ -121,7 +121,7 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
@@ -152,7 +152,7 @@ jobs:
       matrix:
         libclang: [19, 21, 22, 23]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -204,7 +204,7 @@ jobs:
       # what makes the C4530 above fatal. Looks dead, isn't.
       RUSTFLAGS: --cfg deny_warnings -Dwarnings -Cdebuginfo=0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
@@ -267,7 +267,7 @@ jobs:
     name: Address Sanitizer
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # Nightly for `-Z build-std`, which rebuilds std from rust-src with
@@ -298,7 +298,7 @@ jobs:
     name: Test forcing wrapper generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: Swatinem/rust-cache@v2
@@ -314,7 +314,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -330,7 +330,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/install@cargo-outdated
       - run: cargo outdated -R -w
 
@@ -339,7 +339,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -365,7 +365,7 @@ jobs:
       # No test runs here - see the note on RUSTFLAGS at the top of the file.
       RUSTFLAGS: -Cdebuginfo=0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Only the submodule the patches are against. The other two are the
       # examples' C++ dependencies, and are large.
       - run: git submodule update --init engine/third_party/rust-bindgen
@@ -377,7 +377,7 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
