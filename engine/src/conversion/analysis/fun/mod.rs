@@ -2653,8 +2653,6 @@ impl<'a> FnAnalyzer<'a> {
         };
         let mut cxxbridge_name = make_ident(&cxxbridge_name);
 
-        // Analyze the return type, just as we previously did for the
-        // parameters.
         let mut return_analysis = self
             .convert_return_type(&fun.output, ns, &diagnostic_name, sophistication)
             .unwrap_or_else(|err| {

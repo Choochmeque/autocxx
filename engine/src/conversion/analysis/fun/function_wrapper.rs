@@ -273,8 +273,7 @@ impl WholeCppConversion {
             // on the other side of the call. Answering `MoveOrCopy` would ask
             // for `::autocxx_move_or_copy` instead and cover both, but it
             // would also rewrite the C++ generated for every override which
-            // takes an ordinary copyable POD, so it is not this change's to
-            // make.
+            // takes an ordinary copyable POD.
             Self::None | Self::MoveOrCopy => Self::None,
             Self::FromUniquePtrToValue | Self::FromPtrToValue => Self::FromValueToUniquePtr,
             Self::FromValueToUniquePtr => Self::FromUniquePtrToValue,

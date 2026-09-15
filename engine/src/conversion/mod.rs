@@ -161,7 +161,6 @@ impl<'a> BridgeConverter<'a> {
                     shadowed_types,
                     names_duplicated_by_bindgen,
                 };
-                // Inside parse_results, we now have a list of APIs.
                 // We now enter various analysis phases.
                 // First, convert any typedefs.
                 // "Convert" means replacing bindgen-style type targets

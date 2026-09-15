@@ -61,9 +61,7 @@ fn init_logging() {
     // installed for the process, so all but one call here is going to lose -
     // to another test running in parallel, which asks for the same thing, or
     // to the mdbook preprocessor, which installs its own (at env_logger's
-    // stock `error` default) before it ever calls [`doctest`]. That last was
-    // the arrangement before this function existed too, so nothing changes
-    // for the book's tests.
+    // stock `error` default) before it ever calls [`doctest`].
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER),
     )
@@ -788,10 +786,6 @@ const RS_FIND_KEYS: [&str; 3] = ["AUTOCXX_RS", "AUTOCXX_RS_JSON_ARCHIVE", "AUTOC
 
 /// The environment variables that tell the generated code where to find the
 /// Rust bindings, resolved for a given [`RsFindMode`].
-///
-/// These used to be applied to this process with `set_var` and left there, where
-/// concurrent tests could race over them and stale values could survive into
-/// later tests. They are now values handed to the child that does the build.
 fn rs_find_env(rs_find_mode: RsFindMode, temp_dir: &Path) -> RsFindEnv {
     let one = |key: &str, value: OsString| vec![(key.to_owned(), value)];
     match rs_find_mode {
@@ -1100,10 +1094,10 @@ fn build_in_process(
     // The variables are visible to the rest of the process for as long as this
     // takes, so each is put back afterwards, on the panicking path too. Leaving
     // `CARGO_ENCODED_RUSTFLAGS` behind would be worse than leaving `RUSTFLAGS`
-    // behind, which is what this used to do: it outranks `RUSTFLAGS`, so a later
-    // unrelated build that set its own would silently keep getting these
-    // instead. `CARGO_MANIFEST_DIR` is on the list for the same reason - it is
-    // what the rest of this process is told its own package is.
+    // behind: it outranks `RUSTFLAGS`, so a later unrelated build that set its
+    // own would silently keep getting these instead. `CARGO_MANIFEST_DIR` is on
+    // the list for the same reason - it is what the rest of this process is
+    // told its own package is.
     let restore_env = [
         (
             "CARGO_ENCODED_RUSTFLAGS",
