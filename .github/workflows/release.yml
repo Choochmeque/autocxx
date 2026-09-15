@@ -1,0 +1,202 @@
+# Publishes to crates.io from a version tag, authenticating by OIDC rather than
+# by a stored token: no CARGO_REGISTRY_TOKEN secret exists in this repository.
+# It cannot publish anything until each of the seven crates has a trusted
+# publisher configured on crates.io naming this repository and this filename -
+# see the release process in book/src/contributing.md. Renaming this file breaks
+# every one of those configurations.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# crates.io publishes are permanent and cargo's multi-crate publish is not
+# atomic, so two releases must not interleave, and a cancelled one would leave
+# the set half published.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every workspace member that reaches crates.io, named rather than taken from
+  # `--workspace`. `gate` checks this list against the members which do not say
+  # `publish = false`, so a new published crate cannot be forgotten here.
+  # autocxx-integration-tests is in the set because autocxx-gen dev-depends on
+  # it by exact version, so a release without it cannot resolve. cargo works out
+  # the order from the dependencies.
+  PACKAGES: >-
+    -p autocxx-parser -p autocxx-engine -p autocxx-macro -p autocxx
+    -p autocxx-build -p autocxx-integration-tests -p autocxx-gen
+
+jobs:
+  # Everything that can fail while no publishing credential is reachable: the
+  # tag's provenance, the versions it claims, and a full packaging and build of
+  # all seven crates from their packaged form. It also produces the one
+  # generated input the publish needs, so that what is uploaded is built from
+  # the bytes checked here.
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Showing the tag is on main needs main's history, not the tagged
+          # commit alone.
+          fetch-depth: 0
+      # Stable rather than the runner's default: publishing more than one crate
+      # in one invocation, with the inter-crate dependencies resolved against
+      # the tarballs, is Cargo 1.90 and later.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit which is not on main"
+            exit 1
+          fi
+
+      - name: Versions equal the tag
+        # A version bump is an ordinary pull request; nothing here edits a
+        # manifest. A tag which disagrees with one is a mis-tag, and the half of
+        # the set that did agree would otherwise publish before cargo noticed.
+        run: |
+          want=${GITHUB_REF_NAME#v}
+          # shellcheck disable=SC2086 # PACKAGES is a word list on purpose
+          names=$(printf '%s\n' $PACKAGES | grep -vx -- -p | jq -R . | jq -sc .)
+          metadata=$(cargo metadata --no-deps --format-version 1)
+
+          # `publish = []` is what `publish = false` reads as here. Comparing
+          # against the whole workspace rather than filtering by name first is
+          # what makes a newly published member fail this rather than be
+          # silently left out of the release.
+          declared=$(echo "$metadata" | jq -r '[.packages[] | select(.publish != []) | .name] | sort | join(" ")')
+          listed=$(echo "$names" | jq -r 'sort | join(" ")')
+          if [ "$declared" != "$listed" ]; then
+            echo "::error::the workspace's publishable members are not the set this workflow publishes"
+            echo "  workspace: $declared"
+            echo "  workflow:  $listed"
+            exit 1
+          fi
+
+          bad=$(echo "$metadata" | jq -r --arg want "$want" \
+            '.packages[] | select(.publish != []) | select(.version != $want) | "  \(.name) is \(.version)"')
+          if [ -n "$bad" ]; then
+            echo "::error::$GITHUB_REF_NAME asks for $want, but:"
+            echo "$bad"
+            exit 1
+          fi
+
+      # Only the submodule the patch series is against. The other two are the
+      # examples' C++ dependencies, and are large.
+      - run: git submodule update --init engine/third_party/rust-bindgen
+
+      - name: Flatten bindgen's sources
+        # autocxx-engine cannot be packaged from a checkout: `cargo package`
+        # prunes every directory below the package root holding a `Cargo.toml`,
+        # and the bindgen submodule has two. This copies them to
+        # `engine/third_party/bindgen-src` with those manifests renamed, which
+        # is what the crate's `include` list ships. The variable is set on this
+        # one command: a packaged crate has no submodule to flatten, so a build
+        # script which saw it set there would abort the verification build.
+        run: AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine
+
+      - name: Nothing else is uncommitted
+        # The flattened sources are generated and gitignored, which cargo counts
+        # as dirt, so the publish below runs `--allow-dirty`. That flag would
+        # equally carry a real uncommitted change into a tarball, so the check it
+        # removes is made here against git's own answer. A version bump which
+        # left Cargo.lock behind fails here.
+        run: |
+          dirt=$(git status --porcelain)
+          if [ -n "$dirt" ]; then
+            echo "::error::the working tree carries changes which are not in the tag:"
+            echo "$dirt"
+            exit 1
+          fi
+
+      - name: Dry run
+        # Packages and builds all seven from their packaged form, in cargo's
+        # order, resolving the inter-crate dependencies against the tarballs
+        # rather than against crates.io. Everything the real publish does except
+        # the upload.
+        # shellcheck disable=SC2086
+        run: cargo publish --dry-run --allow-dirty $PACKAGES
+
+      - uses: actions/upload-artifact@v4
+        # Handed to the publish job rather than regenerated there, so that the
+        # bindgen sources uploaded to crates.io are the ones this job just built
+        # and packaged, and so that the job holding the token compiles nothing.
+        with:
+          name: bindgen-src
+          path: engine/third_party/bindgen-src
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: gate
+    runs-on: ubuntu-latest
+    # Gives the maintainer somewhere to hang required reviewers, and lets the
+    # crates.io trusted publisher configurations bind to it. GitHub creates it
+    # on first use if it does not exist, without protection rules.
+    environment: release
+    permissions:
+      contents: read
+      # The OIDC claim the crates.io token is exchanged for. Held by this job
+      # alone, and a job-wide permission covers every step in it - which is why
+      # nothing here builds anything: `--no-verify` packaging runs no build
+      # script, so no dependency's code executes while the claim is reachable.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # The submodule is deliberately not initialised: `include` ships
+      # `third_party/bindgen-src`, and `build.rs` is never run here.
+      - uses: actions/download-artifact@v4
+        with:
+          name: bindgen-src
+          path: engine/third_party/bindgen-src
+
+      - name: Nothing else is uncommitted
+        run: |
+          dirt=$(git status --porcelain)
+          if [ -n "$dirt" ]; then
+            echo "::error::the working tree carries changes which are not in the tag:"
+            echo "$dirt"
+            exit 1
+          fi
+      - name: The flattened sources arrived
+        run: test -f engine/third_party/bindgen-src/lib.rs
+
+      # Last step before the upload, because the token it mints lasts thirty
+      # minutes. Its post step revokes the token when the job ends.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish
+        # `--no-verify` because the gate job built every one of these from its
+        # packaged form, on this commit and these same flattened sources.
+        # Repeating it here would put seven cold builds inside the thirty-minute
+        # token, and a token expiring mid-publish leaves a partially published
+        # release which cannot be undone.
+        # shellcheck disable=SC2086
+        run: cargo publish --allow-dirty --no-verify $PACKAGES
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -11,6 +11,9 @@ name = "autocxx-mdbook-preprocessor"
 version = "0.30.0"
 authors = ["adetaylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
+# Holds no crates.io name, and would have one created for it by a publish
+# which took the workspace rather than a named set.
+publish = false
 
 [dependencies]
 clap = { version = "4", features = ["cargo"] }
