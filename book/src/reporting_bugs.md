@@ -22,8 +22,8 @@ do a combination.
 
 Once you have a minimal test case:
 
-* First see if it triggers a problem when you're using pure `bindgen`.
-  autocxx is very dependent on `bindgen` generating correct code.
+* First see if it triggers a problem when you're using pure `bindgen`,
+  since autocxx is very dependent on `bindgen` generating correct code.
   To do this, fetch the [`bindgen` code](https://github.com/rust-lang/rust-bindgen)
   then run
   `cargo run -- XYZ.hpp --no-layout-tests --enable-cxx-namespaces --allowlist-type ABC-- -std=c++14`

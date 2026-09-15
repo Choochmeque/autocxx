@@ -85,7 +85,7 @@ such as in `index.md` to see how to do this.
 
 ## Maintenance responsibilities
 
-autocxx is under active development: C++ constructs it could not bind get
+The project is under active development: C++ constructs it could not bind get
 bound, bugs get fixed, and the existing bindings are kept working as Rust,
 `bindgen` and `cxx` change underneath them.
 
@@ -99,7 +99,7 @@ Work also arrives from outside:
 Here's what to do. If issues are reported, encourage the reporter
 to raise a PR with a minimized test case by pointing them at the
 ["reporting bugs"](reporting_bugs.md) page. This resolves all concerns about
-reproducibility. autocxx is quite sensitive to the environment in which it
+reproducibility: autocxx is quite sensitive to the environment in which it
 runs, e.g. standard library header files in use, and it's rare to be able
 to reproduce a reporter's bug without them raising a reproducible test case
 like this.
@@ -114,7 +114,7 @@ bug reports, try to investigate them. A fair proportion of the bug reports
 boil down to certain key known areas of technical debt or limitations,
 described below, and you can mark them as a duplicate or similar.
 
-autocxx tends to make a release every month or two, dependent on what changes
+Releases typically happen every month or two, dependent on what changes
 have been made. Ideally, autocxx would release after every single pull
 request but the process takes about 15 minutes (see below) so it's not
 that frequent.
@@ -142,7 +142,7 @@ To make a new release of autocxx,
 
 ## Rolling bindgen
 
-autocxx needs facts about C++ which bindgen does not report: access specifiers, special
+The engine needs facts about C++ which bindgen does not report: access specifiers, special
 members, virtualness, the original C++ spelling behind a flattened nested name, and markers
 telling opaque types and references apart from what they are generated as. It used to get
 them from `autocxx-bindgen`, a fork republished under its own name, which had to be rebased
@@ -209,7 +209,7 @@ can be tackled fairly independently.
 
 Without further ado, they are:
 
-1. **Naming**. autocxx deals with lots of names - the original C++ name,
+1. **Naming**. The codebase deals with lots of names - the original C++ name,
    the name chosen by bindgen, the name we want to give to cxx, etc.
    When one kind of name is used for another purpose, certain invariants
    need to be applied, e.g. avoiding conflicting overloads, or avoiding
