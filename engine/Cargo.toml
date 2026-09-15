@@ -52,7 +52,7 @@ static = ["clang-sys/static"]
 log = "0.4"
 proc-macro2 = "1.0.80"
 quote = "1.0"
-indoc = "1.0"
+indoc = "2.0"
 # bindgen is vendored, not depended on: `build.rs` patches the sources in
 # `third_party/rust-bindgen` into OUT_DIR and `src/lib.rs` mounts them as
 # `crate::vendored_bindgen`. These are the dependencies that copy needs, taken
