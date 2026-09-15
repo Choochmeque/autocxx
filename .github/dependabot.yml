@@ -10,6 +10,9 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    # Twice the default: the workspace has enough direct dependencies that
+    # a cap of 5 left updates queued behind long-lived major-bump PRs.
+    open-pull-requests-limit: 10
     ignore:
       # Pinned to =1.0.81: the integration harness restates this release's
       # flag list through CARGO_ENCODED_RUSTFLAGS, so a release that changed
