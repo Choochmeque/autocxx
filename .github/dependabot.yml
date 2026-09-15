@@ -29,3 +29,10 @@ updates:
     directory: '/parser/fuzz'
     schedule:
       interval: 'monthly'
+    ignore:
+      # The fuzz target leans on the path-dependent autocxx-parser's Parse
+      # and ToTokens impls, so a major here is usable only in step with the
+      # workspace's; the root entry's PR is the signal, and this manifest
+      # and lockfile move by hand with it.
+      - dependency-name: 'syn'
+      - dependency-name: 'quote'
