@@ -194,8 +194,8 @@ normal - if this is a problem, try to minimize the test case manually, or
 do a combination.</p>
 <p>Once you have a minimal test case:</p>
 <ul>
-<li>First see if it triggers a problem when you're using pure <code>bindgen</code>.
-autocxx is very dependent on <code>bindgen</code> generating correct code.
+<li>First see if it triggers a problem when you're using pure <code>bindgen</code>,
+since autocxx is very dependent on <code>bindgen</code> generating correct code.
 To do this, fetch the <a href="https://github.com/rust-lang/rust-bindgen"><code>bindgen</code> code</a>
 then run
 <code>cargo run -- XYZ.hpp --no-layout-tests --enable-cxx-namespaces --allowlist-type ABC-- -std=c++14</code>

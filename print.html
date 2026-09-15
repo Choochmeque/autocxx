@@ -1297,7 +1297,7 @@ copies the view somewhere that outlives the call may be left holding a dangling
 one — whether it is depends on what you passed, and passing a borrowed <code>&amp;[u8]</code>
 promises nothing beyond the call. It is the same bargain as letting C++ keep the
 <code>const char*</code> out of a <code>const std::string&amp;</code> parameter, except that <code>string_view</code>
-is a type people do store. autocxx cannot see that happen, so it falls under what
+is a type people do store. The generator cannot see that happen, so it falls under what
 you vouch for with <code>safety!</code>. If the C++ keeps what it is lent, give it an owned
 <code>std::string</code> parameter instead.</p>
 <p>The bytes are bytes. C++ asks nothing about the encoding of a <code>string_view</code>
@@ -2188,10 +2188,10 @@ fn main() {
 <p>Subclasses implement <code>AsRef</code> to enable casting to superclasses.</p>
 <p>The superclass implements its own <code>_methods</code> trait too, so a function written
 as <code>fn feed(d: &amp;impl Dinosaur_methods)</code> takes a <code>TRex</code>, a <code>Diplodocus</code>, or a
-C++ <code>Dinosaur</code> alike. (autocxx can't do this where one of the superclass's
+C++ <code>Dinosaur</code> alike. (The generator can't do this where one of the superclass's
 virtual methods has no binding of its own - a private or protected one, for
 instance - because there would be nothing for the implementation to call.)</p>
-<p>autocxx has not always written that impl. If you filled the gap with an
+<p>Older releases did not write that impl. If you filled the gap with an
 <code>impl Dinosaur_methods for Dinosaur</code> of your own, delete it when you upgrade:
 Rust rejects the two together with <code>E0119</code>, conflicting implementations.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="other-c-features"><a class="header" href="#other-c-features">Other C++ features</a></h1>
@@ -2512,8 +2512,8 @@ reference:</p>
 <h2 id="soundness"><a class="header" href="#soundness">Soundness</a></h2>
 <p>This crate shares the general approach to safety and soundness pioneered by cxx, but has two important differences:</p>
 <ul>
-<li>cxx requires you to specify your interface in detail, and thus think through all aspects of the language boundary. autocxx doesn't, and may autogenerate footguns.</li>
-<li>cxx may allow multiple conflicting Rust references to exist to 'trivial' data types ("plain old data" or POD in autocxx parlance), but they're rare. autocxx may allow conflicting Rust references to exist even to 'opaque' (non-POD) data, and they're more common. This difference exists because opaque data is zero-sized in cxx, and zero-sized references cannot conflict. (In autocxx, we tell Rust about the size in order that we can allocate such types on the stack.)</li>
+<li>cxx requires you to specify your interface in detail, and thus think through all aspects of the language boundary; autocxx doesn't, and may autogenerate footguns.</li>
+<li>cxx may allow multiple conflicting Rust references to exist to 'trivial' data types ("plain old data" or POD in autocxx parlance), but they're rare; autocxx may allow conflicting Rust references to exist even to 'opaque' (non-POD) data, and they're more common. This difference exists because opaque data is zero-sized in cxx, and zero-sized references cannot conflict. (In autocxx, we tell Rust about the size in order that we can allocate such types on the stack.)</li>
 </ul>
 <p>There are preliminary explorations to avoid this problem by using a C++ reference wrapper type. See <code>examples/reference-wrappers</code>.</p>
 <h2 id="thread-safety"><a class="header" href="#thread-safety">Thread safety</a></h2>
@@ -2648,8 +2648,8 @@ normal - if this is a problem, try to minimize the test case manually, or
 do a combination.</p>
 <p>Once you have a minimal test case:</p>
 <ul>
-<li>First see if it triggers a problem when you're using pure <code>bindgen</code>.
-autocxx is very dependent on <code>bindgen</code> generating correct code.
+<li>First see if it triggers a problem when you're using pure <code>bindgen</code>,
+since autocxx is very dependent on <code>bindgen</code> generating correct code.
 To do this, fetch the <a href="https://github.com/rust-lang/rust-bindgen"><code>bindgen</code> code</a>
 then run
 <code>cargo run -- XYZ.hpp --no-layout-tests --enable-cxx-namespaces --allowlist-type ABC-- -std=c++14</code>
@@ -2752,7 +2752,7 @@ parameterize the test suite to do both.)</p>
 a custom preprocessor is used for this manual. See one of the existing examples
 such as in <code>index.md</code> to see how to do this.</p>
 <h2 id="maintenance-responsibilities"><a class="header" href="#maintenance-responsibilities">Maintenance responsibilities</a></h2>
-<p>autocxx is under active development: C++ constructs it could not bind get
+<p>The project is under active development: C++ constructs it could not bind get
 bound, bugs get fixed, and the existing bindings are kept working as Rust,
 <code>bindgen</code> and <code>cxx</code> change underneath them.</p>
 <p>Work also arrives from outside:</p>
@@ -2765,7 +2765,7 @@ bound, bugs get fixed, and the existing bindings are kept working as Rust,
 <p>Here's what to do. If issues are reported, encourage the reporter
 to raise a PR with a minimized test case by pointing them at the
 <a href="reporting_bugs.html">"reporting bugs"</a> page. This resolves all concerns about
-reproducibility. autocxx is quite sensitive to the environment in which it
+reproducibility: autocxx is quite sensitive to the environment in which it
 runs, e.g. standard library header files in use, and it's rare to be able
 to reproduce a reporter's bug without them raising a reproducible test case
 like this.</p>
@@ -2777,7 +2777,7 @@ because of more aggressive clippy lints).</p>
 bug reports, try to investigate them. A fair proportion of the bug reports
 boil down to certain key known areas of technical debt or limitations,
 described below, and you can mark them as a duplicate or similar.</p>
-<p>autocxx tends to make a release every month or two, dependent on what changes
+<p>Releases typically happen every month or two, dependent on what changes
 have been made. Ideally, autocxx would release after every single pull
 request but the process takes about 15 minutes (see below) so it's not
 that frequent.</p>
@@ -2802,7 +2802,7 @@ choose Draft a new release. Add a tag for <code>v0.X.Y</code>. Go through
 the process to automatically create release notes.</li>
 </ul>
 <h2 id="rolling-bindgen"><a class="header" href="#rolling-bindgen">Rolling bindgen</a></h2>
-<p>autocxx needs facts about C++ which bindgen does not report: access specifiers, special
+<p>The engine needs facts about C++ which bindgen does not report: access specifiers, special
 members, virtualness, the original C++ spelling behind a flattened nested name, and markers
 telling opaque types and references apart from what they are generated as. It used to get
 them from <code>autocxx-bindgen</code>, a fork republished under its own name, which had to be rebased
@@ -2863,7 +2863,7 @@ can be tackled fairly independently.</p>
 <p>Without further ado, they are:</p>
 <ol>
 <li>
-<p><strong>Naming</strong>. autocxx deals with lots of names - the original C++ name,
+<p><strong>Naming</strong>. The codebase deals with lots of names - the original C++ name,
 the name chosen by bindgen, the name we want to give to cxx, etc.
 When one kind of name is used for another purpose, certain invariants
 need to be applied, e.g. avoiding conflicting overloads, or avoiding
