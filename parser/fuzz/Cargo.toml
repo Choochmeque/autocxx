@@ -6,7 +6,7 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 #
-# This crate is intentionally detached from the main workspace: the empty
+# This crate is intentionally detached from the main workspace: the
 # `[workspace]` table below keeps it out of ordinary `cargo build
 # --workspace`/`cargo test --workspace`/CI runs, and `parser/Cargo.toml`'s
 # `exclude = ["fuzz"]` separately keeps it out of the published
@@ -44,3 +44,9 @@ doc = false
 bench = false
 
 [workspace]
+# The root package is a member regardless, so the empty list changes nothing
+# for cargo. It is for dependabot, whose cargo fetcher treats a `[workspace]`
+# without a `members` key as license to follow path dependencies - here `..`,
+# which would put the parser's manifest under this directory's dependabot
+# entry as well as the root workspace's.
+members = []

@@ -1,12 +1,44 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
 version: 2
 updates:
-  # Enable version updates for GitHub Actions
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
       interval: 'weekly'
+    groups:
+      actions:
+        patterns:
+          - '*'
+
+  # The root workspace: manifest floors plus the committed Cargo.lock.
+  - package-ecosystem: 'cargo'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    ignore:
+      # Pinned to =1.0.81: the integration harness restates this release's
+      # flag list through CARGO_ENCODED_RUSTFLAGS, so a release that changed
+      # the list would silently stop reaching fixtures - see the comment in
+      # integration-tests/Cargo.toml.
+      - dependency-name: 'trybuild'
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - 'minor'
+          - 'patch'
+
+  # Crates excluded from the root workspace. parser/fuzz has its own
+  # committed Cargo.lock; the rest are manifest-only.
+  - package-ecosystem: 'cargo'
+    directories:
+      - '/parser/fuzz'
+      - '/tools/stress-test'
+      - '/examples/*'
+    schedule:
+      interval: 'monthly'
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - 'minor'
+          - 'patch'
