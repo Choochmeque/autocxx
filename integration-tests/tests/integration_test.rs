@@ -30410,11 +30410,12 @@ fn test_bitfield_accessors_do_not_transmute_unnecessarily() {
 /// the lint fix rests on this test, and it is here to keep the platform
 /// divergence visible rather than forgotten.
 ///
-/// The fix belongs in autocxx-bindgen, not in the flags autocxx passes: no
-/// clang flag changes the answer, because clang is already right. `-mms-bitfields`
-/// is what makes the mingw triple use Microsoft bitfields (its C++ ABI is
-/// Itanium, so bindgen's existing `ABIKind`, which keys off `msvc` in the
-/// triple, is the wrong predicate to reuse). Two routes, in preference order:
+/// The fix belongs in the bindgen patch series, not in the flags autocxx
+/// passes: no clang flag changes the answer, because clang is already right.
+/// `-mms-bitfields` is what makes the mingw triple use Microsoft bitfields
+/// (its C++ ABI is Itanium, so bindgen's existing `ABIKind`, which keys off
+/// `msvc` in the triple, is the wrong predicate to reuse). Two routes, in
+/// preference order:
 /// make `bitfields_to_allocation_units` group units from the per-field offsets
 /// clang already put in `RawField::offset`, and teach
 /// `codegen/struct_layout.rs::saw_bitfield_unit` to pad up to a unit's offset

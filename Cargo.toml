@@ -82,5 +82,4 @@ exclude = ["examples/s2", "examples/steam-mini", "examples/subclass", "examples/
 #[patch.crates-io]
 #cxx = { path="../cxx" }
 #cxx-gen = { path="../cxx/gen/lib" }
-#autocxx-bindgen = { path="../bindgen/bindgen" }
 #moveit = { path="../moveit" }

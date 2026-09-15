@@ -445,7 +445,7 @@ impl<'a> RsCodeGenerator<'a> {
         // `strip_bindgen_original_suffix` removes one suffix, the name still
         // does not match the method it belongs to, and static methods silently
         // become free functions (`test_conflicting_static_functions` catches
-        // it). Until autocxx-bindgen stops double-applying the rename, allow
+        // it). Until the vendored bindgen stops double-applying the rename, allow
         // the lint here - over bindgen's output alone, not over the code
         // autocxx writes itself.
         self.bindgen_mod.attrs.push(parse_quote! {

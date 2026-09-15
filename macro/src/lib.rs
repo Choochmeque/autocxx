@@ -142,10 +142,10 @@ fn check_extern_rust_function(attr: TokenStream, input: TokenStream) -> Result<(
     }
 }
 
-/// Attribute which should never be encountered in real life.
-/// This is something which features in the Rust source code generated
-/// by autocxx-bindgen and passed to autocxx-engine, which should never
-/// normally be compiled by rustc before it undergoes further processing.
+/// Attribute which should never be encountered in real life: it marks Rust
+/// source which is bindgen output on its way through autocxx-engine, and which
+/// rustc should therefore never compile. Nothing emits it today; bindgen's
+/// C++ facts reach the engine through parse callbacks.
 #[proc_macro_attribute]
 pub fn cpp_semantics(_attr: TokenStream, _input: TokenStream) -> TokenStream {
     refuse(Error::new(
