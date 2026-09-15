@@ -18,7 +18,7 @@ command = "mdbook-mermaid"
 
 [output.html]
 cname = "autocxx.dev"
-git-repository-url = "https://github.com/google/autocxx"
+git-repository-url = "https://github.com/Choochmeque/autocxx"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.linkcheck]
