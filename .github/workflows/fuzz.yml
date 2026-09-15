@@ -66,7 +66,7 @@ jobs:
       # them: the key is unique per run so every run saves a fresh entry, and
       # the prefix restore-key picks up the most recent one.
       - name: Corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: parser/fuzz/work-corpus/parse_include_cpp
           key: fuzz-corpus-parse_include_cpp-${{ github.run_id }}
