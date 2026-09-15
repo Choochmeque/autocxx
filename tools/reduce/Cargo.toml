@@ -19,7 +19,7 @@ autocxx-engine = { version = "=0.30.0", path = "../../engine" }
 autocxx-parser = { version = "=0.30.0", path = "../../parser", features = [
     "reproduction_case",
 ] }
-clap = { version = "3.1.2", features = ["cargo"] }
+clap = { version = "4", features = ["cargo", "string"] }
 tempfile = "3.4"
 indoc = "1.0"
 itertools = "0.10"
