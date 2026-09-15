@@ -673,8 +673,6 @@ fn create_interestingness_test(
     let problem_grep = problem
         .map(|problem| format!("| grep -q \"{problem}\"  >/dev/null  2>&1"))
         .unwrap_or_default();
-    // We formerly had a 'trap' below but it seems to have caused problems
-    // (trap \"if [[ \\$? -eq 139 ]]; then echo Segfault; fi\" CHLD; {} {} 2>&1 && cat autocxx-ffi-default-gen.rs && cat autocxxgen*.h && {} && {} 2>&1 ) {}
     let content = format!(
         indoc! {"
         #!/bin/bash

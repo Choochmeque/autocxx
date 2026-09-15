@@ -51,8 +51,7 @@ mod cxx_version_parity;
 mod output_registry;
 
 // Public because `Error::Bindgen` carries one and a caller matching on it has
-// to be able to name the payload. It used to be nameable as
-// `autocxx_bindgen::BindgenError`; `vendored_bindgen` is private, so autocxx
+// to be able to name the payload. `vendored_bindgen` is private, so autocxx
 // re-exports the one type of bindgen's that reaches its own API.
 pub use crate::vendored_bindgen::BindgenError;
 use autocxx_parser::{ConfigHash, EnumStyle, IncludeCppConfig, UnsafePolicy};
@@ -574,17 +573,10 @@ impl IncludeCppEngine {
             .every_module_raw_line(all_module_raw_line)
             .generate_private_functions(true)
             .dependent_qualified_types(true)
-            // Off, and staying off. Turning them on was tried in fork PR #72
-            // (CI run 34049300179), where every test and examples leg failed,
-            // for two reasons.
+            // Off, and staying off.
             //
-            // bindgen writes each assertion as `const _: () = { ... }`, and an
-            // item named `_` used to crash the error-stub generator. That part
-            // is fixed - see `ErrorContextType::is_declarable` - but it was
-            // never the interesting failure.
-            //
-            // The interesting one is that the assertions are correct and fire
-            // anyway, on the types autocxx hands bindgen a substitute for.
+            // The assertions are correct and fire anyway, on the types autocxx
+            // hands bindgen a substitute for.
             // `known_types` feeds bindgen a `replaces=` prelude in which
             // `std::vector` and `std::string` are one pointer each; bindgen
             // measures the real C++ type - 24 bytes for a `std::vector<int>` -

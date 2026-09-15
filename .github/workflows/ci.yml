@@ -46,11 +46,7 @@ jobs:
           # standard library and ABI while g++ compiled the generated C++
           # against libstdc++. With that fixed (engine/src/clang_target.rs)
           # the leg ran fully green and the job is blocking like its msvc
-          # sibling. The skip list went from twelve entries to two, and the
-          # last two are off for this run as well: both carried a hypothesis
-          # which only a run without the skip could settle, so this leg is
-          # the experiment - and both hypotheses resolved: one fixture bug
-          # fixed, one stale entry. No skip machinery remains anywhere.
+          # sibling.
           - name: Windows (gnu)
             rust: nightly-x86_64-pc-windows-gnu
             os: windows
@@ -101,11 +97,6 @@ jobs:
         if: matrix.os == 'windows'
         run: echo "LIBCLANG_PATH=$((gcm clang).source -replace "clang.exe")" >> $env:GITHUB_ENV
       - name: Exclude failing targets and tests
-        # Reconnaissance: autocxx-reduce and autocxx-gen have been excluded
-        # on Windows since 2022 ("autocxx-gen also fails on Windows" -
-        # never diagnosed). The creduce-needing reduce tests are env-gated
-        # behind AUTOCXX_RUN_REDUCTION_TESTS these days, so both packages'
-        # remaining tests may simply work; running to find out.
         # This deliberately drops -Dwarnings from the job-level RUSTFLAGS for
         # the suite itself, and --cfg deny_warnings with it, leaving cxx.cc's
         # -Werror check to the examples job, while keeping the workflow's
@@ -113,9 +104,6 @@ jobs:
         # integration-tests composes itself (fixture_rustflags), which replace
         # the run's RUSTFLAGS and do not carry -Dwarnings. What is left under
         # these is the workspace's own build and test targets.
-        # It historically also carried the per-leg skip cfgs, the last of
-        # which retired in 2026 when every skip on both Windows lists turned
-        # out fixed or fixable.
         run: |
           echo RUSTFLAGS=$RUSTFLAGS >> $GITHUB_ENV
           echo exclude= >> "$GITHUB_OUTPUT"
@@ -362,10 +350,8 @@ jobs:
   # Two patches can each apply to pristine bindgen and still break each other -
   # both adding the same method, say - with nothing for git to conflict on:
   # they are separate files, and a series is only a series once it is applied
-  # in order. What used to report that first was a build failure minutes into a
-  # long job, on a branch which had merged green. This runs the patch step on
-  # its own, out of engine/build.rs itself, and stops at the first hunk that
-  # does not apply.
+  # in order. This runs the patch step on its own, out of engine/build.rs
+  # itself, and stops at the first hunk that does not apply.
   #
   # It says the patches apply and nothing more. A clash only the compiler can
   # see still surfaces where bindgen is built, in the test jobs. Nor does green
