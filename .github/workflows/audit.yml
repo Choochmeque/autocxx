@@ -32,7 +32,7 @@ jobs:
     steps:
       # cargo-audit works from the lockfile, so neither the submodules nor a
       # build of anything are needed here.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
