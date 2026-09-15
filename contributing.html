@@ -144,7 +144,7 @@
                         <a href="print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/google/autocxx" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/Choochmeque/autocxx" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
 
@@ -181,23 +181,17 @@
                         <h1 id="how-to-contribute"><a class="header" href="#how-to-contribute">How to Contribute</a></h1>
 <p>We'd love to accept your patches and contributions to this project. There are
 just a few small guidelines you need to follow.</p>
-<h2 id="contributor-license-agreement"><a class="header" href="#contributor-license-agreement">Contributor License Agreement</a></h2>
-<p>Contributions to this project must be accompanied by a Contributor License
-Agreement. You (or your employer) retain the copyright to your contribution;
-this simply gives us permission to use and redistribute your contributions as
-part of the project. Head over to <a href="https://cla.developers.google.com/">https://cla.developers.google.com/</a> to see
-your current agreements on file or to sign a new one.</p>
-<p>You generally only need to submit a CLA once, so if you've already submitted one
-(even if it was for a different project), you probably don't need to do it
-again.</p>
+<h2 id="licensing"><a class="header" href="#licensing">Licensing</a></h2>
+<p>There is no contributor licence agreement. You keep the copyright in what you
+write; opening a pull request offers that work under the terms autocxx's own
+code carries, Apache-2.0 or MIT.</p>
 <h2 id="code-reviews"><a class="header" href="#code-reviews">Code reviews</a></h2>
 <p>All submissions, including submissions by project members, require review. We
 use GitHub pull requests for this purpose. Consult
 <a href="https://help.github.com/articles/about-pull-requests/">GitHub Help</a> for more
 information on using pull requests.</p>
-<h2 id="community-guidelines"><a class="header" href="#community-guidelines">Community Guidelines</a></h2>
-<p>This project follows <a href="https://opensource.google/conduct/">Google's Open Source Community
-Guidelines</a>.</p>
+<h2 id="community-guidelines"><a class="header" href="#community-guidelines">Community guidelines</a></h2>
+<p>This project has a <a href="code-of-conduct.html">code of conduct</a>.</p>
 <h2 id="directory-structure"><a class="header" href="#directory-structure">Directory structure</a></h2>
 <ul>
 <li><code>book</code> - you're reading it!</li>
@@ -247,10 +241,10 @@ parameterize the test suite to do both.)</p>
 a custom preprocessor is used for this manual. See one of the existing examples
 such as in <code>index.md</code> to see how to do this.</p>
 <h2 id="maintenance-responsibilities"><a class="header" href="#maintenance-responsibilities">Maintenance responsibilities</a></h2>
-<p>autocxx is currently in maintenance mode. In future, it may undergo further
-feature development, but for now the job is just to keep it stable
-and functional.</p>
-<p>Events may occur which nonetheless require changes:</p>
+<p>autocxx is under active development: C++ constructs it could not bind get
+bound, bugs get fixed, and the existing bindings are kept working as Rust,
+<code>bindgen</code> and <code>cxx</code> change underneath them.</p>
+<p>Work also arrives from outside:</p>
 <ul>
 <li>Changes to Rust</li>
 <li>Changes to <code>bindgen</code></li>
@@ -292,7 +286,7 @@ submodule into <code>engine/third_party/bindgen-src</code>, because <code>cargo 
 cannot carry a directory containing a <code>Cargo.toml</code> and the submodule has two;
 see "Rolling bindgen" below. That directory is left untracked on purpose, so
 the publish runs <code>--allow-dirty</code>.</li>
-<li>On <a href="https://github.com/google/autocxx/releases">github releases</a>,
+<li>On <a href="https://github.com/Choochmeque/autocxx/releases">github releases</a>,
 choose Draft a new release. Add a tag for <code>v0.X.Y</code>. Go through
 the process to automatically create release notes.</li>
 </ul>
@@ -402,7 +396,8 @@ This is UB. In cxx this problem applies only to types marked <code>Trivial</code
 since others are zero-sized. In <code>autocxx</code>, we give all types a size
 so they can be allocated on the stack, and so the problem is worse.
 (This is explained more
-<a href="https://github.com/google/autocxx/blob/main/engine/src/conversion/codegen_rs/non_pod_struct.rs#L41">here</a>).
+in the comment above <code>generate_opaque_type</code> in
+<a href="https://github.com/Choochmeque/autocxx/blob/main/engine/src/conversion/codegen_rs/non_pod_struct.rs"><code>non_pod_struct.rs</code></a>).
 The intended solution here is to cease to use Rust references to
 represent C++ references - instead using a newtype wrapper called
 <code>CppRef&lt;T&gt;</code>. <code>autocxx</code> can already work in this mode using
