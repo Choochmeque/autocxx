@@ -215,10 +215,10 @@ Subclasses implement `AsRef` to enable casting to superclasses.
 
 The superclass implements its own `_methods` trait too, so a function written
 as `fn feed(d: &impl Dinosaur_methods)` takes a `TRex`, a `Diplodocus`, or a
-C++ `Dinosaur` alike. (autocxx can't do this where one of the superclass's
+C++ `Dinosaur` alike. (The generator can't do this where one of the superclass's
 virtual methods has no binding of its own - a private or protected one, for
 instance - because there would be nothing for the implementation to call.)
 
-autocxx has not always written that impl. If you filled the gap with an
+Older releases did not write that impl. If you filled the gap with an
 `impl Dinosaur_methods for Dinosaur` of your own, delete it when you upgrade:
 Rust rejects the two together with `E0119`, conflicting implementations.

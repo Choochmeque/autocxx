@@ -152,7 +152,7 @@ copies the view somewhere that outlives the call may be left holding a dangling
 one — whether it is depends on what you passed, and passing a borrowed `&[u8]`
 promises nothing beyond the call. It is the same bargain as letting C++ keep the
 `const char*` out of a `const std::string&` parameter, except that `string_view`
-is a type people do store. autocxx cannot see that happen, so it falls under what
+is a type people do store. The generator cannot see that happen, so it falls under what
 you vouch for with `safety!`. If the C++ keeps what it is lent, give it an owned
 `std::string` parameter instead.
 
