@@ -2349,10 +2349,13 @@ impl<'a> FnAnalyzer<'a> {
                 suffix += 1;
             }
             let name = ApiName::new(self_ty.get_namespace(), make_ident(ident));
-            let rust_name = self.get_overload_name(
+            // A synthesized note ident, not a C++ declaration: no key, so it
+            // cannot shift a real declaration's ordinal.
+            let (rust_name, _) = self.get_overload_name(
                 self_ty.get_namespace(),
                 self_ty.get_final_item(),
                 stem_name.to_string(),
+                None,
             );
             let ctx = self.error_context_for_method(&self_ty, &rust_name);
             results.push(Api::IgnoredItem {
