@@ -1,0 +1,352 @@
+Subject: Report a class's conversion functions through `ParseCallbacks`
+
+bindgen parses no member from a conversion function. libclang reports one as a
+`CXCursor_ConversionFunction`, and the visitor in `CompInfo::from_ty` lists that
+cursor among the ones it passes over, so such a member reaches no IR, no
+callback and no output. Nothing bindgen generates distinguishes a class which
+declares one from a class which declares none.
+
+That silence costs more than the count of such classes suggests. A class whose
+only reader is a conversion function - a distance wrapper which converts to an
+integer, a handle which converts to a string - is generated as a type with no
+way to read it at all, and nothing in the bindings says why. The reader is left
+to find the C++ declaration and work out that bindgen never saw it.
+
+`--report-conversion-functions` keeps what C++ said about each of them and
+reports it through `denote_conversion_function`: what the function converts to,
+the constness, and the access. Nothing is generated for one with the option on
+either. Whether bindgen *should* generate them is a separate question and a
+larger one - a conversion function's name is `operator` followed by a type, so
+every generated name would have to be invented from that type and kept stable
+as the type's spelling changes - and this is only about not being silent while
+that question is open.
+
+The target type comes from `clang_getCursorResultType` rather than from the
+cursor's spelling. The spelling prints the type through a policy of libclang's
+choosing and puts the word `operator` in front of it, which a consumer would
+then have to take back off; the result type is the same type without either
+step. It is reported qualified - `Type::qualified_spelling` rather than
+`Type::spelling` - because a consumer which reads `string` cannot tell which
+`string` it was handed, and the name is there to be looked up. It is the type as
+the *declaration* spells it, so for a class template `operator T` reports `T`:
+nothing here instantiates anything, and a consumer which cares reads the class's
+template parameters beside it.
+
+A conversion function template is not reported, where a conversion function of
+any other kind now is. libclang gives one a `CXCursor_FunctionTemplate`, which
+`--report-member-function-templates` already passes over for the same reason it
+would be useless here: libclang spells one `operator type-parameter-0-0` rather
+than `operator T`, so the target type - the whole of what distinguishes one
+conversion function from another - does not survive.
+
+The report is made from `CompInfo::codegen`, beside the reports every class
+makes, and is subject to `--generate=methods` as any other member function is.
+There is no per-member blocklist to consult, a conversion function never
+becoming an item for a blocklist to match, and a blocklisted class does not
+reach codegen at all.
+
+Opt-in, because a report made unconditionally would be a new one for every
+consumer which already implements `ParseCallbacks`. With the option off nothing
+changes at all.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -488,6 +488,32 @@
+     ) {
+     }
+ 
++    /// Report one conversion function of a class, which bindgen does not parse
++    /// as a member of that class at all.
++    ///
++    /// `CompInfo::from_ty` lists `CXCursor_ConversionFunction` among the
++    /// cursors it passes over, so a conversion function reaches no IR and no
++    /// other callback, and nothing in the output distinguishes a class which
++    /// declares one from a class which declares none. That matters more than
++    /// the count of such classes suggests: a class whose only reader is a
++    /// conversion function is a class whose generated form can read nothing.
++    ///
++    /// Called for each conversion function of every compound type which reaches
++    /// codegen, in declaration order; a blocklisted class does not reach it. A
++    /// conversion function *template* is not reported here - libclang spells
++    /// one `operator type-parameter-0-0` rather than `operator T`, and
++    /// [`ParseCallbacks::denote_member_function_template`] does not report one
++    /// either.
++    ///
++    /// Nothing is generated for a conversion function with this on. What a
++    /// consumer gets is that the member is there and what it converts to.
++    fn denote_conversion_function(
++        &self,
++        _parent: DiscoveredItemId,
++        _function: ConversionFunctionInfo<'_>,
++    ) {
++    }
++
+     /// Report the exception specification a C++ function was declared with.
+     ///
+     /// Nothing bindgen generates carries one, and no ABI mangles one into a
+@@ -916,6 +942,30 @@
+     pub template_parameters: usize,
+ }
+ 
++/// What [`ParseCallbacks::denote_conversion_function`] reports about one
++/// conversion function.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct ConversionFunctionInfo<'a> {
++    /// What the function converts to, as libclang spells the type it was
++    /// declared to return.
++    ///
++    /// A qualified C++ spelling rather than a Rust one: bindgen makes no item
++    /// for a conversion function, so there is no signature it rendered for this
++    /// to agree with, and the name is there to be looked up. The spelling is
++    /// the declaration's own, which for a class template may name a parameter
++    /// of the class - `operator T` reports `T` - because nothing here
++    /// instantiates anything.
++    pub target_type: &'a str,
++
++    /// Whether C++ declared the function `const`, which says how a caller must
++    /// take the receiver.
++    pub is_const: bool,
++
++    /// The access C++ gave the function.
++    pub visibility: Visibility,
++}
++
+ /// Whether a method is virtual or pure virtual.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Virtualness {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2904,6 +2904,7 @@
+         utils::report_data_members(ctx, id, self);
+         utils::report_using_declarations(ctx, id, self);
+         utils::report_member_function_templates(ctx, id, self);
++        utils::report_conversion_functions(ctx, id, self);
+ 
+         // Don't output classes with template parameters that aren't types, and
+         // also don't output template specializations, neither total or partial.
+@@ -6645,7 +6646,7 @@
+     use super::serialize::CSerialize;
+     use super::{error, CodegenError, CodegenResult, ToRustTyOrOpaque};
+     use crate::callbacks::{
+-        DataMemberInfo, DiscoveredItemId, Explicitness,
++        ConversionFunctionInfo, DataMemberInfo, DiscoveredItemId, Explicitness,
+         MemberFunctionTemplateInfo, UsingDeclarationInfo, Visibility,
+     };
+     use crate::ir::comp::{CompInfo, Field, FieldMethods, Method, MethodKind};
+@@ -7498,6 +7499,37 @@
+         }
+     }
+ 
++    /// Report the conversion functions of a struct or class through
++    /// [`crate::callbacks::ParseCallbacks::denote_conversion_function`].
++    ///
++    /// Subject to `--generate=methods` as a member function is, and reported
++    /// beside the other reports every class makes rather than from the point
++    /// codegen gives up on a class template's members: a conversion function
++    /// belongs to an ordinary class as readily as to a class template and is
++    /// generated for neither. There is no per-member blocklist check to make, a
++    /// conversion function never becoming an item for a blocklist to match.
++    pub(super) fn report_conversion_functions(
++        ctx: &BindgenContext,
++        parent: DiscoveredItemId,
++        comp: &CompInfo,
++    ) {
++        if !ctx.options().codegen_config.methods() {
++            return;
++        }
++        for function in comp.conversion_functions() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_conversion_function(
++                    parent,
++                    ConversionFunctionInfo {
++                        target_type: function.target_type(),
++                        is_const: function.is_const(),
++                        visibility: function.visibility(),
++                    },
++                );
++            });
++        }
++    }
++
+     pub(super) fn callback_with_cpp_name(
+         ctx: &BindgenContext,
+         item: &Item,
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -230,6 +230,54 @@
+     }
+ }
+ 
++/// One conversion function of a class.
++///
++/// bindgen parses no member from a `CXCursor_ConversionFunction`, so this is
++/// the only thing which says such a member exists.
++///
++/// What it converts to is kept and what it is called is not: a conversion
++/// function's C++ name is `operator` followed by the type, so the type is the
++/// whole of the name which distinguishes one from another.
++#[derive(Debug, Clone)]
++pub(crate) struct ConversionFunction {
++    target_type: String,
++    is_const: bool,
++    visibility: Visibility,
++}
++
++impl ConversionFunction {
++    /// Read one off a `CXCursor_ConversionFunction` found among a class's
++    /// children.
++    ///
++    /// The target type comes from `clang_getCursorResultType` rather than from
++    /// the cursor's spelling, which prints the type through a policy of its own
++    /// and has the word `operator` in front of it. Qualified, because the name
++    /// is there to be looked up: `Type::spelling` drops the qualification a
++    /// consumer would need to find `std::string` rather than some `string`.
++    fn from_cursor(cursor: &clang::Cursor) -> Option<Self> {
++        Some(Self {
++            target_type: cursor.ret_type()?.qualified_spelling(),
++            is_const: cursor.method_is_const(),
++            visibility: Visibility::from(cursor.access_specifier()),
++        })
++    }
++
++    /// What the function converts to, as libclang spells it.
++    pub(crate) fn target_type(&self) -> &str {
++        &self.target_type
++    }
++
++    /// Whether C++ declared the function `const`.
++    pub(crate) fn is_const(&self) -> bool {
++        self.is_const
++    }
++
++    /// The access C++ gave the function.
++    pub(crate) fn visibility(&self) -> Visibility {
++        self.visibility
++    }
++}
++
+ /// A struct representing a C++ method, either static, normal, or virtual.
+ #[derive(Debug)]
+ pub(crate) struct Method {
+@@ -1331,6 +1379,11 @@
+     /// parsed from a `CXCursor_FunctionTemplate`.
+     member_function_templates: Vec<MemberFunctionTemplate>,
+ 
++    /// The conversion functions this class declares, which are members of it in
++    /// C++ and are in no other field here: nothing else in this type is parsed
++    /// from a `CXCursor_ConversionFunction`.
++    conversion_functions: Vec<ConversionFunction>,
++
+     /// Whether this type should generate an vtable (TODO: Should be able to
+     /// look at the virtual methods and ditch this field).
+     has_own_virtual_method: bool,
+@@ -1386,6 +1439,7 @@
+             inner_vars: vec![],
+             using_declarations: vec![],
+             member_function_templates: vec![],
++            conversion_functions: vec![],
+             has_own_virtual_method: false,
+             has_destructor: false,
+             has_nonempty_base: false,
+@@ -1577,6 +1631,11 @@
+         &self.member_function_templates
+     }
+ 
++    /// The conversion functions this class declares, in declaration order.
++    pub(crate) fn conversion_functions(&self) -> &[ConversionFunction] {
++        &self.conversion_functions
++    }
++
+     /// Construct a new compound type from a Clang type.
+     pub(crate) fn from_ty(
+         potential_id: ItemId,
+@@ -1927,10 +1986,23 @@
+                         }
+                     }
+                 }
++                CXCursor_ConversionFunction => {
++                    // A conversion function, which was passed over entirely:
++                    // no member is parsed from this cursor. Nothing is
++                    // generated for one with the option on either;
++                    // `--report-conversion-functions` keeps what C++ said about
++                    // it, for a consumer which has to account for a member it
++                    // cannot call.
++                    if ctx.options().report_conversion_functions {
++                        if let Some(function) =
++                            ConversionFunction::from_cursor(&cur)
++                        {
++                            ci.conversion_functions.push(function);
++                        }
++                    }
++                }
+                 // Intentionally not handled
+-                CXCursor_CXXAccessSpecifier |
+-                CXCursor_CXXFinalAttr |
+-                CXCursor_ConversionFunction => {}
++                CXCursor_CXXAccessSpecifier | CXCursor_CXXFinalAttr => {}
+                 _ => {
+                     warn!(
+                         "unhandled comp member `{}` (kind {:?}) in `{}` ({})",
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -475,6 +475,9 @@
+     /// Always output explicit padding fields.
+     #[arg(long)]
+     explicit_padding: bool,
++    /// Report the conversion functions of a class through `ParseCallbacks`.
++    #[arg(long)]
++    report_conversion_functions: bool,
+     /// Always be specific about the 'receiver' of a virtual function.
+     #[arg(long)]
+     use_specific_virtual_function_receiver: bool,
+@@ -707,6 +710,7 @@
+         explicit_padding,
+         report_template_member_functions,
+         report_member_function_templates,
++        report_conversion_functions,
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
+         use_distinct_wchar_t,
+@@ -1026,6 +1030,7 @@
+             explicit_padding,
+             report_template_member_functions,
+             report_member_function_templates,
++            report_conversion_functions,
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
+             use_distinct_wchar_t,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -255,6 +255,31 @@
+         as_args: "--report-member-function-templates",
+     },
+ 
++    /// Report the conversion functions of a class through
++    /// [`ParseCallbacks::denote_conversion_function`], which bindgen otherwise
++    /// passes over: `CompInfo::from_ty` lists `CXCursor_ConversionFunction`
++    /// among the cursors it does not handle, so nothing in the output says such
++    /// a member exists.
++    ///
++    /// Nothing is generated for them with the option on either. What a consumer
++    /// gets is that the member is there and what it converts to, which for a
++    /// class whose only reader is a conversion function is the difference
++    /// between a type it can explain and one it cannot.
++    ///
++    /// [`ParseCallbacks::denote_conversion_function`]:
++    ///     callbacks::ParseCallbacks::denote_conversion_function
++    report_conversion_functions: bool {
++        methods: {
++            /// If this is true, report the conversion functions of a class
++            /// through `ParseCallbacks` rather than passing over them.
++            pub fn report_conversion_functions(mut self, doit: bool) -> Builder {
++                self.options.report_conversion_functions = doit;
++                self
++            }
++        },
++        as_args: "--report-conversion-functions",
++    },
++
+     /// Use a newtype wrapper to denote types which are `const` in their own
+     /// right, as opposed to pointing at something `const`. Rust has no
+     /// spelling for that - `const int` and `int` are both `c_int`, and
