@@ -9,7 +9,7 @@
 [package]
 name = "autocxx-mdbook-preprocessor"
 version = "0.30.0"
-authors = ["adetaylor <adetaylor@chromium.org>"]
+authors = ["adetaylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
 
 [dependencies]

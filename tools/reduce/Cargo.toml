@@ -9,7 +9,7 @@
 [package]
 name = "autocxx-reduce"
 version = "0.30.0"
-authors = ["adetaylor <adetaylor@chromium.org>"]
+authors = ["adetaylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
