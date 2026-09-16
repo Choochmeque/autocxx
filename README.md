@@ -76,7 +76,7 @@ Then an `include_cpp!` block in your Rust source, as in the example above; the h
 
 ## Contributing
 
-`cargo test --workspace` runs the main suite; the [contributing chapter](https://autocxx.dev/contributing.html) of the manual describes the code layout and how the engine's phases fit together. For bug reports, `tools/reduce` can shrink a failing preprocessed header to a minimal repro.
+Clone with `--recursive`: the engine builds a patched copy of `bindgen` from a submodule, so a flat checkout will not compile. `cargo test --workspace` then runs the main suite; the [contributing chapter](https://autocxx.dev/contributing.html) of the manual describes the code layout and how the engine's phases fit together. For bug reports, `tools/reduce` can shrink a failing preprocessed header to a minimal repro.
 
 <br>
 
