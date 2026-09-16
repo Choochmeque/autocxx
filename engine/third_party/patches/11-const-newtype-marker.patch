@@ -79,6 +79,16 @@ fixes that one, the same way the pointer arm here already does.
      /// Whether we should distinguish between C++'s `char16_t` and `u16`.
 --- a/options/cli.rs
 +++ b/options/cli.rs
+@@ -487,6 +487,9 @@
+     /// Wrap C++ references in a newtype marker
+     #[arg(long)]
+     use_reference_newtype_wrapper: bool,
++    /// Wrap const-qualified types in a newtype marker
++    #[arg(long)]
++    use_const_newtype_wrapper: bool,
+     /// Enables generation of vtable functions.
+     #[arg(long)]
+     vtable_generation: bool,
 @@ -695,6 +695,7 @@
          represent_cxx_operators,
          use_opaque_newtype_wrapper,

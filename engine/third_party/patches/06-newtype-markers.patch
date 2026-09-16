@@ -167,6 +167,19 @@ Subject: Mark opaque types and C++ references with newtype wrappers
              TypeKind::BlockPointer(inner) |
 --- a/options/cli.rs
 +++ b/options/cli.rs
+@@ -481,6 +481,12 @@
+     /// Output C++ overloaded operators
+     #[arg(long)]
+     represent_cxx_operators: bool,
++    /// Wrap opaque types in a newtype marker
++    #[arg(long)]
++    use_opaque_newtype_wrapper: bool,
++    /// Wrap C++ references in a newtype marker
++    #[arg(long)]
++    use_reference_newtype_wrapper: bool,
+     /// Enables generation of vtable functions.
+     #[arg(long)]
+     vtable_generation: bool,
 @@ -689,6 +689,8 @@
          use_specific_virtual_function_receiver,
          use_distinct_char16_t,
