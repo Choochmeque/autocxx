@@ -12879,8 +12879,12 @@ fn test_double_underscores_ignored() {
     run_test_ex("", hdr, rs, quote! { generate_all!() }, None, None, None);
 }
 
+/// A chain of aliases which passes through names cxx cannot spell, and ends
+/// at a builtin. cxx never has to name an alias - the bridge names what the
+/// chain resolves to - so the reserved link is resolved through rather than
+/// refused, and the member taking the alias binds.
 #[test]
-fn test_double_underscore_typedef_ignored() {
+fn test_double_underscore_typedef_resolved_through() {
     let hdr = indoc! {"
     #include <cstdint>
     typedef int __fx_int32_t;
@@ -12898,8 +12902,252 @@ fn test_double_underscore_typedef_ignored() {
     let rs = quote! {
         let b = ffi::B::new().within_unique_ptr();
         assert_eq!(b.get_a(), 2);
+        assert_eq!(b.take_foo(autocxx::c_int(1)), 3);
     };
     run_test("", hdr, rs, &["B"], &[]);
+}
+
+/// As above for a free function and for a method taking and returning the
+/// alias, the chain ending at `long` so that the alias reaches Rust as the
+/// `c_long` newtype - what an unaliased `long` gives. This is the shape of
+/// macOS's `time_t`, which is `__darwin_time_t`, which is `long`.
+#[test]
+fn test_reserved_name_in_typedef_chain_in_signature() {
+    let hdr = indoc! {"
+    typedef long __fake_reserved_t;
+    typedef __fake_reserved_t my_time_t;
+    inline my_time_t double_it(my_time_t t) { return t * 2; }
+    struct Holder {
+        Holder() : t(7) {}
+        my_time_t get() const { return t; }
+        void set(my_time_t v) { t = v; }
+        my_time_t t;
+    };
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::double_it(autocxx::c_long(21)), autocxx::c_long(42));
+        let mut h = ffi::Holder::new().within_unique_ptr();
+        assert_eq!(h.get(), autocxx::c_long(7));
+        h.pin_mut().set(autocxx::c_long(9));
+        assert_eq!(h.get(), autocxx::c_long(9));
+    };
+    run_test("", hdr, rs, &["double_it", "Holder"], &[]);
+}
+
+/// The reserved name written straight into a signature, rather than reached
+/// through a further alias. Same answer: the bridge names the `long`, so
+/// there is nothing for the rule to protect.
+#[test]
+fn test_reserved_name_typedef_used_directly_in_signature() {
+    let hdr = indoc! {"
+    typedef long __fake_reserved_t;
+    inline __fake_reserved_t double_it(__fake_reserved_t t) { return t * 2; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::double_it(autocxx::c_long(21)), autocxx::c_long(42));
+    };
+    run_test("", hdr, rs, &["double_it"], &[]);
+}
+
+/// The same alias as a POD struct field, which reaches Rust as the integer
+/// bindgen wrote - exactly as an unaliased `long` field does. Nothing below
+/// names that integer, whose width varies by platform.
+#[test]
+fn test_reserved_name_in_typedef_chain_in_pod_field() {
+    let hdr = indoc! {"
+    typedef long __fake_reserved_t;
+    typedef __fake_reserved_t my_time_t;
+    struct Stamped {
+        my_time_t t;
+    };
+    "};
+    let rs = quote! {
+        let s = ffi::Stamped { t: 5 };
+        assert_eq!(s.t, 5);
+    };
+    run_test("", hdr, rs, &[], &["Stamped"]);
+}
+
+/// The refusal stands where resolving through the reserved link gains
+/// nothing, the chain ending at a type cxx cannot name either.
+#[test]
+fn test_reserved_name_typedef_to_unnameable_type_still_refused() {
+    let hdr = indoc! {"
+    struct __Hidden { int a; };
+    typedef __Hidden my_hidden_t;
+    inline int read_hidden(const my_hidden_t& h) { return h.a; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("read_hidden")
+        },
+        None,
+        &[
+            "read_hidden",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
+    );
+}
+
+/// As above where the reserved names are aliases rather than the type the
+/// chain ends at: every link is skipped and the refusal still arrives.
+#[test]
+fn test_reserved_name_typedef_chain_to_unnameable_type_still_refused() {
+    let hdr = indoc! {"
+    struct __Hidden { int a; };
+    typedef __Hidden __mid_t;
+    typedef __mid_t outer_t;
+    inline int read_outer(const outer_t& h) { return h.a; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("read_outer")
+        },
+        None,
+        &[
+            "read_outer",
+            "did not result in any usable code being generated",
+            "Names containing __ are reserved by C++",
+        ],
+    );
+}
+
+/// A `block!` written against a link of the chain is the last word on it:
+/// the walk refuses through that link rather than resolving past it.
+#[test]
+fn test_reserved_name_typedef_chain_blocked_link_refused() {
+    let hdr = indoc! {"
+    typedef long __fx_blocked_t;
+    typedef __fx_blocked_t __fx_mid_t;
+    typedef __fx_mid_t fx_public_t;
+    inline fx_public_t fx_get_pub() { return 42; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_get_pub")
+            block!("__fx_blocked_t")
+        },
+        None,
+        &[
+            "fx_get_pub",
+            "did not result in any usable code being generated",
+            "type marked as blocked",
+        ],
+    );
+}
+
+/// The same refusal when the blocked link is entered directly, with no outer
+/// alias over it: same directive, same answer.
+#[test]
+fn test_reserved_name_typedef_chain_blocked_link_refused_direct() {
+    let hdr = indoc! {"
+    typedef long __fx_blocked_t;
+    typedef __fx_blocked_t __fx_mid_t;
+    inline __fx_mid_t fx_get_mid() { return 42; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_get_mid")
+            block!("__fx_blocked_t")
+        },
+        None,
+        &[
+            "fx_get_mid",
+            "did not result in any usable code being generated",
+            "type marked as blocked",
+        ],
+    );
+}
+
+/// A `block!` on the reserved name itself, written straight into the
+/// signature: the block reason wins over the ident rules, so the caller
+/// hears about the directive and not about underscores.
+#[test]
+fn test_reserved_name_typedef_blocked_itself_refused() {
+    let hdr = indoc! {"
+    typedef long __fx_blocked_t;
+    inline __fx_blocked_t fx_get_b() { return 42; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("fx_get_b")
+            block!("__fx_blocked_t")
+        },
+        None,
+        &[
+            "fx_get_b",
+            "did not result in any usable code being generated",
+            "type marked as blocked",
+        ],
+    );
+}
+
+/// A reserved link whose target is no bare path but a marker: `typedef const
+/// int __ci` renders as `__bindgen_marker_Const<c_int>`, and the walk hands
+/// that whole type to conversion, which unwraps the marker as it would have
+/// for the typedef itself.
+#[test]
+fn test_reserved_name_typedef_to_const_int() {
+    let hdr = indoc! {"
+    typedef const int __fx_ci;
+    typedef __fx_ci fx_ci_t;
+    inline int fx_take_ci(fx_ci_t v) { return v + 1; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::fx_take_ci(autocxx::c_int(4)), autocxx::c_int(5));
+    };
+    run_test("", hdr, rs, &["fx_take_ci"], &[]);
+}
+
+/// As above where the target is not a path at all: a pointer, which bindgen
+/// writes as `*mut` with no marker around it.
+#[test]
+fn test_reserved_name_typedef_to_pointer() {
+    let hdr = indoc! {"
+    #include <cstdint>
+    typedef int32_t* __fx_ip;
+    typedef __fx_ip fx_ip_t;
+    inline int32_t fx_deref(fx_ip_t p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v: i32 = 7;
+        unsafe {
+            assert_eq!(ffi::fx_deref(&mut v as *mut i32), 7);
+        }
+    };
+    run_test("", hdr, rs, &["fx_deref"], &[]);
+}
+
+/// The real case. Every platform reaches `time_t` through a reserved name -
+/// `__darwin_time_t` on macOS, `__time_t` on glibc, `__time64_t` on MSVC -
+/// and they end at different integers, so nothing below names one.
+#[test]
+fn test_time_t_in_signature() {
+    let hdr = indoc! {"
+    #include <ctime>
+    inline time_t zero_time() { return 0; }
+    inline bool time_is_zero(time_t t) { return t == 0; }
+    "};
+    let rs = quote! {
+        assert!(ffi::time_is_zero(ffi::zero_time()));
+    };
+    run_test("", hdr, rs, &["zero_time", "time_is_zero"], &[]);
 }
 
 #[test]
