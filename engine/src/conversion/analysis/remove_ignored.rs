@@ -115,7 +115,7 @@ pub(crate) fn filter_apis_by_ignored_dependents(mut apis: ApiVec<FnPhase>) -> Ap
 
 fn create_ignore_item(api: Api<FnPhase>, err: ConvertErrorFromCpp) -> Api<FnPhase> {
     let id = api.name().get_final_ident();
-    log::info!("Marking as ignored: {} because {}", id.to_string(), err);
+    log::info!("Marking as ignored: {} because {}", id, err);
     Api::IgnoredItem {
         name: api.name_info().clone(),
         err,
