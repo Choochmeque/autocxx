@@ -1,0 +1,85 @@
+Subject: Keep the `const` an elaborated type carries
+
+A `const` referent written with a qualified name loses the qualifier:
+`void f(const std::int32_t&)` comes out `*mut c_int`, a mutable pointer to
+something C++ will not let anyone write to, while the `const int&` beside it
+comes out `*const c_int` as it should. Anything which takes the address of
+such a function - a member pointer, a function pointer - then names a
+signature the function does not have, so the loss is not cosmetic.
+
+clang wraps a qualified name in `CXType_Elaborated`, and `Type::from_clang_ty`
+deals with one by recursing on `clang_Type_getNamedType`. That call answers
+with the type the name denotes and none of the cv-qualifiers the elaborated
+node carries, so the recursion sees a bare `int32_t`. Every reader of the
+qualifier sits downstream of that point - the tail of `from_clang_ty` takes
+`is_const` from whichever type the recursion ended on, and `TryToRustTy`
+renders a pointer or a reference `*const` or `*mut` from the pointee item's
+flag - so the `const` is gone for good. The same alias named without its
+namespace is not elaborated at all, which is why only one of the two spellings
+was wrong.
+
+Put the qualifier back on what the recursion produced. A newly parsed type is
+this use's own node and can carry it directly. A type which resolved to an
+existing item cannot: that item is shared with every other use of the name,
+most of them not `const`, so the qualifier goes on a `ResolvedTypeRef` wrapper
+instead - which is what `build_const_wrapper` is for, and what clang's own
+qualified nodes look like.
+
+`volatile` rides on the same node. The wrapper path already carries it:
+`build_wrapper` copies the qualifier off the type it is handed, so a
+`const volatile` referent which resolved to an existing item keeps both. The
+newly-parsed path restores only `const`, and a `volatile` referent without
+`const` returns before any of this runs - restoring that qualifier in its own
+right is a decision for whoever needs it, not for a patch about `const`.
+
+--- a/ir/ty.rs
++++ b/ir/ty.rs
+@@ -1451,13 +1451,45 @@
+                     );
+                 }
+                 CXType_Elaborated => {
+-                    return Self::from_clang_ty(
++                    // `clang_Type_getNamedType` answers with the type the name
++                    // denotes and none of the cv-qualifiers the elaborated node
++                    // carries: `const std::int32_t` names a plain `int32_t`. The
++                    // tail of this function reads the qualifier off whichever
++                    // type the recursion ended on, so recursing alone drops it,
++                    // and a `const` pointee then reaches codegen as `*mut T`.
++                    let named = ty.named();
++                    let result = Self::from_clang_ty(
+                         potential_id,
+-                        &ty.named(),
++                        &named,
+                         location,
+                         parent_id,
+                         ctx,
+-                    );
++                    )?;
++                    if !ty.is_const() || named.is_const() {
++                        return Ok(result);
++                    }
++                    return Ok(match result {
++                        ParseResult::New(mut inner, decl) => {
++                            inner.is_const = true;
++                            ParseResult::New(inner, decl)
++                        }
++                        // The name resolved to an item every other use of it
++                        // shares, so the qualifier cannot be written onto that
++                        // item; it goes on a wrapper, which is what wrapping
++                        // exists for here.
++                        ParseResult::AlreadyResolved(id) => {
++                            let with_id = ctx.next_item_id();
++                            ParseResult::AlreadyResolved(
++                                ctx.build_const_wrapper(
++                                    with_id,
++                                    id.as_type_id_unchecked(),
++                                    parent_id,
++                                    ty,
++                                )
++                                .into(),
++                            )
++                        }
++                    });
+                 }
+                 CXType_ObjCId => TypeKind::ObjCId,
+                 CXType_ObjCSel => TypeKind::ObjCSel,
