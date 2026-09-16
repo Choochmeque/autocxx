@@ -1204,11 +1204,27 @@ impl<'a> TypeConverter<'a> {
         if is_va_list(&original_tn) {
             return Err(ConvertErrorFromCpp::UnsupportedVaList);
         }
-        original_tn
-            .validate_ok_for_cxx()
-            .map_err(ConvertErrorFromCpp::InvalidIdent)?;
+        // Ahead of the ident rules too, so that a `block!` is obeyed whatever
+        // the name it was written against looks like: the rules below resolve
+        // through an unnameable alias, and a block on one has to be the last
+        // word on it.
         if self.config.is_on_blocklist(&original_tn.to_cpp_name()) {
             return Err(ConvertErrorFromCpp::Blocked(original_tn));
+        }
+        if let Err(e) = original_tn.validate_ok_for_cxx() {
+            // cxx never has to name an alias - the bridge names what the alias
+            // resolves to - so a name it cannot spell is only fatal where the
+            // chain ends at one of these as well. Every platform reaches
+            // `time_t` through such a link (`__darwin_time_t` on macOS,
+            // `__time_t` on glibc, `__time64_t` on MSVC), each of them an
+            // integer, so refusing on the name alone cost every method taking
+            // or returning one, over a name no header says.
+            let target = self
+                .resolve_through_unnameable_alias(&original_tn)?
+                .ok_or(ConvertErrorFromCpp::InvalidIdent(e))?;
+            // The alias's own namespace, not the one this type was written in:
+            // the target is whatever bindgen wrote beside the alias.
+            return self.convert_type(target, original_tn.get_namespace(), ctx);
         }
         let mut deps = HashSet::new();
 
@@ -1609,6 +1625,61 @@ impl<'a> TypeConverter<'a> {
                 _ => return Ok(r),
             }
         }
+    }
+
+    /// What an alias whose own name cxx cannot spell resolves to, or
+    /// `Ok(None)` if the name is not an alias or the chain ends at another
+    /// such name.
+    ///
+    /// Walks [`Self::alias_targets`] rather than [`Self::typedefs`], because
+    /// the analysis which fills the latter is exactly the one this is needed
+    /// during: a typedef whose target is one of these names is converted
+    /// before any typedef has been.
+    ///
+    /// The walk stops at the first target which is not a bare path to another
+    /// unspellable name and hands that whole type back for conversion, so that
+    /// a chain ending at a pointer, an array or a `const` marker is converted
+    /// as what it is. A name which repeats ends the walk with `Ok(None)`: an
+    /// alias which names itself is no way out of the refusal.
+    ///
+    /// A `block!` against any link is the last word on it: the user said the
+    /// name is off limits, and resolving past it would honour the directive on
+    /// a direct use while routing around it through an outer alias. The links
+    /// the walk would skip are checked here; the target it stops at needs no
+    /// check, because it is handed back to [`Self::convert_type`], which
+    /// starts with one. An alias a previous phase already turned down - the
+    /// block, again, by the phase which analysed it as a typedef - is no
+    /// longer in [`Self::alias_targets`], so the reason it was turned down is
+    /// read from [`Self::ignored_types`] instead: whatever the alias itself
+    /// got, a use of it gets.
+    fn resolve_through_unnameable_alias(
+        &self,
+        tn: &QualifiedName,
+    ) -> Result<Option<Type>, ConvertErrorFromCpp> {
+        let mut seen = HashSet::new();
+        let mut tn = tn.clone();
+        while seen.insert(tn.clone()) {
+            let Some(target) = self.alias_targets.get(&tn) else {
+                return match self.ignored_types.get(&tn) {
+                    Some(reason) => Err(reason.clone()),
+                    None => Ok(None),
+                };
+            };
+            match target {
+                Type::Path(target_tp) => {
+                    let target_tn = QualifiedName::from_type_path(target_tp);
+                    if target_tn.validate_ok_for_cxx().is_ok() {
+                        return Ok(Some(target.clone()));
+                    }
+                    if self.config.is_on_blocklist(&target_tn.to_cpp_name()) {
+                        return Err(ConvertErrorFromCpp::Blocked(target_tn));
+                    }
+                    tn = target_tn;
+                }
+                _ => return Ok(Some(target.clone())),
+            }
+        }
+        Ok(None)
     }
 
     /// What to make of a C function pointer, which bindgen writes exactly as
