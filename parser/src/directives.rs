@@ -35,6 +35,11 @@ pub(crate) struct DirectivesMap {
     pub(crate) need_exclamation: HashMap<String, Box<dyn Directive>>,
 }
 
+/// The name of the `block_functions!` directive. Written down in two places -
+/// the parse table below and the confirmation table in [`crate::config`] - so
+/// it is a constant rather than two literals which could drift apart.
+pub(crate) const BLOCK_FUNCTIONS: &str = "block_functions";
+
 static DIRECTIVES: OnceCell<DirectivesMap> = OnceCell::new();
 
 pub(crate) fn get_directives() -> &'static DirectivesMap {
@@ -73,6 +78,13 @@ pub(crate) fn get_directives() -> &'static DirectivesMap {
             Box::new(StringList(
                 |config| &mut config.constructor_blocklist,
                 |config| &config.constructor_blocklist,
+            )),
+        );
+        need_exclamation.insert(
+            BLOCK_FUNCTIONS.into(),
+            Box::new(StringList(
+                |config| &mut config.function_blocklist,
+                |config| &config.function_blocklist,
             )),
         );
         need_exclamation.insert(

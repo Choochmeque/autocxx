@@ -55,6 +55,55 @@ C++ functions to unpack the opaque type into something useful:
 const Ham& get_filling(const Sandwich<Ham>& ham_sandwich);
 ```
 
+### Withholding one function
+
+Sometimes the trouble is a single method of an otherwise useful class:
+`autocxx` generates something for it which won't compile. The only way out used
+to be taking the whole class out of your `generate!` directives, because
+[`block!`](https://docs.rs/autocxx/latest/autocxx/macro.block.html) names a type
+and there was nothing smaller to name.
+
+[`block_functions!`](https://docs.rs/autocxx/latest/autocxx/macro.block_functions.html)
+names that one function instead. The rest of the class binds as usual:
+
+```rust,ignore
+include_cpp! {
+    #include "my_header.h"
+    safety!(unsafe_ffi)
+    generate!("ns::Engine")
+    block_functions!("ns::Engine::set_mode")
+}
+```
+
+Name the function as C++ names it: a member function with the class it belongs
+to in front of it, a free function without a class, with its namespaces, as
+`generate!` names one. The namespaces may be left off, which costs what it
+costs in `throws!` - a name written short claims every function answering to
+it, in every class and every namespace. The class may not be left off:
+`block_functions!("ns::set_mode")` names a free function in `ns`, never a
+method of some class in `ns`.
+
+The whole overload set of that name goes. C++ picks between overloads by their
+arguments, so a directive naming one name has no way to say which of them it
+meant.
+
+In place of each binding you get the documentation stub every discarded binding
+leaves, saying the function was blocked - nothing disappears silently. A blocked
+member of a base class is not imported into the classes which derive from it.
+Nor does a Rust subclass get an override for a blocked virtual method - so
+blocking a *pure* virtual leaves that subclass's C++ peer abstract, which the
+C++ compiler will not accept.
+
+Constructors and the destructor cannot be named this way, and no directive
+withholds an explicitly declared one. What there is instead is narrower:
+[`block_constructors!`](https://docs.rs/autocxx/latest/autocxx/macro.block_constructors.html)
+names a class and stops `autocxx` synthesizing the special members C++ declares
+implicitly for it - constructors and destructors the class declares itself are
+bound as usual.
+
+A `block_functions!` which names no function `autocxx` met is a build error,
+since it withheld nothing.
+
 ## Mixing manual and automated bindings
 
 `autocxx` uses [`cxx`](https://cxx.rs) underneath, and its build process will happily spot and

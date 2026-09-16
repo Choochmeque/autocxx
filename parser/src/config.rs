@@ -28,7 +28,10 @@ use thiserror::Error;
 use crate::derives::DeriveMap;
 use crate::enum_style::{EnumStyle, EnumStyleMap};
 use crate::stable_hash::stable_hash;
-use crate::{directives::get_directives, RustPath};
+use crate::{
+    directives::{get_directives, BLOCK_FUNCTIONS},
+    RustPath,
+};
 
 use quote::quote;
 
@@ -156,6 +159,18 @@ pub fn name_matches_directive(cpp_name: &str, directive: &str) -> bool {
             *candidate == spelling || candidate.ends_with(&format!("::{spelling}"))
         })
     })
+}
+
+/// Whether the name autocxx knows a function by is one a directive naming
+/// `directive` claims.
+///
+/// A member function is named by the class which declares it - `Outer::foo`,
+/// and `ns::Outer::foo` with the namespaces in front - and the namespaces may
+/// be left off, which is the latitude `throws!` has always given. That costs
+/// what it costs everywhere else: a name written short claims every function
+/// answering to it, in every class and every namespace.
+fn function_name_matches_directive(cpp_name: &str, directive: &str) -> bool {
+    cpp_name == directive || cpp_name.ends_with(&format!("::{directive}"))
 }
 
 /// The names one name-matching directive asked about, and which of them
@@ -394,6 +409,9 @@ pub struct IncludeCppConfig {
     pub allowlist: Allowlist,
     pub(crate) blocklist: DirectiveList,
     pub(crate) constructor_blocklist: DirectiveList,
+    /// The functions and methods a `block_functions!` directive withholds,
+    /// named as C++ names them.
+    pub(crate) function_blocklist: DirectiveList,
     pub(crate) instantiable: DirectiveList,
     /// The class templates a `smart_pointer!` directive says hold a pointer to
     /// their argument, named as C++ names them. Every instantiation of one gets
@@ -582,6 +600,16 @@ impl IncludeCppConfig {
             .matches(|request| request == cpp_name)
     }
 
+    /// Whether a `block_functions!` directive names this function.
+    ///
+    /// `cpp_name` is one of the names the function answers to - a method is
+    /// asked about under each spelling of the class which declares it - so a
+    /// caller asks about every one of them and lets each record its own match.
+    pub fn is_on_function_blocklist(&self, cpp_name: &str) -> bool {
+        self.function_blocklist
+            .matches(|request| function_name_matches_directive(cpp_name, request))
+    }
+
     /// Whether an `instantiable!` directive named this template instantiation,
     /// which is the user promising that C++ can make one.
     pub fn is_instantiable(&self, cpp_name: &str) -> bool {
@@ -608,7 +636,7 @@ impl IncludeCppConfig {
 
     pub fn is_on_throws_list(&self, cpp_name: &str) -> bool {
         self.throws_list
-            .matches(|entry| cpp_name == entry || cpp_name.ends_with(&format!("::{entry}")))
+            .matches(|entry| function_name_matches_directive(cpp_name, entry))
     }
 
     /// Note the directives which name a C++ type autocxx met, whatever it
@@ -758,14 +786,15 @@ impl IncludeCppConfig {
     /// to be confirmed, and six of them reached this codebase unconfirmed,
     /// among them `throws!`, whose silence costs a `std::terminate` rather
     /// than a missing binding.
-    fn name_matching_directives(&self) -> [(&'static str, &DirectiveList); 4] {
+    fn name_matching_directives(&self) -> [(&'static str, &DirectiveList); 5] {
         let IncludeCppConfig {
             // Confirmed here, each against the query the conversion itself
-            // asked. Two of these remove what they match, so this is the only
+            // asked. Three of these remove what they match, so this is the only
             // place the evidence still exists.
             throws_list,
             blocklist,
             constructor_blocklist,
+            function_blocklist,
             instantiable,
 
             // Confirmed elsewhere, and left alone here so that one directive
@@ -812,6 +841,7 @@ impl IncludeCppConfig {
             ("throws", throws_list),
             ("block", blocklist),
             ("block_constructors", constructor_blocklist),
+            (BLOCK_FUNCTIONS, function_blocklist),
             ("instantiable", instantiable),
         ]
     }
@@ -1139,6 +1169,42 @@ mod parse_tests {
         assert!(!has("MyObserver"));
     }
 
+    /// `block_functions!` names a function the way `throws!` does: by the
+    /// class which declares it, with the namespaces in front of that optional.
+    /// The latitude runs one way only - a directive may be shorter than the
+    /// name autocxx knows the function by, never longer.
+    #[test]
+    fn test_block_functions_matching() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            block_functions!("ns::Thing::method")
+            block_functions!("free_fn")
+        };
+        assert!(config.is_on_function_blocklist("ns::Thing::method"));
+        assert!(!config.is_on_function_blocklist("Thing::method"));
+        assert!(!config.is_on_function_blocklist("ns::Other::method"));
+        assert!(!config.is_on_function_blocklist("ns::Thing::method2"));
+        assert!(config.is_on_function_blocklist("free_fn"));
+        assert!(config.is_on_function_blocklist("ns::deep::free_fn"));
+        assert!(!config.is_on_function_blocklist("ns::other_free_fn"));
+        assert!(config.unmatched_directives().is_empty());
+    }
+
+    /// A `block_functions!` nothing answered to is reported, like every other
+    /// directive which matches by name.
+    #[test]
+    fn test_unmatched_block_functions_reported() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            block_functions!("Thing::mispelt")
+        };
+        assert!(!config.is_on_function_blocklist("Thing::method"));
+        let unmatched = config.unmatched_directives();
+        assert_eq!(unmatched.len(), 1);
+        assert_eq!(unmatched[0].directive, "block_functions");
+        assert_eq!(unmatched[0].request, "Thing::mispelt");
+    }
+
     #[test]
     fn test_safety_unsafe() {
         let us: UnsafePolicy = parse_quote! {
@@ -1191,7 +1257,7 @@ mod parse_tests {
             #hexathorpe include "a.h"
             generate!("Foo")
         };
-        assert_eq!(plain.get_hash(), ConfigHash(0xb03cf0e02f64c740));
+        assert_eq!(plain.get_hash(), ConfigHash(0x1bf4745a948d615a));
 
         let with_syn_types: IncludeCppConfig = parse_quote! {
             #hexathorpe include "a.h"
@@ -1205,7 +1271,7 @@ mod parse_tests {
             derive!("Foo", "Clone")
             enum_style!(BitfieldEnum, "Flags")
         };
-        assert_eq!(with_syn_types.get_hash(), ConfigHash(0x31fecadfdca5ae23));
+        assert_eq!(with_syn_types.get_hash(), ConfigHash(0xd0a8bedde60cd260));
         // The point of the second config is the `syn` types, so it is worth
         // knowing they are in there rather than silently dropped.
         assert!(!with_syn_types.extern_rust_funs.is_empty());
@@ -1222,11 +1288,12 @@ mod parse_tests {
             throws!("Foo::bar")
             block!("Blocked")
             block_constructors!("Foo")
+            block_functions!("Foo::baz")
             instantiable!("Conc")
             smart_pointer!("MyPtr")
             opaque!("Blob")
         };
-        assert_eq!(directive_lists.get_hash(), ConfigHash(0x8efe2d1687b7b717));
+        assert_eq!(directive_lists.get_hash(), ConfigHash(0x1ee0ec8a789f4e76));
     }
 
     /// The hash is an archive key for the block as written. What a conversion

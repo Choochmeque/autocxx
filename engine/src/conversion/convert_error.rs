@@ -185,6 +185,8 @@ pub enum ConvertErrorFromCpp {
     },
     #[error("Found an attempt at using a type marked as blocked! ({})", .0.to_cpp_name())]
     Blocked(QualifiedName),
+    #[error("A 'block_functions!' directive names this function, so autocxx generated no binding for it. Every overload of the name the directive gives is withheld, and so is every import of the function into a class which derives from this one.")]
+    FunctionBlocked,
     /// Attached to the type, not to its uses, so the message is about the type:
     /// it reaches a user through whatever mentioned it, including
     /// [`Self::ConcreteVersionOfIgnoredTemplate`] for a specialization.

@@ -900,6 +900,60 @@ impl<'a> FnAnalyzer<'a> {
         self.generic_types.contains(type_name)
     }
 
+    /// Whether a `block_functions!` directive names this function.
+    ///
+    /// A method is named with its class, a free function without one. So a
+    /// free function is asked about at its one name, namespaces in front, and
+    /// a method only under each spelling of the class which declares it - a
+    /// nested class answers both to the `Outer::Inner` C++ uses and to the
+    /// `Outer_Inner` bindgen flattened it into, and a directive may leave the
+    /// namespaces off either way because the blocklist matches any tail of
+    /// the name asked about. What a method is never asked about is its
+    /// class-less diagnostic name: that keeps the namespaces while dropping
+    /// the class, so asking would let `block_functions!("ns::f")` claim the
+    /// method `ns::C::f` - and count itself matched - with no free function
+    /// `ns::f` in sight.
+    ///
+    /// Every spelling of the class is asked about and no `||` short-circuits
+    /// past one, because the config records a request as matched where it
+    /// answers the question, so stopping at the first spelling to answer
+    /// would leave a second request naming this same function by the other
+    /// spelling looking unmatched.
+    ///
+    /// Only an ordinary function or method is asked about. A constructor or
+    /// destructor is `block_constructors!`'s territory, and even that
+    /// directive only stops the synthesis of the special members C++ declares
+    /// implicitly; one declared explicitly is bound as usual.
+    fn is_blocked_by_directive(&self, kind: &FnKind, diagnostic_name: &QualifiedName) -> bool {
+        let impl_for = match kind {
+            FnKind::Function => None,
+            FnKind::Method {
+                impl_for,
+                method_kind:
+                    MethodKind::Normal
+                    | MethodKind::Static
+                    | MethodKind::Virtual(_)
+                    | MethodKind::PureVirtual(_),
+            } => Some(impl_for),
+            FnKind::Method { .. } | FnKind::TraitMethod { .. } => return false,
+        };
+        let Some(impl_for) = impl_for else {
+            return self
+                .config
+                .is_on_function_blocklist(&diagnostic_name.to_cpp_name());
+        };
+        let mut blocked = false;
+        for spelling in self.nested_cpp_names.spellings(impl_for) {
+            if self.config.is_on_function_blocklist(&format!(
+                "{spelling}::{}",
+                diagnostic_name.get_final_item()
+            )) {
+                blocked = true;
+            }
+        }
+        blocked
+    }
+
     #[allow(clippy::if_same_then_else)] // clippy bug doesn't notice the two
                                         // closures below are different.
     fn should_be_unsafe(
@@ -1059,14 +1113,31 @@ impl<'a> FnAnalyzer<'a> {
             self.analyze_foreign_fn(name, &fun, TypeConversionSophistication::Regular, None);
         let mut results = ApiVec::new();
 
-        // Consider whether we need to synthesize subclass items.
-        if let FnKind::Method {
-            impl_for: sup,
-            method_kind:
-                MethodKind::Virtual(receiver_mutability) | MethodKind::PureVirtual(receiver_mutability),
-            ..
-        } = &analysis.kind
-        {
+        // Consider whether we need to synthesize subclass items. Not for a
+        // method a `block_functions!` directive names: the trait method a Rust
+        // subclass would implement, and the `_super` helper which calls the
+        // superclass's own implementation, are both ways of reaching the very
+        // function the user asked to have withheld.
+        let subclass_source = match &analysis.kind {
+            FnKind::Method {
+                impl_for: sup,
+                method_kind:
+                    MethodKind::Virtual(receiver_mutability)
+                    | MethodKind::PureVirtual(receiver_mutability),
+                ..
+            } if !matches!(
+                analysis.ignore_reason,
+                Err(ConvertErrorWithContext(
+                    ConvertErrorFromCpp::FunctionBlocked,
+                    _
+                ))
+            ) =>
+            {
+                Some((sup, receiver_mutability))
+            }
+            _ => None,
+        };
+        if let Some((sup, receiver_mutability)) = subclass_source {
             let (simpler_analysis, _) = self.analyze_foreign_fn(
                 name.clone(),
                 &fun,
@@ -1327,12 +1398,28 @@ impl<'a> FnAnalyzer<'a> {
                                     | MethodKind::Virtual(_)
                                     | MethodKind::PureVirtual(_),
                             },
+                        ignore_reason,
                         ..
                     },
             } = api
             else {
                 continue;
             };
+            // A `block_functions!` directive names the member on the class
+            // which declares it, and re-exporting it under another class's
+            // name would hand back the very thing it withheld. Every other
+            // reason a member was discarded is left alone: the import is
+            // analyzed afresh and fails the same way, which is what it did
+            // before this pass knew about blocking at all.
+            if matches!(
+                ignore_reason,
+                Err(ConvertErrorWithContext(
+                    ConvertErrorFromCpp::FunctionBlocked,
+                    _
+                ))
+            ) {
+                continue;
+            }
             let cpp_name = name.cpp_name().to_string_for_cpp_generation().to_string();
             if members_named.get(&(base.clone(), cpp_name.clone())) != Some(&1) {
                 continue;
@@ -3105,7 +3192,7 @@ impl<'a> FnAnalyzer<'a> {
         // Work out our final naming strategy.
         validate_ident_ok_for_cxx(&cxxbridge_name.to_string())
             .map_err(ConvertErrorFromCpp::InvalidIdent)
-            .unwrap_or_else(set_ignore_reason);
+            .unwrap_or_else(&mut set_ignore_reason);
         let rust_name_ident = make_ident(&rust_name);
         let rust_rename_strategy = match kind {
             _ if rust_wrapper_needed => RustRenameStrategy::RenameUsingWrapperFunction,
@@ -3114,6 +3201,14 @@ impl<'a> FnAnalyzer<'a> {
             }
             _ => RustRenameStrategy::None,
         };
+
+        // Asked last, so that a `block_functions!` naming this one beats every
+        // other reason recorded above. Whatever autocxx would have refused the
+        // function for, "you asked for it to be gone" is the reason the reader
+        // of the stub can do something about.
+        if self.is_blocked_by_directive(&kind, &diagnostic_name) {
+            set_ignore_reason(ConvertErrorFromCpp::FunctionBlocked);
+        }
 
         let analysis = FnAnalysis {
             cxxbridge_name: cxxbridge_name.clone(),

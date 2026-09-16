@@ -41427,3 +41427,408 @@ fn test_const_reference_to_int32_typedef_return() {
     };
     run_test("", hdr, rs, &["fx_same32"], &[]);
 }
+
+// --- `block_functions!` ---------------------------------------------------
+//
+// One method with a shape autocxx gets wrong used to cost the whole class,
+// `block!` naming a type being the smallest thing there was to name. These
+// pin what naming one function does instead.
+
+/// The shape which prompted the directive: a class worth binding, with one
+/// method which is not. The class and its other methods bind and run; the
+/// blocked one leaves the documentation stub every discarded binding leaves,
+/// so the reader is told where it went.
+#[test]
+fn test_block_functions_withholds_one_method_of_a_class() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace bf_ns {
+            class Settings {
+            public:
+                uint32_t get_good() const { return 12; }
+                uint32_t get_blocked(const uint32_t& a) const { return a; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::bf_ns::Settings::new().within_unique_ptr();
+            assert_eq!(c.get_good(), 12);
+        },
+        quote! {
+            generate!("bf_ns::Settings")
+            block_functions!("bf_ns::Settings::get_blocked")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn get_blocked(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec!["block_functions".into()]),
+        ])),
+        None,
+    );
+}
+
+/// A static member function is named the same way as any other member: C++
+/// names it by the class which declares it too.
+#[test]
+fn test_block_functions_withholds_a_static_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfStatics {
+        public:
+            static uint32_t gone_static() { return 1; }
+            static uint32_t kept_static() { return 2; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::BfStatics::kept_static(), 2);
+        },
+        quote! {
+            generate!("BfStatics")
+            block_functions!("BfStatics::gone_static")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn gone_static(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            Box::new(CppMatcher::new(&["kept_static"], &["gone_static"])),
+        ])),
+        None,
+    );
+}
+
+/// A free function is named by its namespaces, as `generate!` names it.
+#[test]
+fn test_block_functions_withholds_a_free_function() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace bf_ns {
+            inline uint32_t bf_free_gone() { return 1; }
+            inline uint32_t bf_free_kept() { return 2; }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::bf_ns::bf_free_kept(), 2);
+        },
+        quote! {
+            generate_ns!("bf_ns")
+            block_functions!("bf_ns::bf_free_gone")
+        },
+        None,
+        Some(make_error_finder("bf_free_gone")),
+        None,
+    );
+}
+
+/// The whole overload set of the name goes. Which overload a C++ call selects
+/// is overload resolution's to decide, and a directive naming one name has no
+/// way to say which of them it meant.
+#[test]
+fn test_block_functions_takes_the_whole_overload_set() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfOverloaded {
+        public:
+            uint32_t both(uint32_t a) const { return a; }
+            uint32_t both(uint32_t a, uint32_t b) const { return a + b; }
+            uint32_t kept() const { return 5; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = ffi::BfOverloaded::new().within_unique_ptr();
+            assert_eq!(o.kept(), 5);
+        },
+        quote! {
+            generate!("BfOverloaded")
+            block_functions!("BfOverloaded::both")
+        },
+        None,
+        Some(make_rust_code_finder(vec![
+            quote! { fn both(_uhoh: autocxx::BindingGenerationFailure) },
+            quote! { fn both1(_uhoh: autocxx::BindingGenerationFailure) },
+        ])),
+        None,
+    );
+}
+
+/// The class in front of the name is part of it: another class's method of the
+/// same name is untouched, and goes on being callable.
+#[test]
+fn test_block_functions_does_not_reach_another_class() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfBlockedHere {
+        public:
+            uint32_t shared() const { return 1; }
+        };
+        class BfKeptHere {
+        public:
+            uint32_t shared() const { return 2; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let kept = ffi::BfKeptHere::new().within_unique_ptr();
+            assert_eq!(kept.shared(), 2);
+        },
+        quote! {
+            generate!("BfBlockedHere")
+            generate!("BfKeptHere")
+            block_functions!("BfBlockedHere::shared")
+        },
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            fn shared(_uhoh: autocxx::BindingGenerationFailure)
+        }])),
+        None,
+    );
+}
+
+/// A directive spelled without a class names a free function, never a method:
+/// `bf_twin_ns::bf_twin` is the free function, and the method
+/// `bf_twin_ns::BfTwinHolder::bf_twin` sharing its name binds and runs.
+#[test]
+fn test_block_functions_free_name_does_not_reach_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace bf_twin_ns {
+            inline uint32_t bf_twin() { return 1; }
+            class BfTwinHolder {
+            public:
+                uint32_t bf_twin() const { return 2; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let h = ffi::bf_twin_ns::BfTwinHolder::new().within_unique_ptr();
+            assert_eq!(h.bf_twin(), 2);
+        },
+        quote! {
+            generate_ns!("bf_twin_ns")
+            block_functions!("bf_twin_ns::bf_twin")
+        },
+        None,
+        Some(make_error_finder("bf_twin")),
+        None,
+    );
+}
+
+/// With only the method present, the class-less spelling names nothing: the
+/// method is not the free function the directive asked to have withheld.
+#[test]
+fn test_block_functions_free_spelling_matches_no_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace bf_lone_ns {
+            class BfLoneHolder {
+            public:
+                uint32_t bf_lone() const { return 1; }
+            };
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("bf_lone_ns::BfLoneHolder")
+            block_functions!("bf_lone_ns::bf_lone")
+        },
+        None,
+        &[
+            "DirectiveMatchedNothing",
+            "block_functions",
+            "bf_lone_ns::bf_lone",
+        ],
+    );
+}
+
+/// Removal-shaped like `block!`: unmatched, the function the user asked to
+/// have withheld is generated anyway, and nothing says so.
+#[test]
+fn test_block_functions_directive_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfTypo {
+        public:
+            uint32_t method() const { return 1; }
+        };
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("BfTypo")
+            block_functions!("BfTypo::mthod")
+        },
+        None,
+        &[
+            "DirectiveMatchedNothing",
+            "block_functions",
+            "BfTypo::mthod",
+        ],
+    );
+}
+
+/// Naming one function in both `generate!` and `block_functions!` asks for two
+/// contradictory things, and the `generate!` half says so: it produced nothing
+/// usable, because of this.
+#[test]
+fn test_block_functions_contradicting_generate_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t bf_contradicted() { return 1; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("bf_contradicted")
+            block_functions!("bf_contradicted")
+        },
+        None,
+        &["DidNotGenerateAnythingUsable", "FunctionBlocked"],
+    );
+}
+
+/// A member of a base class is bound a second time against each class which
+/// inherits it - the way out of google/autocxx#197 - and a blocked member must
+/// not come back that way.
+#[test]
+fn test_block_functions_not_imported_onto_derived_class() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfInheritedBase {
+        public:
+            uint32_t gone_up() const { return 1; }
+            uint32_t kept_up() const { return 2; }
+        };
+        class BfInheritedDerived : public BfInheritedBase {
+        public:
+            uint32_t own() const { return 3; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::BfInheritedDerived::new().within_unique_ptr();
+            assert_eq!(d.kept_up(), 2);
+            assert_eq!(d.own(), 3);
+        },
+        quote! {
+            generate!("BfInheritedDerived")
+            block_functions!("BfInheritedBase::gone_up")
+        },
+        None,
+        Some(Box::new(CppMatcher::new(&["kept_up"], &["gone_up"]))),
+        None,
+    );
+}
+
+/// A `using Base::foo;` re-exports a base's member under the importing class,
+/// which is the other way a blocked member could come back.
+#[test]
+fn test_block_functions_not_imported_by_using_declaration() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfUsingBase {
+        protected:
+            uint32_t gone_using() const { return 7; }
+            uint32_t kept_using() const { return 8; }
+        };
+        class BfUsingDerived : public BfUsingBase {
+        public:
+            using BfUsingBase::gone_using;
+            using BfUsingBase::kept_using;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::BfUsingDerived::new().within_unique_ptr();
+            assert_eq!(d.kept_using(), 8);
+        },
+        quote! {
+            generate!("BfUsingBase")
+            generate!("BfUsingDerived")
+            block_functions!("BfUsingBase::gone_using")
+        },
+        None,
+        Some(Box::new(CppMatcher::new(&["kept_using"], &["gone_using"]))),
+        None,
+    );
+}
+
+/// A Rust subclass overrides its superclass's virtual methods, and calls the
+/// superclass's own implementation through a `_super` helper. Both reach the
+/// function the directive withheld, so neither is generated for it.
+#[test]
+fn test_block_functions_leaves_no_subclass_items() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class BfSuper {
+        public:
+            BfSuper() {}
+            virtual uint32_t gone_virtual() const { return 1; }
+            virtual uint32_t kept_virtual() const { return 2; }
+            virtual ~BfSuper() {}
+        };
+        inline void bf_sub_anchor() {}
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            BfSubclass::new_rust_owned(BfSubclass {
+                a: 3,
+                cpp_peer: Default::default(),
+            });
+        },
+        quote! {
+            generate!("bf_sub_anchor")
+            subclass!("BfSuper", BfSubclass)
+            block_functions!("BfSuper::gone_virtual")
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["kept_virtual"],
+            &["gone_virtual"],
+        ))),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::BfSuper_methods;
+            #[autocxx::subclass::subclass]
+            pub struct BfSubclass {
+                a: u32,
+            }
+            impl BfSuper_methods for BfSubclass {
+                fn kept_virtual(&self) -> u32 {
+                    self.a
+                }
+            }
+        }),
+    );
+}
