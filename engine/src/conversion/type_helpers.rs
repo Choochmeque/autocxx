@@ -7,9 +7,14 @@
 // except according to those terms.
 
 use syn::{
-    AngleBracketedGenericArguments, GenericArgument, Path, PathArguments, PathSegment, Type,
-    TypePath, TypePtr, TypeReference,
+    AngleBracketedGenericArguments, GenericArgument, Path, PathArguments, PathSegment,
+    PointerMutability, Type, TypePath, TypePtr, TypeReference,
 };
+
+/// Whether a pointer is a `*mut`, as opposed to a `*const`.
+pub(crate) fn ptr_is_mut(mutability: &PointerMutability) -> bool {
+    matches!(mutability, PointerMutability::Mut(_))
+}
 
 /// Looks in a `core::pin::Pin<&mut Something>` and returns the `Something`
 /// if it's found.
@@ -217,7 +222,7 @@ fn mentions_marker(ty: &Type, marker: &str) -> bool {
         Type::Reference(r) => mentions_marker(&r.elem, marker),
         // bindgen writes a C function pointer as `Option<unsafe extern "C"
         // fn(..)>`, so this is reached through the `Option`'s argument above.
-        Type::BareFn(f) => {
+        Type::FnPtr(f) => {
             f.inputs.iter().any(|arg| mentions_marker(&arg.ty, marker))
                 || match &f.output {
                     syn::ReturnType::Type(_, ty) => mentions_marker(ty, marker),
@@ -457,7 +462,7 @@ pub(crate) fn unwrap_bitfield(ty: &TypePath) -> Option<&syn::Type> {
 /// bindgen writes the path out as `::std::option::Option`; the shorter
 /// spellings of the same path are accepted too, but nothing else, because a
 /// C++ class called `Option` reaches us as `root::Option`.
-pub(crate) fn unwrap_function_pointer(ty: &TypePath) -> Option<&syn::TypeBareFn> {
+pub(crate) fn unwrap_function_pointer(ty: &TypePath) -> Option<&syn::TypeFnPtr> {
     if ty.qself.is_some() {
         return None;
     }
@@ -467,7 +472,7 @@ pub(crate) fn unwrap_function_pointer(ty: &TypePath) -> Option<&syn::TypeBareFn>
         return None;
     }
     match unwrap_newtype(last, "Option")? {
-        Type::BareFn(fun) => Some(fun),
+        Type::FnPtr(fun) => Some(fun),
         _ => None,
     }
 }

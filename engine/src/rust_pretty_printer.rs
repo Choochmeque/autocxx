@@ -11,6 +11,7 @@ use syn::{Item, ItemMod};
 pub(crate) fn pretty_print(itm: &ItemMod) -> String {
     prettyplease::unparse(&syn::File {
         shebang: None,
+        frontmatter: None,
         attrs: Vec::new(),
         items: vec![Item::Mod(itm.clone())],
     })

@@ -43,7 +43,7 @@ impl CodeCheckerFns for ErrorFinder {
         error_item
             .attrs
             .into_iter()
-            .find(|a| a.path.get_ident().filter(|p| *p == "doc").is_some())
+            .find(|a| a.path().get_ident().filter(|p| *p == "doc").is_some())
             .ok_or_else(|| TestError::RsCodeExaminationFail("Item had no docs".into()))?;
         Ok(())
     }

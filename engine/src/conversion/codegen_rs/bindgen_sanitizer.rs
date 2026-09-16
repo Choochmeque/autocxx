@@ -333,9 +333,12 @@ fn is_zero_filling_default_impl(item: &Item) -> bool {
     let Item::Impl(imp) = item else {
         return false;
     };
-    let Some((None, trait_path, _)) = &imp.trait_ else {
+    let Some((trait_path, _)) = &imp.trait_ else {
         return false;
     };
+    if imp.modifiers.polarity.is_some() {
+        return false;
+    }
     if !trait_path
         .segments
         .last()
@@ -523,7 +526,7 @@ fn rewrite_bitfield_getter(f: &mut ImplItemFn, aliases: &TypeAliases) -> bool {
 /// `raw_get`/`raw_set`. There is no shape to check: it needs the block whatever
 /// else it does.
 fn remaining_unsafety(sig: &Signature, unit_access: &Expr, method: &str) -> Option<StillUnsafe> {
-    if sig.unsafety.is_some() {
+    if matches!(sig.safety, syn::Safety::Unsafe(_)) {
         return Some(StillUnsafe::Yes);
     }
     allocation_unit_access(unit_access, method)
@@ -1252,7 +1255,7 @@ fn has_unbound_ident(ty: &Type, params: &HashSet<String>, defined: &HashSet<Stri
                 PathArguments::Parenthesized(p) => {
                     p.inputs
                         .iter()
-                        .any(|ty| has_unbound_ident(ty, params, defined))
+                        .any(|arg| has_unbound_ident(&arg.ty, params, defined))
                         || match &p.output {
                             ReturnType::Type(_, ty) => has_unbound_ident(ty, params, defined),
                             ReturnType::Default => false,
@@ -1282,7 +1285,7 @@ fn has_unbound_ident(ty: &Type, params: &HashSet<String>, defined: &HashSet<Stri
             .bounds
             .iter()
             .any(|b| bound_has_unbound_ident(b, params, defined)),
-        Type::BareFn(f) => {
+        Type::FnPtr(f) => {
             f.inputs
                 .iter()
                 .any(|arg| has_unbound_ident(&arg.ty, params, defined))
@@ -1313,7 +1316,7 @@ fn bound_has_unbound_ident(
             PathArguments::Parenthesized(p) => {
                 p.inputs
                     .iter()
-                    .any(|ty| has_unbound_ident(ty, params, defined))
+                    .any(|arg| has_unbound_ident(&arg.ty, params, defined))
                     || match &p.output {
                         ReturnType::Type(_, ty) => has_unbound_ident(ty, params, defined),
                         ReturnType::Default => false,

@@ -33,7 +33,7 @@ quote = "1.0"
 autocxx-parser = { path = "..", features = ["reproduction_case"] }
 
 [dependencies.syn]
-version = "2"
+version = "3"
 features = ["full", "extra-traits"]
 
 [[bin]]

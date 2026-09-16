@@ -35,7 +35,7 @@ use crate::{
         parse::CppRefQualifier,
         type_helpers::extract_pinned_mutable_reference_type,
         type_helpers::{
-            cpp_array_element, denotes_cpp_array_behind_pointer, is_volatile_qualified,
+            cpp_array_element, denotes_cpp_array_behind_pointer, is_volatile_qualified, ptr_is_mut,
             type_is_reference, unwrap_has_opaque,
         },
         CppEffectiveName, CppOriginalName,
@@ -55,7 +55,6 @@ use function_wrapper::{
     RECEIVER_ARG_NAME,
 };
 use itertools::Itertools;
-use proc_macro2::Span;
 use quote::{quote, ToTokens};
 use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, Ident, Pat, PatType, ReturnType, Type,
@@ -3338,7 +3337,7 @@ impl<'a> FnAnalyzer<'a> {
                                         blob.to_token_stream().to_string(),
                                     )),
                                     None => {
-                                        let receiver_mutability = if mutability.is_some() {
+                                        let receiver_mutability = if ptr_is_mut(mutability) {
                                             ReceiverMutability::Mutable
                                         } else {
                                             ReceiverMutability::Const
@@ -3346,13 +3345,8 @@ impl<'a> FnAnalyzer<'a> {
 
                                         let this_type = if let Some(virtual_this) = virtual_this {
                                             let this_type_path = virtual_this.to_type_path();
-                                            let const_token = if mutability.is_some() {
-                                                None
-                                            } else {
-                                                Some(syn::Token![const](Span::call_site()))
-                                            };
                                             pt.ty = Box::new(parse_quote! {
-                                                * #mutability #const_token #this_type_path
+                                                * #mutability #this_type_path
                                             });
                                             virtual_this.clone()
                                         } else {
@@ -3519,7 +3513,7 @@ impl<'a> FnAnalyzer<'a> {
         is_return: bool,
     ) -> Option<TypeConversionPolicy> {
         let (pointee, is_mut, was_reference) = match converted {
-            Type::Ptr(p) => ((*p.elem).clone(), p.mutability.is_some(), false),
+            Type::Ptr(p) => ((*p.elem).clone(), ptr_is_mut(&p.mutability), false),
             Type::Reference(r) => ((*r.elem).clone(), r.mutability.is_some(), true),
             Type::Path(p) => (
                 extract_pinned_mutable_reference_type(p)?.clone(),
@@ -3765,7 +3759,7 @@ impl<'a> FnAnalyzer<'a> {
                 }
             }
             Type::Ptr(tp) => {
-                let pointer = BridgePointer::to((*tp.elem).clone(), tp.mutability.is_some());
+                let pointer = BridgePointer::to((*tp.elem).clone(), ptr_is_mut(&tp.mutability));
                 let rust_conversion = force_rust_conversion.map_or(
                     PointerRustConversion::None,
                     ForcedRustConversion::on_pointer,

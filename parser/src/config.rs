@@ -1205,7 +1205,7 @@ mod parse_tests {
             derive!("Foo", "Clone")
             enum_style!(BitfieldEnum, "Flags")
         };
-        assert_eq!(with_syn_types.get_hash(), ConfigHash(0x809f6210a5e1f8fe));
+        assert_eq!(with_syn_types.get_hash(), ConfigHash(0x31fecadfdca5ae23));
         // The point of the second config is the `syn` types, so it is worth
         // knowing they are in there rather than silently dropped.
         assert!(!with_syn_types.extern_rust_funs.is_empty());

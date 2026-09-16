@@ -17,7 +17,7 @@ use crate::{
         inner_type_traits::inner_types_required_of_params,
         type_helpers::{
             extract_pinned_mutable_reference_type, is_volatile_qualified, mentions_cpp_array,
-            mentions_float128, mentions_long_double, mentions_volatile,
+            mentions_float128, mentions_long_double, mentions_volatile, ptr_is_mut,
             unqualified_array_element_type, unwrap_bitfield, unwrap_const, unwrap_float128,
             unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double, unwrap_reference,
             unwrap_std_array, unwrap_volatile,
@@ -946,7 +946,7 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // LValue reference
-        let mutability = ptr.mutability;
+        let mutable = ptr_is_mut(&ptr.mutability);
         // Read before conversion, which peels the marker off the referent.
         let referent_is_volatile = is_volatile_qualified(&ptr.elem);
         let elem = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
@@ -998,7 +998,7 @@ impl<'a> TypeConverter<'a> {
         // fine, because the struct was going to be opaque either way.
         // `test_rust_str_reference_field_is_left_alone` covers the field
         // spelt both ways.
-        if mutability.is_some()
+        if mutable
             && !ctx.within_struct_field()
             && Self::is_rust_str(&elem.ty)
             && !self.config.unsafe_policy.requires_cpprefs()
@@ -1006,15 +1006,18 @@ impl<'a> TypeConverter<'a> {
             return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
         }
         Self::check_array_referent(&elem, ctx)?;
-        let mut outer = elem.map(|elem| match mutability {
-            Some(_) => Type::Path(parse_quote! {
-                ::core::pin::Pin < & #mutability #elem >
-            }),
-            None => Type::Reference(parse_quote! {
-                & #elem
-            }),
+        let mut outer = elem.map(|elem| {
+            if mutable {
+                Type::Path(parse_quote! {
+                    ::core::pin::Pin < & mut #elem >
+                })
+            } else {
+                Type::Reference(parse_quote! {
+                    & #elem
+                })
+            }
         });
-        outer.kind = if mutability.is_some() {
+        outer.kind = if mutable {
             TypeKind::MutableReference
         } else {
             TypeKind::Reference
