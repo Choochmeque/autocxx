@@ -274,7 +274,6 @@ version = "0.30.0"
 dependencies = [
  "indexmap 1.9.3",
  "itertools",
- "log",
  "once_cell",
  "proc-macro2",
  "quote",
