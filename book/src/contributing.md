@@ -130,30 +130,81 @@ boil down to certain key known areas of technical debt or limitations,
 described below, and you can mark them as a duplicate or similar.
 
 Releases typically happen every month or two, dependent on what changes
-have been made. Ideally, autocxx would release after every single pull
-request but the process takes about 15 minutes (see below) so it's not
-that frequent.
+have been made.
 
 ## Release process
 
-To make a new release of autocxx,
+A release is a tag push. `.github/workflows/release.yml` answers a tag matching
+`v*` by publishing to crates.io and creating the github release. It authenticates
+by OIDC through crates.io trusted publishing, so there is no API token in this
+repository's secrets and nothing to rotate.
 
-* First ensure there's green CI on github.
-* Check out `main` locally and ensure it's up to date with `origin/main`.
-* Make a new branch
-* Run `tools/upgrade-version.sh OLD NEW` where `OLD` is the previous
-  released version number, and `NEW` is the new version number.
-* Commit that and make a PR; ensure it passes tests on github CI.
-* If so, merge that PR, and update locally.
-* Run `tools/publish-all.sh`. This will do the actual `cargo publish`
-  for all the various crates. It first flattens bindgen's sources out of the
-  submodule into `engine/third_party/bindgen-src`, because `cargo package`
-  cannot carry a directory containing a `Cargo.toml` and the submodule has two;
-  see "Rolling bindgen" below. That directory is left untracked on purpose, so
-  the publish runs `--allow-dirty`.
-* On [github releases](https://github.com/Choochmeque/autocxx/releases),
-  choose Draft a new release. Add a tag for `v0.X.Y`. Go through
-  the process to automatically create release notes.
+Seven crates are published, and cargo works out the order from the
+dependencies: `autocxx-parser`, `autocxx-engine`, `autocxx-macro`, `autocxx`,
+`autocxx-build`, `autocxx-integration-tests`, `autocxx-gen`. The last is in the
+set because `autocxx-gen` dev-depends on it by exact version, so a release
+leaving it out cannot resolve. The other workspace members - `demo`,
+`tools/reduce`, `tools/mdbook-preprocessor`, `tools/patch-check` and
+`integration-tests/fixture-deps` - are not published, and the first three hold
+no crates.io name at all.
+
+To make a new release:
+
+* Ensure there's green CI on main.
+* Make a branch and run `tools/upgrade-version.sh OLD NEW`, where `OLD` is the
+  released version number and `NEW` is the new one. It rewrites the manifests
+  only, so run `cargo check --workspace` after it and commit the moved
+  `Cargo.lock` alongside them - CI builds `--locked`, and the release refuses a
+  working tree carrying anything the tag does not. The version bump is an
+  ordinary pull request; the workflow never edits a manifest, and refuses a tag
+  which disagrees with one.
+* Merge that pull request.
+* Tag the merged commit `vNEW` and push the tag. The workflow refuses a tag
+  pointing anywhere but main.
+
+The workflow runs three jobs. `gate` holds no publishing credential: it checks
+the tag's commit and versions, then packages and builds all seven crates from
+their packaged form, which is everything the publish does except the upload. It
+hands on the flattened bindgen sources it built, so that what reaches crates.io
+is what it checked. `publish` mints a crates.io token, valid for thirty minutes,
+as its last step before uploading; it compiles nothing, because the OIDC claim a
+token is minted from is reachable by every step of the job that holds it, build
+scripts included. `github-release` creates the release with generated notes.
+
+`publish` runs in a github environment named `release`, which is where required
+reviewers go if you want a manual gate between the tag and the upload.
+
+### crates.io setup, once per crate
+
+The workflow cannot publish anything until this is done, and it is done in the
+crates.io UI rather than here. For each of the seven crates, under Settings →
+Trusted Publishing → Add → GitHub:
+
+| Field | Value |
+| --- | --- |
+| Repository owner | `Choochmeque` |
+| Repository name | `autocxx` |
+| Workflow filename | `release.yml` |
+| Environment | `release` |
+
+You must own the crate on crates.io to add this, and the crate must already
+exist there - a name's first publish still needs an API token. Renaming the
+workflow file, the repository or the environment invalidates all seven
+configurations.
+
+Do all seven before the first tag. The dry run needs no credential, so it cannot
+tell you that the sixth crate's configuration is missing; that shows up as a
+rejected upload after five crates have already been published.
+
+### When a publish fails partway
+
+cargo's multi-crate publish is not atomic, and a crates.io publish cannot be
+undone or repeated. A run which uploads three crates and then fails leaves those
+three published; cargo warns that a version already exists rather than skipping
+it, so re-pushing the tag is not a clean retry. Publish what remains by hand -
+`tools/publish-all.sh` is the same sequence, run locally against an API token -
+and then move to a new version number rather than trying to complete the old
+one from CI.
 
 ## Rolling bindgen
 
@@ -186,14 +237,16 @@ Instead:
 A checkout therefore needs `git submodule update --init --recursive`, and CI jobs which
 compile the engine check out with `submodules: recursive`.
 
-Publishing needs one more step, which `tools/publish-all.sh` runs. `cargo package` prunes
-every directory below the package root which contains a `Cargo.toml`, reading it as a
-separate package; neither `include` nor `exclude` lifts that, so the submodule can never
-reach crates.io as it stands. `AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine`
-therefore copies the sources to `engine/third_party/bindgen-src` with those manifests
-renamed, and `build.rs` prefers that directory when it exists - which in a published crate
-is always. It is left untracked, so the publish is `--allow-dirty` and no bindgen source is
-committed here.
+Publishing needs one more step, which the release workflow and
+`tools/publish-all.sh` both run. `cargo package` prunes every directory below the package
+root which contains a `Cargo.toml`, reading it as a separate package; neither `include` nor
+`exclude` lifts that, so the submodule can never reach crates.io as it stands.
+`AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine` therefore copies the sources to
+`engine/third_party/bindgen-src` with those manifests renamed, and `build.rs` prefers the
+submodule where there is one - which in a published crate there never is. The copy is left
+untracked, so the publish is `--allow-dirty` and no bindgen source is committed here. The
+variable belongs on that one command: a packaged crate has no submodule to flatten, so a
+build script which saw it set there aborts the verification build.
 
 To move to a new bindgen release:
 
