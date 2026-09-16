@@ -1741,7 +1741,7 @@ pub fn do_run_test_manual(
         RsFindMode::AutocxxRs,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tdir.into_path().to_str());
+        println!("Tempdir: {:?}", tdir.keep().to_str());
     }
     r.map_err(TestError::RsBuild)?;
     Ok(())

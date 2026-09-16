@@ -218,7 +218,7 @@ fn run(matches: ArgMatches) -> Result<(), std::io::Error> {
     if keep_tmp {
         println!(
             "Keeping temp dir created at: {}",
-            tmp_dir.into_path().to_str().unwrap()
+            tmp_dir.keep().to_str().unwrap()
         );
     }
     r
