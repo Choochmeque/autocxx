@@ -27,6 +27,11 @@ fn main() {
 )
 ```
 
+Each of these integer newtypes implements `Display`, printing as the integer it
+wraps, so `println!("{}", ffi::some_count())` works without reaching for `.0`.
+A character type such as `c_uchar` prints its value as a number, which is what
+the wrapped type is.
+
 ### Inside a `unique_ptr`
 
 `cxx` will not put one of its own integer types inside a `UniquePtr`, so a
@@ -48,7 +53,8 @@ each one a transparent newtype:
 [`c_char8_t`](https://docs.rs/autocxx/latest/autocxx/struct.c_char8_t.html) and
 [`c_wchar_t`](https://docs.rs/autocxx/latest/autocxx/struct.c_wchar_t.html), each
 wrapping the Rust integer of the same width, so a value crosses with `.0` or
-`From`.
+`From`. Like the integer newtypes above, each implements `Display` and prints as
+the integer it wraps - a number, not a character.
 
 `wchar_t` is the one whose width and signedness are the target's to choose -
 `unsigned short` on Windows, `int` on Linux and macOS, `unsigned int` under

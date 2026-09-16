@@ -808,6 +808,14 @@ macro_rules! ctype_newtype {
                 val.0
             }
         }
+
+        // The wrapper is over an integer, so a character type such as
+        // `c_uchar` prints its value as a number rather than as a character.
+        impl ::std::fmt::Display for $r {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
     };
 }
 
@@ -922,6 +930,14 @@ impl From<c_char16_t> for u16 {
     }
 }
 
+// Numeric, not a character, like every c_* newtype: the wrapper is over an
+// integer. The other three character newtypes below do the same.
+impl ::std::fmt::Display for c_char16_t {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// The Rust integer which a C++ `wchar_t` is, on this target.
 ///
 /// Unlike `char16_t`, `wchar_t` has no fixed representation: its width and its
@@ -1032,6 +1048,12 @@ impl From<c_wchar_t> for wchar_t {
     }
 }
 
+impl ::std::fmt::Display for c_wchar_t {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// A C++ `char32_t`. Like the other C type wrappers here, this is a
 /// transparent newtype over the Rust integer of the same width, so a value
 /// crosses between the two with `.0` or [`From`].
@@ -1061,6 +1083,12 @@ impl From<c_char32_t> for u32 {
     }
 }
 
+impl ::std::fmt::Display for c_char32_t {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// A C++20 `char8_t`. Like the other C type wrappers here, this is a
 /// transparent newtype over the Rust integer of the same width, so a value
 /// crosses between the two with `.0` or [`From`].
@@ -1087,6 +1115,32 @@ impl From<u8> for c_char8_t {
 impl From<c_char8_t> for u8 {
     fn from(val: c_char8_t) -> Self {
         val.0
+    }
+}
+
+impl ::std::fmt::Display for c_char8_t {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[cfg(test)]
+mod ctype_tests {
+    use super::{c_char16_t, c_char32_t, c_char8_t, c_i64, c_int, c_uchar, c_uint, c_wchar_t};
+
+    #[test]
+    fn display_forwards_to_the_wrapped_integer() {
+        assert_eq!(c_int(-12).to_string(), "-12");
+        assert_eq!(c_uint(13).to_string(), "13");
+        assert_eq!(c_uchar(b'A').to_string(), "65");
+        // Formatting flags reach the integer rather than being swallowed.
+        assert_eq!(format!("{:>5}", c_i64(-7)), "   -7");
+        // The character newtypes print numerically too.
+        assert_eq!(c_char8_t(200).to_string(), "200");
+        assert_eq!(c_char16_t(0x2603).to_string(), "9731");
+        assert_eq!(c_char32_t(0x1F600).to_string(), "128512");
+        assert_eq!(c_wchar_t(65).to_string(), "65");
+        assert_eq!(format!("{:04}", c_wchar_t(7)), "0007");
     }
 }
 
