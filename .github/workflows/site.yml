@@ -30,21 +30,30 @@ jobs:
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
         with:
-          # Must stay on 0.4.x: tools/mdbook-preprocessor links the mdbook
-          # 0.4 crate and cannot parse the render context emitted by
-          # mdBook 0.5+.
-          mdbook-version: '0.4.52'
+          # Must stay on 0.5.x: tools/mdbook-preprocessor links the
+          # mdbook-preprocessor 0.5 crate and only parses the render context
+          # emitted by mdBook 0.5.
+          mdbook-version: '0.5.2'
 
-      - name: Install mdbook-linkcheck
-        run: cargo install mdbook-linkcheck
-    
+      - name: Install mdbook-linkcheck2
+        run: cargo install mdbook-linkcheck2 --version 0.13.0
+
       - name: Install mdbook-mermaid
-        # 0.15.0 is the last release compatible with mdbook 0.4,
-        # which we're pinned to (see the Setup mdBook step).
-        run: cargo install mdbook-mermaid --version 0.15.0
-    
+        # Must match the committed book/mermaid*.js, which `mdbook-mermaid
+        # install` generates.
+        run: cargo install mdbook-mermaid --version 0.17.1
+
       - run: mdbook build
         working-directory: book
+
+      - name: Check fragment links
+        # linkcheck2 verifies that link targets exist but not that their
+        # #fragment anchors do; lychee resolves fragments against the ids
+        # in the generated HTML. --offline keeps web links linkcheck2's job.
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --root-dir ${{ github.workspace }}/book/build/html 'book/build/html/**/*.html'
+          fail: true
 
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v4
