@@ -155,6 +155,16 @@ of `bindgen` here and generating overloads as `func`, `func1`, `func2` etc.
 This is essentially awful without `rust-analyzer` IDE support - see the
 [workflows chapter](workflow.md) for why you should be using an IDE.
 
+Each numbered function carries a doc comment saying which C++ declaration it
+came from - `C++: `saw`, declaration 2 of that name, counting in the order
+autocxx met them` - so the IDE has something to show you. Read the position
+rather than the digits: a suffix skips any number already taken by a real
+function, so `func3` is not necessarily the fourth `func`. The count is in the
+order `autocxx` met the declarations, which is usually the header's order but
+not guaranteed to be - a member function template, for one, is met after every
+ordinary method. The same note names the C++ function behind a name Rust would
+not accept as an identifier, where `type` reaches you as `type_`.
+
 ```rust,ignore,autocxx,hidecpp
 autocxx_integration_tests::doctest(
 "
