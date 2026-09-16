@@ -17,7 +17,7 @@ use syn::{PatType, Type};
 
 use crate::conversion::analysis::type_converter::TypeKind;
 use crate::conversion::type_helpers::{
-    array_element_type, is_volatile_qualified, unwrap_reference,
+    array_element_type, is_volatile_qualified, ptr_is_mut, unwrap_reference,
 };
 use crate::{
     conversion::{
@@ -1694,7 +1694,7 @@ fn assignment_operator_kind(
     };
     match source {
         Some(typ) if unwrap_reference(typ, true).is_some() => ExplicitKind::MoveAssignmentOperator,
-        Some(typ) if matches!(unwrap_reference(typ, false), Some(ptr) if ptr.mutability.is_some()) => {
+        Some(typ) if matches!(unwrap_reference(typ, false), Some(ptr) if ptr_is_mut(&ptr.mutability)) => {
             ExplicitKind::NonConstCopyAssignmentOperator
         }
         _ => ExplicitKind::ConstCopyAssignmentOperator,
@@ -1716,7 +1716,7 @@ fn source_is_const_rvalue_reference(
     match inputs.iter().nth(1).map(|input| &input.0) {
         Some(syn::FnArg::Typed(PatType { ty, .. }, ..)) => match ty.as_ref() {
             Type::Path(typ) => {
-                matches!(unwrap_reference(typ, true), Some(ptr) if ptr.mutability.is_none())
+                matches!(unwrap_reference(typ, true), Some(ptr) if !ptr_is_mut(&ptr.mutability))
             }
             _ => false,
         },
@@ -1744,7 +1744,7 @@ fn source_is_const_volatile_reference(
     match inputs.iter().nth(1).map(|input| &input.0) {
         Some(syn::FnArg::Typed(PatType { ty, .. }, ..)) => match ty.as_ref() {
             Type::Path(typ) => matches!(unwrap_reference(typ, false), Some(ptr)
-                if ptr.mutability.is_none() && is_volatile_qualified(&ptr.elem)),
+                if !ptr_is_mut(&ptr.mutability) && is_volatile_qualified(&ptr.elem)),
             _ => false,
         },
         _ => false,

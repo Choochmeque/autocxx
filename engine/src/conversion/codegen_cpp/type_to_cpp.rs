@@ -10,7 +10,7 @@ use crate::{
     conversion::{
         api::Api,
         apivec::ApiVec,
-        type_helpers::{unwrap_const, unwrap_volatile},
+        type_helpers::{ptr_is_mut, unwrap_const, unwrap_volatile},
         AnalysisPhase, ConvertErrorFromCpp,
     },
     parse_callbacks::CppOriginalName,
@@ -21,7 +21,7 @@ use indexmap::set::IndexSet as HashSet;
 use itertools::Itertools;
 use quote::ToTokens;
 use std::iter::once;
-use syn::{Token, Type};
+use syn::Type;
 
 /// The suffix we append to a type's name to make the alias which lets us refer
 /// to it even though its own name is hidden by a variable. See
@@ -286,7 +286,7 @@ impl CppNameMap {
                 Type::Path(typ) if typ.path.is_ident("str") => Ok("rust::Str".into()),
                 _ => Ok(format!(
                     "{}{}&",
-                    get_mut_string(&typr.mutability),
+                    get_mut_string(typr.mutability.is_some()),
                     self.type_to_cpp(typr.elem.as_ref())?
                 )),
             },
@@ -303,7 +303,7 @@ impl CppNameMap {
                 let qualifier = if pointee_says_const {
                     ""
                 } else {
-                    get_mut_string(&typp.mutability)
+                    get_mut_string(ptr_is_mut(&typp.mutability))
                 };
                 Ok(format!(
                     "{qualifier}{}*",
@@ -332,7 +332,7 @@ impl CppNameMap {
                     len.base10_digits()
                 ))
             }
-            Type::BareFn(_)
+            Type::FnPtr(_)
             | Type::Group(_)
             | Type::ImplTrait(_)
             | Type::Infer(_)
@@ -397,9 +397,10 @@ fn unaliased_cpp_name(
     }
 }
 
-fn get_mut_string(mutability: &Option<Token![mut]>) -> &'static str {
-    match mutability {
-        None => "const ",
-        Some(_) => "",
+fn get_mut_string(mutable: bool) -> &'static str {
+    if mutable {
+        ""
+    } else {
+        "const "
     }
 }

@@ -11,7 +11,10 @@ use crate::conversion::parse::CppRefQualifier;
 use crate::conversion::{ConvertErrorFromCpp, CppEffectiveName};
 use crate::minisyn::Ident;
 use crate::{
-    conversion::{api::SubclassName, type_helpers::extract_pinned_mutable_reference_type},
+    conversion::{
+        api::SubclassName,
+        type_helpers::{extract_pinned_mutable_reference_type, ptr_is_mut},
+    },
     types::{Namespace, QualifiedName},
 };
 use quote::ToTokens;
@@ -47,7 +50,7 @@ impl BridgePointer {
         match ty {
             Type::Ptr(TypePtr {
                 elem, mutability, ..
-            }) => Some(Self::to((**elem).clone(), mutability.is_some())),
+            }) => Some(Self::to((**elem).clone(), ptr_is_mut(mutability))),
             _ => None,
         }
     }

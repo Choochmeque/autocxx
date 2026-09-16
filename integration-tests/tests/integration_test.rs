@@ -32160,7 +32160,7 @@ fn test_impl_new_returns_are_must_use() {
             let mut checked = 0usize;
             for (name, sig, attrs) in collect_fns(&rs) {
                 let returns_new = quote!(#sig).to_string().contains(":: New <");
-                let must_use = attrs.iter().any(|attr| attr.path.is_ident("must_use"));
+                let must_use = attrs.iter().any(|attr| attr.path().is_ident("must_use"));
                 if returns_new {
                     checked += 1;
                 }
@@ -32197,7 +32197,7 @@ fn test_impl_new_returns_are_must_use() {
                     }
                     syn::Item::Impl(i) if i.trait_.is_none() => {
                         for item in &i.items {
-                            if let syn::ImplItem::Method(f) = item {
+                            if let syn::ImplItem::Fn(f) = item {
                                 out.push((f.sig.ident.to_string(), f.sig.clone(), f.attrs.clone()));
                             }
                         }
@@ -38371,7 +38371,7 @@ impl CodeCheckerFns for NoMethodNamed {
                     imp.trait_.is_none()
                         && quote::quote!(#self_ty).to_string() == ty
                         && imp.items.iter().any(|item| match item {
-                            syn::ImplItem::Method(f) => f.sig.ident == method,
+                            syn::ImplItem::Fn(f) => f.sig.ident == method,
                             _ => false,
                         })
                 }

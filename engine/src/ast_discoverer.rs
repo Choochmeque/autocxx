@@ -270,8 +270,8 @@ impl PerModDiscoveries<'_> {
                 self.search_expr(&exm.expr)?;
                 for a in &exm.arms {
                     self.search_expr(&a.body)?;
-                    if let Some((_, guard)) = &a.guard {
-                        self.search_expr(guard)?;
+                    if let Pat::Guard(guarded) = &a.pat {
+                        self.search_expr(&guarded.guard)?;
                     }
                 }
             }
@@ -415,7 +415,7 @@ impl PerModDiscoveries<'_> {
             | Type::Ptr(TypePtr { elem, .. })
             | Type::Reference(TypeReference { elem, .. })
             | Type::Slice(TypeSlice { elem, .. }) => self.search_type(elem)?,
-            Type::BareFn(tf) => {
+            Type::FnPtr(tf) => {
                 for input in &tf.inputs {
                     self.search_type(&input.ty)?;
                 }
@@ -489,7 +489,7 @@ impl PerModDiscoveries<'_> {
             syn::PathArguments::Parenthesized(pas) => {
                 self.search_return_type(&pas.output)?;
                 for t in &pas.inputs {
-                    self.search_type(t)?;
+                    self.search_type(&t.ty)?;
                 }
             }
         }
@@ -525,6 +525,25 @@ impl VisitMut for SelfSubstituter<'_> {
     }
 }
 
+/// The type a receiver binds, spelled in terms of `Self`: `self` is `Self`,
+/// `&'a mut self` is `&'a mut Self`, and `self: T` is `T`.
+fn receiver_type(rec_arg: &syn::Receiver) -> Type {
+    match &rec_arg.kind {
+        syn::ReceiverKind::Reference(and_token, lifetime, mutability) => {
+            Type::Reference(TypeReference {
+                attrs: Vec::new(),
+                and_token: *and_token,
+                lifetime: lifetime.clone(),
+                mutability: *mutability,
+                elem: Box::new(parse_quote! { Self }),
+            })
+        }
+        syn::ReceiverKind::Typed(_, ty) => (**ty).clone(),
+        // `ReceiverKind::Value`, and any notation syn adds later, spells `Self`.
+        _ => parse_quote! { Self },
+    }
+}
+
 /// Take a method signature that may be `fn a(&self)`
 /// and turn it into `fn a(self: &A)` which is what we will
 /// need to specify to cxx.
@@ -533,7 +552,7 @@ fn add_receiver(sig: &Signature, receiver: &Ident) -> Result<Signature, Discover
     match sig.inputs.iter_mut().next() {
         Some(first_arg) => match first_arg {
             syn::FnArg::Receiver(rec_arg) => {
-                let mut substituted_type = rec_arg.ty.clone();
+                let mut substituted_type = receiver_type(rec_arg);
                 visit_type_mut(&mut SelfSubstituter::new(receiver), &mut substituted_type);
                 *first_arg = parse_quote! {
                         qelf: #substituted_type

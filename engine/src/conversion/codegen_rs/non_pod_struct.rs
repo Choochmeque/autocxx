@@ -6,10 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use syn::{
-    parse_quote, Attribute, GenericParam, Generics, Item, TraitBound, TraitBoundModifier,
-    TypeParamBound,
-};
+use syn::{parse_quote, Attribute, GenericParam, Generics, Item, TraitBound, TypeParamBound};
 
 use crate::types::{make_ident, Namespace, QualifiedName};
 
@@ -197,10 +194,7 @@ fn rewrite_for_the_output_mod(generics: &Generics, ns: &Namespace) -> Generics {
 fn is_relaxation(bound: &TypeParamBound) -> bool {
     matches!(
         bound,
-        TypeParamBound::Trait(TraitBound {
-            modifier: TraitBoundModifier::Maybe(_),
-            ..
-        })
+        TypeParamBound::Trait(TraitBound { maybe: Some(_), .. })
     )
 }
 

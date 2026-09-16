@@ -338,6 +338,7 @@ fn reference_type(
     cpp_name_map: &CppNameMap,
 ) -> Result<String, ConvertErrorFromCpp> {
     let ty = Type::Reference(TypeReference {
+        attrs: Vec::new(),
         and_token: Default::default(),
         lifetime: None,
         mutability: pointer.is_mut().then(Default::default),

@@ -105,10 +105,18 @@ pub(crate) fn add_explicit_lifetime_if_necessary<'r>(
         }
         None => (None, params, ret_type),
         Some(new_return_type) => {
-            for syn::FnArg::Typed(PatType { ty, .. })
-            | syn::FnArg::Receiver(syn::Receiver { ty, .. }) in
-                params.iter_mut().map(|minifnarg| &mut minifnarg.0)
-            {
+            for param in params.iter_mut().map(|minifnarg| &mut minifnarg.0) {
+                // A receiver written `&self` prints from its own tokens rather
+                // than from a type, so only the `self: T` spelling has one to
+                // qualify.
+                let ty = match param {
+                    syn::FnArg::Typed(PatType { ty, .. })
+                    | syn::FnArg::Receiver(syn::Receiver {
+                        kind: syn::ReceiverKind::Typed(_, ty),
+                        ..
+                    }) => ty,
+                    syn::FnArg::Receiver(_) => continue,
+                };
                 match ty.as_mut() {
                     Type::Path(TypePath {
                         path: Path { segments, .. },
