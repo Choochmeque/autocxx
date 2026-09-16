@@ -1560,11 +1560,12 @@ impl<'a> FnAnalyzer<'a> {
     /// - the base declares that name once. An overload set is not something
     ///   the shim can select from either: bindgen reports neither default
     ///   arguments nor enough of the types to say which member `d.foo(args)`
-    ///   would pick. This is the one rule which leaves a note behind rather
-    ///   than nothing: the name would otherwise vanish from the deriving class
-    ///   with no sign that C++ declares it, where the other rules each leave
-    ///   something the reader can see - a member which hides it, a second
-    ///   subobject, a base they cannot name.
+    ///   would pick.
+    ///
+    /// The last two leave a note behind rather than nothing: the name would
+    /// otherwise vanish from the deriving class with no sign that C++ declares
+    /// it, where the other rules each leave something the reader can see - a
+    /// member which hides it, a second subobject, a base they cannot name.
     ///
     /// Only public members are imported, and only member functions: a static
     /// member's call needs no receiver and so needs a shim of a different
@@ -1764,12 +1765,12 @@ impl<'a> FnAnalyzer<'a> {
             })
             .collect();
         let mut imports = Vec::new();
-        // The deriving class, the base's C++ spelling (a nested base's bindgen
-        // identifier names nothing in C++), the base member's bindgen
-        // identifier, its C++ name and how many of that name the base declares
-        // - one entry per family which was not imported, for the note left in
-        // its place.
-        let mut overload_set_notes: Vec<(QualifiedName, String, String, CppOriginalName, usize)> =
+        // The deriving class, the base member's bindgen identifier, its C++
+        // name and why the family was declined - one entry per family which
+        // was not imported, for the note left in its place. The reason carries
+        // the base's C++ spelling, a nested base's bindgen identifier naming
+        // nothing in C++.
+        let mut declined_notes: Vec<(QualifiedName, String, CppOriginalName, ConvertErrorFromCpp)> =
             Vec::new();
         let mut noted: HashSet<(QualifiedName, CppOriginalName)> = HashSet::new();
         for api in apis.iter() {
@@ -1830,9 +1831,6 @@ impl<'a> FnAnalyzer<'a> {
                 continue;
             };
             let cpp_name = name.cpp_name().to_string_for_cpp_generation().to_string();
-            if merged_names.contains(&(base.clone(), cpp_name.clone())) {
-                continue;
-            }
             // How many functions of this name the base declares. One is
             // importable; a set is not, and leaves a note instead of a binding
             // so that the deriving class says what became of the name. The
@@ -1840,6 +1838,12 @@ impl<'a> FnAnalyzer<'a> {
             let Some(&declared) = member_functions.get(&(base.clone(), cpp_name.clone())) else {
                 continue;
             };
+            // A using-declaration in the base merges members its own base
+            // declares under this name into the base's set, which is as
+            // unimportable as an overload set and for the same reason - and
+            // counting will not find it, bindgen reporting the declaration
+            // without saying what it names. Also a note rather than a silence.
+            let merged = merged_names.contains(&(base.clone(), cpp_name.clone()));
             for derived in &importers {
                 // One base subobject, publicly reached: neither question
                 // answers the other. Two paths make two subobjects whatever
@@ -1864,18 +1868,27 @@ impl<'a> FnAnalyzer<'a> {
                 if !resolves_here {
                     continue;
                 }
-                if declared != 1 {
-                    // One note for the family, not one per overload: the
-                    // outer loop reaches this once for each member of the set,
-                    // and they all say the same thing about the same name.
+                if merged || declared != 1 {
+                    // One note for the family, not one per member: the outer
+                    // loop reaches this once for each member of the set, and
+                    // they all say the same thing about the same name.
                     if let Some(cpp_name) = name.cpp_name_if_present() {
                         if noted.insert((derived.clone(), cpp_name.clone())) {
-                            overload_set_notes.push((
+                            let err = if merged {
+                                ConvertErrorFromCpp::InheritedMergedName {
+                                    base: base_cpp_spelling.clone(),
+                                }
+                            } else {
+                                ConvertErrorFromCpp::InheritedOverloadSet {
+                                    base: base_cpp_spelling.clone(),
+                                    count: declared,
+                                }
+                            };
+                            declined_notes.push((
                                 derived.clone(),
-                                base_cpp_spelling.clone(),
                                 name.name.get_final_item().to_string(),
                                 cpp_name.clone(),
-                                declared,
+                                err,
                             ));
                         }
                     }
@@ -1908,7 +1921,7 @@ impl<'a> FnAnalyzer<'a> {
             .map(|api| api.name().clone())
             .chain(self.extra_apis.iter().map(|api| api.name().clone()))
             .collect();
-        for (derived, base, base_method_ident, cpp_name, declared) in overload_set_notes {
+        for (derived, base_method_ident, cpp_name, err) in declined_notes {
             let Some(rust_name) = note_rust_name(&cpp_name) else {
                 continue;
             };
@@ -1922,8 +1935,8 @@ impl<'a> FnAnalyzer<'a> {
                 ident = format!("{stem}{suffix}");
                 suffix += 1;
             }
-            // No declaration key: the note stands for a whole overload set,
-            // not any one declaration of the name.
+            // No declaration key: the note stands for a whole family of the
+            // name, not any one declaration of it.
             let (rust_name, _) = self.get_overload_name(
                 derived.get_namespace(),
                 derived.get_final_item(),
@@ -1937,10 +1950,7 @@ impl<'a> FnAnalyzer<'a> {
                     make_ident(ident),
                     Some(cpp_name),
                 ),
-                err: ConvertErrorFromCpp::InheritedOverloadSet {
-                    base,
-                    count: declared,
-                },
+                err,
                 ctx: Some(ctx),
             });
         }
