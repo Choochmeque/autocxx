@@ -38,6 +38,19 @@ struct StructDetails {
     dependent_structs: Vec<QualifiedName>,
 }
 
+/// A type some struct's POD-ness depends on, together with the field bindgen
+/// wrote it for.
+///
+/// The field name is carried because the type sometimes is not one C++ ever
+/// spelled: bindgen writes a marker newtype where it could not name the real
+/// type, and a refusal which names the marker sends the reader looking for a
+/// type that is in nobody's headers. The field is what they can find.
+struct FieldDependency {
+    /// bindgen's name for the field, where it wrote one.
+    field: Option<String>,
+    ty: QualifiedName,
+}
+
 impl StructDetails {
     fn new(state: PodState) -> Self {
         StructDetails {
@@ -298,8 +311,8 @@ impl ByValueChecker {
                 // Back on the stack beneath everything it depends on, to be
                 // ordered once they are all out of the way.
                 stack.push((position, true));
-                for field_type in Self::get_field_types(structs[position].1) {
-                    if let Some(&dependency) = positions.get(&field_type) {
+                for field in Self::get_field_dependencies(structs[position].1) {
+                    if let Some(&dependency) = positions.get(&field.ty) {
                         if progress[dependency] == Progress::Unseen {
                             stack.push((dependency, false));
                         }
@@ -329,8 +342,9 @@ impl ByValueChecker {
         } else {
             PodState::SafeToBePod
         };
-        let fieldlist = Self::get_field_types(def);
-        for ty_id in &fieldlist {
+        let fieldlist = Self::get_field_dependencies(def);
+        for dependency in &fieldlist {
+            let ty_id = &dependency.ty;
             match self.results.get(ty_id) {
                 None if ty_id.get_final_item() == "__BindgenUnionField" => {
                     field_safety_problem = PodState::UnsafeToBePod(format!(
@@ -380,10 +394,19 @@ impl ByValueChecker {
                     ));
                     break;
                 }
+                // Where the field's type is one of bindgen's marker newtypes,
+                // say what the marker means about the field: naming it would
+                // send the reader looking for a type in nobody's headers.
                 None => {
-                    field_safety_problem = PodState::UnsafeToBePod(format!(
-                        "Type {tyname} could not be POD because its dependent type {ty_id} isn't known"
-                    ));
+                    field_safety_problem = PodState::UnsafeToBePod(
+                        marker_field_reason(&tyname, dependency, &self.has_bases).unwrap_or_else(
+                            || {
+                                format!(
+                                "Type {tyname} could not be POD because its dependent type {ty_id} isn't known"
+                            )
+                            },
+                        ),
+                    );
                     break;
                 }
                 Some(deets) => {
@@ -423,14 +446,14 @@ impl ByValueChecker {
             // object carries at runtime, so the fields above are not this
             // type's layout, and holding it by value in Rust would copy
             // something else. Nothing else here can see it - a virtual base
-            // gets no field for `get_field_types` to find.
+            // gets no field for `get_field_dependencies` to find.
             let reason = format!(
                 "Type {tyname} could not be POD because it inherits a base class virtually."
             );
             field_safety_problem = PodState::UnsafeToBePod(reason);
         }
         let mut my_details = StructDetails::new(field_safety_problem);
-        my_details.dependent_structs = fieldlist;
+        my_details.dependent_structs = fieldlist.into_iter().map(|field| field.ty).collect();
         self.results.insert(tyname, my_details);
     }
 
@@ -537,7 +560,7 @@ impl ByValueChecker {
     /// fields which may be non-POD, so can largely concern itself with the type a
     /// field names - through any number of array dimensions, since an array holds
     /// its elements by value.
-    fn get_field_types(def: &ItemStruct) -> Vec<QualifiedName> {
+    fn get_field_dependencies(def: &ItemStruct) -> Vec<FieldDependency> {
         let mut results = Vec::new();
         for f in &def.fields {
             if f.ident
@@ -609,7 +632,10 @@ impl ByValueChecker {
                         // being settled as a side effect of following arrays.
                         continue;
                     }
-                    results.push(QualifiedName::from_type_path(p));
+                    results.push(FieldDependency {
+                        field: f.ident.as_ref().map(|id| id.to_string()),
+                        ty: QualifiedName::from_type_path(p),
+                    });
                 }
                 // A pointer. Copying the field copies the pointer, whatever it
                 // points at, so it neither blocks POD-ness nor names a type we
@@ -652,6 +678,65 @@ impl ByValueChecker {
                 .unwrap_or(false)
         })
     }
+}
+
+/// Why `tyname` cannot be POD, where the offending field's type is one of
+/// bindgen's marker newtypes rather than a type C++ declared.
+///
+/// A marker - `__bindgen_marker_Opaque` and the two reference ones are the
+/// shapes which get this far - is bindgen's encoding and is in nobody's
+/// headers, so naming it sends the reader hunting for a type that does not
+/// exist. The field is what they can find, so the refusal names that and says
+/// what the marker records about it.
+///
+/// `None` for a type which is not a marker, leaving the caller to name it: an
+/// ordinary type the reader can go and look at is exactly what should be named.
+fn marker_field_reason(
+    tyname: &QualifiedName,
+    dependency: &FieldDependency,
+    has_bases: &HashSet<QualifiedName>,
+) -> Option<String> {
+    // bindgen names the field it writes for a base subobject `_base`, `_base_1`
+    // and so on (`ir/comp.rs`): `_base` or `_base_` plus digits, nothing else,
+    // so a member like `_base_ref` is not read as one. Asking whether the type
+    // has bases at all corroborates. A member literally named `_base` in a
+    // class with bases stays ambiguous here; bindgen renames the field where
+    // the two genuinely collide.
+    let is_base = has_bases.contains(tyname)
+        && dependency.field.as_deref().is_some_and(|field| {
+            field == "_base"
+                || field
+                    .strip_prefix("_base_")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+    let subject = match (is_base, dependency.field.as_deref()) {
+        (true, _) => "one of its base classes is".to_string(),
+        (false, Some(field)) => format!("its member `{field}` is"),
+        (false, None) => "one of its members is".to_string(),
+    };
+    let detail = match dependency.ty.get_final_item() {
+        "__bindgen_marker_Opaque" => {
+            "of a type autocxx could not name - a class template instantiation, usually - \
+             so bindgen wrote it as a blob of bytes of the right size and alignment \
+             instead. A blob is not a type Rust can hold by value"
+        }
+        "__bindgen_marker_Reference" | "__bindgen_marker_RValueReference" => {
+            "a C++ reference, which autocxx has no POD field type for: bindgen writes a \
+             raw pointer, and a public Rust field of one would let safe code point the \
+             reference wherever it liked"
+        }
+        // Any other marker, so that a shape added later is described rather
+        // than leaked under its internal name.
+        name if name.starts_with("__bindgen_") => {
+            "of a kind bindgen could only write under a marker of its own, which autocxx \
+             has no Rust type for"
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "Type {tyname} could not be POD because {subject} {detail}. `generate!` still \
+         binds {tyname}; only holding it by value is out."
+    ))
 }
 
 #[cfg(test)]
@@ -988,7 +1073,7 @@ mod tests {
     }
 
     /// An array of a type bindgen could not name, and so replaced with a blob
-    /// of bytes, leaves the struct holding it POD. See `get_field_types`, where
+    /// of bytes, leaves the struct holding it POD. See `get_field_dependencies`, where
     /// this and the next test are the two halves of the asymmetry it describes.
     #[test]
     fn test_array_of_blob_is_pod() {
@@ -1005,8 +1090,9 @@ mod tests {
         assert!(bvc.is_pod(&t_id));
     }
 
-    /// The same blob written as a plain field is refused, because the marker
-    /// names a type this knows nothing about.
+    /// The same blob written as a plain field is refused, and the refusal names
+    /// the member rather than the marker: the marker is bindgen's encoding and
+    /// is in no header the reader could go and look at.
     #[test]
     fn test_plain_blob_field_is_not_pod() {
         let mut bvc = ByValueChecker::new();
@@ -1020,8 +1106,105 @@ mod tests {
         bvc.ingest_struct(&t, &Namespace::new());
         let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
         assert!(
-            err.contains("__bindgen_marker_Opaque"),
-            "should be refused for naming a type we don't know, was: {err}"
+            err.contains("its member `one`") && err.contains("blob of bytes"),
+            "should be refused for the member holding a blob, was: {err}"
+        );
+        assert!(
+            !err.contains("__bindgen"),
+            "the marker should not be named, was: {err}"
+        );
+    }
+
+    /// The same blob as the field bindgen writes for a base subobject - the
+    /// shape which found this defect: the base is a class template
+    /// instantiation bindgen could not name, so the field is a blob, and the
+    /// refusal has to say so rather than blame the marker.
+    #[test]
+    fn test_blob_base_field_names_the_base() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                _base: __bindgen_marker_Opaque<[u8; 16usize]>,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.has_bases.insert(t_id.clone());
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("one of its base classes"),
+            "should be refused for the base, was: {err}"
+        );
+        assert!(
+            !err.contains("__bindgen"),
+            "the marker should not be named, was: {err}"
+        );
+    }
+
+    /// A `_base`-looking field on a class bindgen reported no base for is a
+    /// member C++ spelled that way, and is named as one.
+    #[test]
+    fn test_blob_field_spelled_like_a_base_is_still_a_member() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                _base: __bindgen_marker_Opaque<[u8; 16usize]>,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("its member `_base`"),
+            "should be refused for the member, was: {err}"
+        );
+    }
+
+    /// A member whose name merely starts with `_base_` - a `_base_ref`, say -
+    /// on a class which does have bases. Only `_base` and `_base_<digits>` are
+    /// bindgen's base-subobject fields, so this is a member and must be blamed
+    /// as one, has_bases notwithstanding.
+    #[test]
+    fn test_blob_member_with_base_prefix_is_still_a_member() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                _base: u32,
+                _base_ref: __bindgen_marker_Reference<*mut Inner>,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.has_bases.insert(t_id.clone());
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("its member `_base_ref`"),
+            "should be refused for the member, was: {err}"
+        );
+    }
+
+    /// A C++ reference member, which reaches the same arm under the reference
+    /// marker. Same mechanism, so the same fix: name the member, not bindgen's
+    /// encoding of its type.
+    #[test]
+    fn test_reference_member_is_not_pod() {
+        let mut bvc = ByValueChecker::new();
+        let t: ItemStruct = parse_quote! {
+            struct Bar {
+                r: __bindgen_marker_Reference<*mut Inner>,
+                tail: u32,
+            }
+        };
+        let t_id = ty_from_ident(&t.ident);
+        bvc.ingest_struct(&t, &Namespace::new());
+        let err = bvc.satisfy_requests(vec![t_id]).unwrap_err();
+        assert!(
+            err.contains("its member `r`") && err.contains("C++ reference"),
+            "should be refused for the reference member, was: {err}"
+        );
+        assert!(
+            !err.contains("__bindgen"),
+            "the marker should not be named, was: {err}"
         );
     }
 

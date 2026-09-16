@@ -33771,6 +33771,89 @@ fn test_pod_array_of_concrete_instantiation_is_refused() {
     );
 }
 
+/// A class whose base is a class template instantiation, asked for as a POD.
+/// bindgen cannot name the instantiation, so it writes the base subobject as a
+/// blob under `__bindgen_marker_Opaque` - a marker which exists in nobody's
+/// headers. The refusal must name the base rather than the marker, or it sends
+/// the reader hunting for a type nobody wrote. The shape which found this: a
+/// point class whose base is a `Point<2>`-style template instantiation.
+#[test]
+fn test_pod_with_template_instantiation_base_blames_the_base() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        template <int SIZE> class fx_KPoint {
+        public:
+            double fx_at(size_t i) const { return fx_p[i]; }
+        protected:
+            double fx_p[SIZE];
+        };
+        class fx_Point2 : public fx_KPoint<2> {
+        public:
+            fx_Point2(double x, double y) { fx_p[0] = x; fx_p[1] = y; }
+            double fx_x() const { return fx_p[0]; }
+        };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_Point2"],
+        &[
+            "Type fx_Point2 could not be POD because one of its base classes is",
+            "blob of bytes of the right size and alignment",
+        ],
+    );
+}
+
+/// The same class asked for with `generate!`, which is what the refusal above
+/// points at: the type binds, and its own methods with it.
+#[test]
+fn test_template_instantiation_base_is_fine_without_pod() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        template <int SIZE> class fx_KPoint2 {
+        public:
+            double fx_at(size_t i) const { return fx_p[i]; }
+        protected:
+            double fx_p[SIZE];
+        };
+        class fx_Point2b : public fx_KPoint2<2> {
+        public:
+            fx_Point2b(double x, double y) { fx_p[0] = x; fx_p[1] = y; }
+            double fx_x() const { return fx_p[0]; }
+        };
+    "};
+    let rs = quote! {
+        let p = ffi::fx_Point2b::new(3.0, 4.0).within_unique_ptr();
+        assert_eq!(p.fx_x(), 3.0);
+    };
+    run_test("", hdr, rs, &["fx_Point2b"], &[]);
+}
+
+/// A C++ reference member reaches the same arm under a different marker, so
+/// the same fix has to cover it: name the member, never
+/// `__bindgen_marker_Reference`.
+#[test]
+fn test_pod_with_reference_member_blames_the_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_RefInner { uint32_t a; };
+        struct fx_HoldsRef { fx_RefInner& r; uint32_t tail; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_HoldsRef"],
+        &[
+            "Type fx_HoldsRef could not be POD because its member `r` is",
+            "a C++ reference",
+        ],
+    );
+}
+
 /// Where bindgen gives us a *typedef* to a blob, the alias has a name of its
 /// own, so it becomes an opaque type rather than an alias for an integer. What
 /// then uses it in a position an opaque type cannot fill has to be refused -
