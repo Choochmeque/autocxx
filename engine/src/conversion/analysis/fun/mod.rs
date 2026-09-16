@@ -52,7 +52,9 @@ use indexmap::map::IndexMap as HashMap;
 use indexmap::set::IndexSet as HashSet;
 
 use crate::vendored_bindgen::callbacks::ExceptionSpecification;
-use autocxx_parser::{ExternCppType, IncludeCppConfig, UnsafePolicy};
+use autocxx_parser::{
+    BorrowSource, BorrowSourceMatch, ExternCppType, IncludeCppConfig, UnsafePolicy,
+};
 use function_wrapper::{
     CppExceptionSpecification, CppFunction, CppFunctionBody, TypeConversionPolicy,
     RECEIVER_ARG_NAME,
@@ -212,6 +214,11 @@ pub(crate) struct ArgumentAnalysis {
     pub(crate) self_type: Option<(QualifiedName, ReceiverMutability)>,
     pub(crate) has_lifetime: bool,
     pub(crate) is_mutable_reference: bool,
+    /// Whether a `returns_borrow_from!` directive says the reference this
+    /// function returns points into this parameter, so the returned reference
+    /// takes this one's lifetime and no other parameter's. At most one
+    /// parameter of a function has it.
+    pub(crate) is_borrow_source: bool,
     pub(crate) deps: HashSet<QualifiedName>,
     pub(crate) requires_unsafe: UnsafetyNeeded,
     pub(crate) is_placement_return_destination: bool,
@@ -993,6 +1000,85 @@ impl<'a> FnAnalyzer<'a> {
             }
         }
         blocked
+    }
+
+    /// What a `returns_borrow_from!` directive promises about the reference
+    /// this function returns.
+    ///
+    /// Named exactly as `block_functions!` names a function, and asked the
+    /// same way, for the reasons [`Self::is_blocked_by_directive`] sets out: a
+    /// method only under each spelling of the class which declares it, a free
+    /// function under its own name, and never a method under a class-less
+    /// spelling.
+    ///
+    /// Two spellings of the same class reach the same directives, so they can
+    /// only disagree where two directives do - which is the conflict the
+    /// config reports and this passes on.
+    ///
+    /// `unsafe_references_wrapped` is left exactly as it was, and a directive
+    /// written in such a block does nothing. That mode hands back an
+    /// `autocxx::CppLtRef<'a, T>` while its reference *parameters* are the
+    /// lifetime-free `CppRef<T>`, so there is no parameter lifetime for a
+    /// promise to name, and admitting the functions it declines today would
+    /// only put more of them behind an `'a` which no parameter constrains. The
+    /// directives are still asked, so that one written there counts as having
+    /// named the function rather than being reported as naming nothing.
+    fn borrow_source_by_directive(
+        &self,
+        kind: &FnKind,
+        diagnostic_name: &QualifiedName,
+    ) -> BorrowSourceMatch {
+        let found = self.borrow_source_named(kind, diagnostic_name);
+        if self.config.unsafe_policy.requires_cpprefs() {
+            return BorrowSourceMatch::None;
+        }
+        found
+    }
+
+    /// The directives which name this function, whatever is then done with
+    /// them. See [`Self::borrow_source_by_directive`].
+    fn borrow_source_named(
+        &self,
+        kind: &FnKind,
+        diagnostic_name: &QualifiedName,
+    ) -> BorrowSourceMatch {
+        let impl_for = match kind {
+            FnKind::Function => None,
+            FnKind::Method {
+                impl_for,
+                method_kind:
+                    MethodKind::Normal
+                    | MethodKind::Static
+                    | MethodKind::Virtual(_)
+                    | MethodKind::PureVirtual(_),
+            } => Some(impl_for),
+            FnKind::Method { .. } | FnKind::TraitMethod { .. } => return BorrowSourceMatch::None,
+        };
+        let Some(impl_for) = impl_for else {
+            return self.config.borrow_source(&diagnostic_name.to_cpp_name());
+        };
+        let mut found = BorrowSourceMatch::None;
+        for spelling in self.nested_cpp_names.spellings(impl_for) {
+            let answer = self
+                .config
+                .borrow_source(&format!("{spelling}::{}", diagnostic_name.get_final_item()));
+            found = match (found, answer) {
+                (BorrowSourceMatch::Conflict(first, second), _) => {
+                    BorrowSourceMatch::Conflict(first, second)
+                }
+                (_, BorrowSourceMatch::Conflict(first, second)) => {
+                    BorrowSourceMatch::Conflict(first, second)
+                }
+                (BorrowSourceMatch::None, answer) => answer,
+                (BorrowSourceMatch::One(first), BorrowSourceMatch::One(second))
+                    if first != second =>
+                {
+                    BorrowSourceMatch::Conflict(first, second)
+                }
+                (found, _) => found,
+            };
+        }
+        found
     }
 
     #[allow(clippy::if_same_then_else)] // clippy bug doesn't notice the two
@@ -3087,40 +3173,70 @@ impl<'a> FnAnalyzer<'a> {
         // `T& operator=(const T&)` returns a mutable reference and takes two
         // references, so it fails the first count for having more than one and
         // would have failed the second had it taken one fewer.
+        //
+        // A `returns_borrow_from!` directive answers both counts at once: it
+        // is the user saying which input the output borrows from, which is the
+        // one thing neither the C++ declaration nor autocxx can work out. It
+        // is asked only where the return really is a reference, so a directive
+        // naming a function which returns anything else has nothing to promise
+        // about and leaves that function exactly as it was.
         if return_analysis.was_reference && !is_assignment_operator {
-            // cxx only allows functions to return a reference if they take exactly
-            // one reference as a parameter. Let's see.
-            let num_input_references = param_details.iter().filter(|pd| pd.has_lifetime).count();
-            if num_input_references == 0 {
-                set_ignore_reason(ConvertErrorFromCpp::NoInputReference(rust_name.clone()));
-            }
-            if num_input_references > 1 {
-                set_ignore_reason(ConvertErrorFromCpp::MultipleInputReferences(
-                    rust_name.clone(),
-                ));
-            }
-        }
-        if return_analysis.was_mutable_reference && !is_assignment_operator {
-            // This one's a bit more subtle. We can't have:
-            //    fn foo(thing: &Thing) -> &mut OtherThing
-            // because Rust doesn't allow it.
-            // We could probably allow:
-            //    fn foo(thing: &mut Thing, thing2: &mut OtherThing) -> &mut OtherThing
-            // but probably cxx doesn't allow that. (I haven't checked). Even if it did,
-            // there's ambiguity here so won't allow it.
-            let num_input_mutable_references = param_details
-                .iter()
-                .filter(|pd| pd.has_lifetime && pd.is_mutable_reference)
-                .count();
-            if num_input_mutable_references == 0 {
-                set_ignore_reason(ConvertErrorFromCpp::NoMutableInputReference(
-                    rust_name.clone(),
-                ));
-            }
-            if num_input_mutable_references > 1 {
-                set_ignore_reason(ConvertErrorFromCpp::MultipleMutableInputReferences(
-                    rust_name.clone(),
-                ));
+            match self.borrow_source_by_directive(&kind, &diagnostic_name) {
+                BorrowSourceMatch::None => {
+                    if let Some(err) = undirected_reference_refusal(
+                        &param_details,
+                        &rust_name,
+                        return_analysis.was_mutable_reference,
+                    ) {
+                        set_ignore_reason(err);
+                    }
+                }
+                BorrowSourceMatch::Conflict(first, second) => {
+                    set_ignore_reason(ConvertErrorFromCpp::ConflictingBorrowSources {
+                        function: directive_name_for(&kind, &diagnostic_name),
+                        first: first.to_string(),
+                        second: second.to_string(),
+                    })
+                }
+                BorrowSourceMatch::One(source) => match resolve_borrow_source(
+                    &source,
+                    &param_details,
+                    &params,
+                    &directive_name_for(&kind, &diagnostic_name),
+                    return_analysis.was_mutable_reference,
+                ) {
+                    Ok(index) => param_details[index].is_borrow_source = true,
+                    // The named parameter does not resolve on this declaration,
+                    // so the directive does not cover this overload. It is
+                    // analysed exactly as if no directive had been written -
+                    // the directive is monotone, never taking away a binding
+                    // that worked - and where that analysis still declines it,
+                    // the stub carries the directive's own message, which says
+                    // both that the lifetime could not be deduced and why the
+                    // directive did not settle it. `self` failing to resolve
+                    // counts only for a member function, where a static
+                    // overload can sit in a set with instance ones; on a free
+                    // function no overload could ever have a receiver, so that
+                    // is a mistake in the directive and stays refused.
+                    Err(err)
+                        if matches!(err, ConvertErrorFromCpp::BorrowSourceNotAParameter { .. })
+                            || (matches!(
+                                err,
+                                ConvertErrorFromCpp::BorrowSourceHasNoReceiver { .. }
+                            ) && !matches!(kind, FnKind::Function)) =>
+                    {
+                        if undirected_reference_refusal(
+                            &param_details,
+                            &rust_name,
+                            return_analysis.was_mutable_reference,
+                        )
+                        .is_some()
+                        {
+                            set_ignore_reason(err);
+                        }
+                    }
+                    Err(err) => set_ignore_reason(err),
+                },
             }
         }
 
@@ -3861,6 +3977,9 @@ impl<'a> FnAnalyzer<'a> {
                             annotated_type.kind,
                             type_converter::TypeKind::MutableReference
                         ),
+                        // Settled once the whole signature is known; see
+                        // `resolve_borrow_source`.
+                        is_borrow_source: false,
                         deps: annotated_type.types_encountered,
                         requires_unsafe,
                         is_placement_return_destination,
@@ -5445,6 +5564,179 @@ fn return_type_is_reference(output: &crate::minisyn::ReturnType) -> bool {
         type_is_reference(ty.as_ref(), true)
     } else {
         false
+    }
+}
+
+/// Why a reference-returning function is declined when no
+/// `returns_borrow_from!` directive settles which input the reference borrows
+/// from - or `None` where nothing needs settling.
+///
+/// cxx only allows functions to return a reference if they take exactly one
+/// reference as a parameter, which is also the only shape whose output
+/// lifetime needs no one's word. Where several counts are wrong at once, the
+/// last one computed wins, exactly as consecutive `set_ignore_reason` calls
+/// always resolved it.
+///
+/// The mutable case is a bit more subtle. We can't have:
+///    fn foo(thing: &Thing) -> &mut OtherThing
+/// because Rust doesn't allow it.
+/// We could probably allow:
+///    fn foo(thing: &mut Thing, thing2: &mut OtherThing) -> &mut OtherThing
+/// but probably cxx doesn't allow that. (I haven't checked). Even if it did,
+/// there's ambiguity here so won't allow it.
+fn undirected_reference_refusal(
+    param_details: &[ArgumentAnalysis],
+    rust_name: &str,
+    returns_mutable_reference: bool,
+) -> Option<ConvertErrorFromCpp> {
+    let mut refusal = None;
+    let num_input_references = param_details.iter().filter(|pd| pd.has_lifetime).count();
+    if num_input_references == 0 {
+        refusal = Some(ConvertErrorFromCpp::NoInputReference(rust_name.to_string()));
+    }
+    if num_input_references > 1 {
+        refusal = Some(ConvertErrorFromCpp::MultipleInputReferences(
+            rust_name.to_string(),
+        ));
+    }
+    if returns_mutable_reference {
+        let num_input_mutable_references = param_details
+            .iter()
+            .filter(|pd| pd.has_lifetime && pd.is_mutable_reference)
+            .count();
+        if num_input_mutable_references == 0 {
+            refusal = Some(ConvertErrorFromCpp::NoMutableInputReference(
+                rust_name.to_string(),
+            ));
+        }
+        if num_input_mutable_references > 1 {
+            refusal = Some(ConvertErrorFromCpp::MultipleMutableInputReferences(
+                rust_name.to_string(),
+            ));
+        }
+    }
+    refusal
+}
+
+/// Which parameter a `returns_borrow_from!` directive names, in this
+/// declaration, or why nothing here can keep the promise it makes.
+///
+/// The directive is a statement about C++ which autocxx cannot check: whether
+/// the reference really does point into that parameter is the author's word.
+/// What can be checked is whether the promise is expressible at all, and each
+/// refusal below is a shape where honouring it would produce a Rust signature
+/// which lies:
+///
+/// * a parameter passed by value, as a pointer or as an rvalue reference has
+///   no lifetime in the generated signature to give away;
+/// * a parameter the Rust wrapper converts hands C++ a temporary built from
+///   the caller's argument rather than the caller's own borrow, and the
+///   temporary dies inside the wrapper;
+/// * a mutable reference borrowed out of a const one is a `&mut` derived from
+///   a `&`, which Rust does not have and C++ reaches only through a
+///   `const_cast`.
+///
+/// A name which resolves to nothing here is not an error about the directive -
+/// it claims a whole overload set, and an overload without such a parameter is
+/// one it does not cover. The caller treats that overload as if no directive
+/// had been written, and keeps the error this returns only for the stub of one
+/// still declined; see the `resolve_borrow_source` call site.
+fn resolve_borrow_source(
+    source: &BorrowSource,
+    param_details: &[ArgumentAnalysis],
+    params: &Punctuated<FnArg, Comma>,
+    function: &str,
+    returns_mutable_reference: bool,
+) -> Result<usize, ConvertErrorFromCpp> {
+    let function = function.to_string();
+    // A position counts the parameters C++ declared, so it skips the receiver
+    // - which `self` names instead - and the pointer autocxx adds for a
+    // function which builds its result into the caller's storage.
+    let declared = || {
+        param_details
+            .iter()
+            .zip(params.iter())
+            .enumerate()
+            .filter(|(_, (pd, _))| pd.self_type.is_none() && !pd.is_placement_return_destination)
+    };
+    let not_a_parameter = || ConvertErrorFromCpp::BorrowSourceNotAParameter {
+        function: function.clone(),
+        parameter: source.to_string(),
+    };
+    let (index, (pd, param)) = match source {
+        BorrowSource::Receiver => param_details
+            .iter()
+            .zip(params.iter())
+            .enumerate()
+            .find(|(_, (pd, _))| pd.self_type.is_some())
+            .ok_or_else(|| ConvertErrorFromCpp::BorrowSourceHasNoReceiver {
+                function: function.clone(),
+                parameter: source.to_string(),
+            })?,
+        BorrowSource::Named(name) => declared()
+            .find(|(_, (pd, _))| matches!(&pd.name.0, Pat::Ident(id) if id.ident == *name))
+            .ok_or_else(not_a_parameter)?,
+        BorrowSource::Position(position) => {
+            declared().nth(*position).ok_or_else(not_a_parameter)?
+        }
+    };
+    if !pd.has_lifetime {
+        return Err(ConvertErrorFromCpp::BorrowSourceNotAReference {
+            function,
+            parameter: source.to_string(),
+            rust_type: parameter_type_description(param),
+        });
+    }
+    // `has_lifetime` records what C++ declared; whether the caller's borrow
+    // actually flows through is the conversion's to say. A parameter the Rust
+    // wrapper converts lends C++ something built for the call, which dies with
+    // the wrapper's own frame, so a signature returning `'a` from it could
+    // never compile. Of the conversions `WholeRustConversion` names, only
+    // `FromBytes` - the `impl AsCppStringView` a `const std::string_view&`
+    // parameter becomes - can coincide with `has_lifetime` today: `FromStr`,
+    // `FromValueParamToPtr`, `FromRValueParamToPtr` and `ToBoxedUpHolder` all
+    // belong to by-value or rvalue parameters the check above already refused,
+    // and the `PointerRustConversion`s arise only under
+    // `unsafe_references_wrapped` (where the directive is inert) or for
+    // pointers. Asking "does the Rust side convert at all" covers every one of
+    // them, and whatever adapter is added next.
+    if pd.conversion.rust_work_needed() {
+        return Err(ConvertErrorFromCpp::BorrowSourceIsConverted {
+            function,
+            parameter: source.to_string(),
+        });
+    }
+    if returns_mutable_reference && !pd.is_mutable_reference {
+        return Err(ConvertErrorFromCpp::BorrowSourceIsConst {
+            function,
+            parameter: source.to_string(),
+        });
+    }
+    Ok(index)
+}
+
+/// The name a directive would have been written with to reach this function,
+/// for a diagnostic about one: the class in front for a member function, and
+/// the namespaces alone for a free one. The name autocxx carries for
+/// diagnostics keeps the namespaces and drops the class, which is a name no
+/// directive can be written with.
+fn directive_name_for(kind: &FnKind, diagnostic_name: &QualifiedName) -> String {
+    match kind {
+        FnKind::Method { impl_for, .. } | FnKind::TraitMethod { impl_for, .. } => format!(
+            "{}::{}",
+            impl_for.to_cpp_name(),
+            diagnostic_name.get_final_item()
+        ),
+        FnKind::Function => diagnostic_name.to_cpp_name(),
+    }
+}
+
+/// How the generated Rust signature spells a parameter, for a diagnostic which
+/// has to say what it is instead of a reference.
+fn parameter_type_description(param: &FnArg) -> String {
+    match &param.0 {
+        syn::FnArg::Typed(pt) => pt.ty.to_token_stream().to_string(),
+        syn::FnArg::Receiver(_) => param.to_token_stream().to_string(),
     }
 }
 
