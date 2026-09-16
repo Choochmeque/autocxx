@@ -267,6 +267,48 @@ macro_rules! block_constructors {
     ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
 }
 
+/// Generate no binding for a named C++ function or member function, while
+/// binding everything else about the class it belongs to. What autocxx knows
+/// it cannot bind it already skips on its own; this is for the method it
+/// would bind wrongly - generating something which won't compile - or one you
+/// want withheld. Either used to cost you the whole class: `block!` names a
+/// type, and there was no way to name less than that.
+///
+/// Name the function as C++ names it: a member function with the class which
+/// declares it in front - `block_functions!("ns::Engine::set_mode")` -
+/// and a free function without a class, by its namespaces alone:
+/// `block_functions!("ns::my_function")`. The namespaces may be left off,
+/// exactly as for [`throws`], at the same cost: a name written short claims
+/// every function answering to it, in every class and every namespace. The
+/// class may not be left off: `block_functions!("ns::set_mode")` names a free
+/// function in `ns`, never a method of some class in `ns`.
+///
+/// The whole overload set of that name goes: C++ overload resolution is not
+/// something a directive naming one name could select within.
+///
+/// What is left behind is a documentation stub saying the function was
+/// blocked, in place of the binding - blocking is a decision worth a marker
+/// rather than a silence. A method blocked on a base class is not imported
+/// into classes which derive from it either. Nor does a Rust subclass get an
+/// override for a blocked virtual method, so blocking a *pure* virtual leaves
+/// the subclass's C++ peer abstract - which the C++ compiler will not accept.
+///
+/// Constructors and destructors are not named this way, and no directive
+/// withholds an explicitly declared one. [`block_constructors`] names a class
+/// and stops autocxx synthesizing the special members C++ declares implicitly
+/// for it - constructors and destructors the class declares itself are bound
+/// as usual.
+///
+/// A directive which matches no function autocxx met is a build error, since
+/// it withheld nothing.
+///
+/// A directive to be included inside
+/// [include_cpp] - see [include_cpp] for general information.
+#[macro_export]
+macro_rules! block_functions {
+    ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
+}
+
 /// The name of the mod to be generated with the FFI code.
 /// The default is `ffi`.
 ///

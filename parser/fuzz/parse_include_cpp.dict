@@ -20,6 +20,7 @@ pod="pod!(\""
 block="block!(\""
 opaque="opaque!(\""
 block_constructors="block_constructors!(\""
+block_functions="block_functions!(\""
 instantiable="instantiable!(\""
 throws="throws!(\""
 
