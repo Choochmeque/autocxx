@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-43152c70.js";
+            window.path_to_searchindex_js = "searchindex-87307bc7.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -252,7 +252,7 @@ functions are marked as throwing:</p>
 <tbody>
 <tr><td><code>throws!("do_something")</code></td><td>Any function named <code>do_something</code></td></tr>
 <tr><td><code>throws!("MyClass::method")</code></td><td>Method <code>method</code> on class <code>MyClass</code></td></tr>
-<tr><td><code>throws!("ns::do_something")</code></td><td>Function <code>do_something</code> in namespace <code>ns</code></td></tr>
+<tr><td><code>throws!("ns::do_something")</code></td><td>Free function <code>do_something</code> in namespace <code>ns</code></td></tr>
 <tr><td><code>throws!("ns::MyClass::method")</code></td><td>Method on a namespaced class</td></tr>
 <tr><td><code>throws!("Outer::Inner::method")</code></td><td>Method on a nested class</td></tr>
 </tbody>
@@ -260,10 +260,17 @@ functions are marked as throwing:</p>
 </div>
 <p>A nested class may also be named by the flattened <code>Outer_Inner</code> spelling
 autocxx knows it by, exactly as in <code>generate!</code>.</p>
+<p>The class may not be left off, exactly as in <code>block_functions!</code>:
+<code>throws!("ns::do_something")</code> names a free function in <code>ns</code>, never a method of
+some class in <code>ns</code>. A designation which names only the namespace of a method
+therefore matches nothing and is refused, rather than making an unrelated
+function of that name fallible.</p>
 <h3 id="partial-matching"><a class="header" href="#partial-matching">Partial matching</a></h3>
 <p>Partial matching is supported: a shorter pattern will match functions in any
 namespace. For example, <code>throws!("do_something")</code> will match both a top-level
-<code>do_something</code> and <code>my_namespace::do_something</code>.</p>
+<code>do_something</code> and <code>my_namespace::do_something</code> - and, since what is dropped
+there is the whole qualification rather than the class alone, a
+<code>MyClass::do_something</code> as well.</p>
 <h4 id="c-header-2"><a class="header" href="#c-header-2">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
