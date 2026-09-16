@@ -44,6 +44,19 @@ arbitrary_self_types = []
 # compile with cxx's own "the trait `VectorElement` is not implemented for
 # `autocxx::c_int`", which names what to turn back on.
 c-type-vectors = ["dep:cxx-build"]
+# Declares `autocxx::CxxMap<K, V>`, standing for `std::map<K, V>`, and compiles
+# the C++ behind it - see `src/cxx_map.rs`. Implies `c-type-vectors`, because
+# `keys()` and `values()` hand back a `CxxVector` of a key or value type and
+# the `c_*` newtypes get theirs from that feature.
+#
+# Off by default, unlike `c-type-vectors`, because of what it costs and who
+# would pay. Glue for a `std::map` is one set of functions per *pair* of types,
+# so the table is a cross product - 483 instantiations, some seconds of C++ and
+# a megabyte of object code. `c-type-vectors` is on by default because a
+# binding which mentions `std::vector<int>` does not compile without it;
+# nothing fails to compile without this one, because no generated binding
+# produces a `CxxMap` yet. Turn it on to use the type in a bridge of your own.
+cxx-maps = ["c-type-vectors", "dep:cc"]
 
 [dependencies]
 autocxx-macro = { path="macro", version="0.30.0" }
@@ -74,6 +87,16 @@ moveit = { version = "0.6", features = [ "cxx" ] }
 # Compiles the `std::vector` glue for the `c_*` newtypes - see `build.rs`.
 # Optional so that `--no-default-features` leaves this a pure-Rust crate.
 cxx-build = { version = "1.0.161", optional = true }
+# Compiles `src/cxx_map.cc`, which is plain C++ rather than a cxx bridge and so
+# needs no more than a C++ compiler driver. Already in the tree under
+# `cxx-build`; optional for the same reason as that one. 1.2 rather than 1.0
+# because `Build::std` is what picks `/std:c++14` over `-std=c++14` on MSVC.
+cc = { version = "1.2", optional = true }
+
+# `cxx-maps` is off by default, and the book links to `CxxMap`'s and
+# `MapPair`'s pages, so the published documentation has to be built with it.
+[package.metadata.docs.rs]
+features = ["cxx-maps"]
 
 [workspace]
 members = ["parser", "engine", "gen/cmd", "gen/build", "macro", "demo", "tools/reduce", "tools/mdbook-preprocessor", "tools/patch-check", "integration-tests", "integration-tests/fixture-deps"]

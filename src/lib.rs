@@ -23,6 +23,8 @@
 // autocxx_macro::include_cpp_impl.
 
 mod argv;
+#[cfg(feature = "cxx-maps")]
+mod cxx_map;
 mod fallible;
 mod reference_wrapper;
 mod rvalue_param;
@@ -31,6 +33,8 @@ mod value_param;
 mod volatile;
 
 pub use argv::{ArgvError, ArgvHolder};
+#[cfg(feature = "cxx-maps")]
+pub use cxx_map::{CxxMap, MapPair, CXX_MAP_HEADER};
 pub use fallible::{StackSlot, TryWithinBox, TryWithinUniquePtr};
 pub use reference_wrapper::{
     AsCppMutRef, AsCppRef, CppLtRef, CppMutLtRef, CppMutRef, CppPin, CppRef, CppUniquePtrPin,
