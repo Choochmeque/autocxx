@@ -22,7 +22,6 @@ categories = ["development-tools::ffi", "api-bindings"]
 exclude = ["fuzz"]
 
 [dependencies]
-log = "0.4"
 proc-macro2 = "1.0"
 quote = "1.0"
 serde = { version = "1.0", features = ["derive"] }
