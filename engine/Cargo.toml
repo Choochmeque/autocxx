@@ -9,7 +9,7 @@
 [package]
 name = "autocxx-engine"
 version = "0.30.0"
-authors = ["Adrian Taylor <adetaylor@chromium.org>"]
+authors = ["Adrian Taylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 # `AND BSD-3-Clause` because the published crate carries bindgen's sources; see
 # the `include` list below. autocxx's own code is still MIT or Apache-2.0.
 license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
