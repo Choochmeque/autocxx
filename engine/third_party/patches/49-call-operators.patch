@@ -1,0 +1,344 @@
+Subject: Report a class's call operators through `ParseCallbacks`
+
+A member C++ calls `operator()` reaches `Function::parse` and is dropped there.
+With `--represent-cxx-operators` the name is checked against the operators
+bindgen has a Rust spelling for, `operator()` is not among them, and the parse
+returns `ParseError::Continue`; without that option the name is refused sooner,
+for not being an identifier. Either way `CompInfo::from_ty` sees a member it got
+no function for and moves on, so nothing bindgen generates says that a class is
+callable at all.
+
+`--report-call-operators` keeps what C++ said about each of them and reports it
+through `denote_call_operator`: how many parameters it declares, the constness,
+and the access. Nothing is generated with the option on either. Naming one is
+the hard half - `operator()` is no identifier, and a name invented for it has to
+stay clear of the class's own members - and that is a question this leaves open;
+what it closes is the class which looks, in the output, exactly like a class
+which declares no such thing.
+
+The report is made where the member was dropped: the arm which takes the
+cursors `Item::parse` returned nothing for. A member reported from there is one
+bindgen really did decline, so an option which later generated call operators
+would stop these being reported without a second decision having to be kept in
+step with the first.
+
+Which cursor that is has to be read from the cursor itself rather than from the
+name `Function::parse` worked with. `ParseCallbacks::generated_name_override`
+runs before that name is examined, so a consumer which renames every function -
+and one which renames every function is the consumer most likely to want this -
+leaves nothing there to recognise. `clang_getCursorSpelling` is unaffected by
+the rename and answers `operator()`.
+
+No signature is reported, only the count of parameters. That is what tells one
+overload of `operator()` from another, which is as much as a consumer needs to
+say how many of them a class has; a signature would be the first half of
+generating them, which this does not do. The count is of what C++ declared
+rather than of what a call must pass, a parameter being free to have a default
+argument.
+
+A call operator template is not reported here. libclang gives one a
+`CXCursor_FunctionTemplate`, which `CompInfo::from_ty` never parses as a member,
+and `--report-member-function-templates` already speaks for those.
+
+The report itself is made from `CompInfo::codegen`, beside the reports every
+class makes, and is subject to `--generate=methods` as any other member
+function is. There is no per-member blocklist to consult, a call operator never
+becoming an item for a blocklist to match, and a blocklisted class does not
+reach codegen at all.
+
+Opt-in, because a report made unconditionally would be a new one for every
+consumer which already implements `ParseCallbacks`. With the option off nothing
+changes at all.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -514,6 +514,29 @@
+     ) {
+     }
+ 
++    /// Report one call operator of a class, for which bindgen generates no
++    /// function.
++    ///
++    /// `Function::parse` gives up on a member C++ calls `operator()`: there is
++    /// no name left to generate it under, `operator()` being no identifier in
++    /// any language bindgen emits. The member is then dropped where it was
++    /// parsed, so nothing in the output says a class is callable.
++    ///
++    /// Called for each call operator of every compound type which reaches
++    /// codegen, in declaration order; a blocklisted class does not reach it. A
++    /// call operator *template* is not reported here - libclang gives one a
++    /// `CXCursor_FunctionTemplate`, which is
++    /// [`ParseCallbacks::denote_member_function_template`]'s to report.
++    ///
++    /// No signature is reported, only how many parameters C++ declared, which
++    /// is what tells one overload of `operator()` from another.
++    fn denote_call_operator(
++        &self,
++        _parent: DiscoveredItemId,
++        _operator: CallOperatorInfo,
++    ) {
++    }
++
+     /// Report the exception specification a C++ function was declared with.
+     ///
+     /// Nothing bindgen generates carries one, and no ABI mangles one into a
+@@ -966,6 +989,24 @@
+     pub visibility: Visibility,
+ }
+ 
++/// What [`ParseCallbacks::denote_call_operator`] reports about one call
++/// operator.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct CallOperatorInfo {
++    /// How many parameters C++ declared, which is what tells one overload of
++    /// `operator()` from another. Not how many a call must pass: a parameter
++    /// may have a default argument.
++    pub parameters: usize,
++
++    /// Whether C++ declared the operator `const`, which says how a caller must
++    /// take the receiver.
++    pub is_const: bool,
++
++    /// The access C++ gave the operator.
++    pub visibility: Visibility,
++}
++
+ /// Whether a method is virtual or pure virtual.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+ pub enum Virtualness {
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -2905,6 +2905,7 @@
+         utils::report_using_declarations(ctx, id, self);
+         utils::report_member_function_templates(ctx, id, self);
+         utils::report_conversion_functions(ctx, id, self);
++        utils::report_call_operators(ctx, id, self);
+ 
+         // Don't output classes with template parameters that aren't types, and
+         // also don't output template specializations, neither total or partial.
+@@ -6646,8 +6647,9 @@
+     use super::serialize::CSerialize;
+     use super::{error, CodegenError, CodegenResult, ToRustTyOrOpaque};
+     use crate::callbacks::{
+-        ConversionFunctionInfo, DataMemberInfo, DiscoveredItemId, Explicitness,
+-        MemberFunctionTemplateInfo, UsingDeclarationInfo, Visibility,
++        CallOperatorInfo, ConversionFunctionInfo, DataMemberInfo,
++        DiscoveredItemId, Explicitness, MemberFunctionTemplateInfo,
++        UsingDeclarationInfo, Visibility,
+     };
+     use crate::ir::comp::{CompInfo, Field, FieldMethods, Method, MethodKind};
+     use crate::ir::context::BindgenContext;
+@@ -7530,6 +7532,34 @@
+         }
+     }
+ 
++    /// Report the call operators of a struct or class through
++    /// [`crate::callbacks::ParseCallbacks::denote_call_operator`].
++    ///
++    /// Subject to `--generate=methods` as a member function is. There is no
++    /// per-member blocklist check to make, a call operator never becoming an
++    /// item for a blocklist to match.
++    pub(super) fn report_call_operators(
++        ctx: &BindgenContext,
++        parent: DiscoveredItemId,
++        comp: &CompInfo,
++    ) {
++        if !ctx.options().codegen_config.methods() {
++            return;
++        }
++        for operator in comp.call_operators() {
++            ctx.options().for_each_callback(|cb| {
++                cb.denote_call_operator(
++                    parent,
++                    CallOperatorInfo {
++                        parameters: operator.parameters(),
++                        is_const: operator.is_const(),
++                        visibility: operator.visibility(),
++                    },
++                );
++            });
++        }
++    }
++
+     pub(super) fn callback_with_cpp_name(
+         ctx: &BindgenContext,
+         item: &Item,
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -278,6 +278,56 @@
+     }
+ }
+ 
++/// One call operator of a class, which `Function::parse` declined to make a
++/// function of for want of a name to generate it under.
++///
++/// Nothing is recorded of what it does beyond how many parameters it declares:
++/// this says that the class is callable and how, which is what an output with
++/// no function for it cannot otherwise say.
++#[derive(Debug, Clone)]
++pub(crate) struct CallOperator {
++    parameters: usize,
++    is_const: bool,
++    visibility: Visibility,
++}
++
++impl CallOperator {
++    /// Read one off a cursor bindgen made no function from.
++    ///
++    /// `None` for anything but a member C++ spells `operator()`. The spelling
++    /// is the cursor's own, not the name `Function::parse` worked with: a
++    /// consumer's `ParseCallbacks::generated_name_override` has already
++    /// rewritten that one, and a consumer which renames every function leaves
++    /// nothing there to recognise.
++    fn from_cursor(cursor: &clang::Cursor) -> Option<Self> {
++        if cursor.kind() != clang_sys::CXCursor_CXXMethod ||
++            cursor.spelling() != "operator()"
++        {
++            return None;
++        }
++        Some(Self {
++            parameters: cursor.num_args().ok()? as usize,
++            is_const: cursor.method_is_const(),
++            visibility: Visibility::from(cursor.access_specifier()),
++        })
++    }
++
++    /// How many parameters C++ declared.
++    pub(crate) fn parameters(&self) -> usize {
++        self.parameters
++    }
++
++    /// Whether C++ declared the operator `const`.
++    pub(crate) fn is_const(&self) -> bool {
++        self.is_const
++    }
++
++    /// The access C++ gave the operator.
++    pub(crate) fn visibility(&self) -> Visibility {
++        self.visibility
++    }
++}
++
+ /// A struct representing a C++ method, either static, normal, or virtual.
+ #[derive(Debug)]
+ pub(crate) struct Method {
+@@ -1384,6 +1434,11 @@
+     /// from a `CXCursor_ConversionFunction`.
+     conversion_functions: Vec<ConversionFunction>,
+ 
++    /// The call operators this class declares, which are members of it in C++
++    /// and are in no other field here: bindgen makes no function for one, so
++    /// none reaches `methods`.
++    call_operators: Vec<CallOperator>,
++
+     /// Whether this type should generate an vtable (TODO: Should be able to
+     /// look at the virtual methods and ditch this field).
+     has_own_virtual_method: bool,
+@@ -1440,6 +1495,7 @@
+             using_declarations: vec![],
+             member_function_templates: vec![],
+             conversion_functions: vec![],
++            call_operators: vec![],
+             has_own_virtual_method: false,
+             has_destructor: false,
+             has_nonempty_base: false,
+@@ -1636,6 +1692,11 @@
+         &self.conversion_functions
+     }
+ 
++    /// The call operators this class declares, in declaration order.
++    pub(crate) fn call_operators(&self) -> &[CallOperator] {
++        &self.call_operators
++    }
++
+     /// Construct a new compound type from a Clang type.
+     pub(crate) fn from_ty(
+         potential_id: ItemId,
+@@ -1908,7 +1969,23 @@
+                             {
+                                 item
+                             }
+-                            _ => return CXChildVisit_Continue,
++                            // A member bindgen made no function for. One of
++                            // those is a member every consumer has to know
++                            // about: `Function::parse` gives up on a call
++                            // operator for want of a name to generate it
++                            // under, and `--report-call-operators` keeps what
++                            // C++ said about it rather than letting a callable
++                            // class look like any other.
++                            _ => {
++                                if ctx.options().report_call_operators {
++                                    if let Some(operator) =
++                                        CallOperator::from_cursor(&cur)
++                                    {
++                                        ci.call_operators.push(operator);
++                                    }
++                                }
++                                return CXChildVisit_Continue;
++                            }
+                         };
+ 
+                     let signature = signature.expect_function_id(ctx);
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -478,6 +478,9 @@
+     /// Report the conversion functions of a class through `ParseCallbacks`.
+     #[arg(long)]
+     report_conversion_functions: bool,
++    /// Report the call operators of a class through `ParseCallbacks`.
++    #[arg(long)]
++    report_call_operators: bool,
+     /// Always be specific about the 'receiver' of a virtual function.
+     #[arg(long)]
+     use_specific_virtual_function_receiver: bool,
+@@ -711,6 +714,7 @@
+         report_template_member_functions,
+         report_member_function_templates,
+         report_conversion_functions,
++        report_call_operators,
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
+         use_distinct_wchar_t,
+@@ -1031,6 +1035,7 @@
+             report_template_member_functions,
+             report_member_function_templates,
+             report_conversion_functions,
++            report_call_operators,
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
+             use_distinct_wchar_t,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -280,6 +280,31 @@
+         as_args: "--report-conversion-functions",
+     },
+ 
++    /// Report the call operators of a class through
++    /// [`ParseCallbacks::denote_call_operator`], for which bindgen otherwise
++    /// generates nothing and says nothing: `Function::parse` gives up on a
++    /// member C++ calls `operator()` for want of a name to generate it under,
++    /// and drops it where it was parsed.
++    ///
++    /// Nothing is generated for them with the option on either, and no
++    /// signature is reported - only how many parameters C++ declared, which is
++    /// what tells one overload from another. What a consumer gets is that the
++    /// class is callable.
++    ///
++    /// [`ParseCallbacks::denote_call_operator`]:
++    ///     callbacks::ParseCallbacks::denote_call_operator
++    report_call_operators: bool {
++        methods: {
++            /// If this is true, report the call operators of a class through
++            /// `ParseCallbacks` rather than dropping them in silence.
++            pub fn report_call_operators(mut self, doit: bool) -> Builder {
++                self.options.report_call_operators = doit;
++                self
++            }
++        },
++        as_args: "--report-call-operators",
++    },
++
+     /// Use a newtype wrapper to denote types which are `const` in their own
+     /// right, as opposed to pointing at something `const`. Rust has no
+     /// spelling for that - `const int` and `int` are both `c_int`, and
