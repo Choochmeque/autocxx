@@ -1,7 +1,3 @@
-[![GitHub](https://img.shields.io/crates/l/autocxx)](https://github.com/Choochmeque/autocxx)
-[![crates.io](https://img.shields.io/crates/d/autocxx)](https://crates.io/crates/autocxx)
-[![docs.rs](https://docs.rs/autocxx/badge.svg)](https://docs.rs/autocxx)
-
 > **Note:** This is the actively maintained continuation of [google/autocxx](https://github.com/google/autocxx), which is no longer maintained by Google (see [google/autocxx#1507](https://github.com/google/autocxx/issues/1507)). Bug reports, feature requests and pull requests are welcome here.
 
 # autocxx — automatic safe interop between Rust and C++
