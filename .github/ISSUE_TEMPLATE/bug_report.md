@@ -20,3 +20,6 @@ A clear and concise description of what you expected to happen.
 
 **Additional context**
 Add any other context about the problem here.
+
+**AI assistance**
+If any part of this report was produced with AI, say so here and confirm you reproduced the problem yourself. Reports with no way to reproduce the problem are closed - see [the contribution guidelines](https://autocxx.dev/contributing.html#use-of-ai).

@@ -16,6 +16,21 @@ use GitHub pull requests for this purpose. Consult
 [GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
 information on using pull requests.
 
+## Tests
+
+A bug fix comes with a test that fails without it; a new feature comes with
+tests covering it. Documentation, comments and pure refactors don't need new
+tests.
+
+## Use of AI
+
+Use whatever tooling you like, AI assistance included; contributions are judged
+on the result. You are the author of what you submit: you must understand the
+change, be able to defend it in review and have run the tests yourself. The
+same standard applies to project members. AI slop is rejected: pull requests
+their submitter cannot explain and bug reports with no way to reproduce the
+problem are closed without further investigation.
+
 ## Community guidelines
 
 This project has a [code of conduct](code-of-conduct.md).
