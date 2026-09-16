@@ -16,6 +16,12 @@ use GitHub pull requests for this purpose. Consult
 [GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
 information on using pull requests.
 
+## Tests
+
+A bug fix comes with a test that fails without it; a new feature comes with
+tests covering it. Documentation, comments and pure refactors don't need new
+tests.
+
 ## Use of AI
 
 Use whatever tooling you like, AI assistance included; contributions are judged
