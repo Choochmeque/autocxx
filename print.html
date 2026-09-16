@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-702b644c.js";
+            window.path_to_searchindex_js = "searchindex-ea1514f7.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -1213,6 +1213,10 @@ fn main() {
     assert_eq!(ffi::do_math(c_int(12), c_int(13)), c_int(25));
 }
 </code></pre>
+<p>Each of these integer newtypes implements <code>Display</code>, printing as the integer it
+wraps, so <code>println!("{}", ffi::some_count())</code> works without reaching for <code>.0</code>.
+A character type such as <code>c_uchar</code> prints its value as a number, which is what
+the wrapped type is.</p>
 <h3 id="inside-a-unique_ptr"><a class="header" href="#inside-a-unique_ptr">Inside a <code>unique_ptr</code></a></h3>
 <p><code>cxx</code> will not put one of its own integer types inside a <code>UniquePtr</code>, so a
 <code>std::unique_ptr&lt;uint32_t&gt;</code> arrives as a <code>UniquePtr&lt;autocxx::c_u32&gt;</code> rather
@@ -1231,7 +1235,8 @@ each one a transparent newtype:
 <a href="https://docs.rs/autocxx/latest/autocxx/struct.c_char8_t.html"><code>c_char8_t</code></a> and
 <a href="https://docs.rs/autocxx/latest/autocxx/struct.c_wchar_t.html"><code>c_wchar_t</code></a>, each
 wrapping the Rust integer of the same width, so a value crosses with <code>.0</code> or
-<code>From</code>.</p>
+<code>From</code>. Like the integer newtypes above, each implements <code>Display</code> and prints as
+the integer it wraps - a number, not a character.</p>
 <p><code>wchar_t</code> is the one whose width and signedness are the target’s to choose -
 <code>unsigned short</code> on Windows, <code>int</code> on Linux and macOS, <code>unsigned int</code> under
 AAPCS - so its payload is
