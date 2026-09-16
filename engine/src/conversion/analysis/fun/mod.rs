@@ -1432,7 +1432,11 @@ impl<'a> FnAnalyzer<'a> {
     /// - the base declares that name once. An overload set is not something
     ///   the shim can select from either: bindgen reports neither default
     ///   arguments nor enough of the types to say which member `d.foo(args)`
-    ///   would pick.
+    ///   would pick. This is the one rule which leaves a note behind rather
+    ///   than nothing: the name would otherwise vanish from the deriving class
+    ///   with no sign that C++ declares it, where the other rules each leave
+    ///   something the reader can see - a member which hides it, a second
+    ///   subobject, a base they cannot name.
     ///
     /// Only public members are imported, and only member functions: a static
     /// member's call needs no receiver and so needs a shim of a different
@@ -1632,6 +1636,14 @@ impl<'a> FnAnalyzer<'a> {
             })
             .collect();
         let mut imports = Vec::new();
+        // The deriving class, the base's C++ spelling (a nested base's bindgen
+        // identifier names nothing in C++), the base member's bindgen
+        // identifier, its C++ name and how many of that name the base declares
+        // - one entry per family which was not imported, for the note left in
+        // its place.
+        let mut overload_set_notes: Vec<(QualifiedName, String, String, CppOriginalName, usize)> =
+            Vec::new();
+        let mut noted: HashSet<(QualifiedName, CppOriginalName)> = HashSet::new();
         for api in apis.iter() {
             let Api::Function {
                 name,
@@ -1690,11 +1702,16 @@ impl<'a> FnAnalyzer<'a> {
                 continue;
             };
             let cpp_name = name.cpp_name().to_string_for_cpp_generation().to_string();
-            if member_functions.get(&(base.clone(), cpp_name.clone())) != Some(&1)
-                || merged_names.contains(&(base.clone(), cpp_name.clone()))
-            {
+            if merged_names.contains(&(base.clone(), cpp_name.clone())) {
                 continue;
             }
+            // How many functions of this name the base declares. One is
+            // importable; a set is not, and leaves a note instead of a binding
+            // so that the deriving class says what became of the name. The
+            // count was taken over these same APIs, so it is always there.
+            let Some(&declared) = member_functions.get(&(base.clone(), cpp_name.clone())) else {
+                continue;
+            };
             for derived in &importers {
                 // One base subobject, publicly reached: neither question
                 // answers the other. Two paths make two subobjects whatever
@@ -1716,15 +1733,33 @@ impl<'a> FnAnalyzer<'a> {
                     ),
                     MemberLookup::Found(found) if found == *base
                 );
-                if resolves_here {
-                    imports.push(import_member_into(
-                        derived,
-                        CppVisibility::Public,
-                        name,
-                        fun,
-                        Some((base_cpp_spelling, receiver_mutability)),
-                    ));
+                if !resolves_here {
+                    continue;
                 }
+                if declared != 1 {
+                    // One note for the family, not one per overload: the
+                    // outer loop reaches this once for each member of the set,
+                    // and they all say the same thing about the same name.
+                    if let Some(cpp_name) = name.cpp_name_if_present() {
+                        if noted.insert((derived.clone(), cpp_name.clone())) {
+                            overload_set_notes.push((
+                                derived.clone(),
+                                base_cpp_spelling.clone(),
+                                name.name.get_final_item().to_string(),
+                                cpp_name.clone(),
+                                declared,
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                imports.push(import_member_into(
+                    derived,
+                    CppVisibility::Public,
+                    name,
+                    fun,
+                    Some((base_cpp_spelling, receiver_mutability)),
+                ));
             }
         }
 
@@ -1737,6 +1772,46 @@ impl<'a> FnAnalyzer<'a> {
                 TypeConversionSophistication::Regular,
                 None,
             );
+        }
+        // After the imports, so that a name the deriving class did take is
+        // numbered before a note asks the same overload tracker for one.
+        let mut taken: HashSet<QualifiedName> = results
+            .iter()
+            .map(|api| api.name().clone())
+            .chain(self.extra_apis.iter().map(|api| api.name().clone()))
+            .collect();
+        for (derived, base, base_method_ident, cpp_name, declared) in overload_set_notes {
+            let Some(rust_name) = note_rust_name(&cpp_name) else {
+                continue;
+            };
+            let stem = format!("{}_{}", derived.get_final_item(), base_method_ident);
+            let mut ident = stem.clone();
+            let mut suffix = 1;
+            while !taken.insert(QualifiedName::new(
+                derived.get_namespace(),
+                make_ident(&ident),
+            )) {
+                ident = format!("{stem}{suffix}");
+                suffix += 1;
+            }
+            let rust_name = self.get_overload_name(
+                derived.get_namespace(),
+                derived.get_final_item(),
+                rust_name,
+            );
+            let ctx = self.error_context_for_method(&derived, &rust_name);
+            results.push(Api::IgnoredItem {
+                name: ApiName::new_with_cpp_name(
+                    derived.get_namespace(),
+                    make_ident(ident),
+                    Some(cpp_name),
+                ),
+                err: ConvertErrorFromCpp::InheritedOverloadSet {
+                    base,
+                    count: declared,
+                },
+                ctx: Some(ctx),
+            });
         }
         results
     }

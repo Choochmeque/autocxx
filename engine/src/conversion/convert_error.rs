@@ -277,6 +277,13 @@ pub enum ConvertErrorFromCpp {
     MethodOfNonAllowlistedType,
     #[error("This type is templated, so we can't generate bindings. We will instead generate bindings for each instantiation.")]
     MethodOfGenericType,
+    #[error("The base class {base} declares {count} functions of this name, and autocxx inherits a base class member onto a deriving class only where the base declares exactly one. The shim it would write calls the member by name on the receiver cast to the base, and nothing autocxx is told says which of an overload set a call would pick: bindgen reports neither default arguments nor enough of the parameter types. Call the overload you want on a reference to {base} instead - where that base is generated too, its AsRef impl hands you a shared one, which reaches the overloads callable on a const receiver - or bind a C++ function of your own which takes the deriving class and picks the overload there; the mutable overloads need that route.")]
+    InheritedOverloadSet {
+        /// The base's C++ spelling: bindgen's flattened identifier for a
+        /// nested base (`Outer_Base`) names nothing in C++.
+        base: String,
+        count: usize,
+    },
     #[error("autocxx could not read the Rust signature bindgen reported for this member function of a class template: {0}. Nothing about the C++ decides this - bindgen renders that signature from the Rust types it would itself have generated - so there is nothing to change in the header; please report it.")]
     TemplateMemberSignatureNotRust(String),
     #[error("This is a member function template, declared with template parameters of its own ({0} of them). autocxx does not bind member function templates: a call has to reach one chosen specialization, and nothing autocxx generates can name one. Bind a non-template C++ function which calls it, choosing the template arguments there. Writing an explicit specialization or an explicit instantiation in the header is not enough on its own - libclang reports either outside the class, so autocxx does not see it as a member. See https://github.com/google/autocxx/issues/109.")]
