@@ -42783,3 +42783,793 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
     };
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
 }
+
+// --- `returns_borrow_from!` ------------------------------------------------
+//
+// A C++ function returning a reference gets a binding only where autocxx can
+// see which input the reference points into, which it can do only when there
+// is exactly one candidate. The receiver counts, so every chainable setter -
+// `T& set(const K&, const V&)` - has three and is declined. These pin what
+// happens when the person reading the header says which one it is.
+
+/// The shape the directive exists for, without one. Three input references -
+/// the receiver and the two parameters - so which of them the returned
+/// reference points into is not something autocxx can know, and the method is
+/// declined.
+#[test]
+fn test_chainable_setter_declined_without_a_directive() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Settings {
+            public:
+                Settings& set(const uint32_t& key, const uint32_t& value) {
+                    last_key_ = key;
+                    last_value_ = value;
+                    return *this;
+                }
+                uint32_t key() const { return last_key_; }
+            private:
+                uint32_t last_key_ = 0;
+                uint32_t last_value_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let s = ffi::rbf_ns::Settings::new().within_unique_ptr();
+            assert_eq!(s.key(), 0);
+        },
+        quote! {
+            generate!("rbf_ns::Settings")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn set(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec![">1 input reference parameters".into()]),
+        ])),
+        None,
+    );
+}
+
+/// The same header with the promise written down: the reference comes back out
+/// of the receiver, so the setter binds and chains, and the returned reference
+/// carries the receiver's lifetime.
+#[test]
+fn test_returns_borrow_from_self_binds_a_chainable_setter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Settings {
+            public:
+                Settings& set(const uint32_t& key, const uint32_t& value) {
+                    last_key_ = key;
+                    last_value_ = value;
+                    return *this;
+                }
+                uint32_t key() const { return last_key_; }
+                uint32_t value() const { return last_value_; }
+            private:
+                uint32_t last_key_ = 0;
+                uint32_t last_value_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut s = ffi::rbf_ns::Settings::new().within_unique_ptr();
+            s.pin_mut().set(&3, &4).set(&5, &6);
+            assert_eq!(s.key(), 5);
+            assert_eq!(s.value(), 6);
+        },
+        quote! {
+            generate!("rbf_ns::Settings")
+            returns_borrow_from!("rbf_ns::Settings::set", "self")
+        },
+        None,
+        // Only the receiver carries the lifetime: the key and the value are
+        // lent for the call and are free the moment it returns, which is what
+        // lets a chain be written over temporaries.
+        Some(make_rust_code_finder(vec![quote! {
+            pub fn set<'a>(
+                self: Pin<&'a mut Settings>,
+                key: &u32,
+                value: &u32
+            ) -> Pin<&'a mut Settings>
+        }])),
+        None,
+    );
+}
+
+/// And the lifetime is load-bearing rather than decorative: the reference the
+/// setter hands back cannot outlive the object it came out of.
+#[test]
+fn test_returns_borrow_from_self_reference_cannot_outlive_receiver() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Settings {
+            public:
+                Settings& set(const uint32_t& key) { last_key_ = key; return *this; }
+                uint32_t key() const { return last_key_; }
+            private:
+                uint32_t last_key_ = 0;
+            };
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {
+            let escaped = {
+                let mut s = ffi::rbf_ns::Settings::new().within_unique_ptr();
+                s.pin_mut().set(&3)
+            };
+            assert_eq!(escaped.key(), 3);
+        },
+        quote! {
+            generate!("rbf_ns::Settings")
+            returns_borrow_from!("rbf_ns::Settings::set", "self")
+        },
+        "does not live long enough",
+    );
+}
+
+/// A method whose result points into a parameter rather than into the object.
+/// Elision would have tied it to the receiver - that is what elision does with
+/// a receiver present - so the directive is the only way to say otherwise.
+#[test]
+fn test_returns_borrow_from_parameter_not_receiver() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Echo {
+            public:
+                const uint32_t& echo(const uint32_t& key) { seen_ = key; return key; }
+                uint32_t seen() const { return seen_; }
+            private:
+                uint32_t seen_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut e = ffi::rbf_ns::Echo::new().within_unique_ptr();
+            let key = 7u32;
+            let borrowed = e.pin_mut().echo(&key);
+            // The receiver is free to be borrowed again while the returned
+            // reference lives, which it would not be had the lifetime come
+            // from `self`.
+            e.pin_mut().echo(&key);
+            assert_eq!(*borrowed, 7);
+            assert_eq!(e.seen(), 7);
+        },
+        quote! {
+            generate!("rbf_ns::Echo")
+            returns_borrow_from!("rbf_ns::Echo::echo", "key")
+        },
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            pub fn echo<'a>(self: Pin<&mut Echo>, key: &'a u32) -> &'a u32
+        }])),
+        None,
+    );
+}
+
+/// The other half of the same claim: the result really is tied to that
+/// parameter, so it cannot outlive it.
+#[test]
+fn test_returns_borrow_from_parameter_reference_cannot_outlive_it() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Echo {
+            public:
+                const uint32_t& echo(const uint32_t& key) { seen_ = key; return key; }
+                uint32_t seen() const { return seen_; }
+            private:
+                uint32_t seen_ = 0;
+            };
+        }
+    "};
+    run_test_expect_fail_with_error_ex(
+        "",
+        hdr,
+        quote! {
+            let mut e = ffi::rbf_ns::Echo::new().within_unique_ptr();
+            let borrowed = {
+                let key = 7u32;
+                e.pin_mut().echo(&key)
+            };
+            assert_eq!(*borrowed, 7);
+        },
+        quote! {
+            generate!("rbf_ns::Echo")
+            returns_borrow_from!("rbf_ns::Echo::echo", "key")
+        },
+        "does not live long enough",
+    );
+}
+
+/// A free function, named the way `generate!` names one, with no class in
+/// front. The parameter it does not borrow from keeps a lifetime of its own.
+#[test]
+fn test_returns_borrow_from_free_function() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            inline const uint32_t& rbf_pick(const uint32_t& chosen, const uint32_t&) {
+                return chosen;
+            }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let chosen = 1u32;
+            let other = 2u32;
+            assert_eq!(*ffi::rbf_ns::rbf_pick(&chosen, &other), 1);
+        },
+        quote! {
+            generate!("rbf_ns::rbf_pick")
+            returns_borrow_from!("rbf_ns::rbf_pick", "chosen")
+        },
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            pub fn rbf_pick<'a>(chosen: &'a u32, arg1: &u32) -> &'a u32
+        }])),
+        None,
+    );
+}
+
+/// A parameter C++ declared without a name has no name to write, and the one
+/// bindgen invents counts the unnamed parameters rather than the declared
+/// ones - `arg1` here is the second parameter only by coincidence. A position
+/// counts what C++ wrote.
+#[test]
+fn test_returns_borrow_from_parameter_by_position() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            inline const uint32_t& rbf_second(const uint32_t&, const uint32_t& kept) {
+                return kept;
+            }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let ignored = 1u32;
+            let kept = 2u32;
+            assert_eq!(*ffi::rbf_ns::rbf_second(&ignored, &kept), 2);
+        },
+        quote! {
+            generate!("rbf_ns::rbf_second")
+            returns_borrow_from!("rbf_ns::rbf_second", "#1")
+        },
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            pub fn rbf_second<'a>(arg1: &u32, kept: &'a u32) -> &'a u32
+        }])),
+        None,
+    );
+}
+
+/// A directive claims the whole overload set of the name, because C++ overload
+/// resolution is not something a name could select within. An overload with no
+/// parameter answering to it is left exactly as it was - declined - and the
+/// stub says the directive did not cover it.
+#[test]
+fn test_returns_borrow_from_overload_the_directive_does_not_cover() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Split {
+            public:
+                const uint32_t& fetch(const uint32_t& key) { return key; }
+                const uint32_t& fetch(const uint32_t& other, const uint32_t& extra) {
+                    last_ = extra;
+                    return other;
+                }
+                uint32_t last() const { return last_; }
+            private:
+                uint32_t last_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut s = ffi::rbf_ns::Split::new().within_unique_ptr();
+            let key = 9u32;
+            assert_eq!(*s.pin_mut().fetch(&key), 9);
+        },
+        quote! {
+            generate!("rbf_ns::Split")
+            returns_borrow_from!("rbf_ns::Split::fetch", "key")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![
+                quote! {
+                    pub fn fetch<'a>(self: Pin<&mut Split>, key: &'a u32) -> &'a u32
+                },
+                quote! {
+                    fn fetch1(_uhoh: autocxx::BindingGenerationFailure)
+                },
+            ]),
+            make_string_finder(vec!["has none by that name".into()]),
+        ])),
+        None,
+    );
+}
+
+/// The directive is monotone: an overload it does not cover is analysed as if
+/// it were not written, so one which bound on its own - a single input
+/// reference - still binds, undirected, beside the directed one.
+#[test]
+fn test_returns_borrow_from_uncovered_overload_still_binds() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            inline const uint32_t& rbf_pair(const uint32_t& chosen,
+                                            const uint32_t& other) {
+                (void)other;
+                return chosen;
+            }
+            inline const uint32_t& rbf_pair(const uint32_t& sole) {
+                return sole;
+            }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let chosen = 1u32;
+            let other = 2u32;
+            assert_eq!(*ffi::rbf_ns::rbf_pair(&chosen, &other), 1);
+            let sole = 3u32;
+            assert_eq!(*ffi::rbf_ns::rbf_pair1(&sole), 3);
+        },
+        quote! {
+            generate!("rbf_ns::rbf_pair")
+            returns_borrow_from!("rbf_ns::rbf_pair", "chosen")
+        },
+        None,
+        Some(make_rust_code_finder(vec![
+            quote! {
+                pub fn rbf_pair<'a>(chosen: &'a u32, other: &u32) -> &'a u32
+            },
+            // The uncovered overload keeps the undirected shape: its one
+            // reference parameter, elided as ever.
+            quote! {
+                pub fn rbf_pair1(sole: &u32) -> &u32
+            },
+        ])),
+        None,
+    );
+}
+
+/// The same monotonicity where `self` is the named parameter: a static member
+/// overload has no receiver for `self` to resolve to, so the directive does
+/// not cover it, and it binds undirected off its single reference parameter.
+#[test]
+fn test_returns_borrow_from_self_leaves_a_static_overload_alone() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Mixed {
+            public:
+                const uint32_t& fetch(const uint32_t& key, const uint32_t& other) {
+                    held_ = key + other;
+                    return held_;
+                }
+                static const uint32_t& fetch(const uint32_t& sole) { return sole; }
+            private:
+                uint32_t held_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut m = ffi::rbf_ns::Mixed::new().within_unique_ptr();
+            let key = 4u32;
+            let other = 5u32;
+            assert_eq!(*m.pin_mut().fetch(&key, &other), 9);
+            let sole = 6u32;
+            assert_eq!(*ffi::rbf_ns::Mixed::fetch1(&sole), 6);
+        },
+        quote! {
+            generate!("rbf_ns::Mixed")
+            returns_borrow_from!("rbf_ns::Mixed::fetch", "self")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A mutable reference cannot come out of a const one: Rust has no `&mut`
+/// derived from a `&`, and C++ reaching one needs a `const_cast`. The promise
+/// is refused rather than written down as a signature which lies.
+#[test]
+fn test_returns_borrow_from_const_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Mut {
+            public:
+                uint32_t& bad(const uint32_t& key) { held_ = key; return held_; }
+            private:
+                uint32_t held_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::rbf_ns::Mut::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("rbf_ns::Mut")
+            returns_borrow_from!("rbf_ns::Mut::bad", "key")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn bad(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec!["which is a const reference".into()]),
+        ])),
+        None,
+    );
+}
+
+/// A parameter passed by value has no lifetime in the generated signature for
+/// the returned reference to take, so naming one is refused - even though this
+/// method would have bound without the directive at all.
+#[test]
+fn test_returns_borrow_from_value_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Val {
+            public:
+                const uint32_t& take(uint32_t count) { held_ = count; return held_; }
+            private:
+                uint32_t held_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::rbf_ns::Val::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("rbf_ns::Val")
+            returns_borrow_from!("rbf_ns::Val::take", "count")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn take(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec!["rather than as a Rust reference".into()]),
+        ])),
+        None,
+    );
+}
+
+/// A `const std::string_view&` parameter is a reference in C++, but autocxx
+/// rebuilds it: the wrapper takes `impl AsCppStringView` and lends C++ a
+/// temporary view over its bytes, which dies when the call returns. No
+/// caller-owned borrow flows through, so there is no lifetime for the
+/// returned reference to take, and the promise is refused rather than
+/// written into a wrapper which could never compile.
+#[test]
+fn test_returns_borrow_from_string_view_parameter_refused() {
+    let hdr = indoc! {"
+        #include <string_view>
+        #include <cstdint>
+        namespace rbf_ns {
+            class Sv {
+            public:
+                const uint32_t& pick(const std::string_view& view,
+                                     const uint32_t& other) {
+                    (void)view;
+                    return other;
+                }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::rbf_ns::Sv::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("rbf_ns::Sv")
+            returns_borrow_from!("rbf_ns::Sv::pick", "view")
+        },
+        make_cpp17_adder(),
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn pick(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec!["not the caller's own reference".into()]),
+        ])),
+        None,
+    );
+}
+
+/// `self` is not something a free function has, and the directive says so
+/// rather than quietly picking a parameter.
+#[test]
+fn test_returns_borrow_from_self_on_a_free_function_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            inline const uint32_t& rbf_only(const uint32_t& one) { return one; }
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("rbf_ns::rbf_only")
+            returns_borrow_from!("rbf_ns::rbf_only", "self")
+        },
+        None,
+        &["has no object to be called on"],
+    );
+}
+
+/// Two directives reaching the same function under different spellings promise
+/// two different lifetimes. Honouring whichever was written last would be
+/// picking one at random, so neither is honoured and the reader is told.
+#[test]
+fn test_conflicting_returns_borrow_from_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Settings {
+            public:
+                Settings& set(const uint32_t& key) { last_ = key; return *this; }
+            private:
+                uint32_t last_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::rbf_ns::Settings::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("rbf_ns::Settings")
+            returns_borrow_from!("rbf_ns::Settings::set", "self")
+            returns_borrow_from!("set", "key")
+        },
+        None,
+        Some(make_checks(vec![make_string_finder(vec![
+            "disagree about which parameter".into(),
+        ])])),
+        None,
+    );
+}
+
+/// A directive which named nothing is a build error, like every other
+/// name-matching directive: it promised something about a function which is
+/// not there.
+#[test]
+fn test_returns_borrow_from_matching_nothing_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Settings {
+            public:
+                uint32_t get() const { return 1; }
+            };
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("rbf_ns::Settings")
+            returns_borrow_from!("rbf_ns::Settings::mispelt", "self")
+        },
+        None,
+        &[
+            "returns_borrow_from",
+            "reached no function which returns a reference",
+            "rbf_ns::Settings::mispelt",
+        ],
+    );
+}
+
+/// A name written without a class names a free function, and never a method of
+/// some class in that namespace - the same contract `block_functions!` keeps.
+/// Nothing answers to this one, so it is refused as unmatched.
+#[test]
+fn test_returns_borrow_from_free_spelling_matches_no_method() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_tw {
+            class Holder {
+            public:
+                const uint32_t& keep(const uint32_t& key) { return key; }
+            };
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("rbf_tw::Holder")
+            returns_borrow_from!("rbf_tw::keep", "key")
+        },
+        None,
+        &[
+            "returns_borrow_from",
+            "reached no function which returns a reference",
+            "rbf_tw::keep",
+        ],
+    );
+}
+
+/// A promise about the lifetime and a designation that the function may throw
+/// are independent claims about the same declaration, and both are honoured:
+/// the result is the borrowed reference inside a `Result`.
+#[test]
+fn test_returns_borrow_from_a_throwing_setter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <stdexcept>
+        namespace rbf_ns {
+            class Budget {
+            public:
+                Budget& spend(const uint32_t& amount) {
+                    if (amount > 10) throw std::runtime_error(\"too much\");
+                    total_ += amount;
+                    return *this;
+                }
+                uint32_t total() const { return total_; }
+            private:
+                uint32_t total_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut b = ffi::rbf_ns::Budget::new().within_unique_ptr();
+            b.pin_mut().spend(&4).unwrap().spend(&5).unwrap();
+            assert_eq!(b.total(), 9);
+            assert!(b.pin_mut().spend(&11).is_err());
+        },
+        quote! {
+            generate!("rbf_ns::Budget")
+            returns_borrow_from!("rbf_ns::Budget::spend", "self")
+            throws!("rbf_ns::Budget::spend")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A directive which reaches only functions returning something other than a
+/// reference promised nothing about anything, and is reported for it: there is
+/// no lifetime anywhere for it to have been about.
+#[test]
+fn test_returns_borrow_from_a_non_reference_return_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Plain {
+            public:
+                uint32_t count(const uint32_t& key) const { return key; }
+            };
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("rbf_ns::Plain")
+            returns_borrow_from!("rbf_ns::Plain::count", "self")
+        },
+        None,
+        &[
+            "returns_borrow_from",
+            "reached no function which returns a reference",
+        ],
+    );
+}
+
+/// The same promise where autocxx builds a Rust wrapper around the bridge
+/// call rather than calling it directly: the lifetime has to land on the
+/// wrapper's own signature too, and on the same parameter - and on the
+/// `cxx::bridge` declaration underneath, where the receiver goes in renamed.
+#[test]
+fn test_returns_borrow_from_self_through_a_wrapper() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Wrapped {
+            public:
+                Wrapped& set(const uint32_t& key, const uint32_t& value) {
+                    last_key_ = key;
+                    last_value_ = value;
+                    return *this;
+                }
+                uint32_t key() const { return last_key_; }
+                uint32_t value() const { return last_value_; }
+            private:
+                uint32_t last_key_ = 0;
+                uint32_t last_value_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut w = ffi::rbf_ns::Wrapped::new().within_unique_ptr();
+            w.pin_mut().set(&1, &2).set(&3, &4);
+            assert_eq!(w.key(), 3);
+            assert_eq!(w.value(), 4);
+        },
+        quote! {
+            generate!("rbf_ns::Wrapped")
+            returns_borrow_from!("rbf_ns::Wrapped::set", "self")
+        },
+        Some(Box::new(ForceWrapperGeneration)),
+        // Both layers keep the promise. The bridge's receiver goes in under
+        // the wrapper's own name for it, and has to carry `'a` all the same:
+        // a bridge returning `Pin<&'a mut Wrapped>` with no parameter
+        // constraining `'a` would be a safe signature promising a lifetime
+        // from nowhere, even with the public wrapper re-tying it above.
+        // The bridge function's name carries a per-test hash, so the needles
+        // start at its parameter list.
+        Some(make_rust_code_finder(vec![
+            quote! {
+                (autocxx_gen_this: Pin<&'a mut Wrapped>, key: &u32, value: &u32)
+                    -> Pin<&'a mut Wrapped>
+            },
+            quote! {
+                pub fn set<'a>(
+                    self: ::core::pin::Pin<&'a mut output::rbf_ns::Wrapped>,
+                    key: &u32,
+                    value: &u32
+                ) -> ::core::pin::Pin<&'a mut output::rbf_ns::Wrapped>
+            },
+        ])),
+        None,
+    );
+}

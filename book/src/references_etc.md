@@ -52,6 +52,95 @@ you'll need to figure out the guarantees attached to the C++ object - most
 notably its lifetime. To see some of the decision making process involved
 see the [Steam example](https://github.com/Choochmeque/autocxx/tree/main/examples/steam-mini/src/main.rs).
 
+## Saying which parameter a returned reference borrows from
+
+"Ambiguous lifetime" above means: more than one input reference. A returned
+reference borrows from one of the inputs, and where there are several, nothing
+in the C++ declaration says which - so `autocxx` declines the function rather
+than guess.
+
+The receiver counts as an input reference, which is why the chainable setter
+gets no binding at all:
+
+```cpp
+class Settings {
+public:
+    Settings& set(const Key& key, const Value& value);  // returns *this
+};
+```
+
+Three input references - `this`, `key` and `value` - so `set` is declined, and
+so is every other setter on the class. The builder idiom runs into this in
+general.
+
+You know which one it is. Say so:
+
+```rust,ignore
+returns_borrow_from!("Settings::set", "self")
+```
+
+and the setter binds, with the lifetime it should have:
+
+```rust,ignore
+pub fn set<'a>(self: Pin<&'a mut Settings>, key: &Key, value: &Value)
+    -> Pin<&'a mut Settings>;
+```
+
+Only the receiver's lifetime comes back out. The key and the value are lent for
+the call alone, so a chain can be written over temporaries, and the reference
+the chain ends with cannot outlive the `Settings` it came from - which is what
+the C++ means.
+
+The parameter is named as `"self"` (or `"this"`) for the receiver, by the name
+C++ gives it, or by position - `"#0"` for the first declared parameter, not
+counting the receiver. Positions are there for the parameter C++ declared
+without a name: such a parameter does reach Rust, as `arg1` or `arg2`, but that
+number counts the unnamed parameters rather than the declared ones, so it is
+not the position and must not be written as though it were.
+
+### It is a promise, not a deduction
+
+`autocxx` cannot read the C++ body. This directive is your word about what the
+function does, and it carries the same weight as
+[`safety!(unsafe_ffi)`](safety.md): if the reference actually points into the
+*other* parameter, then safe Rust - with no `unsafe` block anywhere near the
+call - is holding a reference which may already dangle, and the compiler has
+been told that is fine.
+
+So write it for a function you have read, or whose documentation says where the
+returned reference points. What `autocxx` does check is whether the promise is
+expressible at all, and it refuses rather than emit a signature which lies:
+
+* the named parameter has to be a reference itself - one passed by value, as a
+  pointer, or as an rvalue reference has no lifetime to give away;
+* it has to reach C++ as the caller's own borrow. A parameter `autocxx`
+  rebuilds for the call - a `const std::string_view&`, which arrives as
+  anything viewable as bytes and lends C++ a temporary view over them - has
+  no lifetime that outlives the call for the returned reference to take;
+* a returned mutable reference may not be promised out of a `const` parameter,
+  which would be a `&mut` derived from a `&`.
+
+The directive claims the whole overload set of the name, as `block_functions!`
+does, and it is monotone: an overload with no parameter answering to the name
+is analysed exactly as if the directive were not written, so one that bound on
+its own still binds, and one still declined gets a stub saying the directive
+didn't cover it. `"self"` resolves on nothing a static member overload has, so
+such an overload is likewise left alone - but naming `"self"` for a free
+function is refused outright, since no overload of one could ever have a
+receiver. An overload returning something other than a reference has no
+lifetime for the directive to be about, and is bound as it would have been
+without one.
+
+A directive which reaches no reference-returning function at all is a build
+error - whether the name matched nothing, or nothing it matched returns a
+reference.
+
+Under `safety!(unsafe_references_wrapped)` the directive does nothing. That mode
+hands a returned reference back as a `CppLtRef` with a lifetime of its own and
+passes reference parameters as the lifetime-free `CppRef`, so there is no
+parameter lifetime for a promise to name, and the functions that mode declines
+stay declined.
+
 ## [`cxx::UniquePtr`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html)s tips
 
 We use [`cxx::UniquePtr`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html) in completely the normal way, but there are a few
