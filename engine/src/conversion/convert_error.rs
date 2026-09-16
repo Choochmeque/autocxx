@@ -283,6 +283,10 @@ pub enum ConvertErrorFromCpp {
     MemberFunctionTemplate(usize),
     #[error("The class template this type instantiates declares a member function template of this name, with template parameters of its own ({0} of them). autocxx does not bind member function templates: a call has to reach one chosen specialization, and nothing autocxx generates can name one. Bind a non-template C++ function which calls it, choosing the template arguments there; writing an explicit specialization or an explicit instantiation in the header is not enough on its own, libclang reporting either outside the class. Only the class template was read for this: bindgen reports nothing about a specialization, so an explicit specialization for these template arguments may declare something else entirely. See https://github.com/google/autocxx/issues/109.")]
     MemberFunctionTemplateOfClassTemplate(usize),
+    #[error("C++ declares a conversion operator to {0} here. autocxx does not bind one: `operator {0}` is no name Rust can spell. A class whose only reader is a conversion operator therefore arrives with nothing able to read it. Add a named C++ accessor - `{0} value() const`, say - and bind that instead.")]
+    ConversionOperator(String),
+    #[error("C++ declares a call operator here, with parameters of its own ({0} of them). autocxx does not bind one: `operator()` is no name Rust can spell. Add a named C++ method which does what the operator does, and bind that instead.")]
+    CallOperator(usize),
     #[error("This member function of a class template has a signature which mentions a template parameter, and bindgen reports nothing about a specialization, so autocxx has no way to know what that parameter became in this instantiation. Only the members whose signatures mention no template parameter can be generated for an instantiation. See https://github.com/google/autocxx/issues/723.")]
     TemplateMemberWithDependentSignature,
     #[error("bindgen generated multiple different APIs (functions/types) with this name. autocxx doesn't know how to disambiguate them, so we won't generate bindings for any of them.")]
