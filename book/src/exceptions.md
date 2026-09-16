@@ -154,15 +154,16 @@ A designation autocxx matched and then could not honour counts as matched: a
 copy constructor becomes a `moveit` trait method with nowhere to put a
 `Result`, and naming one is not a mistake - see below.
 
-The same is true of `block!`, `block_constructors!` and `instantiable!`, each
-of which quietly did nothing when it matched nothing. The first two name a
-type, and a type they name is a match whether or not autocxx could act on it;
-what they catch is a name which fits nothing autocxx saw at all.
-`instantiable!` names an alias or a `concrete!` type, and a name which is
-neither is refused. Write all three as `bindgen` does - namespaces, and any
+The same is true of `block!`, `block_constructors!`, `block_functions!` and
+`instantiable!`, each of which quietly did nothing when it matched nothing. The
+first two name a type, and a type they name is a match whether or not autocxx
+could act on it; what they catch is a name which fits nothing autocxx saw at
+all. `instantiable!` names an alias or a `concrete!` type, and a name which is
+neither is refused. Write those three as `bindgen` does - namespaces, and any
 enclosing class flattened into the type, so `ns::Outer_Inner` - which is the
-spelling all three accept. `throws!` and `smart_pointer!` take the C++
-spelling as well.
+spelling they accept. `block_functions!` names a function rather than a type,
+exactly as `throws!` does, reading the same spellings; `throws!` and
+`smart_pointer!` take the C++ spelling as well.
 
 ## Constructors
 
