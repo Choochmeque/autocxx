@@ -822,7 +822,12 @@ impl<'a> CppCodeGenerator<'a> {
                     )
                 }
             },
-            CppFunctionBody::BaseClassMethodCall(base, id, receiver_mutability) => {
+            CppFunctionBody::BaseClassMethodCall {
+                base_cpp_spelling: base,
+                method: id,
+                receiver_mutability,
+                ..
+            } => {
                 // On the receiver cast to the base, rather than on the
                 // receiver itself. `self.foo(args)` would let anything the
                 // receiver's own class declares under that name decide what is

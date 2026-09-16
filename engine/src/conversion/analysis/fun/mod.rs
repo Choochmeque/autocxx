@@ -1899,7 +1899,7 @@ impl<'a> FnAnalyzer<'a> {
                     CppVisibility::Public,
                     name,
                     fun,
-                    Some((base_cpp_spelling, receiver_mutability)),
+                    Some((base, base_cpp_spelling, receiver_mutability)),
                 ));
             }
         }
@@ -3195,9 +3195,25 @@ impl<'a> FnAnalyzer<'a> {
             // designates under the name they wrote it with - the base's. The
             // checks above see only the class it was imported into, which the
             // author never wrote at all.
-            Some((CppFunctionBody::BaseClassMethodCall(base, name, _), _)) => self
-                .config
-                .is_on_throws_list(&format!("{base}::{}", name.to_string_for_cpp_generation())),
+            //
+            // Asked over the base's spellings rather than over the one the
+            // shim's cast writes, which for a nested base is the C++ spelling
+            // alone. This binding and the base's own are the same C++
+            // function, so the two answer to the same set of names; asking
+            // about fewer would make a designation mean one thing written
+            // `Outer::Base::foo` and another written `Outer_Base::foo`.
+            Some((CppFunctionBody::BaseClassMethodCall { base, method, .. }, _)) => {
+                let mut designated = false;
+                for spelling in self.nested_cpp_names.spellings(base) {
+                    if self.config.is_on_throws_list(&format!(
+                        "{spelling}::{}",
+                        method.to_string_for_cpp_generation()
+                    )) {
+                        designated = true;
+                    }
+                }
+                designated
+            }
             _ => false,
         };
         let designated_as_throwing =
@@ -5018,7 +5034,8 @@ fn template_member_function(
 /// make the call is also what gets the `this` adjustment right for a base
 /// which does not sit at offset zero within the derived class.
 ///
-/// `through_base` names the base to make the call through, for a caller which
+/// `through_base` names the base to make the call through - its name, the C++
+/// spelling the cast writes and the receiver's constness - for a caller which
 /// wants the member settled rather than looked up on the receiver: see
 /// [`CppFunctionBody::BaseClassMethodCall`]. A `using Base::foo;` passes
 /// `None`, since the point of one may be a base, or a member, which the shim
@@ -5028,7 +5045,7 @@ fn import_member_into(
     visibility: CppVisibility,
     base_method: &ApiName,
     fun: &FuncToConvert,
-    through_base: Option<(&str, &ReceiverMutability)>,
+    through_base: Option<(&QualifiedName, &str, &ReceiverMutability)>,
 ) -> (ApiName, Box<FuncToConvert>) {
     // The importer's name in front of the base method's whole bindgen name,
     // which already names the base: this only has to be unique and to be an
@@ -5056,11 +5073,14 @@ fn import_member_into(
     fun.special_member = None;
     fun.synthetic_cpp = Some((
         match through_base {
-            Some((base, receiver_mutability)) => CppFunctionBody::BaseClassMethodCall(
-                base.to_string(),
-                base_method.cpp_name(),
-                *receiver_mutability,
-            ),
+            Some((base, base_cpp_spelling, receiver_mutability)) => {
+                CppFunctionBody::BaseClassMethodCall {
+                    base: base.clone(),
+                    base_cpp_spelling: base_cpp_spelling.to_string(),
+                    method: base_method.cpp_name(),
+                    receiver_mutability: *receiver_mutability,
+                }
+            }
             None => CppFunctionBody::FunctionCall(Namespace::new(), base_method.cpp_name()),
         },
         CppFunctionKind::Method,
