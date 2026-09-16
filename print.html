@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-ea1514f7.js";
+            window.path_to_searchindex_js = "searchindex-626b4203.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -351,6 +351,44 @@ you a fairly useless opaque type such as <code>Sandwich_Ham</code>. You can writ
 C++ functions to unpack the opaque type into something useful:</p>
 <pre><code class="language-cpp">const Ham&amp; get_filling(const Sandwich&lt;Ham&gt;&amp; ham_sandwich);
 </code></pre>
+<h3 id="withholding-one-function"><a class="header" href="#withholding-one-function">Withholding one function</a></h3>
+<p>Sometimes the trouble is a single method of an otherwise useful class:
+<code>autocxx</code> generates something for it which won’t compile. The only way out used
+to be taking the whole class out of your <code>generate!</code> directives, because
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.block.html"><code>block!</code></a> names a type
+and there was nothing smaller to name.</p>
+<p><a href="https://docs.rs/autocxx/latest/autocxx/macro.block_functions.html"><code>block_functions!</code></a>
+names that one function instead. The rest of the class binds as usual:</p>
+<pre><code class="language-rust ignore">include_cpp! {
+    #include "my_header.h"
+    safety!(unsafe_ffi)
+    generate!("ns::Engine")
+    block_functions!("ns::Engine::set_mode")
+}</code></pre>
+<p>Name the function as C++ names it: a member function with the class it belongs
+to in front of it, a free function without a class, with its namespaces, as
+<code>generate!</code> names one. The namespaces may be left off, which costs what it
+costs in <code>throws!</code> - a name written short claims every function answering to
+it, in every class and every namespace. The class may not be left off:
+<code>block_functions!("ns::set_mode")</code> names a free function in <code>ns</code>, never a
+method of some class in <code>ns</code>.</p>
+<p>The whole overload set of that name goes. C++ picks between overloads by their
+arguments, so a directive naming one name has no way to say which of them it
+meant.</p>
+<p>In place of each binding you get the documentation stub every discarded binding
+leaves, saying the function was blocked - nothing disappears silently. A blocked
+member of a base class is not imported into the classes which derive from it.
+Nor does a Rust subclass get an override for a blocked virtual method - so
+blocking a <em>pure</em> virtual leaves that subclass’s C++ peer abstract, which the
+C++ compiler will not accept.</p>
+<p>Constructors and the destructor cannot be named this way, and no directive
+withholds an explicitly declared one. What there is instead is narrower:
+<a href="https://docs.rs/autocxx/latest/autocxx/macro.block_constructors.html"><code>block_constructors!</code></a>
+names a class and stops <code>autocxx</code> synthesizing the special members C++ declares
+implicitly for it - constructors and destructors the class declares itself are
+bound as usual.</p>
+<p>A <code>block_functions!</code> which names no function <code>autocxx</code> met is a build error,
+since it withheld nothing.</p>
 <h2 id="mixing-manual-and-automated-bindings"><a class="header" href="#mixing-manual-and-automated-bindings">Mixing manual and automated bindings</a></h2>
 <p><code>autocxx</code> uses <a href="https://cxx.rs"><code>cxx</code></a> underneath, and its build process will happily spot and
 process manually-crafted <a href="https://cxx.rs/concepts.html"><code>cxx::bridge</code> mods</a> which you include in your
@@ -1833,15 +1871,16 @@ designation left behind after the C++ it named was renamed all land here.</p>
 <p>A designation autocxx matched and then could not honour counts as matched: a
 copy constructor becomes a <code>moveit</code> trait method with nowhere to put a
 <code>Result</code>, and naming one is not a mistake - see below.</p>
-<p>The same is true of <code>block!</code>, <code>block_constructors!</code> and <code>instantiable!</code>, each
-of which quietly did nothing when it matched nothing. The first two name a
-type, and a type they name is a match whether or not autocxx could act on it;
-what they catch is a name which fits nothing autocxx saw at all.
-<code>instantiable!</code> names an alias or a <code>concrete!</code> type, and a name which is
-neither is refused. Write all three as <code>bindgen</code> does - namespaces, and any
+<p>The same is true of <code>block!</code>, <code>block_constructors!</code>, <code>block_functions!</code> and
+<code>instantiable!</code>, each of which quietly did nothing when it matched nothing. The
+first two name a type, and a type they name is a match whether or not autocxx
+could act on it; what they catch is a name which fits nothing autocxx saw at
+all. <code>instantiable!</code> names an alias or a <code>concrete!</code> type, and a name which is
+neither is refused. Write those three as <code>bindgen</code> does - namespaces, and any
 enclosing class flattened into the type, so <code>ns::Outer_Inner</code> - which is the
-spelling all three accept. <code>throws!</code> and <code>smart_pointer!</code> take the C++
-spelling as well.</p>
+spelling they accept. <code>block_functions!</code> names a function rather than a type,
+exactly as <code>throws!</code> does, reading the same spellings; <code>throws!</code> and
+<code>smart_pointer!</code> take the C++ spelling as well.</p>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <p>A constructor is named in <code>throws!</code> the way C++ names it - <code>Class::Class</code>:</p>
 <h4 id="c-header-3-2"><a class="header" href="#c-header-3-2">C++ header:</a></h4>
