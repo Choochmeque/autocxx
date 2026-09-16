@@ -747,3 +747,55 @@ impl Directive for DeriveDirective {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{get_directives, EnumStyle};
+
+    /// The dictionary the weekly fuzz job runs with. Its header promises it
+    /// lists every directive, and a directive missing from it costs the
+    /// mutator the bytes of the keyword before it can reach the parse code
+    /// behind it.
+    const DICT: &str = include_str!("../fuzz/parse_include_cpp.dict");
+
+    /// The dictionary's live entries only: comment lines dropped, so a
+    /// commented-out entry cannot satisfy either test below.
+    fn dict_entries() -> String {
+        DICT.lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn fuzz_dictionary_lists_every_directive() {
+        let entries = dict_entries();
+        let directives = get_directives();
+        for name in directives.need_exclamation.keys() {
+            // The opening quote pins the match to the start of a dictionary
+            // value, so `rust_type` is not satisfied by `extern_rust_type`.
+            assert!(
+                entries.contains(&format!("\"{name}!(")),
+                "parse_include_cpp.dict is missing {name}!"
+            );
+        }
+        for name in directives.need_hexathorpe.keys() {
+            assert!(
+                entries.contains(&format!("\"#{name} ")),
+                "parse_include_cpp.dict is missing #{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn fuzz_dictionary_lists_every_enum_style() {
+        let entries = dict_entries();
+        for style in EnumStyle::all() {
+            assert!(
+                entries.contains(style.as_str()),
+                "parse_include_cpp.dict is missing the {} enum style",
+                style.as_str()
+            );
+        }
+    }
+}
