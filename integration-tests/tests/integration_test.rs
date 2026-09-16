@@ -42488,3 +42488,108 @@ fn test_keyword_rename_colliding_with_a_genuine_name_is_not_called_an_overload()
         None,
     );
 }
+
+/// The other qualifier the same elaborated node carries. A `volatile` referent
+/// written with a namespace-qualified alias - `volatile std::uint32_t&` - is a
+/// reference to storage C++ said may change under the program, so it has to
+/// arrive as the handle the unqualified spelling gets. Unwrapping the
+/// elaborated type dropped the qualifier, and `volatile` has no Rust spelling
+/// to fall back on the way `const` has `*const T`: Rust was handed an ordinary
+/// reference to a register, and the generated C++ named a `::c_uint&`
+/// signature the function does not have.
+#[test]
+fn test_volatile_reference_to_qualified_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void fx_poke_q(volatile std::uint32_t& reg) { reg = 7; }
+    "};
+    let rs = quote! {
+        let mut cell = autocxx::c_uint(0);
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut autocxx::c_uint);
+        unsafe { ffi::fx_poke_q(p) };
+        assert_eq!(cell, autocxx::c_uint(7));
+    };
+    run_test("", hdr, rs, &["fx_poke_q"], &[]);
+}
+
+/// The pointer spelling of the same thing, which is the one real
+/// memory-mapped-register code is written in.
+#[test]
+fn test_volatile_pointer_to_qualified_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void fx_poke_qp(volatile std::uint32_t* reg) { *reg = 9; }
+    "};
+    let rs = quote! {
+        let mut cell = autocxx::c_uint(0);
+        let p = autocxx::VolatilePtr::new(&mut cell as *mut autocxx::c_uint);
+        unsafe { ffi::fx_poke_qp(p) };
+        assert_eq!(cell, autocxx::c_uint(9));
+    };
+    run_test("", hdr, rs, &["fx_poke_qp"], &[]);
+}
+
+/// Both qualifiers on one elaborated node, which is how a read-only hardware
+/// status register is declared. The `volatile` half earns the handle, the
+/// `const` half is what makes it the read-only one, so losing either gives the
+/// wrong type. The annotation is the assertion: `VolatilePtr` has a `write` and
+/// would not compile here.
+#[test]
+fn test_const_volatile_reference_to_qualified_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline std::uint32_t fx_read_q(const volatile std::uint32_t& reg) {
+            return reg;
+        }
+    "};
+    let rs = quote! {
+        let cell = autocxx::c_uint(3);
+        let p: autocxx::VolatileConstPtr<autocxx::c_uint> =
+            autocxx::VolatileConstPtr::new(&cell as *const autocxx::c_uint);
+        assert_eq!(unsafe { ffi::fx_read_q(p) }, autocxx::c_uint(3));
+    };
+    run_test("", hdr, rs, &["fx_read_q"], &[]);
+}
+
+/// The same spelling in the return direction, where the handle earns its keep:
+/// C++ hands back the address of storage it qualified `volatile` and every
+/// access from here on is Rust's.
+#[test]
+fn test_volatile_reference_to_qualified_typedef_return() {
+    let cxx = indoc! {"
+        std::uint32_t fx_storage = 4;
+        volatile std::uint32_t& fx_reg_q() { return fx_storage; }
+    "};
+    let hdr = indoc! {"
+        #include <cstdint>
+        volatile std::uint32_t& fx_reg_q();
+    "};
+    let rs = quote! {
+        let p = unsafe { ffi::fx_reg_q() };
+        assert_eq!(unsafe { p.read() }, autocxx::c_uint(4));
+        unsafe { p.write(autocxx::c_uint(11)) };
+        assert_eq!(unsafe { p.read() }, autocxx::c_uint(11));
+    };
+    run_test(cxx, hdr, rs, &["fx_reg_q"], &[]);
+}
+
+/// The same alias named without its namespace, which is the same C++ type by a
+/// different road: nothing is elaborated, so the qualifier was never at risk
+/// and the referent keeps the typedef rather than resolving to the atom behind
+/// it. Both annotations are the assertion - the handle is what has to match,
+/// the payload is what may not.
+#[test]
+fn test_volatile_reference_to_unqualified_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline void fx_poke_u(volatile uint32_t& reg) { reg = 7; }
+    "};
+    let rs = quote! {
+        let mut cell: u32 = 0;
+        let p: autocxx::VolatilePtr<u32> =
+            autocxx::VolatilePtr::new(&mut cell as *mut u32);
+        unsafe { ffi::fx_poke_u(p) };
+        assert_eq!(cell, 7);
+    };
+    run_test("", hdr, rs, &["fx_poke_u"], &[]);
+}
