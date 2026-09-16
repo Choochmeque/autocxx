@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-626b4203.js";
+            window.path_to_searchindex_js = "searchindex-43152c70.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -301,6 +301,14 @@ for how to turn this opaque object into something useful (spoiler: just append <
 of <code>bindgen</code> here and generating overloads as <code>func</code>, <code>func1</code>, <code>func2</code> etc.
 This is essentially awful without <code>rust-analyzer</code> IDE support - see the
 <a href="workflow.html">workflows chapter</a> for why you should be using an IDE.</p>
+<p>Each numbered function carries a doc comment saying which C++ declaration it
+came from - <code>C++: </code>saw<code>, declaration 2 of that name, counting in the order autocxx met them</code> - so the IDE has something to show you. Read the position
+rather than the digits: a suffix skips any number already taken by a real
+function, so <code>func3</code> is not necessarily the fourth <code>func</code>. The count is in the
+order <code>autocxx</code> met the declarations, which is usually the header’s order but
+not guaranteed to be - a member function template, for one, is met after every
+ordinary method. The same note names the C++ function behind a name Rust would
+not accept as an identifier, where <code>type</code> reaches you as <code>type_</code>.</p>
 <h4 id="c-header-3"><a class="header" href="#c-header-3">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;string&gt;
