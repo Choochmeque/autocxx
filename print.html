@@ -13,21 +13,20 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="favicon.svg">
-        <link rel="shortcut icon" href="favicon.png">
-        <link rel="stylesheet" href="css/variables.css">
-        <link rel="stylesheet" href="css/general.css">
-        <link rel="stylesheet" href="css/chrome.css">
-        <link rel="stylesheet" href="css/print.css" media="print">
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
-        <link rel="stylesheet" href="fonts/fonts.css">
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="highlight-css" href="highlight.css">
-        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
-        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
@@ -37,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex.js";
+            window.path_to_searchindex_js = "searchindex-62ac2a3a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc.js"></script>
+        <script src="toc-c0f61b2c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -54,7 +53,7 @@
             </div>
         </div>
     </div>
-    <div id="body-container">
+    <div id="mdbook-body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
@@ -83,12 +82,12 @@
             html.classList.add("js");
         </script>
 
-        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
 
         <!-- Hide / unhide sidebar before it is displayed -->
         <script>
             let sidebar = null;
-            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
             if (document.body.clientWidth >= 1080) {
                 try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
                 sidebar = sidebar || 'visible';
@@ -103,39 +102,39 @@
             }
         </script>
 
-        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
                 <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
-            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
             </div>
         </nav>
 
-        <div id="page-wrapper" class="page-wrapper">
+        <div id="mdbook-page-wrapper" class="page-wrapper">
 
             <div class="page">
-                <div id="menu-bar-hover-placeholder"></div>
-                <div id="menu-bar" class="menu-bar sticky">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
                     <div class="left-buttons">
-                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
-                            <i class="fa fa-bars"></i>
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
                         </label>
-                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
-                            <i class="fa fa-paint-brush"></i>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
                         </button>
-                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
-                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
-                            <i class="fa fa-search"></i>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
                         </button>
                     </div>
 
@@ -143,45 +142,45 @@
 
                     <div class="right-buttons">
                         <a href="print.html" title="Print this book" aria-label="Print this book">
-                            <i id="print-button" class="fa fa-print"></i>
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
                         <a href="https://github.com/Choochmeque/autocxx" title="Git repository" aria-label="Git repository">
-                            <i id="git-repository-button" class="fa fa-github"></i>
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
                         </a>
 
                     </div>
                 </div>
 
-                <div id="search-wrapper" class="hidden">
-                    <form id="searchbar-outer" class="searchbar-outer">
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
                         <div class="search-wrapper">
-                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
                             <div class="spinner-wrapper">
-                                <i class="fa fa-spinner fa-spin"></i>
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
                             </div>
                         </div>
                     </form>
-                    <div id="searchresults-outer" class="searchresults-outer hidden">
-                        <div id="searchresults-header" class="searchresults-header"></div>
-                        <ul id="searchresults">
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
                         </ul>
                     </div>
                 </div>
 
                 <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
                 <script>
-                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
-                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
-                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
                         link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
                     });
                 </script>
 
-                <div id="content" class="content">
+                <div id="mdbook-content" class="content">
                     <main>
-                        <p><a href="https://github.com/Choochmeque/autocxx"><img src="https://img.shields.io/crates/l/autocxx" alt="GitHub" /></a>
-<a href="https://crates.io/crates/autocxx"><img src="https://img.shields.io/crates/d/autocxx" alt="crates.io" /></a>
-<a href="https://docs.rs/autocxx"><img src="https://docs.rs/autocxx/badge.svg" alt="docs.rs" /></a></p>
+                        <p><a href="https://github.com/Choochmeque/autocxx"><img src="https://img.shields.io/crates/l/autocxx" alt="GitHub"></a>
+<a href="https://crates.io/crates/autocxx"><img src="https://img.shields.io/crates/d/autocxx" alt="crates.io"></a>
+<a href="https://docs.rs/autocxx"><img src="https://docs.rs/autocxx/badge.svg" alt="docs.rs"></a></p>
 <blockquote>
 <p><strong>Note:</strong> This is the actively maintained continuation of <a href="https://github.com/google/autocxx">google/autocxx</a>, which is no longer maintained by Google (see <a href="https://github.com/google/autocxx/issues/1507">google/autocxx#1507</a>). Bug reports, feature requests and pull requests are welcome here.</p>
 </blockquote>
@@ -199,11 +198,11 @@
 </ul>
 <p>But sometimes:</p>
 <ul>
-<li>If you need to call arbitrary functions and use arbitrary types within an existing C++ codebase, use <code>autocxx</code>. You're in the right place!</li>
+<li>If you need to call arbitrary functions and use arbitrary types within an existing C++ codebase, use <code>autocxx</code>. You’re in the right place!</li>
 <li>Like <code>cxx</code>, but unlike <code>bindgen</code>, <code>autocxx</code> helps with calls from C++ to Rust, too.</li>
 </ul>
 <h2 id="examples-to-give-you-a-feel-for-autocxx"><a class="header" href="#examples-to-give-you-a-feel-for-autocxx">Examples to give you a feel for <code>autocxx</code></a></h2>
-<p>Here's a code example:</p>
+<p>Here’s a code example:</p>
 <h4 id="c-header"><a class="header" href="#c-header">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;stdint.h&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
@@ -261,20 +260,21 @@ sometimes extra steps are required to handle cases like null pointers or convert
 <p>Still, fundamentally, you can interact with C++ objects without using <code>unsafe</code> in the majority of cases.
 <code>cxx</code> takes care of the fundamentals of lifetimes and destructors.</p>
 <h2 id="how-to-read-this-book"><a class="header" href="#how-to-read-this-book">How to read this book</a></h2>
-<p>We'd recommend starting with <a href="tutorial.html">tutorial</a> and then <a href="workflow.html">workflow</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="tutorial"><a class="header" href="#tutorial">Tutorial</a></h1>
-<p>If you're here, you want to call some C++ from Rust, right? (If you want to do things the other way round, read the <a href="rust_calls.html">Rust calls</a> page.)</p>
-<p>Let's assume you're calling into some <em>existing</em> C++ code.</p>
+<p>We’d recommend starting with <a href="#tutorial">tutorial</a> and then <a href="#workflow">workflow</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="tutorial"><a class="header" href="#tutorial">Tutorial</a></h1>
+<p>If you’re here, you want to call some C++ from Rust, right? (If you want to do things the other way round, read the <a href="#callbacks-into-rust">Rust calls</a> page.)</p>
+<p>Let’s assume you’re calling into some <em>existing</em> C++ code.</p>
 <p>You will need:</p>
 <ul>
 <li>Some C++ header files (<code>.h</code> files)</li>
-<li>The C++ "include path". That is, the set of directories containing those headers. (That's not necessarily the directory in which each header <em>file</em> lives; C++ might contain <code>#include "foo/bar.h"</code> and so your include path would need to include the directory <em>containing</em> the <code>foo</code> directory).</li>
+<li>The C++ “include path”. That is, the set of directories containing those headers. (That’s not necessarily the directory in which each header <em>file</em> lives; C++ might contain <code>#include "foo/bar.h"</code> and so your include path would need to include the directory <em>containing</em> the <code>foo</code> directory).</li>
 <li>A list of the APIs (types and functions) from those header files which you wish to make available in Rust.</li>
 <li>To know how to link the C++ libraries into your Cargo project. This is beyond the scope of what <code>autocxx</code> helps with, but one solution is to emit a print from your <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html#rustc-link-lib">build script</a>.</li>
 <li><a href="https://rust-lang.github.io/rust-bindgen/requirements.html">LLVM to be installed</a>.</li>
 <li>Some patience. This is not a magic solution. C++/Rust interop is hard. Avoid it if you can!</li>
 </ul>
-<p>The rest of this 'getting started' section assumes Cargo - if you're using something else, see the <a href="building.html">building</a> section.</p>
+<p>The rest of this ‘getting started’ section assumes Cargo - if you’re using something else, see the <a href="#building">building</a> section.</p>
 <p>First, add <code>autocxx</code> <em>and <code>cxx</code></em> to your <code>dependencies</code> and <code>autocxx-build</code> to your <code>build-dependencies</code> in your <code>Cargo.toml</code>. <strong>You must specify both.</strong></p>
 <pre><code class="language-toml">[dependencies]
 autocxx = "0.30.0"
@@ -297,7 +297,7 @@ miette = { version = "5", features = ["fancy"] } # optional but gives nicer erro
 
     Ok(())
 }</code></pre>
-<p>See <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script">the standard cargo build script output mechanisms for how you can direct Rust to link against pre-existing libraries</a>, and see the <a href="building.html">building section of this book for more details about build options - for example, enabling C++17</a>.</p>
+<p>See <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script">the standard cargo build script output mechanisms for how you can direct Rust to link against pre-existing libraries</a>, and see the <a href="#building">building section of this book for more details about build options - for example, enabling C++17</a>.</p>
 <p>Finally, in your <code>main.rs</code> you can use the <a href="https://docs.rs/autocxx/latest/autocxx/macro.include_cpp.html"><code>include_cpp</code></a> macro which is the heart of <code>autocxx</code>:</p>
 <pre><code class="language-rust ignore">use autocxx::prelude::*; // use all the main autocxx functions
 
@@ -310,26 +310,27 @@ include_cpp! {
 <pre><code class="language-rust ignore">fn main() {
     println!("The answer to Life, The Universe and Everything is {}", ffi::DeepThought());
 }</code></pre>
-<p>C++ types such as <code>std::string</code> and <code>std::unique_ptr</code> are represented using the types provided by the marvellous <a href="https://cxx.rs">cxx</a> library. This provides good ergonomics and safety norms, so unlike with normal <code>bindgen</code> bindings, you won't <em>normally</em> need to write <code>unsafe</code> code for every function call.</p>
-<p>Next, read the section about <a href="workflow.html">workflows</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="workflow"><a class="header" href="#workflow">Workflow</a></h1>
-<p>C++ is complex, and <code>autocxx</code> can't ingest everything.</p>
+<p>C++ types such as <code>std::string</code> and <code>std::unique_ptr</code> are represented using the types provided by the marvellous <a href="https://cxx.rs">cxx</a> library. This provides good ergonomics and safety norms, so unlike with normal <code>bindgen</code> bindings, you won’t <em>normally</em> need to write <code>unsafe</code> code for every function call.</p>
+<p>Next, read the section about <a href="#workflow">workflows</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="workflow"><a class="header" href="#workflow">Workflow</a></h1>
+<p>C++ is complex, and <code>autocxx</code> can’t ingest everything.</p>
 <p>First tip - use an IDE. Type annotation and autocompletion is <em>incredibly</em> helpful in an <code>autocxx</code>
 context, where you may be dealing with <code>UniquePtr&lt;T&gt;</code> and <code>Option&lt;&amp;T&gt;</code> and <code>Pin&lt;&amp;mut T&gt;</code> very often.
-<img src="vscode1.png" alt="VSCode autocompletion of autocxx APIs" /></p>
-<p>As you'll see, it's also <em>essential</em> when <code>autocxx</code> can't produce bindings for some reason.</p>
-<h2 id="what-if-autocxx-cant-generate-bindings"><a class="header" href="#what-if-autocxx-cant-generate-bindings">What if <code>autocxx</code> can't generate bindings?</a></h2>
+<img src="vscode1.png" alt="VSCode autocompletion of autocxx APIs"></p>
+<p>As you’ll see, it’s also <em>essential</em> when <code>autocxx</code> can’t produce bindings for some reason.</p>
+<h2 id="what-if-autocxx-cant-generate-bindings"><a class="header" href="#what-if-autocxx-cant-generate-bindings">What if <code>autocxx</code> can’t generate bindings?</a></h2>
 <p>This bit is important.</p>
-<p>When you use <code>autocxx</code>, you'll ask it to generate Rust bindings for <a href="allowlist.html">C++ types or functions</a> using
+<p>When you use <code>autocxx</code>, you’ll ask it to generate Rust bindings for <a href="#the-allowlist-and-include_cpp-syntax">C++ types or functions</a> using
 <code>generate!</code> directives.</p>
 <p>If you name something specifically in a <code>generate!</code> or <code>generate_pod!</code> directive - a function
-or a type - and <code>autocxx</code> can't generate bindings for it: the build will fail, and the error
+or a type - and <code>autocxx</code> can’t generate bindings for it: the build will fail, and the error
 will say what stopped it.</p>
 <p>If you ask to generate bindings for an entire type, <code>autocxx</code> will generate bindings for as
-many methods as possible. For those methods where it can't generate bindings, it will instead
+many methods as possible. For those methods where it can’t generate bindings, it will instead
 generate some placeholder function or struct with documentation explaining what went wrong:</p>
-<p><img src="vscode2.png" alt="VSCode showing an error for an API where autocxx couldn&#39;t generate bindings" /></p>
-<p><em>This</em> is why it's crucial to use an IDE with <code>autocxx</code>.</p>
+<p><img src="vscode2.png" alt="VSCode showing an error for an API where autocxx couldn’t generate bindings"></p>
+<p><em>This</em> is why it’s crucial to use an IDE with <code>autocxx</code>.</p>
 <h2 id="how-can-i-see-what-bindings-autocxx-has-generated"><a class="header" href="#how-can-i-see-what-bindings-autocxx-has-generated">How can I see what bindings <code>autocxx</code> has generated?</a></h2>
 <p>Options:</p>
 <ul>
@@ -340,7 +341,7 @@ generate some placeholder function or struct with documentation explaining what 
 to your <code>include_cpp!</code> and read the file <code>AUTOCXX_RS_FILE</code> names. Without it
 that file is a single line of tokens.</li>
 </ul>
-<h2 id="how-to-work-around-cases-where-autocxx-cant-generate-bindings"><a class="header" href="#how-to-work-around-cases-where-autocxx-cant-generate-bindings">How to work around cases where <code>autocxx</code> can't generate bindings</a></h2>
+<h2 id="how-to-work-around-cases-where-autocxx-cant-generate-bindings"><a class="header" href="#how-to-work-around-cases-where-autocxx-cant-generate-bindings">How to work around cases where <code>autocxx</code> can’t generate bindings</a></h2>
 <p>Your options are:</p>
 <ul>
 <li>Write extra C++ functions with simpler parameters or return types, and generate
@@ -348,7 +349,7 @@ bindings to them, instead.</li>
 <li>Write some manual <code>#[cxx::bridge]</code> bindings - see below.</li>
 </ul>
 <p>Usually, you can solve problems by writing a bit of additional C++ code. For example,
-supposing autocxx can't understand your type <code>Sandwich&lt;Ham&gt;</code>. Instead it will give
+supposing autocxx can’t understand your type <code>Sandwich&lt;Ham&gt;</code>. Instead it will give
 you a fairly useless opaque type such as <code>Sandwich_Ham</code>. You can write additional
 C++ functions to unpack the opaque type into something useful:</p>
 <pre><code class="language-cpp">const Ham&amp; get_filling(const Sandwich&lt;Ham&gt;&amp; ham_sandwich);
@@ -359,7 +360,7 @@ process manually-crafted <a href="https://cxx.rs/concepts.html"><code>cxx::bridg
 Rust source code. A common pattern could be to use <code>autocxx</code> to generate
 all the bindings possible, then hand-craft a <code>cxx::bridge</code> mod for the
 remainder where <code>autocxx</code> falls short.</p>
-<p>To do this, you'll need to use the <a href="https://cxx.rs/extern-c++.html#reusing-existing-binding-types">ability of one cxx::bridge mod to refer to types from another</a>,
+<p>To do this, you’ll need to use the <a href="https://cxx.rs/extern-c++.html#reusing-existing-binding-types">ability of one cxx::bridge mod to refer to types from another</a>,
 for example:</p>
 <pre><code class="language-rust ignore">autocxx::include_cpp! {
     #include "foo.h"
@@ -379,7 +380,7 @@ fn main() {
     let a = ffi2::give_A();
     assert_eq!(ffi::take_A(&amp;a), autocxx::c_int(5));
 }</code></pre>
-<p>In the example above, we're referring <em>from</em> manual bindings <em>to</em> automated bindings.</p>
+<p>In the example above, we’re referring <em>from</em> manual bindings <em>to</em> automated bindings.</p>
 <p>You can also do it the other way round using <code>extern_cpp_opaque_type!</code>:</p>
 <pre><code class="language-rust ignore">autocxx::include_cpp! {
     #hexathorpe include "input.h"
@@ -402,20 +403,21 @@ fn main() {
 }</code></pre>
 <h2 id="my-build-entirely-failed"><a class="header" href="#my-build-entirely-failed">My build entirely failed</a></h2>
 <p><code>autocxx</code> should nearly always successfully parse the C++ codebase and
-generate <em>some</em> APIs. It's reliant on <code>bindgen</code>, but <code>bindgen</code> is excellent
+generate <em>some</em> APIs. It’s reliant on <code>bindgen</code>, but <code>bindgen</code> is excellent
 and rarely bails out entirely.</p>
 <p>If it does, you may be able to use the <a href="https://docs.rs/autocxx/latest/autocxx/macro.block.html"><code>block!</code> macro</a>.</p>
-<p>We'd appreciate a minimized bug report of the troublesome code - see <a href="contributing.html">contributing</a>.</p>
+<p>We’d appreciate a minimized bug report of the troublesome code - see <a href="#how-to-contribute">contributing</a>.</p>
 <h2 id="enabling-autocompletion-in-a-rust-analyzer-ide"><a class="header" href="#enabling-autocompletion-in-a-rust-analyzer-ide">Enabling autocompletion in a rust-analyzer IDE</a></h2>
-<p>You'll need to enable <em>both</em>:</p>
+<p>You’ll need to enable <em>both</em>:</p>
 <ul>
 <li>Rust-analyzer: Proc Macro: Enable</li>
 <li>Rust-analyzer: Experimental: Proc Attr Macros</li>
 </ul>
 <h2 id="next-steps"><a class="header" href="#next-steps">Next steps</a></h2>
-<p>Now you've read what can go wrong with <code>autocxx</code>, and how to diagnose problems - the next step is to give it a try!
+<p>Now you’ve read what can go wrong with <code>autocxx</code>, and how to diagnose problems - the next step is to give it a try!
 Treat the rest of this manual as a reference.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="the-allowlist-and-include_cpp-syntax"><a class="header" href="#the-allowlist-and-include_cpp-syntax">The allowlist and <code>include_cpp</code> syntax</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-allowlist-and-include_cpp-syntax"><a class="header" href="#the-allowlist-and-include_cpp-syntax">The allowlist and <code>include_cpp</code> syntax</a></h1>
 <p>To include C++ in your Rust codebase using <code>autocxx</code>, you will need
 at least one <a href="https://docs.rs/autocxx/latest/autocxx/macro.include_cpp.html"><code>include_cpp</code> macro</a>.</p>
 <p>The simplest is:</p>
@@ -426,24 +428,25 @@ include_cpp! {
     generate!("MyAPIFunction")
 }</code></pre>
 <p>You need to include <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate.html"><code>generate!</code> directives</a>
-for every <em>type</em> or <em>function</em> you wish to access from Rust. You don't need to specify this for member functions
-of types that you've added - they'll be generated automatically. (If a particular member function can't
-be generated, some placeholder item with explanatory documentation <a href="workflow.html">will be generated instead</a>).</p>
+for every <em>type</em> or <em>function</em> you wish to access from Rust. You don’t need to specify this for member functions
+of types that you’ve added - they’ll be generated automatically. (If a particular member function can’t
+be generated, some placeholder item with explanatory documentation <a href="#workflow">will be generated instead</a>).</p>
 <p>Various other directives are possible inside this macro, most notably:</p>
 <ul>
 <li>You can ask to generate all the items in a namespace using
 <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_ns.html"><code>generate_ns!</code></a>. Unlike
-<code>generate!</code>, whole-namespace generation is tolerant: items which can't be generated get a
-placeholder, whereas anything you name explicitly and which can't be generated fails the build.</li>
-<li>You might sometimes want to ask that a type is generated as 'plain old data' using
+<code>generate!</code>, whole-namespace generation is tolerant: items which can’t be generated get a
+placeholder, whereas anything you name explicitly and which can’t be generated fails the build.</li>
+<li>You might sometimes want to ask that a type is generated as ‘plain old data’ using
 <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a> instead of <code>generate!</code> -
-see the chapter on <a href="cpp_types.html">C++ types</a>.</li>
-<li>You'll probaly want to specify a <a href="safety.html"><code>safety!</code> policy</a></li>
+see the chapter on <a href="#c-structs-enums-and-classes">C++ types</a>.</li>
+<li>You’ll probaly want to specify a <a href="#safety"><code>safety!</code> policy</a></li>
 </ul>
 <p>See <a href="https://docs.rs/autocxx/latest/autocxx/">the docs.rs documentation for the full list</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="building"><a class="header" href="#building">Building</a></h1>
-<h2 id="building-if-youre-using-cargo"><a class="header" href="#building-if-youre-using-cargo">Building if you're using cargo</a></h2>
-<p>The basics of building in a <code>cargo</code> environment are explained in <a href="tutorial.html">the tutorial</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="building"><a class="header" href="#building">Building</a></h1>
+<h2 id="building-if-youre-using-cargo"><a class="header" href="#building-if-youre-using-cargo">Building if you’re using cargo</a></h2>
+<p>The basics of building in a <code>cargo</code> environment are explained in <a href="#tutorial">the tutorial</a>.</p>
 <p>If your build depends on later editions of the C++ standard library, you will need to ensure that both <code>libclang</code> and the compiler are sent the appropriate flag, like this:</p>
 <pre><code class="language-rust ignore">fn main() {
     let path = std::path::PathBuf::from("src"); // include path
@@ -462,7 +465,7 @@ it changes - which includes headers reached indirectly. You do not need to
 name any of those yourself. Do name anything else your build script reads: the
 <code>.cc</code> files you hand to <code>cc</code>, and any file you generate from.</p>
 <p>Cargo stops scanning your package directory as a whole once a build script
-names a single file. Your build script's own sources are still tracked, but
+names a single file. Your build script’s own sources are still tracked, but
 any other file it reads and nobody names is one that can change without
 rerunning it - leaving both the generated Rust bindings and the C++ built
 from them as they were.</p>
@@ -479,17 +482,17 @@ in step. <code>autocxx-build</code> reports the mismatch before generating anyth
 long as your crate depends on <code>cxx</code> directly (which it needs to anyway, since
 the generated code names <code>::cxx</code>) and both crates come from a registry rather
 than a <code>[patch]</code> or a vendor directory.</p>
-<h2 id="building---if-youre-not-using-cargo"><a class="header" href="#building---if-youre-not-using-cargo">Building - if you're not using cargo</a></h2>
-<p>See the <code>autocxx-gen</code> crate. You'll need to:</p>
+<h2 id="building---if-youre-not-using-cargo"><a class="header" href="#building---if-youre-not-using-cargo">Building - if you’re not using cargo</a></h2>
+<p>See the <code>autocxx-gen</code> crate. You’ll need to:</p>
 <ul>
-<li>Run the <code>codegen</code> phase. You'll need to use the <a href="https://crates.io/crates/autocxx-gen"><code>autocxx-gen</code></a>
+<li>Run the <code>codegen</code> phase. You’ll need to use the <a href="https://crates.io/crates/autocxx-gen"><code>autocxx-gen</code></a>
 tool to process the .rs code into C++ header and
 implementation files. This will also generate <code>.rs</code> side bindings.</li>
 <li>Educate the procedural macro about where to find the generated <code>.rs</code> bindings. Set the
 <code>AUTOCXX_RS</code> environment variable to a list of directories to search.
 If you use <code>autocxx-build</code>, this happens automatically. (You can alternatively
 specify <code>AUTOCXX_RS_FILE</code> to give a precise filename as opposed to a directory to search,
-though this isn't recommended unless your build system specifically requires it
+though this isn’t recommended unless your build system specifically requires it
 because it allows only a single <code>include_cpp!</code> block per <code>.rs</code> file.) See <code>gen --help</code>
 for details on the naming of the generated files.</li>
 </ul>
@@ -514,28 +517,29 @@ for details on the naming of the generated files.</li>
     cppb --&gt; l
     rsb --&gt; l
 </pre>
-<p>This interop inevitably involves lots of fiddly small functions. It's likely to perform far better if you can achieve cross-language link-time-optimization (LTO). <a href="https://github.com/dtolnay/cxx/issues/371">This issue</a> may give some useful hints - see also all the build-related help in <a href="https://cxx.rs/">the cxx manual</a> which all applies here too.</p>
+
+<p>This interop inevitably involves lots of fiddly small functions. It’s likely to perform far better if you can achieve cross-language link-time-optimization (LTO). <a href="https://github.com/dtolnay/cxx/issues/371">This issue</a> may give some useful hints - see also all the build-related help in <a href="https://cxx.rs/">the cxx manual</a> which all applies here too.</p>
 <h2 id="c-versions-and-other-compiler-command-line-flags"><a class="header" href="#c-versions-and-other-compiler-command-line-flags">C++ versions and other compiler command-line flags</a></h2>
 <p>Two standards are in play and they are set separately.</p>
 <ul>
-<li><strong>The standard your headers are parsed at.</strong> <code>autocxx</code> reads your headers with <code>libclang</code>, at <strong>C++17</strong>. Raise or lower it with <a href="https://docs.rs/autocxx-engine/latest/autocxx_engine/struct.Builder.html#method.extra_clang_args"><code>Builder::extra_clang_args</code></a> — see <a href="building.html#if-your-headers-do-not-parse-as-c17">below</a>.</li>
-<li><strong>The standard the generated code is compiled at.</strong> That is your <code>cc::Build</code>'s business, and <code>autocxx</code> never sets it. The code <code>cxx</code> and <code>autocxx</code> generate requires <strong>C++14</strong>, so it's not possible to use an earlier version of C++ than that.</li>
+<li><strong>The standard your headers are parsed at.</strong> <code>autocxx</code> reads your headers with <code>libclang</code>, at <strong>C++17</strong>. Raise or lower it with <a href="https://docs.rs/autocxx-engine/latest/autocxx_engine/struct.Builder.html#method.extra_clang_args"><code>Builder::extra_clang_args</code></a> — see <a href="#if-your-headers-do-not-parse-as-c17">below</a>.</li>
+<li><strong>The standard the generated code is compiled at.</strong> That is your <code>cc::Build</code>’s business, and <code>autocxx</code> never sets it. The code <code>cxx</code> and <code>autocxx</code> generate requires <strong>C++14</strong>, so it’s not possible to use an earlier version of C++ than that.</li>
 </ul>
 <p><strong>Keep the two the same where you can.</strong> A header read at one standard and compiled at another can differ in more than <code>#if __cplusplus &gt;= 201703L</code>, where a declaration <code>autocxx</code> generated a binding for may simply not be there at compile time. The quieter cases need no conditional compilation at all, because C++17 changed rules the header is already written against:</p>
 <ul>
-<li>Overload resolution. <code>noexcept</code> is part of a function's type from C++17, so taking the address of a <code>noexcept</code> function picks a different overload than it did — and if the result feeds a constant expression, a value <code>autocxx</code> recorded from the parse may not be the value the compiler computes.</li>
-<li>Constant evaluation. Guaranteed copy elision means <code>noexcept(noexcept(T(T{})))</code> can be false at C++14 and true at C++17, so a method's own exception specification can differ between the two.</li>
+<li>Overload resolution. <code>noexcept</code> is part of a function’s type from C++17, so taking the address of a <code>noexcept</code> function picks a different overload than it did — and if the result feeds a constant expression, a value <code>autocxx</code> recorded from the parse may not be the value the compiler computes.</li>
+<li>Constant evaluation. Guaranteed copy elision means <code>noexcept(noexcept(T(T{})))</code> can be false at C++14 and true at C++17, so a method’s own exception specification can differ between the two.</li>
 </ul>
 <p>Most builds are unaffected. <code>autocxx</code> parsed at C++14 while compilers have defaulted to later standards for years, so the two have rarely agreed on their own; C++17 makes them agree for anyone whose compiler defaults to C++17, and narrows the gap for everyone else. Compiler defaults move, though, so set both sides explicitly if it matters to you — that is the only way to know they agree.</p>
-<p>The parse standard is C++17 because that is the first standard in which a function's exception specification is part of its type. Only there can <code>autocxx</code> tell <code>noexcept(false)</code> from <code>noexcept(true)</code>, which it needs in order to reproduce a superclass method's specification on a <a href="rust_calls.html">subclass</a> override rather than refuse it.</p>
+<p>The parse standard is C++17 because that is the first standard in which a function’s exception specification is part of its type. Only there can <code>autocxx</code> tell <code>noexcept(false)</code> from <code>noexcept(true)</code>, which it needs in order to reproduce a superclass method’s specification on a <a href="#callbacks-into-rust">subclass</a> override rather than refuse it.</p>
 <p>To compile the generated code at a later version, you need to:</p>
 <ul>
-<li>Build the generated code with a later C++ version. If you're using autocxx's cargo support, then you would do this by calling <a href="https://docs.rs/cc/latest/cc/struct.Build.html#method.std"><code>std</code></a> on the returned <code>cc::Build</code> object — <code>b.std("c++17")</code> — which names the standard and lets <code>cc</code> pick the separator the compiler it chose wants: <code>-std=c++17</code> for gcc and clang, <code>-std:c++17</code> for cl (which takes <code>-</code> for <code>/</code>). Prefer it to passing the flag yourself with <a href="https://docs.rs/cc/latest/cc/struct.Build.html#method.flag_if_supported"><code>flag_if_supported</code></a>, which hard-codes one compiler's spelling and, wherever that spelling is not the one the compiler wants, is dropped without a word — leaving whatever standard the build would otherwise have used. Note that <code>cc</code> emits the <code>std</code> flag <em>before</em> the <code>CXXFLAGS</code> from your environment, and a flag you pass yourself <em>after</em> them; so for gcc and clang a <code>-std=</code> in <code>CXXFLAGS</code> overrides <code>std</code>, and whichever of the two ends up in force is the one that has to agree with <code>extra_clang_args</code> below. (For cl it takes a <code>/std:</code> or <code>-std:</code> there to have that effect; a <code>-std=</code> is not an option cl recognises.)</li>
-<li><em>Also</em> give similar directives to the C++ parsing which happens <em>within</em> autocxx (specifically, by autocxx's version of bindgen). To do that, use <a href="https://docs.rs/autocxx-engine/latest/autocxx_engine/struct.Builder.html#method.extra_clang_args"><code>Builder::extra_clang_args</code></a>. Calls to it accumulate in call order, so a <code>build.rs</code> which assembles its builder out of several helpers keeps each helper's flags; what a repeated option then means is clang's to decide, and it takes the last <code>-std=</code>.</li>
+<li>Build the generated code with a later C++ version. If you’re using autocxx’s cargo support, then you would do this by calling <a href="https://docs.rs/cc/latest/cc/struct.Build.html#method.std"><code>std</code></a> on the returned <code>cc::Build</code> object — <code>b.std("c++17")</code> — which names the standard and lets <code>cc</code> pick the separator the compiler it chose wants: <code>-std=c++17</code> for gcc and clang, <code>-std:c++17</code> for cl (which takes <code>-</code> for <code>/</code>). Prefer it to passing the flag yourself with <a href="https://docs.rs/cc/latest/cc/struct.Build.html#method.flag_if_supported"><code>flag_if_supported</code></a>, which hard-codes one compiler’s spelling and, wherever that spelling is not the one the compiler wants, is dropped without a word — leaving whatever standard the build would otherwise have used. Note that <code>cc</code> emits the <code>std</code> flag <em>before</em> the <code>CXXFLAGS</code> from your environment, and a flag you pass yourself <em>after</em> them; so for gcc and clang a <code>-std=</code> in <code>CXXFLAGS</code> overrides <code>std</code>, and whichever of the two ends up in force is the one that has to agree with <code>extra_clang_args</code> below. (For cl it takes a <code>/std:</code> or <code>-std:</code> there to have that effect; a <code>-std=</code> is not an option cl recognises.)</li>
+<li><em>Also</em> give similar directives to the C++ parsing which happens <em>within</em> autocxx (specifically, by autocxx’s version of bindgen). To do that, use <a href="https://docs.rs/autocxx-engine/latest/autocxx_engine/struct.Builder.html#method.extra_clang_args"><code>Builder::extra_clang_args</code></a>. Calls to it accumulate in call order, so a <code>build.rs</code> which assembles its builder out of several helpers keeps each helper’s flags; what a repeated option then means is clang’s to decide, and it takes the last <code>-std=</code>.</li>
 </ul>
-<p>The same applies with the command-line <code>autocxx_gen</code> support - you'll need to pass such extra compiler options to <code>autocxx_gen</code> and also use them when building the generated C++ code.</p>
+<p>The same applies with the command-line <code>autocxx_gen</code> support - you’ll need to pass such extra compiler options to <code>autocxx_gen</code> and also use them when building the generated C++ code.</p>
 <h3 id="if-your-headers-do-not-parse-as-c17"><a class="header" href="#if-your-headers-do-not-parse-as-c17">If your headers do not parse as C++17</a></h3>
-<p>Most headers written for an older standard parse as C++17 unchanged. C++17 deleted a few things, and clang reports three of them as errors by default, which would stop <code>autocxx</code> reading the header at all. <code>autocxx</code> demotes each to a warning — you will still see it — so that a header containing one is still read: dynamic exception specifications (<code>void f() throw(int)</code>), the <code>register</code> storage class, and incrementing a <code>bool</code>. Pass <code>-Werror=dynamic-exception-spec</code>, <code>-Werror=register</code> or <code>-Werror=increment-bool</code> in <code>extra_clang_args</code> to have any of them back as an error, since your arguments come after <code>autocxx</code>'s.</p>
+<p>Most headers written for an older standard parse as C++17 unchanged. C++17 deleted a few things, and clang reports three of them as errors by default, which would stop <code>autocxx</code> reading the header at all. <code>autocxx</code> demotes each to a warning — you will still see it — so that a header containing one is still read: dynamic exception specifications (<code>void f() throw(int)</code>), the <code>register</code> storage class, and incrementing a <code>bool</code>. Pass <code>-Werror=dynamic-exception-spec</code>, <code>-Werror=register</code> or <code>-Werror=increment-bool</code> in <code>extra_clang_args</code> to have any of them back as an error, since your arguments come after <code>autocxx</code>’s.</p>
 <p>What <code>autocxx</code> does <em>not</em> do is change which declarations the parse sees, so a standard library facility C++17 removed is genuinely gone: <code>std::auto_ptr</code> is the one most likely to come up, and on some standard libraries no macro brings it back. A header which needs one of those has to be parsed at an older standard:</p>
 <pre><code class="language-rust ignore">let mut b = autocxx_build::Builder::new("src/main.rs", &amp;[&amp;path])
     .extra_clang_args(&amp;["-std=c++14"])
@@ -543,22 +547,23 @@ for details on the naming of the generated files.</li>
     .unwrap();
 b.std("c++14").compile("autocxx-demo");</code></pre>
 <p><code>autocxx</code> puts its own <code>-std=</code> first and yours after it, and clang obeys the last one, so that is all it takes. (<code>BINDGEN_EXTRA_CLANG_ARGS</code> lands after both and overrides both.) The cost is that <code>autocxx</code> can no longer tell which way a <code>noexcept(expr)</code> resolved, so a subclass override of a method declared with one is refused — the behaviour before the parse standard was C++17.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="c-structs-enums-and-classes"><a class="header" href="#c-structs-enums-and-classes">C++ structs, enums and classes</a></h1>
-<p>If you add a C++ struct, class or enum to the <a href="allowlist.html">allowlist</a>, Rust bindings will be generated to that type and to any methods it has.
-Even if you don't add it to the allowlist, the type may be generated if it's required by some other function - but in this case
-all its methods won't be generated.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="c-structs-enums-and-classes"><a class="header" href="#c-structs-enums-and-classes">C++ structs, enums and classes</a></h1>
+<p>If you add a C++ struct, class or enum to the <a href="#the-allowlist-and-include_cpp-syntax">allowlist</a>, Rust bindings will be generated to that type and to any methods it has.
+Even if you don’t add it to the allowlist, the type may be generated if it’s required by some other function - but in this case
+all its methods won’t be generated.</p>
 <p>Rust and C++ differ in an important way:</p>
 <ul>
 <li>In Rust, the compiler is free to pick up some data and move it to somewhere else (in a <code>memcpy</code> sense). The object is none the wiser.</li>
-<li>In C++, once created, an object stays where it is, until or unless it has its "move constructor" invoked.</li>
+<li>In C++, once created, an object stays where it is, until or unless it has its “move constructor” invoked.</li>
 </ul>
 <p>This makes a big difference: C++ objects can have self-referential pointers, and any such pointer would be invalidated by Rust doing
 a memcpy. Such self-referential pointers are common - even some implementations of <code>std::string</code> do it.</p>
 <h2 id="pod-and-non-pod"><a class="header" href="#pod-and-non-pod">POD and non-POD</a></h2>
 <p>When asking <code>autocxx</code> to generate bindings for a type, then, you have to make a choice.</p>
 <ul>
-<li><em>This C++ type is trivial</em>. It has no destructor or move constructor (or they're trivial), and thus Rust is free to move it around the stack as it wishes. <code>autocxx</code> calls these types POD ("plain old data"). Alternatively,</li>
-<li><em>This C++ type has a non-trivial destructor or move constructor, so we can't allow Rust to move this around</em>. <code>autocxx</code> calls these types non-POD.</li>
+<li><em>This C++ type is trivial</em>. It has no destructor or move constructor (or they’re trivial), and thus Rust is free to move it around the stack as it wishes. <code>autocxx</code> calls these types POD (“plain old data”). Alternatively,</li>
+<li><em>This C++ type has a non-trivial destructor or move constructor, so we can’t allow Rust to move this around</em>. <code>autocxx</code> calls these types non-POD.</li>
 </ul>
 <p>POD types are nicer:</p>
 <ul>
@@ -568,33 +573,39 @@ a memcpy. Such self-referential pointers are common - even some implementations 
 </ul>
 <p>Non-POD types are awkward:</p>
 <ul>
-<li>You can't just <em>have</em> one as a Rust variable. Normally you hold them in a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>, though there are other options.</li>
+<li>You can’t just <em>have</em> one as a Rust variable. Normally you hold them in a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>, though there are other options.</li>
 <li>Fields are read through generated accessors rather than directly. <code>autocxx</code> gives every public
 data member a method of the same name: a <code>b</code> field is read with <code>obj.b()</code>. A field Rust could
 hold by value comes back by value, anything else comes back as a reference borrowed from the
 object, and an array or reference member gets a documented refusal instead of an accessor.
 There are no setters yet.</li>
-<li>You can't even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
-<li>You can't send one to another thread, or share one between threads: they're neither <code>Send</code> nor <code>Sync</code>, because <code>autocxx</code> can't know whether your C++ type tolerates that. See <a href="safety.html#thread-safety">thread safety</a> if you know that yours does.</li>
+<li>You can’t even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
+<li>You can’t send one to another thread, or share one between threads: they’re neither <code>Send</code> nor <code>Sync</code>, because <code>autocxx</code> can’t know whether your C++ type tolerates that. See <a href="#thread-safety">thread safety</a> if you know that yours does.</li>
 </ul>
-<p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don't worry: you can't mess this up. If the C++ type doesn't in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you're <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they're trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
-<p>See <a href="storage.html">the chapter on storage</a> for lots more detail on how you can hold onto non-POD types.</p>
+<p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don’t worry: you can’t mess this up. If the C++ type doesn’t in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you’re <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they’re trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
+<p>See <a href="#storage---stack-and-heaps">the chapter on storage</a> for lots more detail on how you can hold onto non-POD types.</p>
 <h2 id="construction"><a class="header" href="#construction">Construction</a></h2>
-<p>Constructing a POD object is simple: call its <code>new</code> associated function. <a href="https://en.wikipedia.org/wiki/Bob%27s_your_uncle">Bob's your uncle!</a></p>
-<p>Multiple constructors (aka constructor overloading) follows the same <a href="cpp_functions.html#overloads---and-identifiers-ending-in-digits">rules as other functions</a>.</p>
+<p>Constructing a POD object is simple: call its <code>new</code> associated function. <a href="https://en.wikipedia.org/wiki/Bob%27s_your_uncle">Bob’s your uncle!</a></p>
+<p>Multiple constructors (aka constructor overloading) follows the same <a href="#overloads---and-identifiers-ending-in-digits">rules as other functions</a>.</p>
 <p>Constructing a non-POD object requires two steps.</p>
 <ul>
 <li>Call the <code>new</code> associated function in the same way. This will give you something implementing <a href="https://docs.rs/moveit/latest/moveit/new/trait.New.html"><code>moveit::New</code></a>/</li>
 <li>Use this to make the object on the heap or stack, in any of the following ways:</li>
 </ul>
-<div class="table-wrapper"><table><thead><tr><th>Where you want to create it</th><th>How to create it</th><th>What you get</th><th>Example</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Where you want to create it</th><th>How to create it</th><th>What you get</th><th>Example</th></tr>
+</thead>
+<tbody>
 <tr><td>C++ heap (<em>recommended for simplicity</em>)</td><td><a href="https://docs.rs/autocxx/latest/autocxx/trait.Within.html"><code>Within.within_unique_ptr()</code></a> or <a href="https://docs.rs/moveit/latest/moveit/new/trait.EmplaceUnpinned.html#method.emplace"><code>UniquePtr::emplace</code></a></td><td><a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a></td><td><code>let mut obj = ffi::Goldfish::new().within_unique_ptr()</code> or <code>let mut obj = UniquePtr::emplace(ffi::Goldfish::new())</code></td></tr>
 <tr><td>Rust heap</td><td><a href="https://docs.rs/autocxx/latest/autocxx/trait.Within.html"><code>Within.within_box()</code></a> or <a href="https://docs.rs/moveit/latest/moveit/new/trait.Emplace.html#method.emplace"><code>Box::emplace</code></a></td><td><code>Pin&lt;Box&lt;T&gt;&gt;</code></td><td><code>let mut obj = ffi::Goldfish::new().within_box()</code> or <code>let mut obj = Box::emplace(ffi::Goldfish::new())</code></td></tr>
 <tr><td>Rust stack</td><td><a href="https://docs.rs/moveit/latest/moveit/macro.moveit.html"><code>moveit</code> macro</a></td><td><code>Pin&lt;MoveRef&lt;T&gt;&gt;</code></td><td><code>moveit! { let mut obj = ffi::Goldfish::new() }</code></td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>For heap construction, the prefix (<code>emplace</code>) and postfix (<code>.within_...</code>) forms are exactly identical. Choose whichever suits your needs best.</p>
-<p>Rust's own <a href="https://doc.rust-lang.org/std/pin/macro.pin.html"><code>std::pin::pin!</code></a> macro is <em>not</em> a substitute for <code>moveit!</code> here, even though both produce a pinned stack value. <code>pin!</code> pins a value you already own; <code>moveit::New::new</code> only ever writes into a place you hand it, and there's no way to obtain a non-POD object as a plain Rust value to hand to <code>pin!</code> in the first place - that's precisely the point of non-POD types. Writing <code>std::pin::pin!(ffi::Goldfish::new())</code> compiles, but pins the <code>New</code> recipe itself rather than a <code>Goldfish</code>, and the object never gets constructed.</p>
+<p>Rust’s own <a href="https://doc.rust-lang.org/std/pin/macro.pin.html"><code>std::pin::pin!</code></a> macro is <em>not</em> a substitute for <code>moveit!</code> here, even though both produce a pinned stack value. <code>pin!</code> pins a value you already own; <code>moveit::New::new</code> only ever writes into a place you hand it, and there’s no way to obtain a non-POD object as a plain Rust value to hand to <code>pin!</code> in the first place - that’s precisely the point of non-POD types. Writing <code>std::pin::pin!(ffi::Goldfish::new())</code> compiles, but pins the <code>New</code> recipe itself rather than a <code>Goldfish</code>, and the object never gets constructed.</p>
 <h3 id="should-you-construct-on-the-rust-heap-or-the-c-heap"><a class="header" href="#should-you-construct-on-the-rust-heap-or-the-c-heap">Should you construct on the Rust heap or the C++ heap?</a></h3>
 <p>Use <code>.within_unique_ptr()</code> to create objects on the C++ heap. This gives you a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a> which works well with other autocxx and cxx APIs.</p>
 <p>There is a small disadvantage - <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a> is able to store <code>NULL</code> values. Therefore, each time you use the resulting object, there is an <code>unwrap()</code> (explicit or implicit). If this bothers you, use the <code>Box</code> option instead which can never be <code>NULL</code>.</p>
@@ -637,7 +648,7 @@ fn main() {
 }
 </code></pre>
 <h2 id="enums"><a class="header" href="#enums">Enums</a></h2>
-<p>A C++ <code>enum</code> becomes a native Rust <code>enum</code> by default. That's the right shape
+<p>A C++ <code>enum</code> becomes a native Rust <code>enum</code> by default. That’s the right shape
 for an enumeration whose values are a closed set - a colour, a state, an error
 code - and it lets you <code>match</code> on it exhaustively.</p>
 <p>It is the wrong shape for a flag enum. Writing <code>FLAG_A | FLAG_B</code> in C++ gives
@@ -651,21 +662,27 @@ which is none of its variants is instant undefined behaviour - so the
 combination has no representation at all.</p>
 <p>Use <a href="https://docs.rs/autocxx/latest/autocxx/macro.enum_style.html"><code>enum_style!</code></a>
 to pick a different representation for particular enums:</p>
-<div class="table-wrapper"><table><thead><tr><th>Style</th><th>What you get</th><th>Good for</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Style</th><th>What you get</th><th>Good for</th></tr>
+</thead>
+<tbody>
 <tr><td><code>RustifiedEnum</code></td><td>A native Rust <code>enum</code>. This is the default.</td><td>Closed sets of values</td></tr>
 <tr><td><code>RustifiedNonExhaustiveEnum</code></td><td>The same, marked <code>#[non_exhaustive]</code>, so your <code>match</code>es need a catch-all arm</td><td>Closed sets which C++ may extend later</td></tr>
 <tr><td><code>NewtypeEnum</code></td><td>An integer newtype whose enumerators are associated constants</td><td>Values which may be arbitrary integers</td></tr>
 <tr><td><code>BitfieldEnum</code></td><td>The same newtype, plus <code>&amp;</code>, `</td><td><code>, </code>^<code>and</code>!`</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
-<p>The integer the two newtype styles wrap is the enum's underlying type as the
+<p>The integer the two newtype styles wrap is the enum’s underlying type as the
 C++ compiler sees it, so <code>flags.0</code> is a <code>c_int</code> for <code>enum Flags : int</code> and a
 <code>c_uint</code> for <code>enum Flags : unsigned</code>. An unscoped enum with no fixed underlying
 type has no portable answer: the compiler picks, and it may pick differently
 from one target or set of flags to the next. On the targets autocxx tests, MSVC
 gives it <code>int</code>, while gcc and clang give one whose enumerators are all
 non-negative <code>unsigned int</code>. Name the underlying type in C++ if you intend to
-write <code>.0</code>'s type down.</p>
+write <code>.0</code>’s type down.</p>
 <p>The directive takes the style first, then any number of enum names, and may be
 repeated to give different styles to different enums:</p>
 <pre><code class="language-rust ignore">enum_style!(BitfieldEnum, "FileFlags", "WindowFlags")
@@ -673,7 +690,7 @@ enum_style!(RustifiedNonExhaustiveEnum, "ErrorCode")</code></pre>
 <p>Name each enum exactly as you would in <code>generate!</code> - so a namespaced enum is
 <code>ns::Thing</code>, and an enum nested inside a class is <code>Outer_Inner</code>, because that
 is the name <code>bindgen</code> gives it. Asking for two different styles for the same
-enum is an error, as is anything that isn't a plain name.</p>
+enum is an error, as is anything that isn’t a plain name.</p>
 <h3 id="newtypeenum-and-bitfieldenum-need-generate_pod"><a class="header" href="#newtypeenum-and-bitfieldenum-need-generate_pod"><code>NewtypeEnum</code> and <code>BitfieldEnum</code> need <code>generate_pod!</code></a></h3>
 <p>These two styles reach Rust as a <code>struct</code>, not an <code>enum</code>, and their
 enumerators are associated constants on it. <code>autocxx</code> only re-exports the
@@ -684,7 +701,7 @@ A plain <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate.html"><co
 gives you an opaque type with no constants on it, which is unlikely to be what
 you wanted. The two rustified styles work with either, since a Rust <code>enum</code> is
 POD regardless.</p>
-<h4 id="c-header-3"><a class="header" href="#c-header-3">C++ header:</a></h4>
+<h4 id="c-header-1-1"><a class="header" href="#c-header-1-1">C++ header:</a></h4>
 <pre><code class="language-cpp">enum FileFlags : int {
     READ = 1 &lt;&lt; 0,
     WRITE = 1 &lt;&lt; 1,
@@ -693,7 +710,7 @@ POD regardless.</p>
 inline bool is_writable(FileFlags flags) { return flags &amp; FileFlags::WRITE; }
 
 </code></pre>
-<h4 id="rust-3"><a class="header" href="#rust-3">Rust:</a></h4>
+<h4 id="rust-1-1"><a class="header" href="#rust-1-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -730,7 +747,7 @@ not look inside it, so there would be nothing for a derive to work from.
 <code>Default</code> on an enum is refused too: nothing makes one enumerator of a C++ enum
 the default, and a derived <code>Default</code> on an enum with no variant marked
 <code>#[default]</code> does not compile.</p>
-<h4 id="c-header-4"><a class="header" href="#c-header-4">C++ header:</a></h4>
+<h4 id="c-header-2-1"><a class="header" href="#c-header-2-1">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 struct Point {
     uint32_t x;
@@ -738,7 +755,7 @@ struct Point {
 };
 
 </code></pre>
-<h4 id="rust-4"><a class="header" href="#rust-4">Rust:</a></h4>
+<h4 id="rust-2-1"><a class="header" href="#rust-2-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -777,7 +794,7 @@ assert_eq!(b, [11u8, 21, 31, 41]);</code></pre>
 <p>The element can be any type which crosses by value itself, and the rule is the
 same by value and behind a reference:</p>
 <ul>
-<li>one of <code>cxx</code>'s own atoms - <code>uint8_t</code> or <code>int8_t</code>, a <code>float</code> or a <code>double</code>, a
+<li>one of <code>cxx</code>’s own atoms - <code>uint8_t</code> or <code>int8_t</code>, a <code>float</code> or a <code>double</code>, a
 <code>bool</code>, a <code>char</code>;</li>
 <li>an integer whose width the platform chooses, such as <code>int</code> or <code>unsigned</code> and
 the typedefs to them, <code>uint32_t</code> and <code>size_t</code> among them. Those arrive as the
@@ -799,20 +816,20 @@ bound as that pointer.</li>
 <li>Either of them behind a pointer.</li>
 </ul>
 <p>Each gets a refusal which says so. <code>std::array&lt;T, 0&gt;</code> gets one too: C++ gives
-the empty array a size and Rust's <code>[T; 0]</code> has none, so they are not the same
+the empty array a size and Rust’s <code>[T; 0]</code> has none, so they are not the same
 object.</p>
 <h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
 <p>A type which is incomplete in the C++ headers (i.e. represented only by a forward
-declaration) can't be held in a <code>UniquePtr</code> within Rust (because Rust can't know
+declaration) can’t be held in a <code>UniquePtr</code> within Rust (because Rust can’t know
 if it has a destructor that will need to be called if the object is dropped.)
-Naturally, such an object can't be passed by value either; it can still be
+Naturally, such an object can’t be passed by value either; it can still be
 referenced in Rust references.</p>
 <h2 id="generic-templated-types"><a class="header" href="#generic-templated-types">Generic (templated) types</a></h2>
-<p>If you're using one of the generic types which is supported natively by cxx,
+<p>If you’re using one of the generic types which is supported natively by cxx,
 e.g. <code>std::unique_ptr</code>, it should work as you expect. For other generic types,
 we synthesize a concrete Rust type, corresponding to a C++ typedef, for each
 concrete instantiation of the type. Such generated types are always opaque, so
-by default that's enough to pass them
+by default that’s enough to pass them
 between return types and parameters of other functions within <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>s
 but not really enough to do anything else with these types yet<sup class="footnote-reference" id="fr-templated-1"><a href="#footnote-templated">1</a></sup>.</p>
 <p>An
@@ -825,7 +842,7 @@ what it generates and your C++ compiler is the arbiter; see its documentation
 for what is claimed and for the members it cannot reach. Otherwise,
 to make these types more useful, you might have to add extra C++ functions to
 extract data or otherwise deal with them.</p>
-<p>Usually, such concrete types are synthesized automatically because they're
+<p>Usually, such concrete types are synthesized automatically because they’re
 parameters or return values from functions. Very rarely, you may
 want to synthesize them yourself - you can do this using the
 <a href="https://docs.rs/autocxx/latest/autocxx/macro.concrete.html"><code>concrete!</code></a>
@@ -833,7 +850,7 @@ directive. As noted, though, these types are currently opaque and fairly
 useless without passing them back and forth to C++, so this is not a commonly
 used facility. It does, however, allow you to give a more descriptive name
 to the type in Rust:</p>
-<h4 id="c-header-5"><a class="header" href="#c-header-5">C++ header:</a></h4>
+<h4 id="c-header-3"><a class="header" href="#c-header-3">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;string&gt;
 struct Tapioca {
   std::string yuck;
@@ -851,7 +868,7 @@ inline Tea&lt;Tapioca&gt; prepare() {
 inline void drink(const Tea&lt;Tapioca&gt;&amp;) {}
 
 </code></pre>
-<h4 id="rust-5"><a class="header" href="#rust-5">Rust:</a></h4>
+<h4 id="rust-3"><a class="header" href="#rust-3">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -877,7 +894,7 @@ at. A
 directive naming the <em>template</em> says that it is a smart pointer, and every
 instantiation of it then has a <code>get</code> method answering with a raw pointer to the
 payload:</p>
-<h4 id="c-header-6"><a class="header" href="#c-header-6">C++ header:</a></h4>
+<h4 id="c-header-4"><a class="header" href="#c-header-4">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 struct Milk {
   uint32_t creaminess;
@@ -896,7 +913,7 @@ private:
 inline Jug&lt;Milk&gt; fetch() { return Jug&lt;Milk&gt;(new Milk{7}); }
 
 </code></pre>
-<h4 id="rust-6"><a class="header" href="#rust-6">Rust:</a></h4>
+<h4 id="rust-4"><a class="header" href="#rust-4">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -956,7 +973,7 @@ some types. <code>autocxx</code> makes use of these types of special members:</p
 they exist and uses them.</p>
 <p><code>autocxx</code> currently uses its own analysis to determine when implicit versions of
 these exist. This analysis tries to be conservative (avoid generating wrappers
-that require the existence of C++ functions that don't exist), but sometimes
+that require the existence of C++ functions that don’t exist), but sometimes
 this goes wrong and understanding the details is necessary to get the correct
 Rust wrappers generated.</p>
 <p>In particular, determing whether an implicit version of any of these exists
@@ -966,7 +983,7 @@ bases or members are not analyzed, <code>autocxx</code> will assume a public des
 exists (in the absence of any other destructors), and avoid using any other
 implicit special member functions. Notably this includes the default
 constructor, so types with un-analyzed bases or members and no explicit
-constructors will not get a <code>make_unique</code> or <code>new</code> generated. If <code>autocxx</code> isn't
+constructors will not get a <code>make_unique</code> or <code>new</code> generated. If <code>autocxx</code> isn’t
 generating a <code>make_unique</code> or <code>CopyNew</code> or <code>MoveNew</code> for a type which permits
 the corresponding operations in C++, make sure the types of all bases and
 members are analyzed or implement it explicitly.</p>
@@ -976,7 +993,7 @@ exists<sup class="footnote-reference" id="fr-member-initializers-1"><a href="#fo
 work though.</p>
 <p>Currently, <code>autocxx</code> assumes that an explicitly defaulted (<code>= default</code>) member
 function exists, although it is valid C++ for that to be
-deleted<sup class="footnote-reference" id="fr-explicitly-defaulted-1"><a href="#footnote-explicitly-defaulted">3</a></sup>. Clang's
+deleted<sup class="footnote-reference" id="fr-explicitly-defaulted-1"><a href="#footnote-explicitly-defaulted">3</a></sup>. Clang’s
 <a href="https://clang.llvm.org/docs/DiagnosticsReference.html#wdefaulted-function-deleted">-Wdefaulted-function-deleted</a>
 flag (enabled by default) will warn about types like this.</p>
 <p>A C++ type whose destructor is inaccessible - <code>private</code>, <code>protected</code>, or
@@ -995,18 +1012,18 @@ one to call from Rust gets tricky.</p>
 <p>C++ calls an inherited member on the object which inherits it - <code>derived.foo()</code></p>
 <ul>
 <li>and <code>bindgen</code> reports nothing of the sort: a base class arrives as a field of
-the derived class, and the base's members as functions over the base's own
+the derived class, and the base’s members as functions over the base’s own
 type. So <code>autocxx</code> binds each public member of each public base a second time,
 against the classes which inherit it, and the Rust method is where C++ puts it.</li>
 </ul>
 <p>The call itself is made in C++, on the object cast to the base -
 <code>static_cast&lt;const Base&amp;&gt;(d).foo(args)</code>. That is what dispatches a virtual
-member on the object's own dynamic type, what adjusts <code>this</code> for a base which
+member on the object’s own dynamic type, what adjusts <code>this</code> for a base which
 does not sit at the start of the derived class, and what makes the Rust method
 call the member whose signature it was generated from rather than whatever the
 deriving class might declare under the same name. Adding the base to your
 <code>generate!</code> list is not needed for any of it - if you do, you also get the
-base's own type and an <code>AsRef</code> upcast to it, and both routes work.</p>
+base’s own type and an <code>AsRef</code> upcast to it, and both routes work.</p>
 <p>A member is bound this way only where <code>autocxx</code> can say that
 <code>derived.foo(args)</code> would have named it, so several shapes are left alone: a
 name the deriving class declares itself, or one a class between it and the base
@@ -1024,11 +1041,11 @@ pick. Static members are not imported, a static call having no receiver to make
 it on, and neither are data members.</p>
 <p>Three kinds of declaration hide an inherited member in C++ which <code>bindgen</code> does
 not describe well enough for <code>autocxx</code> to notice: a member of an anonymous
-union, an unnamed <code>enum</code>'s enumerators, and a member function template. Where a
+union, an unnamed <code>enum</code>’s enumerators, and a member function template. Where a
 class hides an inherited <code>foo</code> with one of those, <code>autocxx</code> binds <code>foo</code> anyway,
-and the binding calls the base's member - the name reads as C++'s would not,
+and the binding calls the base’s member - the name reads as C++’s would not,
 but it does what it says.</p>
-<p>An <code>enum class</code>'s enumerators are members of the enumeration rather than of the
+<p>An <code>enum class</code>’s enumerators are members of the enumeration rather than of the
 class the enum is nested in, so one named after an inherited member hides
 nothing and the member is bound as usual.</p>
 <p>A member a class re-exports with <code>using Base::foo;</code> is bound too, by a pass of
@@ -1043,14 +1060,14 @@ points at an object of some derived class; if the destructor is not virtual,
 <code>delete</code>ing through that pointer runs the wrong one, which is undefined
 behaviour and which clang reports as <code>-Wdelete-abstract-non-virtual-dtor</code> and
 MSVC as C5205.</p>
-<p>The C++ <code>cxx</code> generates for <code>UniquePtr&lt;T&gt;</code>, and for <code>SharedPtr&lt;T&gt;</code>'s
+<p>The C++ <code>cxx</code> generates for <code>UniquePtr&lt;T&gt;</code>, and for <code>SharedPtr&lt;T&gt;</code>’s
 raw-pointer constructor, deletes through a <code>T*</code> exactly that way.
 <code>CxxVector&lt;T&gt;</code> is a different case with the same outcome: no element of an
 abstract type could ever be constructed, so nothing is there to delete, but the
 destructor which would still gets instantiated and the compiler still reports
 it. So for an abstract type with no virtual destructor <code>autocxx</code> adds none of
 those, nor <code>WeakPtr&lt;T&gt;</code>, which destroys nothing itself but is of no use without
-<code>SharedPtr&lt;T&gt;</code>. The generated type's documentation says so. As with an inaccessible destructor, the type and its
+<code>SharedPtr&lt;T&gt;</code>. The generated type’s documentation says so. As with an inaccessible destructor, the type and its
 methods are still generated and can be used through a reference or pointer C++
 hands you. Adding <code>virtual ~T();</code> to the C++ class is what makes it ownable.</p>
 <p>What <code>autocxx</code> actually knows is that it <em>found</em> no virtual destructor. If the
@@ -1062,7 +1079,8 @@ which itself names a <code>std::unique_ptr&lt;T&gt;</code> for such a <code>T</c
 to compile. Refusing those signatures with a diagnostic instead is a job for a
 future release.</p>
 <hr>
-<ol class="footnote-definition"><li id="footnote-templated">
+<ol class="footnote-definition">
+<li id="footnote-templated">
 <p>Future improvements tracked <a href="https://github.com/google/autocxx/issues/349">here</a> <a href="#fr-templated-1">↩</a></p>
 </li>
 <li id="footnote-member-initializers">
@@ -1081,10 +1099,12 @@ implementation tracked. See
 <a href="https://github.com/google/autocxx/issues/829">here</a>. <a href="#fr-inaccessible-destructor-1">↩</a></p>
 </li>
 <li id="footnote-abstract">
-<p><code>autocxx</code>'s determination of abstract types is a bit approximate and
+<p><code>autocxx</code>’s determination of abstract types is a bit approximate and
 <a href="https://github.com/google/autocxx/issues/774">could be improved</a>. <a href="#fr-abstract-1">↩</a></p>
 </li>
-</ol><div style="break-before: page; page-break-before: always;"></div><h1 id="pointers-references-values"><a class="header" href="#pointers-references-values">Pointers, references, values</a></h1>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="pointers-references-values"><a class="header" href="#pointers-references-values">Pointers, references, values</a></h1>
 <p><code>autocxx</code> knows how to deal with C++ APIs which take C++ types:</p>
 <ul>
 <li>By value</li>
@@ -1096,68 +1116,69 @@ implementation tracked. See
 <li>By rvalue reference (that is, as a move parameter)</li>
 </ul>
 <p>(all of this is because the underlying <a href="https://cxx.rs"><code>cxx</code></a> crate has such versatility).
-Some of these have some quirks in the way they're exposed in Rust, described below.</p>
+Some of these have some quirks in the way they’re exposed in Rust, described below.</p>
 <h2 id="passing-between-c-and-rust-by-value"><a class="header" href="#passing-between-c-and-rust-by-value">Passing between C++ and Rust by value</a></h2>
-<p>See the section on <a href="cpp_types.html">C++ types</a> for the distinction between POD and non-POD types.
+<p>See the section on <a href="#c-structs-enums-and-classes">C++ types</a> for the distinction between POD and non-POD types.
 POD types can be passed around however you like. Non-POD types can be passed into functions
-in various ways - see <a href="cpp_functions.html">calling C++ functions</a> for more details.</p>
+in various ways - see <a href="#c-functions">calling C++ functions</a> for more details.</p>
 <h2 id="references-and-pointers"><a class="header" href="#references-and-pointers">References and pointers</a></h2>
 <p>We follow <a href="https://cxx.rs"><code>cxx</code></a> norms here. Specifically:</p>
 <ul>
 <li>A C++ reference becomes a Rust reference</li>
 <li>A C++ pointer becomes a Rust pointer.</li>
-<li>If a reference is returned with an ambiguous lifetime, we don't generate
+<li>If a reference is returned with an ambiguous lifetime, we don’t generate
 code for the function</li>
-<li>Pointers require use of <code>unsafe</code>, references don't necessarily.</li>
+<li>Pointers require use of <code>unsafe</code>, references don’t necessarily.</li>
 </ul>
-<p>That last point is key. If your C++ API takes pointers, you're going
+<p>That last point is key. If your C++ API takes pointers, you’re going
 to have to use <code>unsafe</code>. Similarly, if your C++ API returns a pointer,
-you'll have to use <code>unsafe</code> to do anything useful with the pointer in Rust.
+you’ll have to use <code>unsafe</code> to do anything useful with the pointer in Rust.
 This is intentional: a pointer from C++ might be subject to concurrent
 mutation, or it might have a lifetime that could disappear at any moment.
 As a human, you must promise that you understand the constraints around
-use of that pointer and that's what the <code>unsafe</code> keyword is for.</p>
+use of that pointer and that’s what the <code>unsafe</code> keyword is for.</p>
 <p>Exactly the same issues apply to C++ references <em>in theory</em>, but in practice,
-they usually don't. Therefore <a href="https://cxx.rs"><code>cxx</code></a> has taken the view that we can "trust"
+they usually don’t. Therefore <a href="https://cxx.rs"><code>cxx</code></a> has taken the view that we can “trust”
 a C++ reference to a higher degree than a pointer, and autocxx follows that
-lead (in fact we 'trust' references even slightly more than cxx).
+lead (in fact we ‘trust’ references even slightly more than cxx).
 In practice, of course, references are rarely return values from C++
 APIs so we rarely have to navel-gaze about the trustworthiness of a
 reference.</p>
-<p>(See also the discussion of <a href="safety.html"><code>safety</code></a> - if you haven't specified
+<p>(See also the discussion of <a href="#safety"><code>safety</code></a> - if you haven’t specified
 an unsafety policy, <em>all</em> C++ APIs require <code>unsafe</code> so the discussion is moot.</p>
-<p>If you're given a C++ object by pointer, and you want to interact with it,
-you'll need to figure out the guarantees attached to the C++ object - most
+<p>If you’re given a C++ object by pointer, and you want to interact with it,
+you’ll need to figure out the guarantees attached to the C++ object - most
 notably its lifetime. To see some of the decision making process involved
 see the <a href="https://github.com/Choochmeque/autocxx/tree/main/examples/steam-mini/src/main.rs">Steam example</a>.</p>
 <h2 id="cxxuniqueptrs-tips"><a class="header" href="#cxxuniqueptrs-tips"><a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>s tips</a></h2>
 <p>We use <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a> in completely the normal way, but there are a few
-quirks which you're more likely to run into with <code>autocxx</code>.</p>
+quirks which you’re more likely to run into with <code>autocxx</code>.</p>
 <ul>
-<li>You'll need to use <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html#method.pin_mut"><code>.pin_mut()</code></a> a lot -
-see <a href="cpp_functions.html">the example at the bottom of C++ functions</a>.</li>
+<li>You’ll need to use <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html#method.pin_mut"><code>.pin_mut()</code></a> a lot -
+see <a href="#c-functions">the example at the bottom of C++ functions</a>.</li>
 <li>If you need to pass a raw pointer to a function, lots of unsafety is required - something like this:
 <pre><code class="language-rust ignore">   let mut a = ffi::A::make_unique();
    unsafe { ffi::TakePointerToA(std::pin::Pin::&lt;&amp;mut ffi::A&gt;::into_inner_unchecked(a.pin_mut())) };</code></pre>
 This may be simplified in future.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="storage---stack-and-heaps"><a class="header" href="#storage---stack-and-heaps">Storage - stack and heaps</a></h1>
-<p>Ensure you understand the distinction between <a href="cpp_types.html">POD and non-POD types described in the C++ types section before proceeding</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="storage---stack-and-heaps"><a class="header" href="#storage---stack-and-heaps">Storage - stack and heaps</a></h1>
+<p>Ensure you understand the distinction between <a href="#c-structs-enums-and-classes">POD and non-POD types described in the C++ types section before proceeding</a>.</p>
 <h2 id="pod-types"><a class="header" href="#pod-types">POD types</a></h2>
 <p>POD types are just regular Rust types! Store them on the stack, heap, in a <code>Vec</code>, a <code>HashMap</code>, whatever you want.</p>
 <h2 id="non-pod-types"><a class="header" href="#non-pod-types">Non-POD types</a></h2>
 <p>Non-POD types can be stored:</p>
 <ul>
-<li>In a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>. This is cxx's Rust wrapper for <code>std::unique_ptr</code> - so the object is stored in the C++ heap. Most of the time you handle a C++ object from <code>autocxx</code>, it will be stored in one of these.</li>
+<li>In a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>. This is cxx’s Rust wrapper for <code>std::unique_ptr</code> - so the object is stored in the C++ heap. Most of the time you handle a C++ object from <code>autocxx</code>, it will be stored in one of these.</li>
 <li>In a <a href="https://doc.rust-lang.org/std/boxed/struct.Box.html"><code>Box</code></a> - so the object is stored on the Rust heap. This has the
-advantage that there's no possibility that the object can be NULL.</li>
+advantage that there’s no possibility that the object can be NULL.</li>
 <li>On the Rust stack, using the <a href="https://docs.rs/moveit/latest/moveit/macro.moveit.html"><code>autocxx::moveit</code></a> macro.</li>
 </ul>
-<p>If in doubt, use <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>. It's simple and ergonomic.</p>
-<p>See <a href="cpp_types.html#construction-sounds-complicated-do-you-have-a-code-example">C++ types</a> for a code example showing a type existing on both the stack and the heap.</p>
+<p>If in doubt, use <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>. It’s simple and ergonomic.</p>
+<p>See <a href="#construction-sounds-complicated-do-you-have-a-code-example">C++ types</a> for a code example showing a type existing on both the stack and the heap.</p>
 <h2 id="whose-heap-is-it-anyway"><a class="header" href="#whose-heap-is-it-anyway">Whose heap is it anyway?</a></h2>
 <p>Specifically <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a> is a binding to <code>std::unique_ptr&lt;T,std::default_delete&lt;T&gt;&gt;</code> which means the object will be deleted using the C++ <code>delete</code> operator. This will respect any overridden <code>operator delete</code> on the type, and similarly, the functions which <code>autocxx</code> provides to <em>construct</em> types should respect overridden <code>operator new</code>. This means: if your C++ type has code to create itself in some special or unusual heap partition, that should work fine.</p>
-<p>The class's own allocator is found by asking for the two signatures a class
+<p>The class’s own allocator is found by asking for the two signatures a class
 declaring nothing else gets, <code>operator new(std::size_t)</code> and
 <code>operator delete(void*)</code>; a class which declares only the sized, aligned or
 destroying overloads is not seen, and its objects are allocated and freed
@@ -1171,16 +1192,17 @@ has no aligned <code>operator new</code> in the language at all, and an over-ali
 whose class declares only one half of the pair. Giving the class an
 <code>operator new(std::size_t)</code> and an <code>operator delete(void*)</code> of its own settles
 every one of those cases.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="built-in-types"><a class="header" href="#built-in-types">Built-in types</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="built-in-types"><a class="header" href="#built-in-types">Built-in types</a></h1>
 <p><code>autocxx</code> relies primarily on the <a href="https://cxx.rs/bindings.html">standard cxx types</a>.
 In particular you should become familiar with <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a> and <a href="https://docs.rs/cxx/latest/cxx/struct.CxxString.html"><code>cxx::CxxString</code></a>.</p>
 <p>There are a few additional integer types, such as <a href="https://docs.rs/autocxx/latest/autocxx/struct.c_int.html"><code>c_int</code></a>,
 which are not yet upstreamed to <code>cxx</code>. These are to support those pesky C/C++ integer types
 which do not have a predictable number of bits on different machines.</p>
-<h4 id="c-header-7"><a class="header" href="#c-header-7">C++ header:</a></h4>
+<h4 id="c-header-5"><a class="header" href="#c-header-5">C++ header:</a></h4>
 <pre><code class="language-cpp">inline int do_math(int a, int b) { return a+b; }
 </code></pre>
-<h4 id="rust-7"><a class="header" href="#rust-7">Rust:</a></h4>
+<h4 id="rust-5"><a class="header" href="#rust-5">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1203,7 +1225,7 @@ newtype over the Rust integer of that width, so <code>.0</code> or <code>.into()
 value back. Anywhere else - by value, in a <code>std::vector</code>, in a
 <code>std::shared_ptr</code> - a <code>uint32_t</code> is a plain <code>u32</code> as before.</p>
 <h2 id="character-types"><a class="header" href="#character-types">Character types</a></h2>
-<p>C++'s <code>char16_t</code>, <code>char32_t</code>, <code>char8_t</code> and <code>wchar_t</code> are distinct types - a
+<p>C++’s <code>char16_t</code>, <code>char32_t</code>, <code>char8_t</code> and <code>wchar_t</code> are distinct types - a
 <code>char32_t</code> is not a <code>uint32_t</code>, and a C++ compiler asked for the exact type of a
 function says so - and Rust has no equivalent of any of them. <code>autocxx</code> gives
 each one a transparent newtype:
@@ -1213,7 +1235,7 @@ each one a transparent newtype:
 <a href="https://docs.rs/autocxx/latest/autocxx/struct.c_wchar_t.html"><code>c_wchar_t</code></a>, each
 wrapping the Rust integer of the same width, so a value crosses with <code>.0</code> or
 <code>From</code>.</p>
-<p><code>wchar_t</code> is the one whose width and signedness are the target's to choose -
+<p><code>wchar_t</code> is the one whose width and signedness are the target’s to choose -
 <code>unsigned short</code> on Windows, <code>int</code> on Linux and macOS, <code>unsigned int</code> under
 AAPCS - so its payload is
 <a href="https://docs.rs/autocxx/latest/autocxx/type.wchar_t.html"><code>autocxx::wchar_t</code></a>,
@@ -1225,7 +1247,7 @@ the keyword does not exist, so a container of one is refused with the rest of
 that function left alone.</p>
 <p><code>long double</code> has no such newtype and is not supported, for a reason which
 differs by target: on MSVC and Apple Arm it is a <code>double</code> under another name, so
-a Rust <code>f64</code> has the right layout but is still the wrong C++ type and <code>cxx</code>'s
+a Rust <code>f64</code> has the right layout but is still the wrong C++ type and <code>cxx</code>’s
 signature check says so; on x86-64 Linux it is an 80-bit x87 float in 16 bytes,
 and on AArch64 Linux an IEEE binary128, and Rust has no type for either. A
 function whose signature mentions one is refused with an error saying that. A
@@ -1244,9 +1266,9 @@ the right size and Rust has no 128-bit float, which is also how an
 and refuses a function which mentions one by name, rather than binding it as the
 integer beside it.</p>
 <h2 id="strings"><a class="header" href="#strings">Strings</a></h2>
-<p><code>autocxx</code> uses <a href="https://docs.rs/cxx/latest/cxx/struct.CxxString.html"><code>cxx::CxxString</code></a>. However, as noted above, we can't
-just pass a C++ string by value, so we'll box and unbox it automatically
-such that you're really dealing with <code>UniquePtr&lt;CxxString&gt;</code> on the Rust
+<p><code>autocxx</code> uses <a href="https://docs.rs/cxx/latest/cxx/struct.CxxString.html"><code>cxx::CxxString</code></a>. However, as noted above, we can’t
+just pass a C++ string by value, so we’ll box and unbox it automatically
+such that you’re really dealing with <code>UniquePtr&lt;CxxString&gt;</code> on the Rust
 side, even if the API just took or returned a plain old <code>std::string</code>.</p>
 <p>However, to ease ergonomics, functions that accept a <code>std::string</code> will
 actually accept anything that
@@ -1254,16 +1276,16 @@ implements a trait called <code>ffi::ToCppString</code>. That may either be a
 <code>UniquePtr&lt;CxxString&gt;</code> or just a plain old Rust string - which will be
 converted transparently to a C++ string.</p>
 <p>This trait, and its implementations, are not present in the <code>autocxx</code>
-documentation because they're dynamically generated in <em>your</em> code
+documentation because they’re dynamically generated in <em>your</em> code
 so that they can call through to a <code>make_string</code> implementation in
-the C++ that we're injecting into your C++ build system.</p>
-<p>(None of that happens if you use <a href="https://docs.rs/autocxx/latest/autocxx/macro.exclude_utilities.html"><code>exclude_utilities</code></a>, so don't do that.)</p>
-<h4 id="c-header-8"><a class="header" href="#c-header-8">C++ header:</a></h4>
+the C++ that we’re injecting into your C++ build system.</p>
+<p>(None of that happens if you use <a href="https://docs.rs/autocxx/latest/autocxx/macro.exclude_utilities.html"><code>exclude_utilities</code></a>, so don’t do that.)</p>
+<h4 id="c-header-1-2"><a class="header" href="#c-header-1-2">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;string&gt;
 #include &lt;cstdint&gt;
 inline uint32_t take_string(std::string a) { return static_cast&lt;uint32_t&gt;(a.size()); }
 </code></pre>
-<h4 id="rust-8"><a class="header" href="#rust-8">Rust:</a></h4>
+<h4 id="rust-1-2"><a class="header" href="#rust-1-2">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1303,12 +1325,12 @@ you vouch for with <code>safety!</code>. If the C++ keeps what it is lent, give 
 <p>The bytes are bytes. C++ asks nothing about the encoding of a <code>string_view</code>
 and neither does this, which is why <code>&amp;[u8]</code> is accepted alongside <code>&amp;str</code> and
 why a view may contain an interior NUL.</p>
-<h4 id="c-header-9"><a class="header" href="#c-header-9">C++ header:</a></h4>
+<h4 id="c-header-2-2"><a class="header" href="#c-header-2-2">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;string_view&gt;
 #include &lt;cstddef&gt;
 inline size_t take_view(std::string_view v) { return v.size(); }
 </code></pre>
-<h4 id="rust-9"><a class="header" href="#rust-9">Rust:</a></h4>
+<h4 id="rust-2-2"><a class="header" href="#rust-2-2">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1338,13 +1360,14 @@ for parsing your headers and once for compiling the code it generates — so
 remember to set it in both places, e.g. <code>cc::Build::std("c++17")</code> beside
 <code>extra_clang_args(["-std=c++17"])</code>. Generated code which needs C++17 and does
 not get it says so by name.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="naming"><a class="header" href="#naming">Naming</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="naming"><a class="header" href="#naming">Naming</a></h1>
 <h2 id="namespaces"><a class="header" href="#namespaces">Namespaces</a></h2>
 <p>The C++ namespace structure is reflected in mods within the generated
 ffi mod. However, at present there is an internal limitation that
-autocxx can't handle multiple types with the same identifier, even
-if they're in different namespaces. This will be fixed in future.</p>
-<h4 id="c-header-10"><a class="header" href="#c-header-10">C++ header:</a></h4>
+autocxx can’t handle multiple types with the same identifier, even
+if they’re in different namespaces. This will be fixed in future.</p>
+<h4 id="c-header-6"><a class="header" href="#c-header-6">C++ header:</a></h4>
 <pre><code class="language-cpp">
 namespace generations {
   void hey_boomer();
@@ -1354,7 +1377,7 @@ namespace submarines {
 }
 
 </code></pre>
-<h4 id="rust-10"><a class="header" href="#rust-10">Rust:</a></h4>
+<h4 id="rust-6"><a class="header" href="#rust-6">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1374,7 +1397,7 @@ fn main() {
 <p>There is support for generating bindings of nested types, with some
 restrictions. Currently the C++ type <code>A::B</code> will be given the Rust name
 <code>A_B</code> in the same module as its enclosing namespace.</p>
-<h4 id="c-header-11"><a class="header" href="#c-header-11">C++ header:</a></h4>
+<h4 id="c-header-1-3"><a class="header" href="#c-header-1-3">C++ header:</a></h4>
 <pre><code class="language-cpp">
 struct Turkey {
     struct Duck {
@@ -1385,7 +1408,7 @@ struct Turkey {
 };
 
 </code></pre>
-<h4 id="rust-11"><a class="header" href="#rust-11">Rust:</a></h4>
+<h4 id="rust-1-3"><a class="header" href="#rust-1-3">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1400,14 +1423,15 @@ fn main() {
 }
 </code></pre>
 <h2 id="overloads"><a class="header" href="#overloads">Overloads</a></h2>
-<p>See <a href="cpp_functions.html">the chapter on C++ functions</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="c-functions"><a class="header" href="#c-functions">C++ functions</a></h1>
+<p>See <a href="#c-functions">the chapter on C++ functions</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="c-functions"><a class="header" href="#c-functions">C++ functions</a></h1>
 <p>Calling C++ functions is largly as you might expect.</p>
 <h2 id="value-and-rvalue-parameters"><a class="header" href="#value-and-rvalue-parameters">Value and rvalue parameters</a></h2>
-<p>Functions taking <a href="cpp_types.html">non-POD</a> value parameters can take a <code>cxx::UniquePtr&lt;T&gt;</code>
+<p>Functions taking <a href="#c-structs-enums-and-classes">non-POD</a> value parameters can take a <code>cxx::UniquePtr&lt;T&gt;</code>
 or a <code>&amp;T</code>. This gives you the choice of Rust semantics - where a parameter
 is absorbed and destroyed - or C++ semantics where the parameter is copied.</p>
-<h4 id="c-header-12"><a class="header" href="#c-header-12">C++ header:</a></h4>
+<h4 id="c-header-7"><a class="header" href="#c-header-7">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Goat {
@@ -1418,7 +1442,7 @@ struct Goat {
 void feed_goat(Goat g); // takes goat by value
 
 </code></pre>
-<h4 id="rust-12"><a class="header" href="#rust-12">Rust:</a></h4>
+<h4 id="rust-7"><a class="header" href="#rust-7">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1442,8 +1466,8 @@ fn main() {
 }
 </code></pre>
 <p>Specifically, you can pass anything which implements <a href="https://docs.rs/autocxx/latest/autocxx/trait.ValueParam.html"><code>ValueParam&lt;T&gt;</code></a>.</p>
-<p>If you're keeping non-POD values on the Rust stack, you need to explicitly use <a href="https://docs.rs/autocxx/latest/autocxx/prelude/fn.as_mov.html"><code>as_mov</code></a> to indicate that you want to consume the object using move semantics:</p>
-<h4 id="c-header-13"><a class="header" href="#c-header-13">C++ header:</a></h4>
+<p>If you’re keeping non-POD values on the Rust stack, you need to explicitly use <a href="https://docs.rs/autocxx/latest/autocxx/prelude/fn.as_mov.html"><code>as_mov</code></a> to indicate that you want to consume the object using move semantics:</p>
+<h4 id="c-header-1-4"><a class="header" href="#c-header-1-4">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Blimp {
@@ -1455,7 +1479,7 @@ void burst(Blimp b); // consumes blimp,
     // but because C++ is amazing, may copy the blimp first.
 
 </code></pre>
-<h4 id="rust-13"><a class="header" href="#rust-13">Rust:</a></h4>
+<h4 id="rust-1-4"><a class="header" href="#rust-1-4">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1475,9 +1499,9 @@ fn main() {
     ffi::burst(as_mov(blimp)); // consume, using move constructor
 }
 </code></pre>
-<p>RValue parameters are a little simpler, because (as you'd hope) they consume
-the object you're passing in.</p>
-<h4 id="c-header-14"><a class="header" href="#c-header-14">C++ header:</a></h4>
+<p>RValue parameters are a little simpler, because (as you’d hope) they consume
+the object you’re passing in.</p>
+<h4 id="c-header-2-3"><a class="header" href="#c-header-2-3">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Cake {
@@ -1488,7 +1512,7 @@ struct Cake {
 void eat(Cake&amp;&amp; c); // consumes the cake. You can't have your cake and eat it.
 
 </code></pre>
-<h4 id="rust-14"><a class="header" href="#rust-14">Rust:</a></h4>
+<h4 id="rust-2-3"><a class="header" href="#rust-2-3">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1515,17 +1539,17 @@ fn main() {
 <h2 id="default-parameters"><a class="header" href="#default-parameters">Default parameters</a></h2>
 <p>Are not yet supported<sup class="footnote-reference" id="fr-default-1"><a href="#footnote-default">1</a></sup>.</p>
 <h2 id="return-values"><a class="header" href="#return-values">Return values</a></h2>
-<p>Any C++ function which returns a <a href="cpp_types.html">non-POD</a> type to Rust in fact gives you an opaque
+<p>Any C++ function which returns a <a href="#c-structs-enums-and-classes">non-POD</a> type to Rust in fact gives you an opaque
 object implementing <a href="https://docs.rs/moveit/latest/moveit/new/trait.New.html"><code>moveit::New</code></a>.
-This enables you to "emplace" the resulting object either on the stack or heap,
-in exactly the same way as if you're constructying an object. See <a href="cpp_types.html#construction">the section on construction</a>
+This enables you to “emplace” the resulting object either on the stack or heap,
+in exactly the same way as if you’re constructying an object. See <a href="#construction">the section on construction</a>
 for how to turn this opaque object into something useful (spoiler: just append <code>.within_unique_ptr()</code>).</p>
 <h2 id="overloads---and-identifiers-ending-in-digits"><a class="header" href="#overloads---and-identifiers-ending-in-digits">Overloads - and identifiers ending in digits</a></h2>
-<p>C++ allows function overloads; Rust doesn't. <code>autocxx</code> follows the lead
+<p>C++ allows function overloads; Rust doesn’t. <code>autocxx</code> follows the lead
 of <code>bindgen</code> here and generating overloads as <code>func</code>, <code>func1</code>, <code>func2</code> etc.
 This is essentially awful without <code>rust-analyzer</code> IDE support - see the
-<a href="workflow.html">workflows chapter</a> for why you should be using an IDE.</p>
-<h4 id="c-header-15"><a class="header" href="#c-header-15">C++ header:</a></h4>
+<a href="#workflow">workflows chapter</a> for why you should be using an IDE.</p>
+<h4 id="c-header-3-1"><a class="header" href="#c-header-3-1">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;string&gt;
 struct View {
@@ -1540,7 +1564,7 @@ void saw(const View&amp;);
 void saw(const Tree&amp;);
 
 </code></pre>
-<h4 id="rust-15"><a class="header" href="#rust-15">Rust:</a></h4>
+<h4 id="rust-3-1"><a class="header" href="#rust-3-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1560,13 +1584,13 @@ fn main() {
     ffi::saw1(&amp;tree); // yuck, overload
 }
 </code></pre>
-<p><code>autocxx</code> doesn't yet support default parameters.</p>
-<p>It's fairly likely we'll change the model here in the future, such that
+<p><code>autocxx</code> doesn’t yet support default parameters.</p>
+<p>It’s fairly likely we’ll change the model here in the future, such that
 we can pass tuples of different parameter types into a single function
 implementation.</p>
 <h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
 <p>Calling a <em>const</em> method is simple:</p>
-<h4 id="c-header-16"><a class="header" href="#c-header-16">C++ header:</a></h4>
+<h4 id="c-header-4-1"><a class="header" href="#c-header-4-1">C++ header:</a></h4>
 <pre><code class="language-cpp">
 class Sloth {
 public:
@@ -1574,7 +1598,7 @@ public:
 };
 
 </code></pre>
-<h4 id="rust-16"><a class="header" href="#rust-16">Rust:</a></h4>
+<h4 id="rust-4-1"><a class="header" href="#rust-4-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1594,7 +1618,7 @@ fn main() {
 references to C++ objects must be <a href="https://doc.rust-lang.org/std/pin/">pinned</a>.
 In practice, this means you must call <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html#method.pin_mut"><code>.pin_mut()</code></a>
 every time you call a method:</p>
-<h4 id="c-header-17"><a class="header" href="#c-header-17">C++ header:</a></h4>
+<h4 id="c-header-5-1"><a class="header" href="#c-header-5-1">C++ header:</a></h4>
 <pre><code class="language-cpp">
 class Sloth {
 public:
@@ -1603,7 +1627,7 @@ public:
 };
 
 </code></pre>
-<h4 id="rust-17"><a class="header" href="#rust-17">Rust:</a></h4>
+<h4 id="rust-5-1"><a class="header" href="#rust-5-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1623,7 +1647,7 @@ fn main() {
 <p>A method qualified with <code>&amp;</code> is called just like any other method - autocxx
 always has an lvalue to call it on, so the qualifier makes no difference to
 how you use it.</p>
-<h4 id="c-header-18"><a class="header" href="#c-header-18">C++ header:</a></h4>
+<h4 id="c-header-6-1"><a class="header" href="#c-header-6-1">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;cstdint&gt;
 class Sloth {
@@ -1632,7 +1656,7 @@ public:
 };
 
 </code></pre>
-<h4 id="rust-18"><a class="header" href="#rust-18">Rust:</a></h4>
+<h4 id="rust-6-1"><a class="header" href="#rust-6-1">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1649,7 +1673,7 @@ fn main() {
 </code></pre>
 <p>A method qualified with <code>&amp;&amp;</code> is a different matter: it can only be called on an
 object which is about to be discarded, and autocxx only ever holds a C++ object
-behind a reference or a smart pointer. There's no way to express that, so no
+behind a reference or a smart pointer. There’s no way to express that, so no
 bindings are generated for such methods. The rest of the type is unaffected,
 and the generated code carries an explanation where the method would have been.</p>
 <h2 id="member-function-templates"><a class="header" href="#member-function-templates">Member function templates</a></h2>
@@ -1676,27 +1700,30 @@ does provide a callable function that way, but libclang reports it outside the
 class rather than as a member of it, so autocxx does not reach it. The wrapper
 is the reliable route.</p>
 <p>The same applies to the member functions of a class template, which are
-described under <a href="cpp_types.html#generic-templated-types">generic types</a>:
+described under <a href="#generic-templated-types">generic types</a>:
 those <em>are</em> bound for an instantiation you declare <code>instantiable!</code>, and a member
 function template among them is the one kind which is not.</p>
 <hr>
-<ol class="footnote-definition"><li id="footnote-default">
+<ol class="footnote-definition">
+<li id="footnote-default">
 <p>the work is <a href="https://github.com/google/autocxx/issues/563">planned here</a>. <a href="#fr-default-1">↩</a></p>
 </li>
-</ol><div style="break-before: page; page-break-before: always;"></div><h1 id="c-exceptions"><a class="header" href="#c-exceptions">C++ Exceptions</a></h1>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="c-exceptions"><a class="header" href="#c-exceptions">C++ Exceptions</a></h1>
 <p>C++ exceptions are supported via the <code>throws!</code> directive. When a function is marked
 with <code>throws!</code>, its Rust binding returns <code>Result&lt;T, cxx::Exception&gt;</code> instead of <code>T</code>,
 allowing you to handle C++ exceptions that propagate across the FFI boundary.
 Constructors take a slightly different shape, for reasons the
-<a href="exceptions.html#constructors">Constructors</a> section explains.</p>
+<a href="#constructors">Constructors</a> section explains.</p>
 <h2 id="basic-usage"><a class="header" href="#basic-usage">Basic usage</a></h2>
-<h4 id="c-header-19"><a class="header" href="#c-header-19">C++ header:</a></h4>
+<h4 id="c-header-8"><a class="header" href="#c-header-8">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 void do_risky_thing();
 
 </code></pre>
-<h4 id="rust-19"><a class="header" href="#rust-19">Rust:</a></h4>
+<h4 id="rust-8"><a class="header" href="#rust-8">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1717,14 +1744,14 @@ fn main() {
 <h2 id="functions-with-return-values"><a class="header" href="#functions-with-return-values">Functions with return values</a></h2>
 <p>Functions that return values work the same way - the return type becomes
 <code>Result&lt;T, cxx::Exception&gt;</code>:</p>
-<h4 id="c-header-20"><a class="header" href="#c-header-20">C++ header:</a></h4>
+<h4 id="c-header-1-5"><a class="header" href="#c-header-1-5">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 #include &lt;cstdint&gt;
 uint32_t parse_number(const char* s);
 
 </code></pre>
-<h4 id="rust-20"><a class="header" href="#rust-20">Rust:</a></h4>
+<h4 id="rust-1-5"><a class="header" href="#rust-1-5">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1750,13 +1777,19 @@ fn main() {
 <h2 id="qualified-names"><a class="header" href="#qualified-names">Qualified names</a></h2>
 <p>The <code>throws!</code> directive supports qualified names for precise control over which
 functions are marked as throwing:</p>
-<div class="table-wrapper"><table><thead><tr><th>Pattern</th><th>Matches</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Pattern</th><th>Matches</th></tr>
+</thead>
+<tbody>
 <tr><td><code>throws!("do_something")</code></td><td>Any function named <code>do_something</code></td></tr>
 <tr><td><code>throws!("MyClass::method")</code></td><td>Method <code>method</code> on class <code>MyClass</code></td></tr>
 <tr><td><code>throws!("ns::do_something")</code></td><td>Function <code>do_something</code> in namespace <code>ns</code></td></tr>
 <tr><td><code>throws!("ns::MyClass::method")</code></td><td>Method on a namespaced class</td></tr>
 <tr><td><code>throws!("Outer::Inner::method")</code></td><td>Method on a nested class</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>A nested class may also be named by the flattened <code>Outer_Inner</code> spelling
 autocxx knows it by, exactly as in <code>generate!</code>.</p>
@@ -1764,7 +1797,7 @@ autocxx knows it by, exactly as in <code>generate!</code>.</p>
 <p>Partial matching is supported: a shorter pattern will match functions in any
 namespace. For example, <code>throws!("do_something")</code> will match both a top-level
 <code>do_something</code> and <code>my_namespace::do_something</code>.</p>
-<h4 id="c-header-21"><a class="header" href="#c-header-21">C++ header:</a></h4>
+<h4 id="c-header-2-4"><a class="header" href="#c-header-2-4">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 namespace utils {
@@ -1772,7 +1805,7 @@ namespace utils {
 }
 
 </code></pre>
-<h4 id="rust-21"><a class="header" href="#rust-21">Rust:</a></h4>
+<h4 id="rust-2-4"><a class="header" href="#rust-2-4">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1809,7 +1842,7 @@ spelling all three accept. <code>throws!</code> and <code>smart_pointer!</code> 
 spelling as well.</p>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <p>A constructor is named in <code>throws!</code> the way C++ names it - <code>Class::Class</code>:</p>
-<h4 id="c-header-22"><a class="header" href="#c-header-22">C++ header:</a></h4>
+<h4 id="c-header-3-2"><a class="header" href="#c-header-3-2">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 #include &lt;cstdint&gt;
@@ -1825,7 +1858,7 @@ private:
 };
 
 </code></pre>
-<h4 id="rust-22"><a class="header" href="#rust-22">Rust:</a></h4>
+<h4 id="rust-3-2"><a class="header" href="#rust-3-2">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1848,12 +1881,18 @@ fn main() {
 <code>within_unique_ptr()</code>, <code>within_box()</code> or the <code>moveit!</code> macro. One named by
 <code>throws!</code> hands back an <code>impl TryNew</code> instead, and each of those finishers has
 a fallible counterpart:</p>
-<div class="table-wrapper"><table><thead><tr><th>Infallible</th><th>Fallible</th><th>Gives you</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Infallible</th><th>Fallible</th><th>Gives you</th></tr>
+</thead>
+<tbody>
 <tr><td><code>.within_unique_ptr()</code></td><td><code>.try_within_unique_ptr()</code></td><td><code>Result&lt;UniquePtr&lt;T&gt;, cxx::Exception&gt;</code></td></tr>
 <tr><td><code>.within_box()</code></td><td><code>.try_within_box()</code></td><td><code>Result&lt;Pin&lt;Box&lt;T&gt;&gt;, cxx::Exception&gt;</code></td></tr>
 <tr><td><code>.within_cpp_pin()</code></td><td><code>.try_within_cpp_pin()</code></td><td><code>Result&lt;CppPin&lt;T&gt;, cxx::Exception&gt;</code></td></tr>
 <tr><td><code>moveit! { let x = ...; }</code></td><td><code>stack_slot!(storage);</code> then <code>storage.try_emplace(...)</code></td><td><code>Result&lt;Pin&lt;MoveRef&lt;T&gt;&gt;, cxx::Exception&gt;</code></td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>There is deliberately no <code>Result&lt;impl New, _&gt;</code>: that would decide whether
 construction failed before the constructor had run, whereas a C++ constructor
@@ -1865,7 +1904,7 @@ names differ rather than just the return types.</p>
 which leaves nowhere for a failure to go. So the two halves are written
 separately, and the half which can fail is an ordinary expression which takes
 <code>?</code>:</p>
-<h4 id="c-header-23"><a class="header" href="#c-header-23">C++ header:</a></h4>
+<h4 id="c-header-4-2"><a class="header" href="#c-header-4-2">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;stdexcept&gt;
 #include &lt;cstdint&gt;
@@ -1881,7 +1920,7 @@ private:
 };
 
 </code></pre>
-<h4 id="rust-23"><a class="header" href="#rust-23">Rust:</a></h4>
+<h4 id="rust-4-2"><a class="header" href="#rust-4-2">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -1917,7 +1956,7 @@ they keep the infallible <code>impl New</code> they always had.</p>
 <code>throws!</code> matches a trailing qualified name. Prefer <code>Goat::Goat</code>: the short form
 would equally match a free function called <code>Goat</code>.</p>
 <p>One kind of constructor the designation cannot reach is a copy or move
-constructor the class declares for itself. Those become <code>moveit</code>'s <code>CopyNew</code>
+constructor the class declares for itself. Those become <code>moveit</code>’s <code>CopyNew</code>
 and <code>MoveNew</code>, whose methods return nothing and so have nowhere to put an
 exception; <code>throws!("Goat::Goat")</code> names them along with the rest, but leaves
 them as they were, and a copy or move constructor which throws still terminates
@@ -1930,12 +1969,12 @@ way as a constructor - C++ writes the result into a place Rust provides - so it
 hands back an <code>impl TryNew</code> and is finished with the same <code>try_</code> methods:</p>
 <pre><code class="language-rust ignore">let made = ffi::make_goat(2).try_within_unique_ptr()?;</code></pre>
 <h2 id="subclasses"><a class="header" href="#subclasses">Subclasses</a></h2>
-<p>If the C++ superclass's constructor can throw, so can the constructor of the
+<p>If the C++ superclass’s constructor can throw, so can the constructor of the
 peer object <code>autocxx</code> generates for your subclass, and that peer constructor is
 the one to name: <code>throws!("MySubclassCpp::MySubclassCpp")</code>. Implement
 <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html"><code>CppPeerConstructor::try_make_peer</code></a>
 as well as <code>make_peer</code>, and construct the subclass with <code>try_new_rust_owned</code>,
-<code>try_new_cpp_owned</code> or <code>try_new_self_owned</code>. Designating the peer's constructor
+<code>try_new_cpp_owned</code> or <code>try_new_self_owned</code>. Designating the peer’s constructor
 also withholds the implementation <code>autocxx</code> writes for itself where the
 superclass has a single no-argument constructor, so the implementation below is
 what a subclass of any superclass needs:</p>
@@ -1950,14 +1989,14 @@ what a subclass of any superclass needs:</p>
         ffi::MySubclassCpp::new(holder, self.arg)
     }
 }</code></pre>
-<p>Note that there is no finisher on that last line. A peer's <code>new</code> hands back the
+<p>Note that there is no finisher on that last line. A peer’s <code>new</code> hands back the
 <code>cxx::UniquePtr</code> itself rather than something to place, so the fallible one
 hands back the <code>Result</code> and there is nothing left to do to it.
-<a href="rust_calls.html#subclasses-without-a-safety-policy">The subclass chapter</a> says
+<a href="#subclasses-without-a-safety-policy">The subclass chapter</a> says
 why. The constructor of a concrete template instantiation behaves the same way,
 for the same reason - see <a href="https://docs.rs/autocxx/latest/autocxx/macro.instantiable.html"><code>instantiable!</code></a>.</p>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
-<p>Under the hood, <code>autocxx</code> leverages <a href="https://cxx.rs/binding/result.html">cxx's native exception handling</a>.
+<p>Under the hood, <code>autocxx</code> leverages <a href="https://cxx.rs/binding/result.html">cxx’s native exception handling</a>.
 When a function is marked with <code>throws!</code>, the generated cxx bridge declaration
 uses <code>Result&lt;T&gt;</code> as the return type. This causes cxx to automatically wrap
 the C++ call in a try-catch block and convert any caught <code>std::exception</code>
@@ -1972,7 +2011,7 @@ of the boundary and never unwinds into Rust.</p>
 <ul>
 <li>
 <p><strong>Non-std::exception types</strong>: only exceptions derived from <code>std::exception</code>
-are caught and converted, because that is what cxx's <code>catch</code> clause names.
+are caught and converted, because that is what cxx’s <code>catch</code> clause names.
 Something else - an <code>int</code>, a bare string literal, a class of your own which
 derives from nothing - passes straight through it and out of the <code>noexcept</code>
 shim around it, which calls <code>std::terminate</code>. The process dies; it is not
@@ -2002,16 +2041,17 @@ cost is only incurred when an exception actually occurs.</p>
 unwind tables: exceptions still propagate and get caught, but
 destructors in intervening frames are skipped, so every throwing call
 leaks its owning temporaries. The <code>cc::Build</code> returned by
-<code>autocxx-build</code>'s <code>Builder</code> passes <code>/EHsc</code> for the code it compiles.
+<code>autocxx-build</code>’s <code>Builder</code> passes <code>/EHsc</code> for the code it compiles.
 Two things stay outside its reach: C++ you compile separately (via
 <code>autocxx-gen</code>, CMake, or another <code>cc::Build</code>) needs a compatible
-exception model of its own, and the <code>cxx</code> crate's own runtime
-(<code>cxx.cc</code>) is compiled by cxx's build script, which currently passes
+exception model of its own, and the <code>cxx</code> crate’s own runtime
+(<code>cxx.cc</code>) is compiled by cxx’s build script, which currently passes
 no <code>/EH</code> flag — set <code>CXXFLAGS=/EHsc</code> in your build environment to
 cover it until that is fixed upstream.</p>
 </li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="callbacks-into-rust"><a class="header" href="#callbacks-into-rust">Callbacks into Rust</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="callbacks-into-rust"><a class="header" href="#callbacks-into-rust">Callbacks into Rust</a></h1>
 <p><code>autocxx</code> is primarily to allow calls from Rust to C++, but like <code>cxx</code> it also allows you to expose Rust APIs to C++.</p>
 <p>You can:</p>
 <ul>
@@ -2019,14 +2059,14 @@ cover it until that is fixed upstream.</p>
 <li>Make Rust functions available to C++ using <a href="https://docs.rs/autocxx/latest/autocxx/extern_rust/attr.extern_rust_function.html"><code>extern_rust_function</code></a>.</li>
 <li>Allow Rust subclasses of C++ classes.</li>
 </ul>
-<p>This latter option is most commonly used for implementing "listeners" or <a href="https://en.wikipedia.org/wiki/Observer_pattern">"observers"</a>, so is often in practice how C++ will call into Rust. More details below.</p>
+<p>This latter option is most commonly used for implementing “listeners” or <a href="https://en.wikipedia.org/wiki/Observer_pattern">“observers”</a>, so is often in practice how C++ will call into Rust. More details below.</p>
 <h2 id="subclasses-1"><a class="header" href="#subclasses-1">Subclasses</a></h2>
 <p>There is limited and experimental support for creating Rust subclasses of
 C++ classes. (Yes, even more experimental than all the rest of this!)
 See <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppSubclass.html"><code>subclass::CppSubclass</code></a> for information about how you do this.
 This is useful primarily if you want to listen out for messages broadcast
 using the C++ observer/listener pattern.</p>
-<h4 id="c-header-24"><a class="header" href="#c-header-24">C++ header:</a></h4>
+<h4 id="c-header-9"><a class="header" href="#c-header-9">C++ header:</a></h4>
 <pre><code class="language-cpp">class GoatObserver {
 public:
     virtual void goat_full() const = 0;
@@ -2038,7 +2078,7 @@ void deregister_observer();
 void feed_goat();
 
 </code></pre>
-<h4 id="rust-24"><a class="header" href="#rust-24">Rust:</a></h4>
+<h4 id="rust-9"><a class="header" href="#rust-9">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 use autocxx::subclass::*;
@@ -2085,20 +2125,20 @@ for full details, but you must decide who owns your subclass:</p>
 <ul>
 <li>C++ owns it</li>
 <li>Rust owns it</li>
-<li>It's self-owned, and only ever frees itself (using <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppSubclassSelfOwned.html#method.delete_self"><code>delete_self</code></a>).</li>
+<li>It’s self-owned, and only ever frees itself (using <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppSubclassSelfOwned.html#method.delete_self"><code>delete_self</code></a>).</li>
 </ul>
 <p>Please be careful: the observer pattern is a minefield for use-after-free bugs.
-It's recommended that you wrap any such subclass in some sort of Rust newtype
-wrapper which <a href="rustic.html">enforces any ownership invariants</a> so that users
-of your types literally can't make any mistakes.</p>
+It’s recommended that you wrap any such subclass in some sort of Rust newtype
+wrapper which <a href="#using-the-generated-bindings">enforces any ownership invariants</a> so that users
+of your types literally can’t make any mistakes.</p>
 <h2 id="subclasses-without-a-safety-policy"><a class="header" href="#subclasses-without-a-safety-policy">Subclasses without a <code>safety!</code> policy</a></h2>
 <p>Where the C++ superclass has a single trivial constructor, autocxx normally
 implements
 <a href="https://docs.rs/autocxx/latest/autocxx/subclass/trait.CppPeerConstructor.html"><code>CppPeerConstructor</code></a>
 for your subclass. It stops doing so if you leave out the
-<a href="safety.html"><code>safety!</code> directive</a>, because then every generated function is
-<code>unsafe</code> - the peer's constructor included - and <code>make_peer</code> is a safe method,
-so the generated body wouldn't compile.</p>
+<a href="#safety"><code>safety!</code> directive</a>, because then every generated function is
+<code>unsafe</code> - the peer’s constructor included - and <code>make_peer</code> is a safe method,
+so the generated body wouldn’t compile.</p>
 <p>Subclasses still work; you write that one impl yourself, putting the <code>unsafe</code>
 block around the call:</p>
 <pre><code class="language-rust ignore">use autocxx::prelude::*;
@@ -2115,20 +2155,20 @@ impl CppPeerConstructor&lt;ffi::MyObserverCpp&gt; for MyObserver {
 }</code></pre>
 <p>This is the same impl you would write under a <code>safety!</code> policy for a
 superclass with several constructors, or one which takes arguments - see the
-trait's documentation. Nothing else about the subclass changes: the ownership
+trait’s documentation. Nothing else about the subclass changes: the ownership
 constructors, the <code>_methods</code> trait and the casts all behave as they do above.</p>
-<p>The peer's <code>new</code> hands back the <code>UniquePtr</code> itself, so the body is just the
+<p>The peer’s <code>new</code> hands back the <code>UniquePtr</code> itself, so the body is just the
 call - no <code>.within_unique_ptr()</code> and nothing to emplace. Most constructors
 autocxx generates hand back a <code>moveit::new::New</code> instead, letting the caller
 put the object where it likes, including in Rust storage. That cannot be
 offered here: autocxx writes the peer class itself, after <code>bindgen</code> has run, so
-nothing ever measures it, and its Rust side is <code>cxx</code>'s zero-sized opaque type.
+nothing ever measures it, and its Rust side is <code>cxx</code>’s zero-sized opaque type.
 Only C++ can allocate a peer.</p>
 <h2 id="calling-superclass-methods"><a class="header" href="#calling-superclass-methods">Calling superclass methods</a></h2>
 <p>Each subclass also implements a trait called <code>&lt;superclass name&gt;_supers</code> which
 includes all superclass methods. You can call methods on that, and if you
-don't implement a particular method, that will be used as the default.</p>
-<h4 id="c-header-25"><a class="header" href="#c-header-25">C++ header:</a></h4>
+don’t implement a particular method, that will be used as the default.</p>
+<h4 id="c-header-1-6"><a class="header" href="#c-header-1-6">C++ header:</a></h4>
 <pre><code class="language-cpp">
 #include &lt;iostream&gt;
 class Dinosaur {
@@ -2142,7 +2182,7 @@ public:
 
 
 </code></pre>
-<h4 id="rust-25"><a class="header" href="#rust-25">Rust:</a></h4>
+<h4 id="rust-1-6"><a class="header" href="#rust-1-6">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 use autocxx::subclass::*;
@@ -2188,15 +2228,16 @@ fn main() {
 <p>Subclasses implement <code>AsRef</code> to enable casting to superclasses.</p>
 <p>The superclass implements its own <code>_methods</code> trait too, so a function written
 as <code>fn feed(d: &amp;impl Dinosaur_methods)</code> takes a <code>TRex</code>, a <code>Diplodocus</code>, or a
-C++ <code>Dinosaur</code> alike. (The generator can't do this where one of the superclass's
+C++ <code>Dinosaur</code> alike. (The generator can’t do this where one of the superclass’s
 virtual methods has no binding of its own - a private or protected one, for
 instance - because there would be nothing for the implementation to call.)</p>
 <p>Older releases did not write that impl. If you filled the gap with an
 <code>impl Dinosaur_methods for Dinosaur</code> of your own, delete it when you upgrade:
 Rust rejects the two together with <code>E0119</code>, conflicting implementations.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="other-c-features"><a class="header" href="#other-c-features">Other C++ features</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="other-c-features"><a class="header" href="#other-c-features">Other C++ features</a></h1>
 <p>You can make Rust subclasses of C++ classes - as these are mostly used to
-implement the Observer pattern, they're documented under <a href="rust_calls.html">calls from C++ to Rust</a>.</p>
+implement the Observer pattern, they’re documented under <a href="#callbacks-into-rust">calls from C++ to Rust</a>.</p>
 <h2 id="preprocessor-symbols"><a class="header" href="#preprocessor-symbols">Preprocessor symbols</a></h2>
 <p><code>#define</code> and other preprocessor symbols will appear as constants.
 At present there is no way to do compile-time disablement of code
@@ -2206,9 +2247,9 @@ At present there is no way to do compile-time disablement of code
 <code>constexpr double kPi = 3.14;</code>, or a <code>static const int</code> member of a class -
 appears as a Rust <code>const</code>, so you can use it anywhere.</p>
 <p>A variable which instead lives at some address, such as one of
-<a href="cpp_types.html">POD</a> struct type, appears as a Rust <code>static</code>. Reading it is
+<a href="#c-structs-enums-and-classes">POD</a> struct type, appears as a Rust <code>static</code>. Reading it is
 <code>unsafe</code>, because C++ may be changing it at the same time:</p>
-<h4 id="c-header-26"><a class="header" href="#c-header-26">C++ header:</a></h4>
+<h4 id="c-header-10"><a class="header" href="#c-header-10">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 
 struct Point {
@@ -2219,7 +2260,7 @@ struct Point {
 extern const Point ORIGIN;
 
 </code></pre>
-<h4 id="rust-26"><a class="header" href="#rust-26">Rust:</a></h4>
+<h4 id="rust-10"><a class="header" href="#rust-10">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2243,11 +2284,11 @@ includes the header - and in a translation unit which never uses it, the
 compiler emits nothing at all. There is no single symbol for Rust to link
 against, so <code>autocxx</code> reports the problem instead of generating code which
 fails to link. (On MSVC, where the decorated name is the same either way,
-<code>autocxx</code> can't tell, and you get the link error.)</p>
+<code>autocxx</code> can’t tell, and you get the link error.)</p>
 <p>A variable of non-POD type is reached differently, because there is no
 non-POD value <code>autocxx</code> can hand Rust at all. Such a variable appears as a
 <em>function</em> of its own name - <code>ffi::BOB()</code> - which returns an opaque holder
-standing for a <code>const</code> reference to it. The holder's <code>get()</code> gives you the
+standing for a <code>const</code> reference to it. The holder’s <code>get()</code> gives you the
 address of the variable itself; nothing is copied, so the type need not be
 copy-constructible and what you read is whatever C++ has most recently written
 there.</p>
@@ -2282,7 +2323,7 @@ below is for, in the one position where Rust is the side doing the reading.</p>
 <p><strong>Refused, by name.</strong> A <code>volatile</code> variable, a field of a <code>generate_pod!</code>
 struct, and a template argument. In each of these Rust would end up doing the
 access itself - a re-exported <code>static</code> is read by ordinary Rust loads, a POD
-struct's fields are ordinary Rust fields - or, for a template argument, the
+struct’s fields are ordinary Rust fields - or, for a template argument, the
 qualifier would simply be dropped from the C++ <code>autocxx</code> writes, naming a
 different specialization. Each refusal says what to do instead, and it is
 usually the same thing: write a C++ function which performs the volatile access,
@@ -2304,7 +2345,7 @@ binds to - so <code>obj.member</code> does not compile for one however copyable 
 otherwise is. A borrowed getter is no better: it hands Rust a reference and lets
 Rust do the reading.</p>
 <p>A <code>volatile</code> <strong>return</strong> of scalar type is bound through a wrapper. A
-cv-qualified return type is part of a function's type and <code>cxx</code> declares a
+cv-qualified return type is part of a function’s type and <code>cxx</code> declares a
 function by taking its address, so <code>int (*f$)() = ::f;</code> does not compile for a
 <code>volatile int f()</code>. <code>autocxx</code> already meets this for a <code>const</code> return and
 answers it the same way: its own wrapper returns the unqualified type and calls
@@ -2317,20 +2358,20 @@ would accept it, but the refusal is pinned to that floor rather than to whicheve
 standard you happen to compile with.</p>
 <p>A <strong>by-value parameter</strong> binds as if the qualifier were not there, because as
 far as C++ is concerned it is not: a top-level cv-qualifier on a parameter is
-no part of a function's type, so <code>void f(volatile int)</code> and <code>void f(int)</code> are
+no part of a function’s type, so <code>void f(volatile int)</code> and <code>void f(int)</code> are
 one function.</p>
 <p>A struct with a <code>volatile</code> member is still usable, whichever of these applies;
 it simply cannot be <code>generate_pod!</code>.</p>
-<p>Its <em>constructors</em> depend on what the member is, though, because C++'s do. A
+<p>Its <em>constructors</em> depend on what the member is, though, because C++’s do. A
 <code>volatile</code> member of scalar type changes nothing: C++ copies a scalar by reading
-it. A <code>volatile</code> member of <strong>class</strong> type deletes the enclosing class's
+it. A <code>volatile</code> member of <strong>class</strong> type deletes the enclosing class’s
 implicitly declared copy and move constructors unless some constructor of the
-member's type accepts the qualified source, because copying the member means
+member’s type accepts the qualified source, because copying the member means
 direct-initializing it from a <code>const volatile</code> source and an implicitly declared
 <code>M(const M&amp;)</code> will not bind to one. <code>autocxx</code> reports that rather than offering
 constructors whose generated C++ could not compile, and says which member is
 responsible.</p>
-<p>The copy can be had back: declare a constructor on the member's own type taking
+<p>The copy can be had back: declare a constructor on the member’s own type taking
 <code>const volatile M&amp;</code>, which is the one reference the source of a copy binds to.
 That constructor does not bring the move back with it. A move reads a <code>volatile M</code> <em>rvalue</em>, and an lvalue reference binds to an rvalue only where it is <code>const</code>
 and not <code>volatile</code>, so <code>M(const volatile M&amp;)</code> cannot take one.</p>
@@ -2370,7 +2411,7 @@ a Rust shared reference promises the referent does not change while it lives,
 which is the one thing a hardware register is guaranteed to do, so a reference
 here would be a false statement to the compiler rather than merely a lost
 guarantee. <code>read</code> and <code>write</code> are <code>unsafe</code>, because whether the address is
-valid is C++'s business and <code>autocxx</code> cannot check it. And a volatile access is
+valid is C++’s business and <code>autocxx</code> cannot check it. And a volatile access is
 <em>not</em> an atomic one and carries no ordering relative to anything but other
 volatile accesses: concurrent access from another thread is a data race exactly
 as it would be otherwise, and
@@ -2426,35 +2467,38 @@ own <code>extern "C"</code> functions there for C++ to call. It is passing or re
 one that has nowhere to go.</p>
 <p>To have C++ call into Rust without that, either subclass a C++ observer class
 from Rust or hand C++ a named Rust function; both are described under
-<a href="rust_calls.html">callbacks into Rust</a>.</p>
+<a href="#callbacks-into-rust">callbacks into Rust</a>.</p>
 <p>The explanation reaches you through the doc comment of the stub standing in for
 whatever could not be generated, whichever standard library you build against,
 though the two put <code>std::function</code> beyond <code>bindgen</code> differently. With libstdc++
 and libc++ it is reduced to an opaque blob of bytes, and the stub stands in for
 that blob - as it does for any other type <code>bindgen</code> reduces the same way, which
-in practice means templated types whose parameters it cannot model. With MSVC's
+in practice means templated types whose parameters it cannot model. With MSVC’s
 standard library the type keeps its name, and the explanation is attached to
 <code>std::function</code> itself; a class-scoped <code>using</code> alias of it is reported as an
-alias to something which could not be generated, and repeats that thing's own
+alias to something which could not be generated, and repeats that thing’s own
 explanation.</p>
 <hr>
-<ol class="footnote-definition"><li id="footnote-ifdef">
+<ol class="footnote-definition">
+<li id="footnote-ifdef">
 <p><a href="https://github.com/google/autocxx/issues/57">This feature</a> should add ifdef support. <a href="#fr-ifdef-1">↩</a></p>
 </li>
-</ol><div style="break-before: page; page-break-before: always;"></div><h1 id="safety"><a class="header" href="#safety">Safety</a></h1>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="safety"><a class="header" href="#safety">Safety</a></h1>
 <h2 id="unsafety-policies"><a class="header" href="#unsafety-policies">Unsafety policies</a></h2>
-<p>By default, every <code>autocxx</code> function is <code>unsafe</code>. That means you can only call C++ functions from <code>unsafe</code> blocks, and it's up to you to be sure that the C++ code upholds the invariants the Rust compiler expects.</p>
+<p>By default, every <code>autocxx</code> function is <code>unsafe</code>. That means you can only call C++ functions from <code>unsafe</code> blocks, and it’s up to you to be sure that the C++ code upholds the invariants the Rust compiler expects.</p>
 <p>You can optionally specify:</p>
 <p><code>safety!(unsafe)</code></p>
 <p>within your <code>include_cpp!</code> macro invocation. If you do this, you are promising the Rust compiler that <em>all</em> your C++ function calls are upholding the invariants which <code>rustc</code> expects, and thus each individual function is no longer <code>unsafe</code>.</p>
 <p>See <a href="https://docs.rs/autocxx/latest/autocxx/macro.safety.html"><code>safety!</code></a> in the documentation for more details.</p>
 <h2 id="examples-with-and-without-safetyunsafe"><a class="header" href="#examples-with-and-without-safetyunsafe">Examples with and without <code>safety!(unsafe)</code></a></h2>
 <p>Without a <code>safety!</code> directive:</p>
-<h4 id="c-header-27"><a class="header" href="#c-header-27">C++ header:</a></h4>
+<h4 id="c-header-11"><a class="header" href="#c-header-11">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
 </code></pre>
-<h4 id="rust-27"><a class="header" href="#rust-27">Rust:</a></h4>
+<h4 id="rust-11"><a class="header" href="#rust-11">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2468,11 +2512,11 @@ fn main() {
 }
 </code></pre>
 <p>With a <code>safety!</code> directive:</p>
-<h4 id="c-header-28"><a class="header" href="#c-header-28">C++ header:</a></h4>
+<h4 id="c-header-1-7"><a class="header" href="#c-header-1-7">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 inline uint32_t do_math(uint32_t a, uint32_t b) { return a+b; }
 </code></pre>
-<h4 id="rust-28"><a class="header" href="#rust-28">Rust:</a></h4>
+<h4 id="rust-1-7"><a class="header" href="#rust-1-7">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2492,34 +2536,34 @@ fn main() {
 <li>Rust unsafe code (requires most review)</li>
 <li>Rust code calling C++ with raw pointers</li>
 <li>Rust code calling C++ with shared pointers, or anything else where there can be concurrent mutation</li>
-<li>Rust code calling C++ with unique pointers, where the Rust single-owner model nearly always applies (but we can't <em>prove</em> that the C++ developer isn't doing something weird)</li>
+<li>Rust code calling C++ with unique pointers, where the Rust single-owner model nearly always applies (but we can’t <em>prove</em> that the C++ developer isn’t doing something weird)</li>
 <li>Rust safe code (requires least review)</li>
 </ul>
-<p>If your project is 90% Rust code, with small bits of C++, <em>don't use this crate</em>. You need something where all C++ interaction is marked with big red "this is terrifying" flags. This crate is aimed at cases where there's 90% C++ and small bits of Rust, and so we want the Rust code to be pragmatically reviewable without the signal:noise ratio of <code>unsafe</code> in the Rust code becoming so bad that <code>unsafe</code> loses all value.</p>
+<p>If your project is 90% Rust code, with small bits of C++, <em>don’t use this crate</em>. You need something where all C++ interaction is marked with big red “this is terrifying” flags. This crate is aimed at cases where there’s 90% C++ and small bits of Rust, and so we want the Rust code to be pragmatically reviewable without the signal:noise ratio of <code>unsafe</code> in the Rust code becoming so bad that <code>unsafe</code> loses all value.</p>
 <h2 id="worked-example"><a class="header" href="#worked-example">Worked example</a></h2>
 <p>Imagine you have this C++:</p>
 <pre><code class="language-cpp">struct Thing;
 void print_thing(const Thing&amp; thing);
 </code></pre>
-<p>By using <code>autocxx</code> (or <code>cxx</code>), you're promising the Rust compiler that the <code>print_thing</code> function does sensible things with that
+<p>By using <code>autocxx</code> (or <code>cxx</code>), you’re promising the Rust compiler that the <code>print_thing</code> function does sensible things with that
 reference:</p>
 <ul>
-<li>It doesn't store a pointer to the thing anywhere and pass it back to Rust later.</li>
-<li>It doesn't mutate it.</li>
-<li>It doesn't delete it.</li>
-<li>or any of the other things that you're not permitted to do in unsafe Rust.</li>
+<li>It doesn’t store a pointer to the thing anywhere and pass it back to Rust later.</li>
+<li>It doesn’t mutate it.</li>
+<li>It doesn’t delete it.</li>
+<li>or any of the other things that you’re not permitted to do in unsafe Rust.</li>
 </ul>
 <h2 id="soundness"><a class="header" href="#soundness">Soundness</a></h2>
 <p>This crate shares the general approach to safety and soundness pioneered by cxx, but has two important differences:</p>
 <ul>
-<li>cxx requires you to specify your interface in detail, and thus think through all aspects of the language boundary; autocxx doesn't, and may autogenerate footguns.</li>
-<li>cxx may allow multiple conflicting Rust references to exist to 'trivial' data types ("plain old data" or POD in autocxx parlance), but they're rare; autocxx may allow conflicting Rust references to exist even to 'opaque' (non-POD) data, and they're more common. This difference exists because opaque data is zero-sized in cxx, and zero-sized references cannot conflict. (In autocxx, we tell Rust about the size in order that we can allocate such types on the stack.)</li>
+<li>cxx requires you to specify your interface in detail, and thus think through all aspects of the language boundary; autocxx doesn’t, and may autogenerate footguns.</li>
+<li>cxx may allow multiple conflicting Rust references to exist to ‘trivial’ data types (“plain old data” or POD in autocxx parlance), but they’re rare; autocxx may allow conflicting Rust references to exist even to ‘opaque’ (non-POD) data, and they’re more common. This difference exists because opaque data is zero-sized in cxx, and zero-sized references cannot conflict. (In autocxx, we tell Rust about the size in order that we can allocate such types on the stack.)</li>
 </ul>
 <p>There are preliminary explorations to avoid this problem by using a C++ reference wrapper type. See <code>examples/reference-wrappers</code>.</p>
 <h2 id="thread-safety"><a class="header" href="#thread-safety">Thread safety</a></h2>
 <p><code>autocxx</code> assumes nothing about the thread safety of your C++ types, so the non-POD types it generates are neither <a href="https://doc.rust-lang.org/std/marker/trait.Send.html"><code>Send</code></a> nor <a href="https://doc.rust-lang.org/std/marker/trait.Sync.html"><code>Sync</code></a>. This follows cxx, which says the same of its opaque types.</p>
 <p>Nothing in a C++ class declaration reveals whether its objects may cross a thread boundary. A class might hold a lock it has taken, an index into a thread-local pool, or a destructor which has to run on the thread that constructed the object. <code>Send</code> is exactly the claim that moving a value to another thread is allowed, and <code>autocxx</code> is not in a position to make that claim on your behalf.</p>
-<p>This extends to the pointers you hold them in: <code>cxx</code> grants <code>UniquePtr&lt;T&gt;: Send</code> only where <code>T: Send</code>, so a <code>UniquePtr</code> to a non-POD type won't cross a thread boundary either.</p>
+<p>This extends to the pointers you hold them in: <code>cxx</code> grants <code>UniquePtr&lt;T&gt;: Send</code> only where <code>T: Send</code>, so a <code>UniquePtr</code> to a non-POD type won’t cross a thread boundary either.</p>
 <p>If you know a particular C++ type really is thread safe, you can say so. <code>include_cpp!</code> expands into the crate that invokes it, so in that crate the generated type is local and the impl is yours to write:</p>
 <pre><code class="language-rust ignore">// SAFETY: a MyType may be used and destroyed on any one thread.
 unsafe impl Send for ffi::MyType {}
@@ -2534,8 +2578,8 @@ unsafe impl Sync for ffi::MyType {}</code></pre>
 // wherever the element may go.
 unsafe impl&lt;T: Send&gt; Send for ffi::MyContainer&lt;T&gt; {}</code></pre>
 <p><code>T: Send</code> is not a universal answer - it suits a container which owns its elements, whereas one handing out shared access to them would want <code>T: Sync</code>, and a container which is thread-affine for reasons of its own is unsuitable whatever <code>T</code> is. Work out which the C++ actually is.</p>
-<h3 id="if-the-bindings-come-from-someone-elses-crate"><a class="header" href="#if-the-bindings-come-from-someone-elses-crate">If the bindings come from someone else's crate</a></h3>
-<p>Only the crate containing the <code>include_cpp!</code> can write that impl. If you depend on a library which generates bindings and re-exports them, the type is foreign to you and Rust's orphan rule refuses the impl - re-exporting or aliasing it doesn't change that:</p>
+<h3 id="if-the-bindings-come-from-someone-elses-crate"><a class="header" href="#if-the-bindings-come-from-someone-elses-crate">If the bindings come from someone else’s crate</a></h3>
+<p>Only the crate containing the <code>include_cpp!</code> can write that impl. If you depend on a library which generates bindings and re-exports them, the type is foreign to you and Rust’s orphan rule refuses the impl - re-exporting or aliasing it doesn’t change that:</p>
 <pre><code class="language-rust ignore">use their_bindings::MyType;
 unsafe impl Send for MyType {} // error[E0117]</code></pre>
 <p>Ask that library to make the claim, since its author is the one who knows the C++ type. Failing that, wrap it in a type of your own and make the claim about the wrapper:</p>
@@ -2547,11 +2591,12 @@ unsafe impl Send for SendMyType {}
 impl SendMyType {
     pub fn count(&amp;self) -&gt; u32 { self.0.count() }
 }</code></pre>
-<p>Note this doesn't make <code>their_bindings::MyType</code> itself <code>Send</code>, so it won't satisfy an API which demands that bound, and you'll be forwarding any methods you need.</p>
+<p>Note this doesn’t make <code>their_bindings::MyType</code> itself <code>Send</code>, so it won’t satisfy an API which demands that bound, and you’ll be forwarding any methods you need.</p>
 <h3 id="pod-types-1"><a class="header" href="#pod-types-1">POD types</a></h3>
-<p>POD types are unaffected: they're plain data, and they're <code>Send</code> and <code>Sync</code> on the same terms as any other Rust struct with the same fields. Be aware that this is a statement about the data, not a promise about the C++ methods. A POD type which is merely an integer handle into thread-local state on the C++ side is <code>Send</code> as far as Rust is concerned, and keeping its methods on the right thread is still yours to arrange.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="using-the-generated-bindings"><a class="header" href="#using-the-generated-bindings">Using the generated bindings</a></h1>
-<p>Congratulations, you've built some bindings using <code>autocxx</code>!</p>
+<p>POD types are unaffected: they’re plain data, and they’re <code>Send</code> and <code>Sync</code> on the same terms as any other Rust struct with the same fields. Be aware that this is a statement about the data, not a promise about the C++ methods. A POD type which is merely an integer handle into thread-local state on the C++ side is <code>Send</code> as far as Rust is concerned, and keeping its methods on the right thread is still yours to arrange.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="using-the-generated-bindings"><a class="header" href="#using-the-generated-bindings">Using the generated bindings</a></h1>
+<p>Congratulations, you’ve built some bindings using <code>autocxx</code>!</p>
 <p>But are they Rustic? How can you ensure that users of the bindings get Rust-like safety?</p>
 <p>The C++ API may have documented usage invariants. Your ideal is to encode as many as possible of those into compile-time checks in Rust.</p>
 <p>Some options to consider:</p>
@@ -2560,10 +2605,11 @@ impl SendMyType {
 <li>Add extra <code>impl</code> blocks to add methods with a more Rustic API.</li>
 <li>Read <a href="https://cppfaq.rs">the C++ to Rust design FAQ</a>.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="structuring-a-large-codebase"><a class="header" href="#structuring-a-large-codebase">Structuring a large codebase</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="structuring-a-large-codebase"><a class="header" href="#structuring-a-large-codebase">Structuring a large codebase</a></h1>
 <p>If you have multiple modules, it may be inconvenient to generate all bindings in one <code>include_cpp!</code> invocation.
 There is <em>limited</em> support to refer from one set of bindings to another, using the <code>extern_cpp_type!</code> directive.</p>
-<h4 id="c-header-29"><a class="header" href="#c-header-29">C++ header:</a></h4>
+<h4 id="c-header-12"><a class="header" href="#c-header-12">C++ header:</a></h4>
 <pre><code class="language-cpp">#include &lt;cstdint&gt;
 struct A {
     A() : a(0) {}
@@ -2576,7 +2622,7 @@ void handle_a(const A&amp; a);
 A create_a(B);
 
 </code></pre>
-<h4 id="rust-29"><a class="header" href="#rust-29">Rust:</a></h4>
+<h4 id="rust-12"><a class="header" href="#rust-12">Rust:</a></h4>
 <pre><code class="language-rust noplayground">
 use autocxx::prelude::*;
 
@@ -2607,7 +2653,8 @@ fn main() {
     dependent::handle_a(&amp;a);
 }
 </code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <ul>
 <li><a href="https://github.com/Choochmeque/autocxx/tree/main/demo">Demo</a> - simplest possible demo</li>
 <li><a href="https://github.com/Choochmeque/autocxx/tree/main/examples/pod">POD example</a> - plain-old-data types, passed by value</li>
@@ -2626,29 +2673,32 @@ fn main() {
 </li>
 </ul>
 <p>Contributions of more examples to the <code>examples</code> directory are much appreciated!</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="credits"><a class="header" href="#credits">Credits</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="credits"><a class="header" href="#credits">Credits</a></h1>
 <p>David Tolnay did much of the hard work here, by inventing the underlying cxx crate, and in fact nearly all of the parsing infrastructure on which this crate depends. <code>bindgen</code> is also awesome. This crate stands on the shoulders of giants!</p>
 <p>Miguel Young also did all the hard thinking about whether non-trivial C++ objects can safely exist on the Rust
 stack. They can! He also draws nifty cartoons.</p>
 <p>Thanks to all the other contributors to cxx, bindgen and autocxx.</p>
 <p>And thanks to <a href="https://www.chromium.org/Home/chromium-security/memory-safety/rust-and-c-interoperability/">all in the Chromium community for inspiring this tool</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h2 id="reporting-bugs"><a class="header" href="#reporting-bugs">Reporting bugs</a></h2>
-<p>If you've found a problem, and you're reading this, <em>thank you</em>! Your diligence
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="reporting-bugs-2"><a href="#reporting-bugs-2" class="header">Reporting bugs</a></h1>
+<h2 id="reporting-bugs"><a class="header" href="#reporting-bugs">Reporting bugs</a></h2>
+<p>If you’ve found a problem, and you’re reading this, <em>thank you</em>! Your diligence
 in reporting the bug is much appreciated and will make <code>autocxx</code> better.</p>
 <p>However, we get a lot of incoming bugs, and we are limited by our ability
 to triage them. Please help us by making a good bug report.</p>
 <p>Much of this is about minimizing the size of your test case so it does not
-depend on your system's C++ headers or any copyrighted code. To minimize the
+depend on your system’s C++ headers or any copyrighted code. To minimize the
 test case, you can use <code>tools/reduce</code>, something like this:</p>
 <p><code>cd tools/reduce; cargo run -- file -d "safety!(unsafe_ffi)" -d 'generate_pod!("A")' -I ~/my-include-dir -h my-header.h -p problem-error-message -- --remove-pass pass_line_markers</code>
 This is a wrapper for the amazing <code>creduce</code> which will take thousands of lines
 of C++, preprocess it, and then identify the minimum required lines to
-reproduce the same problem. This can sometimes take <em>days</em> to run - that's
+reproduce the same problem. This can sometimes take <em>days</em> to run - that’s
 normal - if this is a problem, try to minimize the test case manually, or
 do a combination.</p>
 <p>Once you have a minimal test case:</p>
 <ul>
-<li>First see if it triggers a problem when you're using pure <code>bindgen</code>,
+<li>First see if it triggers a problem when you’re using pure <code>bindgen</code>,
 since autocxx is very dependent on <code>bindgen</code> generating correct code.
 To do this, fetch the <a href="https://github.com/rust-lang/rust-bindgen"><code>bindgen</code> code</a>
 then run
@@ -2667,7 +2717,7 @@ this should generate just a few lines of Rust code and you can inspect it
 </ul>
 </li>
 </ul>
-<p>If you can't get minimization to work:</p>
+<p>If you can’t get minimization to work:</p>
 <ul>
 <li>Use the C++ preprocessor to give a single complete C++ file which demonstrates
 the problem, along with the <code>include_cpp!</code> directive you use.
@@ -2678,23 +2728,24 @@ or <code>CXX</code> environment variables to specify the path to the Clang compi
 <code>cargo clean -p &lt;your package name&gt; &amp;&amp; RUST_LOG=autocxx_engine=info cargo build -vvv</code>
 and send the <em>entire</em> log to us. This will include two key bits of logging:
 the C++ bindings as distilled by <code>bindgen</code>, and then the version which
-we've converted and moulded to be suitable for use by <code>cxx</code>.</li>
+we’ve converted and moulded to be suitable for use by <code>cxx</code>.</li>
 </ul>
 <h2 id="bugs-related-to-linking-problems"><a class="header" href="#bugs-related-to-linking-problems">Bugs related to linking problems</a></h2>
 <p>Unfortunately, <em>linking</em> C++ binaries is a complex area subject in itself, and
-we won't be able to debug your linking issues by means of an autocxx bug report.
-Assuming you're using autocxx's build.rs support, the actual C++ build and
+we won’t be able to debug your linking issues by means of an autocxx bug report.
+Assuming you’re using autocxx’s build.rs support, the actual C++ build and
 managed by the <a href="https://crates.io/crates/cc"><code>cc</code></a> crate. You can find
 many of its options on its <a href="https://docs.rs/cc/latest/cc/struct.Build.html"><code>Build</code> type</a>.
 If you need to bring in an external library, you may also need to emit certain
 <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html#rustc-link-lib">print statements from your <code>build.rs</code></a>
 to instruct cargo to link against that library.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="how-to-contribute"><a class="header" href="#how-to-contribute">How to Contribute</a></h1>
-<p>We'd love to accept your patches and contributions to this project. There are
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="how-to-contribute"><a class="header" href="#how-to-contribute">How to Contribute</a></h1>
+<p>We’d love to accept your patches and contributions to this project. There are
 just a few small guidelines you need to follow.</p>
 <h2 id="licensing"><a class="header" href="#licensing">Licensing</a></h2>
 <p>There is no contributor licence agreement. You keep the copyright in what you
-write; opening a pull request offers that work under the terms autocxx's own
+write; opening a pull request offers that work under the terms autocxx’s own
 code carries, Apache-2.0 or MIT.</p>
 <h2 id="code-reviews"><a class="header" href="#code-reviews">Code reviews</a></h2>
 <p>All submissions, including submissions by project members, require review. We
@@ -2702,14 +2753,14 @@ use GitHub pull requests for this purpose. Consult
 <a href="https://help.github.com/articles/about-pull-requests/">GitHub Help</a> for more
 information on using pull requests.</p>
 <h2 id="community-guidelines"><a class="header" href="#community-guidelines">Community guidelines</a></h2>
-<p>This project has a <a href="code-of-conduct.html">code of conduct</a>.</p>
+<p>This project has a <a href="#code-of-conduct">code of conduct</a>.</p>
 <h2 id="directory-structure"><a class="header" href="#directory-structure">Directory structure</a></h2>
 <ul>
-<li><code>book</code> - you're reading it!</li>
+<li><code>book</code> - you’re reading it!</li>
 <li><code>demo</code> - a very simple demo example</li>
 <li><code>examples</code> - will gradually fill with more complex examples</li>
 <li><code>parser</code> - code which parses a single <code>include_cpp!</code> macro. Used by both the macro
-(which doesn't do much) and the code generator (which does much more, by means of
+(which doesn’t do much) and the code generator (which does much more, by means of
 <code>engine</code> below)</li>
 <li><code>engine</code> - all the core code for actual code generation.</li>
 <li><code>macro</code> - the procedural macro which expands the Rust code.</li>
@@ -2727,11 +2778,11 @@ to <code>cxx</code>.</p>
 <p>However, most of the actual code is in <code>engine/src/conversion/mod.rs</code>.</p>
 <p><code>bindgen</code> is vendored rather than depended upon: <code>engine/third_party/rust-bindgen</code> is a
 submodule of upstream <code>rust-lang/rust-bindgen</code> pinned at a release tag, and
-<code>engine/third_party/patches</code> holds autocxx's delta as a patch series which <code>engine/build.rs</code>
-applies into <code>OUT_DIR</code>. See "Rolling bindgen" below.</p>
+<code>engine/third_party/patches</code> holds autocxx’s delta as a patch series which <code>engine/build.rs</code>
+applies into <code>OUT_DIR</code>. See “Rolling bindgen” below.</p>
 <h2 id="how-to-develop"><a class="header" href="#how-to-develop">How to develop</a></h2>
-<p>If you're making a change, here's what you need to do to get useful diagnostics etc.
-First of all, <code>cargo run</code> in the <code>demo</code> directory. If it breaks, you don't get much
+<p>If you’re making a change, here’s what you need to do to get useful diagnostics etc.
+First of all, <code>cargo run</code> in the <code>demo</code> directory. If it breaks, you don’t get much
 in the way of useful diagnostics, because <code>stdout</code> is swallowed by cargo build scripts.
 So, practically speaking, you would almost always move onto running one of the tests
 in the test suite. With suitable options, you can get plenty of output. For instance:</p>
@@ -2741,11 +2792,11 @@ in the test suite. With suitable options, you can get plenty of output. For inst
 in <code>engine/src/conversion</code>. See <a href="https://docs.rs/autocxx-engine/latest/autocxx_engine/struct.IncludeCppEngine.html">here</a> for documentation and diagrams on how the engine works.</p>
 <p>You may also wish to set <code>AUTOCXX_ASAN=1</code> on Linux when running tests. To exercise all
 the code paths related to generating both C++ and Rust side shims, you can set
-<code>AUTOCXX_FORCE_WRAPPER_GENERATION=1</code>. The test suite doesn't do this by default because
+<code>AUTOCXX_FORCE_WRAPPER_GENERATION=1</code>. The test suite doesn’t do this by default because
 we also want to test the normal code paths. (In the future we might want to
 parameterize the test suite to do both.)</p>
 <h2 id="reporting-bugs-1"><a class="header" href="#reporting-bugs-1">Reporting bugs</a></h2>
-<p>Moved to <a href="reporting_bugs.html">its own document</a>.</p>
+<p>Moved to <a href="#reporting-bugs-2">its own document</a>.</p>
 <h2 id="how-to-contribute-to-this-manual"><a class="header" href="#how-to-contribute-to-this-manual">How to contribute to this manual</a></h2>
 <p>More examples in this manual are <em>very</em> welcome!</p>
 <p>Because <code>autocxx</code> examples require both Rust and C++ code to be linked together,
@@ -2762,12 +2813,12 @@ bound, bugs get fixed, and the existing bindings are kept working as Rust,
 <li>Pull requests raised against autocxx</li>
 <li>Issues reported against autocxx</li>
 </ul>
-<p>Here's what to do. If issues are reported, encourage the reporter
+<p>Here’s what to do. If issues are reported, encourage the reporter
 to raise a PR with a minimized test case by pointing them at the
-<a href="reporting_bugs.html">"reporting bugs"</a> page. This resolves all concerns about
+<a href="#reporting-bugs-2">“reporting bugs”</a> page. This resolves all concerns about
 reproducibility: autocxx is quite sensitive to the environment in which it
-runs, e.g. standard library header files in use, and it's rare to be able
-to reproduce a reporter's bug without them raising a reproducible test case
+runs, e.g. standard library header files in use, and it’s rare to be able
+to reproduce a reporter’s bug without them raising a reproducible test case
 like this.</p>
 <p>If CI starts to fail due to a Rust change (or,
 if we <a href="https://github.com/google/autocxx/issues/124">manage to unfork bindgen, a bindgen change</a>)
@@ -2779,23 +2830,23 @@ boil down to certain key known areas of technical debt or limitations,
 described below, and you can mark them as a duplicate or similar.</p>
 <p>Releases typically happen every month or two, dependent on what changes
 have been made. Ideally, autocxx would release after every single pull
-request but the process takes about 15 minutes (see below) so it's not
+request but the process takes about 15 minutes (see below) so it’s not
 that frequent.</p>
 <h2 id="release-process"><a class="header" href="#release-process">Release process</a></h2>
 <p>To make a new release of autocxx,</p>
 <ul>
-<li>First ensure there's green CI on github.</li>
-<li>Check out <code>main</code> locally and ensure it's up to date with <code>origin/main</code>.</li>
+<li>First ensure there’s green CI on github.</li>
+<li>Check out <code>main</code> locally and ensure it’s up to date with <code>origin/main</code>.</li>
 <li>Make a new branch</li>
 <li>Run <code>tools/upgrade-version.sh OLD NEW</code> where <code>OLD</code> is the previous
 released version number, and <code>NEW</code> is the new version number.</li>
 <li>Commit that and make a PR; ensure it passes tests on github CI.</li>
 <li>If so, merge that PR, and update locally.</li>
 <li>Run <code>tools/publish-all.sh</code>. This will do the actual <code>cargo publish</code>
-for all the various crates. It first flattens bindgen's sources out of the
+for all the various crates. It first flattens bindgen’s sources out of the
 submodule into <code>engine/third_party/bindgen-src</code>, because <code>cargo package</code>
 cannot carry a directory containing a <code>Cargo.toml</code> and the submodule has two;
-see "Rolling bindgen" below. That directory is left untracked on purpose, so
+see “Rolling bindgen” below. That directory is left untracked on purpose, so
 the publish runs <code>--allow-dirty</code>.</li>
 <li>On <a href="https://github.com/Choochmeque/autocxx/releases">github releases</a>,
 choose Draft a new release. Add a tag for <code>v0.X.Y</code>. Go through
@@ -2814,15 +2865,15 @@ and <a href="https://github.com/rust-lang/rust-bindgen/issues/3278">rust-lang/ru
 <li><code>engine/third_party/rust-bindgen</code> is a git submodule of upstream <code>rust-lang/rust-bindgen</code>,
 checked out at a release tag. Nothing in it is edited, and no upstream code is committed to
 this repository.</li>
-<li><code>engine/third_party/patches/*.patch</code> is autocxx's delta, one file per feature, applied in
-filename order. Each patch applies to the submodule's <code>bindgen/</code> directory. A patch's
+<li><code>engine/third_party/patches/*.patch</code> is autocxx’s delta, one file per feature, applied in
+filename order. Each patch applies to the submodule’s <code>bindgen/</code> directory. A patch’s
 number is its position in that order and carries nothing else, so two patches landing in
 parallel take the next two free numbers rather than sharing one under a letter suffix.
 Relabelling the series is therefore safe where reordering it is not: a new number may not
 move a patch relative to the patches whose output it applies to. Comments in the engine and
 in the tests cite patches by filename, so a relabelling has to update those as well.</li>
 <li><code>engine/build.rs</code> copies the submodule sources into <code>OUT_DIR</code>, applies the patches, and
-rewrites the result so it compiles as a module rather than a crate: bindgen's cargo
+rewrites the result so it compiles as a module rather than a crate: bindgen’s cargo
 features become fixed <code>cfg</code>s, macros reached through <code>#[macro_use] extern crate</code> become
 absolute paths, and <code>crate::</code> becomes <code>crate::vendored_bindgen::</code>.</li>
 <li><code>engine/src/lib.rs</code> mounts the result as <code>mod vendored_bindgen</code>.</li>
@@ -2852,13 +2903,13 @@ anything the release changed on its own.</li>
 is the list of reasons autocxx cannot use bindgen as published, and every patch removed from
 it is one less thing to rebase.</p>
 <h2 id="major-areas-of-tech-debt"><a class="header" href="#major-areas-of-tech-debt">Major areas of tech debt</a></h2>
-<p>The core of autocxx is the <code>Api</code> enum. That's solid. It's created by parsing
+<p>The core of autocxx is the <code>Api</code> enum. That’s solid. It’s created by parsing
 bindgen output, and exists all the way through to Rust and C++ codegen.
-It is annotated by various analysis phases; it's parameterized by
-the analysis phase so it's literally impossible to access those annotations
+It is annotated by various analysis phases; it’s parameterized by
+the analysis phase so it’s literally impossible to access those annotations
 before they exist.</p>
 <p>Because this core is solid, most of the areas of tech debt are discrete and
-don't really overlap with each other. If you wish to tackle them, they
+don’t really overlap with each other. If you wish to tackle them, they
 can be tackled fairly independently.</p>
 <p>Without further ado, they are:</p>
 <ol>
@@ -2879,7 +2930,7 @@ become uniform here by abstracting the name deconfliction stuff from the
 function analysis.</p>
 </li>
 <li>
-<p><strong>Patched bindgen</strong>. As noted under <a href="contributing.html#rolling-bindgen">rolling bindgen, above</a>,
+<p><strong>Patched bindgen</strong>. As noted under <a href="#rolling-bindgen">rolling bindgen, above</a>,
 autocxx patches bindgen rather than using it as published. The patch series is
 small and each patch is one feature, but every one of them is a hunk to rebase
 at each bindgen release, and a feature upstream would take is a feature nobody
@@ -2888,11 +2939,11 @@ has to rebase again. Tracked
 </li>
 <li>
 <p><strong>Sensitivity to bindgen bugs caused by constructor calculations</strong>.
-<code>bindgen</code> isn't perfect. When it mis-generates a type, users can
-ask bindgen to mark that type as "opaque", in which case it's represented
+<code>bindgen</code> isn’t perfect. When it mis-generates a type, users can
+ask bindgen to mark that type as “opaque”, in which case it’s represented
 as just an array of bytes. This is especially useful for complex templated
 C++ types where bindgen still has a number of bugs. Unfortunately, users
-of autocxx don't get that luxury. In order to calculate whether types
+of autocxx don’t get that luxury. In order to calculate whether types
 are movable, autocxx requires visibility into all the fields.
 That means that any types marked opaque by bindgen are pretty useless,
 and we never currently ask bindgen for opaque types.
@@ -2915,14 +2966,15 @@ represent C++ references - instead using a newtype wrapper called
 <a href="https://docs.rs/autocxx/latest/autocxx/macro.safety.html"><code>unsafe_references_wrapped</code></a>
 but for now it works well only on nightly Rust, pending the merge of the
 <a href="https://github.com/rust-lang/rust/pull/135881">arbitrary self types v2 RFC</a>.
-Even then, this isn't quite perfect because <code>cxx</code> expects to use
+Even then, this isn’t quite perfect because <code>cxx</code> expects to use
 Rust references, and its key types (such as <code>cxx::UniquePtr</code>) provide
-<code>Deref</code> implementations which point in that direction. This isn't a
-huge problem but I mention it here because it's one of the very few
+<code>Deref</code> implementations which point in that direction. This isn’t a
+huge problem but I mention it here because it’s one of the very few
 occasions in which our dependence on <code>cxx</code> is limiting for us.</p>
 </li>
 </ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="code-of-conduct"><a class="header" href="#code-of-conduct">Code of Conduct</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="code-of-conduct"><a class="header" href="#code-of-conduct">Code of Conduct</a></h1>
 <p>This project is a place to make Rust and C++ work together, and its issues,
 pull requests and reviews are for that work.</p>
 <p>What is expected of everyone taking part:</p>
@@ -2942,9 +2994,9 @@ behaviour is threatening or harassing, report it by opening an issue at
 public can go to the maintainer instead, through the contact details on
 <a href="https://github.com/Choochmeque">https://github.com/Choochmeque</a>.</p>
 <p>Reports are read. What follows depends on the case, and may range from nothing
-to removal from the project's spaces. Where action is taken the person it
+to removal from the project’s spaces. Where action is taken the person it
 concerns is told of the report and given a chance to respond first, except
-where someone's safety is at stake.</p>
+where someone’s safety is at stake.</p>
 
                     </main>
 
@@ -2963,6 +3015,11 @@ where someone's safety is at stake.</p>
 
         </div>
 
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
 
 
@@ -2971,17 +3028,17 @@ where someone's safety is at stake.</p>
         </script>
 
 
-        <script src="elasticlunr.min.js"></script>
-        <script src="mark.min.js"></script>
-        <script src="searcher.js"></script>
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
 
-        <script src="clipboard.min.js"></script>
-        <script src="highlight.js"></script>
-        <script src="book.js"></script>
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="mermaid.min.js"></script>
-        <script src="mermaid-init.js"></script>
+        <script src="mermaid-cc85ecea.min.js"></script>
+        <script src="mermaid-init-4533fb11.js"></script>
 
         <script>
         window.addEventListener('load', function() {

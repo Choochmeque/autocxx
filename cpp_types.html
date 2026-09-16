@@ -12,21 +12,20 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="favicon.svg">
-        <link rel="shortcut icon" href="favicon.png">
-        <link rel="stylesheet" href="css/variables.css">
-        <link rel="stylesheet" href="css/general.css">
-        <link rel="stylesheet" href="css/chrome.css">
-        <link rel="stylesheet" href="css/print.css" media="print">
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
-        <link rel="stylesheet" href="fonts/fonts.css">
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="highlight-css" href="highlight.css">
-        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
-        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
@@ -36,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex.js";
+            window.path_to_searchindex_js = "searchindex-62ac2a3a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc.js"></script>
+        <script src="toc-c0f61b2c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -53,7 +52,7 @@
             </div>
         </div>
     </div>
-    <div id="body-container">
+    <div id="mdbook-body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
@@ -82,12 +81,12 @@
             html.classList.add("js");
         </script>
 
-        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
 
         <!-- Hide / unhide sidebar before it is displayed -->
         <script>
             let sidebar = null;
-            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
             if (document.body.clientWidth >= 1080) {
                 try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
                 sidebar = sidebar || 'visible';
@@ -102,39 +101,39 @@
             }
         </script>
 
-        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
                 <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
-            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
             </div>
         </nav>
 
-        <div id="page-wrapper" class="page-wrapper">
+        <div id="mdbook-page-wrapper" class="page-wrapper">
 
             <div class="page">
-                <div id="menu-bar-hover-placeholder"></div>
-                <div id="menu-bar" class="menu-bar sticky">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
                     <div class="left-buttons">
-                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
-                            <i class="fa fa-bars"></i>
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
                         </label>
-                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
-                            <i class="fa fa-paint-brush"></i>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
                         </button>
-                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
-                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
-                            <i class="fa fa-search"></i>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
                         </button>
                     </div>
 
@@ -142,58 +141,58 @@
 
                     <div class="right-buttons">
                         <a href="print.html" title="Print this book" aria-label="Print this book">
-                            <i id="print-button" class="fa fa-print"></i>
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
                         <a href="https://github.com/Choochmeque/autocxx" title="Git repository" aria-label="Git repository">
-                            <i id="git-repository-button" class="fa fa-github"></i>
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
                         </a>
 
                     </div>
                 </div>
 
-                <div id="search-wrapper" class="hidden">
-                    <form id="searchbar-outer" class="searchbar-outer">
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
                         <div class="search-wrapper">
-                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
                             <div class="spinner-wrapper">
-                                <i class="fa fa-spinner fa-spin"></i>
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
                             </div>
                         </div>
                     </form>
-                    <div id="searchresults-outer" class="searchresults-outer hidden">
-                        <div id="searchresults-header" class="searchresults-header"></div>
-                        <ul id="searchresults">
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
                         </ul>
                     </div>
                 </div>
 
                 <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
                 <script>
-                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
-                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
-                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
                         link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
                     });
                 </script>
 
-                <div id="content" class="content">
+                <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="c-structs-enums-and-classes"><a class="header" href="#c-structs-enums-and-classes">C++ structs, enums and classes</a></h1>
 <p>If you add a C++ struct, class or enum to the <a href="allowlist.html">allowlist</a>, Rust bindings will be generated to that type and to any methods it has.
-Even if you don't add it to the allowlist, the type may be generated if it's required by some other function - but in this case
-all its methods won't be generated.</p>
+Even if you don’t add it to the allowlist, the type may be generated if it’s required by some other function - but in this case
+all its methods won’t be generated.</p>
 <p>Rust and C++ differ in an important way:</p>
 <ul>
 <li>In Rust, the compiler is free to pick up some data and move it to somewhere else (in a <code>memcpy</code> sense). The object is none the wiser.</li>
-<li>In C++, once created, an object stays where it is, until or unless it has its "move constructor" invoked.</li>
+<li>In C++, once created, an object stays where it is, until or unless it has its “move constructor” invoked.</li>
 </ul>
 <p>This makes a big difference: C++ objects can have self-referential pointers, and any such pointer would be invalidated by Rust doing
 a memcpy. Such self-referential pointers are common - even some implementations of <code>std::string</code> do it.</p>
 <h2 id="pod-and-non-pod"><a class="header" href="#pod-and-non-pod">POD and non-POD</a></h2>
 <p>When asking <code>autocxx</code> to generate bindings for a type, then, you have to make a choice.</p>
 <ul>
-<li><em>This C++ type is trivial</em>. It has no destructor or move constructor (or they're trivial), and thus Rust is free to move it around the stack as it wishes. <code>autocxx</code> calls these types POD ("plain old data"). Alternatively,</li>
-<li><em>This C++ type has a non-trivial destructor or move constructor, so we can't allow Rust to move this around</em>. <code>autocxx</code> calls these types non-POD.</li>
+<li><em>This C++ type is trivial</em>. It has no destructor or move constructor (or they’re trivial), and thus Rust is free to move it around the stack as it wishes. <code>autocxx</code> calls these types POD (“plain old data”). Alternatively,</li>
+<li><em>This C++ type has a non-trivial destructor or move constructor, so we can’t allow Rust to move this around</em>. <code>autocxx</code> calls these types non-POD.</li>
 </ul>
 <p>POD types are nicer:</p>
 <ul>
@@ -203,33 +202,39 @@ a memcpy. Such self-referential pointers are common - even some implementations 
 </ul>
 <p>Non-POD types are awkward:</p>
 <ul>
-<li>You can't just <em>have</em> one as a Rust variable. Normally you hold them in a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>, though there are other options.</li>
+<li>You can’t just <em>have</em> one as a Rust variable. Normally you hold them in a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>, though there are other options.</li>
 <li>Fields are read through generated accessors rather than directly. <code>autocxx</code> gives every public
 data member a method of the same name: a <code>b</code> field is read with <code>obj.b()</code>. A field Rust could
 hold by value comes back by value, anything else comes back as a reference borrowed from the
 object, and an array or reference member gets a documented refusal instead of an accessor.
 There are no setters yet.</li>
-<li>You can't even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
-<li>You can't send one to another thread, or share one between threads: they're neither <code>Send</code> nor <code>Sync</code>, because <code>autocxx</code> can't know whether your C++ type tolerates that. See <a href="safety.html#thread-safety">thread safety</a> if you know that yours does.</li>
+<li>You can’t even have a <code>&amp;mut</code> reference to one, because then you might be able to use <a href="https://doc.rust-lang.org/stable/std/mem/fn.swap.html"><code>std::mem::swap</code></a> or similar. You can have a <code>Pin&lt;&amp;mut&gt;</code> reference, which is more fiddly.</li>
+<li>You can’t send one to another thread, or share one between threads: they’re neither <code>Send</code> nor <code>Sync</code>, because <code>autocxx</code> can’t know whether your C++ type tolerates that. See <a href="safety.html#thread-safety">thread safety</a> if you know that yours does.</li>
 </ul>
-<p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don't worry: you can't mess this up. If the C++ type doesn't in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you're <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they're trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
+<p>By default, <code>autocxx</code> generates non-POD types. You can request a POD type using <a href="https://docs.rs/autocxx/latest/autocxx/macro.generate_pod.html"><code>generate_pod!</code></a>. Don’t worry: you can’t mess this up. If the C++ type doesn’t in fact comply with the requirements for a POD type, your build will fail thanks to some static assertions generated in the C++. (If you’re <em>really</em> sure your type is freely relocatable, because you implemented the move constructor and destructor and you promise they’re trivial, you can override these assertions using the C++ trait <code>IsRelocatable</code> per the instructions in <a href="https://github.com/dtolnay/cxx/blob/master/include/cxx.h">cxx.h</a>).</p>
 <p>See <a href="storage.html">the chapter on storage</a> for lots more detail on how you can hold onto non-POD types.</p>
 <h2 id="construction"><a class="header" href="#construction">Construction</a></h2>
-<p>Constructing a POD object is simple: call its <code>new</code> associated function. <a href="https://en.wikipedia.org/wiki/Bob%27s_your_uncle">Bob's your uncle!</a></p>
+<p>Constructing a POD object is simple: call its <code>new</code> associated function. <a href="https://en.wikipedia.org/wiki/Bob%27s_your_uncle">Bob’s your uncle!</a></p>
 <p>Multiple constructors (aka constructor overloading) follows the same <a href="cpp_functions.html#overloads---and-identifiers-ending-in-digits">rules as other functions</a>.</p>
 <p>Constructing a non-POD object requires two steps.</p>
 <ul>
 <li>Call the <code>new</code> associated function in the same way. This will give you something implementing <a href="https://docs.rs/moveit/latest/moveit/new/trait.New.html"><code>moveit::New</code></a>/</li>
 <li>Use this to make the object on the heap or stack, in any of the following ways:</li>
 </ul>
-<div class="table-wrapper"><table><thead><tr><th>Where you want to create it</th><th>How to create it</th><th>What you get</th><th>Example</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Where you want to create it</th><th>How to create it</th><th>What you get</th><th>Example</th></tr>
+</thead>
+<tbody>
 <tr><td>C++ heap (<em>recommended for simplicity</em>)</td><td><a href="https://docs.rs/autocxx/latest/autocxx/trait.Within.html"><code>Within.within_unique_ptr()</code></a> or <a href="https://docs.rs/moveit/latest/moveit/new/trait.EmplaceUnpinned.html#method.emplace"><code>UniquePtr::emplace</code></a></td><td><a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a></td><td><code>let mut obj = ffi::Goldfish::new().within_unique_ptr()</code> or <code>let mut obj = UniquePtr::emplace(ffi::Goldfish::new())</code></td></tr>
 <tr><td>Rust heap</td><td><a href="https://docs.rs/autocxx/latest/autocxx/trait.Within.html"><code>Within.within_box()</code></a> or <a href="https://docs.rs/moveit/latest/moveit/new/trait.Emplace.html#method.emplace"><code>Box::emplace</code></a></td><td><code>Pin&lt;Box&lt;T&gt;&gt;</code></td><td><code>let mut obj = ffi::Goldfish::new().within_box()</code> or <code>let mut obj = Box::emplace(ffi::Goldfish::new())</code></td></tr>
 <tr><td>Rust stack</td><td><a href="https://docs.rs/moveit/latest/moveit/macro.moveit.html"><code>moveit</code> macro</a></td><td><code>Pin&lt;MoveRef&lt;T&gt;&gt;</code></td><td><code>moveit! { let mut obj = ffi::Goldfish::new() }</code></td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>For heap construction, the prefix (<code>emplace</code>) and postfix (<code>.within_...</code>) forms are exactly identical. Choose whichever suits your needs best.</p>
-<p>Rust's own <a href="https://doc.rust-lang.org/std/pin/macro.pin.html"><code>std::pin::pin!</code></a> macro is <em>not</em> a substitute for <code>moveit!</code> here, even though both produce a pinned stack value. <code>pin!</code> pins a value you already own; <code>moveit::New::new</code> only ever writes into a place you hand it, and there's no way to obtain a non-POD object as a plain Rust value to hand to <code>pin!</code> in the first place - that's precisely the point of non-POD types. Writing <code>std::pin::pin!(ffi::Goldfish::new())</code> compiles, but pins the <code>New</code> recipe itself rather than a <code>Goldfish</code>, and the object never gets constructed.</p>
+<p>Rust’s own <a href="https://doc.rust-lang.org/std/pin/macro.pin.html"><code>std::pin::pin!</code></a> macro is <em>not</em> a substitute for <code>moveit!</code> here, even though both produce a pinned stack value. <code>pin!</code> pins a value you already own; <code>moveit::New::new</code> only ever writes into a place you hand it, and there’s no way to obtain a non-POD object as a plain Rust value to hand to <code>pin!</code> in the first place - that’s precisely the point of non-POD types. Writing <code>std::pin::pin!(ffi::Goldfish::new())</code> compiles, but pins the <code>New</code> recipe itself rather than a <code>Goldfish</code>, and the object never gets constructed.</p>
 <h3 id="should-you-construct-on-the-rust-heap-or-the-c-heap"><a class="header" href="#should-you-construct-on-the-rust-heap-or-the-c-heap">Should you construct on the Rust heap or the C++ heap?</a></h3>
 <p>Use <code>.within_unique_ptr()</code> to create objects on the C++ heap. This gives you a <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a> which works well with other autocxx and cxx APIs.</p>
 <p>There is a small disadvantage - <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr&lt;T&gt;</code></a> is able to store <code>NULL</code> values. Therefore, each time you use the resulting object, there is an <code>unwrap()</code> (explicit or implicit). If this bothers you, use the <code>Box</code> option instead which can never be <code>NULL</code>.</p>
@@ -272,7 +277,7 @@ fn main() {
 }
 </code></pre>
 <h2 id="enums"><a class="header" href="#enums">Enums</a></h2>
-<p>A C++ <code>enum</code> becomes a native Rust <code>enum</code> by default. That's the right shape
+<p>A C++ <code>enum</code> becomes a native Rust <code>enum</code> by default. That’s the right shape
 for an enumeration whose values are a closed set - a colour, a state, an error
 code - and it lets you <code>match</code> on it exhaustively.</p>
 <p>It is the wrong shape for a flag enum. Writing <code>FLAG_A | FLAG_B</code> in C++ gives
@@ -286,21 +291,27 @@ which is none of its variants is instant undefined behaviour - so the
 combination has no representation at all.</p>
 <p>Use <a href="https://docs.rs/autocxx/latest/autocxx/macro.enum_style.html"><code>enum_style!</code></a>
 to pick a different representation for particular enums:</p>
-<div class="table-wrapper"><table><thead><tr><th>Style</th><th>What you get</th><th>Good for</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Style</th><th>What you get</th><th>Good for</th></tr>
+</thead>
+<tbody>
 <tr><td><code>RustifiedEnum</code></td><td>A native Rust <code>enum</code>. This is the default.</td><td>Closed sets of values</td></tr>
 <tr><td><code>RustifiedNonExhaustiveEnum</code></td><td>The same, marked <code>#[non_exhaustive]</code>, so your <code>match</code>es need a catch-all arm</td><td>Closed sets which C++ may extend later</td></tr>
 <tr><td><code>NewtypeEnum</code></td><td>An integer newtype whose enumerators are associated constants</td><td>Values which may be arbitrary integers</td></tr>
 <tr><td><code>BitfieldEnum</code></td><td>The same newtype, plus <code>&amp;</code>, `</td><td><code>, </code>^<code>and</code>!`</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
-<p>The integer the two newtype styles wrap is the enum's underlying type as the
+<p>The integer the two newtype styles wrap is the enum’s underlying type as the
 C++ compiler sees it, so <code>flags.0</code> is a <code>c_int</code> for <code>enum Flags : int</code> and a
 <code>c_uint</code> for <code>enum Flags : unsigned</code>. An unscoped enum with no fixed underlying
 type has no portable answer: the compiler picks, and it may pick differently
 from one target or set of flags to the next. On the targets autocxx tests, MSVC
 gives it <code>int</code>, while gcc and clang give one whose enumerators are all
 non-negative <code>unsigned int</code>. Name the underlying type in C++ if you intend to
-write <code>.0</code>'s type down.</p>
+write <code>.0</code>’s type down.</p>
 <p>The directive takes the style first, then any number of enum names, and may be
 repeated to give different styles to different enums:</p>
 <pre><code class="language-rust ignore">enum_style!(BitfieldEnum, "FileFlags", "WindowFlags")
@@ -308,7 +319,7 @@ enum_style!(RustifiedNonExhaustiveEnum, "ErrorCode")</code></pre>
 <p>Name each enum exactly as you would in <code>generate!</code> - so a namespaced enum is
 <code>ns::Thing</code>, and an enum nested inside a class is <code>Outer_Inner</code>, because that
 is the name <code>bindgen</code> gives it. Asking for two different styles for the same
-enum is an error, as is anything that isn't a plain name.</p>
+enum is an error, as is anything that isn’t a plain name.</p>
 <h3 id="newtypeenum-and-bitfieldenum-need-generate_pod"><a class="header" href="#newtypeenum-and-bitfieldenum-need-generate_pod"><code>NewtypeEnum</code> and <code>BitfieldEnum</code> need <code>generate_pod!</code></a></h3>
 <p>These two styles reach Rust as a <code>struct</code>, not an <code>enum</code>, and their
 enumerators are associated constants on it. <code>autocxx</code> only re-exports the
@@ -412,7 +423,7 @@ assert_eq!(b, [11u8, 21, 31, 41]);</code></pre>
 <p>The element can be any type which crosses by value itself, and the rule is the
 same by value and behind a reference:</p>
 <ul>
-<li>one of <code>cxx</code>'s own atoms - <code>uint8_t</code> or <code>int8_t</code>, a <code>float</code> or a <code>double</code>, a
+<li>one of <code>cxx</code>’s own atoms - <code>uint8_t</code> or <code>int8_t</code>, a <code>float</code> or a <code>double</code>, a
 <code>bool</code>, a <code>char</code>;</li>
 <li>an integer whose width the platform chooses, such as <code>int</code> or <code>unsigned</code> and
 the typedefs to them, <code>uint32_t</code> and <code>size_t</code> among them. Those arrive as the
@@ -434,20 +445,20 @@ bound as that pointer.</li>
 <li>Either of them behind a pointer.</li>
 </ul>
 <p>Each gets a refusal which says so. <code>std::array&lt;T, 0&gt;</code> gets one too: C++ gives
-the empty array a size and Rust's <code>[T; 0]</code> has none, so they are not the same
+the empty array a size and Rust’s <code>[T; 0]</code> has none, so they are not the same
 object.</p>
 <h2 id="forward-declarations"><a class="header" href="#forward-declarations">Forward declarations</a></h2>
 <p>A type which is incomplete in the C++ headers (i.e. represented only by a forward
-declaration) can't be held in a <code>UniquePtr</code> within Rust (because Rust can't know
+declaration) can’t be held in a <code>UniquePtr</code> within Rust (because Rust can’t know
 if it has a destructor that will need to be called if the object is dropped.)
-Naturally, such an object can't be passed by value either; it can still be
+Naturally, such an object can’t be passed by value either; it can still be
 referenced in Rust references.</p>
 <h2 id="generic-templated-types"><a class="header" href="#generic-templated-types">Generic (templated) types</a></h2>
-<p>If you're using one of the generic types which is supported natively by cxx,
+<p>If you’re using one of the generic types which is supported natively by cxx,
 e.g. <code>std::unique_ptr</code>, it should work as you expect. For other generic types,
 we synthesize a concrete Rust type, corresponding to a C++ typedef, for each
 concrete instantiation of the type. Such generated types are always opaque, so
-by default that's enough to pass them
+by default that’s enough to pass them
 between return types and parameters of other functions within <a href="https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html"><code>cxx::UniquePtr</code></a>s
 but not really enough to do anything else with these types yet<sup class="footnote-reference" id="fr-templated-1"><a href="#footnote-templated">1</a></sup>.</p>
 <p>An
@@ -460,7 +471,7 @@ what it generates and your C++ compiler is the arbiter; see its documentation
 for what is claimed and for the members it cannot reach. Otherwise,
 to make these types more useful, you might have to add extra C++ functions to
 extract data or otherwise deal with them.</p>
-<p>Usually, such concrete types are synthesized automatically because they're
+<p>Usually, such concrete types are synthesized automatically because they’re
 parameters or return values from functions. Very rarely, you may
 want to synthesize them yourself - you can do this using the
 <a href="https://docs.rs/autocxx/latest/autocxx/macro.concrete.html"><code>concrete!</code></a>
@@ -591,7 +602,7 @@ some types. <code>autocxx</code> makes use of these types of special members:</p
 they exist and uses them.</p>
 <p><code>autocxx</code> currently uses its own analysis to determine when implicit versions of
 these exist. This analysis tries to be conservative (avoid generating wrappers
-that require the existence of C++ functions that don't exist), but sometimes
+that require the existence of C++ functions that don’t exist), but sometimes
 this goes wrong and understanding the details is necessary to get the correct
 Rust wrappers generated.</p>
 <p>In particular, determing whether an implicit version of any of these exists
@@ -601,7 +612,7 @@ bases or members are not analyzed, <code>autocxx</code> will assume a public des
 exists (in the absence of any other destructors), and avoid using any other
 implicit special member functions. Notably this includes the default
 constructor, so types with un-analyzed bases or members and no explicit
-constructors will not get a <code>make_unique</code> or <code>new</code> generated. If <code>autocxx</code> isn't
+constructors will not get a <code>make_unique</code> or <code>new</code> generated. If <code>autocxx</code> isn’t
 generating a <code>make_unique</code> or <code>CopyNew</code> or <code>MoveNew</code> for a type which permits
 the corresponding operations in C++, make sure the types of all bases and
 members are analyzed or implement it explicitly.</p>
@@ -611,7 +622,7 @@ exists<sup class="footnote-reference" id="fr-member-initializers-1"><a href="#fo
 work though.</p>
 <p>Currently, <code>autocxx</code> assumes that an explicitly defaulted (<code>= default</code>) member
 function exists, although it is valid C++ for that to be
-deleted<sup class="footnote-reference" id="fr-explicitly-defaulted-1"><a href="#footnote-explicitly-defaulted">3</a></sup>. Clang's
+deleted<sup class="footnote-reference" id="fr-explicitly-defaulted-1"><a href="#footnote-explicitly-defaulted">3</a></sup>. Clang’s
 <a href="https://clang.llvm.org/docs/DiagnosticsReference.html#wdefaulted-function-deleted">-Wdefaulted-function-deleted</a>
 flag (enabled by default) will warn about types like this.</p>
 <p>A C++ type whose destructor is inaccessible - <code>private</code>, <code>protected</code>, or
@@ -630,18 +641,18 @@ one to call from Rust gets tricky.</p>
 <p>C++ calls an inherited member on the object which inherits it - <code>derived.foo()</code></p>
 <ul>
 <li>and <code>bindgen</code> reports nothing of the sort: a base class arrives as a field of
-the derived class, and the base's members as functions over the base's own
+the derived class, and the base’s members as functions over the base’s own
 type. So <code>autocxx</code> binds each public member of each public base a second time,
 against the classes which inherit it, and the Rust method is where C++ puts it.</li>
 </ul>
 <p>The call itself is made in C++, on the object cast to the base -
 <code>static_cast&lt;const Base&amp;&gt;(d).foo(args)</code>. That is what dispatches a virtual
-member on the object's own dynamic type, what adjusts <code>this</code> for a base which
+member on the object’s own dynamic type, what adjusts <code>this</code> for a base which
 does not sit at the start of the derived class, and what makes the Rust method
 call the member whose signature it was generated from rather than whatever the
 deriving class might declare under the same name. Adding the base to your
 <code>generate!</code> list is not needed for any of it - if you do, you also get the
-base's own type and an <code>AsRef</code> upcast to it, and both routes work.</p>
+base’s own type and an <code>AsRef</code> upcast to it, and both routes work.</p>
 <p>A member is bound this way only where <code>autocxx</code> can say that
 <code>derived.foo(args)</code> would have named it, so several shapes are left alone: a
 name the deriving class declares itself, or one a class between it and the base
@@ -659,11 +670,11 @@ pick. Static members are not imported, a static call having no receiver to make
 it on, and neither are data members.</p>
 <p>Three kinds of declaration hide an inherited member in C++ which <code>bindgen</code> does
 not describe well enough for <code>autocxx</code> to notice: a member of an anonymous
-union, an unnamed <code>enum</code>'s enumerators, and a member function template. Where a
+union, an unnamed <code>enum</code>’s enumerators, and a member function template. Where a
 class hides an inherited <code>foo</code> with one of those, <code>autocxx</code> binds <code>foo</code> anyway,
-and the binding calls the base's member - the name reads as C++'s would not,
+and the binding calls the base’s member - the name reads as C++’s would not,
 but it does what it says.</p>
-<p>An <code>enum class</code>'s enumerators are members of the enumeration rather than of the
+<p>An <code>enum class</code>’s enumerators are members of the enumeration rather than of the
 class the enum is nested in, so one named after an inherited member hides
 nothing and the member is bound as usual.</p>
 <p>A member a class re-exports with <code>using Base::foo;</code> is bound too, by a pass of
@@ -678,14 +689,14 @@ points at an object of some derived class; if the destructor is not virtual,
 <code>delete</code>ing through that pointer runs the wrong one, which is undefined
 behaviour and which clang reports as <code>-Wdelete-abstract-non-virtual-dtor</code> and
 MSVC as C5205.</p>
-<p>The C++ <code>cxx</code> generates for <code>UniquePtr&lt;T&gt;</code>, and for <code>SharedPtr&lt;T&gt;</code>'s
+<p>The C++ <code>cxx</code> generates for <code>UniquePtr&lt;T&gt;</code>, and for <code>SharedPtr&lt;T&gt;</code>’s
 raw-pointer constructor, deletes through a <code>T*</code> exactly that way.
 <code>CxxVector&lt;T&gt;</code> is a different case with the same outcome: no element of an
 abstract type could ever be constructed, so nothing is there to delete, but the
 destructor which would still gets instantiated and the compiler still reports
 it. So for an abstract type with no virtual destructor <code>autocxx</code> adds none of
 those, nor <code>WeakPtr&lt;T&gt;</code>, which destroys nothing itself but is of no use without
-<code>SharedPtr&lt;T&gt;</code>. The generated type's documentation says so. As with an inaccessible destructor, the type and its
+<code>SharedPtr&lt;T&gt;</code>. The generated type’s documentation says so. As with an inaccessible destructor, the type and its
 methods are still generated and can be used through a reference or pointer C++
 hands you. Adding <code>virtual ~T();</code> to the C++ class is what makes it ownable.</p>
 <p>What <code>autocxx</code> actually knows is that it <em>found</em> no virtual destructor. If the
@@ -697,7 +708,8 @@ which itself names a <code>std::unique_ptr&lt;T&gt;</code> for such a <code>T</c
 to compile. Refusing those signatures with a diagnostic instead is a job for a
 future release.</p>
 <hr>
-<ol class="footnote-definition"><li id="footnote-templated">
+<ol class="footnote-definition">
+<li id="footnote-templated">
 <p>Future improvements tracked <a href="https://github.com/google/autocxx/issues/349">here</a> <a href="#fr-templated-1">↩</a></p>
 </li>
 <li id="footnote-member-initializers">
@@ -716,20 +728,21 @@ implementation tracked. See
 <a href="https://github.com/google/autocxx/issues/829">here</a>. <a href="#fr-inaccessible-destructor-1">↩</a></p>
 </li>
 <li id="footnote-abstract">
-<p><code>autocxx</code>'s determination of abstract types is a bit approximate and
+<p><code>autocxx</code>’s determination of abstract types is a bit approximate and
 <a href="https://github.com/google/autocxx/issues/774">could be improved</a>. <a href="#fr-abstract-1">↩</a></p>
 </li>
 </ol>
+
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
                             <a rel="prev" href="building.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
-                                <i class="fa fa-angle-left"></i>
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
                             <a rel="next prefetch" href="references_etc.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                                <i class="fa fa-angle-right"></i>
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
                         <div style="clear: both"></div>
@@ -739,16 +752,21 @@ implementation tracked. See
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
                     <a rel="prev" href="building.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
-                        <i class="fa fa-angle-left"></i>
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
                     <a rel="next prefetch" href="references_etc.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                        <i class="fa fa-angle-right"></i>
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
 
         </div>
 
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
 
 
@@ -757,17 +775,17 @@ implementation tracked. See
         </script>
 
 
-        <script src="elasticlunr.min.js"></script>
-        <script src="mark.min.js"></script>
-        <script src="searcher.js"></script>
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
 
-        <script src="clipboard.min.js"></script>
-        <script src="highlight.js"></script>
-        <script src="book.js"></script>
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="mermaid.min.js"></script>
-        <script src="mermaid-init.js"></script>
+        <script src="mermaid-cc85ecea.min.js"></script>
+        <script src="mermaid-init-4533fb11.js"></script>
 
 
 
