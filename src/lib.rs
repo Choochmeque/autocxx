@@ -923,6 +923,10 @@ ctype_newtype!(
     "Newtype wrapper for a C++ unsigned __int128"
 );
 
+// A newtype rather than a re-export of `std::ffi::c_void`: the generated bridge
+// aliases this type inside `extern "C++"`, which asks for `cxx::ExternType`;
+// cxx implements that for no `c_void`, and a foreign trait on a foreign type is
+// E0117.
 /// Newtype wrapper for a C void. Only useful as a `*c_void`
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
