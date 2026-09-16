@@ -107,6 +107,7 @@ fuzz_target!(|data: &str| {
         let _ = config.is_on_constructor_blocklist(name);
         let _ = config.is_on_function_blocklist(name);
         let _ = config.is_on_throws_list(name);
+        let _ = config.borrow_source(name);
     }
 
     // Finally the reproduction case autocxx writes out when
