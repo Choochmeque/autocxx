@@ -8848,6 +8848,75 @@ fn test_inherited_method_declines_a_subobject_reached_through_a_private_path() {
     );
 }
 
+/// A base which declares an overload set is not imported onto the deriving
+/// class - the shim cannot select from a set - and the deriving class says so
+/// rather than losing the name without a word. The shape which found this: a
+/// config class whose every getter has a with-default overload, so the whole
+/// family went missing from the deriving class in silence.
+#[test]
+fn test_inherited_overload_set_leaves_a_note() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_OB {
+        public:
+            uint32_t get(uint32_t a) const { return a; }
+            uint32_t get(uint32_t a, uint32_t b) const { return a + b; }
+            uint32_t solo() const { return 5; }
+        };
+        class inh_OD : public inh_OB {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::inh_OD::new().within_unique_ptr();
+            // The name the base declares once still arrives.
+            assert_eq!(d.solo(), 5);
+        },
+        directives_from_lists(&["inh_OD"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "fn get (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "The base class inh_OB declares 2 functions of this name".to_string(),
+            "Call the overload you want on a reference to inh_OB instead".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The note names the base by its C++ spelling. A nested base is the case
+/// which tells: bindgen's identifier for it is the flattened `inh_NOuter_OB`,
+/// which names nothing in C++, and the note has to say `inh_NOuter::OB`.
+#[test]
+fn test_inherited_overload_set_note_spells_a_nested_base_in_cpp() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_NOuter {
+        public:
+            class OB {
+            public:
+                uint32_t get(uint32_t a) const { return a; }
+                uint32_t get(uint32_t a, uint32_t b) const { return a + b; }
+            };
+        };
+        class inh_ND : public inh_NOuter::OB {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_ND::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_ND"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "The base class inh_NOuter::OB declares 2 functions of this name".to_string(),
+            "on a reference to inh_NOuter::OB instead".to_string(),
+        ])),
+        None,
+    );
+}
+
 /// `inh_B` writes `using inh_A::foo;` beside a `foo` of its own, so its `foo`
 /// is a merged set of two overloads however few of them autocxx can see, and
 /// a shim calling one of them through `inh_D` would be ambiguous.
@@ -33771,6 +33840,89 @@ fn test_pod_array_of_concrete_instantiation_is_refused() {
     );
 }
 
+/// A class whose base is a class template instantiation, asked for as a POD.
+/// bindgen cannot name the instantiation, so it writes the base subobject as a
+/// blob under `__bindgen_marker_Opaque` - a marker which exists in nobody's
+/// headers. The refusal must name the base rather than the marker, or it sends
+/// the reader hunting for a type nobody wrote. The shape which found this: a
+/// point class whose base is a `Point<2>`-style template instantiation.
+#[test]
+fn test_pod_with_template_instantiation_base_blames_the_base() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        template <int SIZE> class fx_KPoint {
+        public:
+            double fx_at(size_t i) const { return fx_p[i]; }
+        protected:
+            double fx_p[SIZE];
+        };
+        class fx_Point2 : public fx_KPoint<2> {
+        public:
+            fx_Point2(double x, double y) { fx_p[0] = x; fx_p[1] = y; }
+            double fx_x() const { return fx_p[0]; }
+        };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_Point2"],
+        &[
+            "Type fx_Point2 could not be POD because one of its base classes is",
+            "blob of bytes of the right size and alignment",
+        ],
+    );
+}
+
+/// The same class asked for with `generate!`, which is what the refusal above
+/// points at: the type binds, and its own methods with it.
+#[test]
+fn test_template_instantiation_base_is_fine_without_pod() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        template <int SIZE> class fx_KPoint2 {
+        public:
+            double fx_at(size_t i) const { return fx_p[i]; }
+        protected:
+            double fx_p[SIZE];
+        };
+        class fx_Point2b : public fx_KPoint2<2> {
+        public:
+            fx_Point2b(double x, double y) { fx_p[0] = x; fx_p[1] = y; }
+            double fx_x() const { return fx_p[0]; }
+        };
+    "};
+    let rs = quote! {
+        let p = ffi::fx_Point2b::new(3.0, 4.0).within_unique_ptr();
+        assert_eq!(p.fx_x(), 3.0);
+    };
+    run_test("", hdr, rs, &["fx_Point2b"], &[]);
+}
+
+/// A C++ reference member reaches the same arm under a different marker, so
+/// the same fix has to cover it: name the member, never
+/// `__bindgen_marker_Reference`.
+#[test]
+fn test_pod_with_reference_member_blames_the_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_RefInner { uint32_t a; };
+        struct fx_HoldsRef { fx_RefInner& r; uint32_t tail; };
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &[],
+        &["fx_HoldsRef"],
+        &[
+            "Type fx_HoldsRef could not be POD because its member `r` is",
+            "a C++ reference",
+        ],
+    );
+}
+
 /// Where bindgen gives us a *typedef* to a blob, the alias has a name of its
 /// own, so it becomes an opaque type rather than an alias for an integer. What
 /// then uses it in a position an opaque type cannot fill has to be refused -
@@ -38353,6 +38505,10 @@ fn test_using_declaration_declines_a_base_whose_own_set_is_merged() {
 /// Scoped to the type's own inherent impls because bindgen writes impl blocks
 /// of its own inside the mod autocxx re-emits verbatim, and those do carry the
 /// base class's members under their real names.
+///
+/// A failed-binding stub - the documentation item autocxx leaves in place of a
+/// member it declined - is not a binding and does not count: the question is
+/// whether the member was imported, and a stub is what says it was not.
 struct NoMethodNamed {
     ty: &'static str,
     method: &'static str,
@@ -38360,6 +38516,13 @@ struct NoMethodNamed {
 
 impl CodeCheckerFns for NoMethodNamed {
     fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+        fn is_failed_binding_stub(f: &syn::ImplItemFn) -> bool {
+            f.sig.inputs.iter().any(|arg| {
+                quote::quote!(#arg)
+                    .to_string()
+                    .contains("BindingGenerationFailure")
+            })
+        }
         fn walk(items: &[syn::Item], ty: &str, method: &str) -> bool {
             items.iter().any(|item| match item {
                 syn::Item::Mod(m) => m
@@ -38371,7 +38534,9 @@ impl CodeCheckerFns for NoMethodNamed {
                     imp.trait_.is_none()
                         && quote::quote!(#self_ty).to_string() == ty
                         && imp.items.iter().any(|item| match item {
-                            syn::ImplItem::Fn(f) => f.sig.ident == method,
+                            syn::ImplItem::Fn(f) => {
+                                f.sig.ident == method && !is_failed_binding_stub(f)
+                            }
                             _ => false,
                         })
                 }
