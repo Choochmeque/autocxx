@@ -601,7 +601,15 @@ impl IncludeCppEngine {
             // one - calling it means choosing its template arguments - so what
             // this buys is the note which says the member is there, in place of
             // silence. See google/autocxx#109.
-            .report_member_function_templates(true);
+            .report_member_function_templates(true)
+            // The conversion functions of any class, which bindgen otherwise
+            // does not parse as members at all, and the call operators, for
+            // which it generates nothing. autocxx binds neither - a conversion
+            // and a call are C++ expressions rather than named functions - so
+            // what this buys is the note which says the member is there, in
+            // place of a class which reads as having no such thing.
+            .report_conversion_functions(true)
+            .report_call_operators(true);
 
         // 3. Passes allowlist and other options to the bindgen::Builder equivalent
         //    to --output-style=cxx --allowlist=<as passed in>

@@ -11,10 +11,10 @@ use std::{cell::RefCell, fmt::Display, panic::UnwindSafe, rc::Rc};
 use crate::types::{make_ident, strip_bindgen_original_suffix, Namespace};
 use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
-    BaseClassInfo, BaseKind, DataMemberInfo, Deprecation, DiscoveredItem, DiscoveredItemId,
-    ExceptionSpecification, ExceptionSpecifications, Explicitness, MemberFunctionTemplateInfo,
-    MethodKind, RefQualifier, SpecialMemberKind, TemplateMemberFunctionInfo, TypeLayout,
-    UsingDeclarationInfo, Visibility,
+    BaseClassInfo, BaseKind, CallOperatorInfo, ConversionFunctionInfo, DataMemberInfo, Deprecation,
+    DiscoveredItem, DiscoveredItemId, ExceptionSpecification, ExceptionSpecifications,
+    Explicitness, MemberFunctionTemplateInfo, MethodKind, RefQualifier, SpecialMemberKind,
+    TemplateMemberFunctionInfo, TypeLayout, UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -323,6 +323,35 @@ pub(crate) struct MemberFunctionTemplate {
     pub(crate) template_parameters: usize,
 }
 
+/// One conversion function of a class, as bindgen reported it.
+///
+/// bindgen parses no member from a conversion function, so this is the only
+/// thing which says such a member exists. Which is what makes it worth keeping:
+/// a class whose only reader is a conversion function is otherwise generated as
+/// a type nothing can read, with nothing saying why.
+#[derive(Debug, Clone)]
+pub(crate) struct ConversionFunction {
+    /// What the function converts to, as libclang spells the type. A C++
+    /// spelling and not a Rust one - there is no function here for autocxx to
+    /// have converted a signature for - so it goes in a message and nowhere
+    /// else.
+    pub(crate) target_type: String,
+    pub(crate) visibility: Visibility,
+}
+
+/// One call operator of a class, as bindgen reported it.
+///
+/// bindgen generates no function for a member C++ calls `operator()`, so this
+/// is the only thing which says a class is callable.
+#[derive(Debug, Clone)]
+pub(crate) struct CallOperator {
+    /// How many parameters C++ declared, which is what tells one overload of
+    /// `operator()` from another. Not how many a call must pass: a parameter
+    /// may have a default argument.
+    pub(crate) parameters: usize,
+    pub(crate) visibility: Visibility,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct NameAndParent {
     parent: DiscoveredItemId,
@@ -410,6 +439,8 @@ pub(crate) struct UnindexedParseCallbackResults {
     using_declarations: HashMap<DiscoveredItemId, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<DiscoveredItemId, Vec<TemplateMemberFunction>>,
     member_function_templates: HashMap<DiscoveredItemId, Vec<MemberFunctionTemplate>>,
+    conversion_functions: HashMap<DiscoveredItemId, Vec<ConversionFunction>>,
+    call_operators: HashMap<DiscoveredItemId, Vec<CallOperator>>,
     layouts: HashMap<DiscoveredItemId, TypeLayout>,
 }
 
@@ -516,6 +547,18 @@ impl UnindexedParseCallbackResults {
             .filter_map(|(id, members)| Some((self.qualified_name(*id)?, members.clone())))
             .collect();
 
+        let conversion_functions = self
+            .conversion_functions
+            .iter()
+            .filter_map(|(id, functions)| Some((self.qualified_name(*id)?, functions.clone())))
+            .collect();
+
+        let call_operators = self
+            .call_operators
+            .iter()
+            .filter_map(|(id, operators)| Some((self.qualified_name(*id)?, operators.clone())))
+            .collect();
+
         ParseCallbackResults {
             results: self,
             exception_specifications_are_part_of_the_type,
@@ -524,6 +567,8 @@ impl UnindexedParseCallbackResults {
             using_declarations,
             template_member_functions,
             member_function_templates,
+            conversion_functions,
+            call_operators,
         }
     }
 
@@ -594,6 +639,8 @@ pub(crate) struct ParseCallbackResults {
     using_declarations: HashMap<QualifiedName, Vec<UsingDeclaration>>,
     template_member_functions: HashMap<QualifiedName, Vec<TemplateMemberFunction>>,
     member_function_templates: HashMap<QualifiedName, Vec<MemberFunctionTemplate>>,
+    conversion_functions: HashMap<QualifiedName, Vec<ConversionFunction>>,
+    call_operators: HashMap<QualifiedName, Vec<CallOperator>>,
 }
 
 impl ParseCallbackResults {
@@ -820,6 +867,24 @@ impl ParseCallbackResults {
         name: &QualifiedName,
     ) -> &[MemberFunctionTemplate] {
         self.member_function_templates
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The conversion functions bindgen reported for a class, in declaration
+    /// order. Empty for a class which declares none.
+    pub(crate) fn conversion_functions(&self, name: &QualifiedName) -> &[ConversionFunction] {
+        self.conversion_functions
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The call operators bindgen reported for a class, in declaration order.
+    /// Empty for a class which declares none.
+    pub(crate) fn call_operators(&self, name: &QualifiedName) -> &[CallOperator] {
+        self.call_operators
             .get(name)
             .map(Vec::as_slice)
             .unwrap_or_default()
@@ -1096,6 +1161,37 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                 // them.
                 visibility: member.visibility,
                 template_parameters: member.template_parameters,
+            });
+    }
+
+    fn denote_conversion_function(
+        &self,
+        parent: DiscoveredItemId,
+        function: ConversionFunctionInfo<'_>,
+    ) {
+        self.results
+            .borrow_mut()
+            .conversion_functions
+            .entry(parent)
+            .or_default()
+            .push(ConversionFunction {
+                target_type: function.target_type.to_string(),
+                // `is_const` is reported and not kept: it says how a receiver
+                // must be taken to call the function, and autocxx calls none of
+                // them.
+                visibility: function.visibility,
+            });
+    }
+
+    fn denote_call_operator(&self, parent: DiscoveredItemId, operator: CallOperatorInfo) {
+        self.results
+            .borrow_mut()
+            .call_operators
+            .entry(parent)
+            .or_default()
+            .push(CallOperator {
+                parameters: operator.parameters,
+                visibility: operator.visibility,
             });
     }
 

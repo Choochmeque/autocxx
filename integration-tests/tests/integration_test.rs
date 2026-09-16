@@ -4092,6 +4092,264 @@ fn test_member_function_templates_in_a_namespace_are_noted() {
     );
 }
 
+/// A conversion operator, which is how a great many C++ classes offer the one
+/// value they wrap. bindgen parses no member from one at all, so before this
+/// the class arrived with no way to read it and nothing saying why; now it
+/// arrives with the note every other unbindable member gets, naming what C++
+/// converts to.
+#[test]
+fn test_conversion_operator_is_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Distance {
+        public:
+            Distance() : v(12) {}
+            operator long long() const { return v; }
+            uint32_t plain() const { return 34; }
+        private:
+            long long v;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::Distance::new().within_unique_ptr();
+            assert_eq!(d.plain(), 34);
+        },
+        quote! {
+            generate!("Distance")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn conversion_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "C++ declares a conversion operator to long long here".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A conversion operator whose target is a class type rather than a builtin.
+/// The note names what C++ names, whatever kind of type that is.
+#[test]
+fn test_conversion_operator_to_a_class_type_is_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        class Label {
+        public:
+            Label() {}
+            operator std::string() const { return std::string(\"hi\"); }
+            uint32_t plain() const { return 12; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let l = ffi::Label::new().within_unique_ptr();
+            assert_eq!(l.plain(), 12);
+        },
+        quote! {
+            generate!("Label")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn conversion_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "C++ declares a conversion operator to std::string here".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A call operator. bindgen parses the member and then drops it for want of a
+/// name to generate it under, which left a callable class looking exactly like
+/// one which is not callable.
+#[test]
+fn test_call_operator_is_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Adder {
+        public:
+            Adder() {}
+            uint32_t operator()(uint32_t a, uint32_t b) const { return a + b; }
+            uint32_t plain() const { return 12; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let a = ffi::Adder::new().within_unique_ptr();
+            assert_eq!(a.plain(), 12);
+        },
+        quote! {
+            generate!("Adder")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn call_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "C++ declares a call operator here, with parameters of its own (2 of them)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// One class declaring both kinds of operator twice over, beside a method
+/// which binds. Every operator leaves a note, the second of each kind is
+/// numbered by the overload tracker which numbers the bound methods, and the
+/// method beside them is unaffected.
+#[test]
+fn test_a_class_with_every_kind_of_operator_is_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Everything {
+        public:
+            Everything() {}
+            operator long long() const { return 1; }
+            operator bool() const { return true; }
+            void operator()() const {}
+            void operator()(uint32_t) const {}
+            uint32_t plain() const { return 12; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let e = ffi::Everything::new().within_unique_ptr();
+            assert_eq!(e.plain(), 12);
+        },
+        quote! {
+            generate!("Everything")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn conversion_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn conversion_operator1 (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn call_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn call_operator1 (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "C++ declares a conversion operator to long long here".to_string(),
+            "C++ declares a conversion operator to bool here".to_string(),
+            "C++ declares a call operator here, with parameters of its own (0 of them)".to_string(),
+            "C++ declares a call operator here, with parameters of its own (1 of them)".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A private conversion operator and a private call operator get no note, for
+/// the reason a private anything gets none: generated code outside the class
+/// may not name them, so there is nothing the user could do about it.
+#[test]
+fn test_private_operators_are_not_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Secretive {
+        public:
+            Secretive() {}
+            uint32_t plain() const { return 12; }
+        private:
+            operator long long() const { return 1; }
+            void operator()() const {}
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let s = ffi::Secretive::new().within_unique_ptr();
+            assert_eq!(s.plain(), 12);
+        },
+        quote! {
+            generate!("Secretive")
+        },
+        None,
+        Some(make_string_absence_finder(vec![
+            "conversion operator".to_string(),
+            "call operator".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The operators which are neither of the two above. C++ declares them as
+/// members like any other, bindgen refuses each of them for want of a Rust
+/// spelling, and autocxx has never said anything about one - which is what this
+/// pins, because the two notes are made where those refusals are counted and
+/// must not start speaking for every operator a class declares. The comparison
+/// operators here are also the ones a class is most likely to have, so a note
+/// for each would be noise on classes which read perfectly well without it.
+#[test]
+fn test_other_operators_get_no_note() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Comparable {
+        public:
+            Comparable() {}
+            bool operator==(const Comparable&) const { return true; }
+            bool operator<(const Comparable&) const { return false; }
+            Comparable operator+(const Comparable&) const { return *this; }
+            uint32_t operator[](uint32_t i) const { return i; }
+            Comparable& operator=(const Comparable&) { return *this; }
+            uint32_t plain() const { return 12; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = ffi::Comparable::new().within_unique_ptr();
+            assert_eq!(c.plain(), 12);
+        },
+        quote! {
+            generate!("Comparable")
+        },
+        None,
+        Some(make_string_absence_finder(vec![
+            "conversion operator".to_string(),
+            "call operator".to_string(),
+            "BindingGenerationFailure".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// Operators on a class in a namespace, which is where the note has to be filed
+/// under the class's own namespace rather than the root.
+#[test]
+fn test_operators_in_a_namespace_are_noted() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_ns {
+            class Nested {
+            public:
+                Nested() {}
+                operator long long() const { return 1; }
+                void operator()() const {}
+                uint32_t plain() const { return 12; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let n = ffi::fx_ns::Nested::new().within_unique_ptr();
+            assert_eq!(n.plain(), 12);
+        },
+        quote! {
+            generate!("fx_ns::Nested")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "fn conversion_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "fn call_operator (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+        ])),
+        None,
+    );
+}
+
 /// The opaque holders autocxx lowers a `std::shared_ptr<const T>` and friends
 /// to are concrete types too, and must *not* pick up the constructor above
 /// even where the user declares their alias `instantiable!`: what such a

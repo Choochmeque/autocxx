@@ -42,7 +42,10 @@ use crate::{
     },
     known_types::known_types,
     minisyn::{minisynize_punctuated, FnArg},
-    parse_callbacks::{MemberFunctionTemplate, TemplateMemberFunction, UsingDeclaration},
+    parse_callbacks::{
+        CallOperator, ConversionFunction, MemberFunctionTemplate, TemplateMemberFunction,
+        UsingDeclaration,
+    },
     types::validate_ident_ok_for_rust,
 };
 use indexmap::map::IndexMap as HashMap;
@@ -459,6 +462,13 @@ pub(crate) struct FnAnalyzer<'a> {
     /// for an instantiation is the class template: bindgen says nothing about
     /// an instantiation, so the template's declaration is all there is.
     member_function_templates: HashMap<QualifiedName, Vec<MemberFunctionTemplate>>,
+    /// For each ordinary class in these APIs, the conversion operators and call
+    /// operators bindgen reported for it. Not keyed for an instantiation, as
+    /// the two maps above are: what a class template's conversion operator
+    /// converts to is spelled from the template's own declaration, so
+    /// `operator T` for an instantiation would name a type which does not
+    /// exist.
+    operators: HashMap<QualifiedName, (Vec<ConversionFunction>, Vec<CallOperator>)>,
     force_wrapper_generation: bool,
 }
 
@@ -562,6 +572,7 @@ impl<'a> FnAnalyzer<'a> {
                 &apis,
                 parse_callback_results,
             ),
+            operators: Self::build_operators(&apis, parse_callback_results),
             force_wrapper_generation,
         };
         me.reserve_ideal_names(&apis);
@@ -586,6 +597,7 @@ impl<'a> FnAnalyzer<'a> {
         let results = me.add_inherited_member_imports(results);
         let results = me.add_template_instantiation_members(results);
         let results = me.add_member_function_template_notes(results);
+        let results = me.add_operator_notes(results);
         let results = me.add_constructors_present(results);
         let mut results = me.add_subclass_constructors(results);
         results.extend(me.extra_apis.into_iter().map(add_analysis));
@@ -727,6 +739,31 @@ impl<'a> FnAnalyzer<'a> {
             .filter_map(|owner| {
                 let members = parse_callback_results.member_function_templates(&owner);
                 (!members.is_empty()).then(|| (owner, members.to_vec()))
+            })
+            .collect()
+    }
+
+    /// The conversion operators and call operators bindgen reported for each
+    /// ordinary class.
+    ///
+    /// Only a class which declares them itself, unlike the two maps above: a
+    /// conversion operator is reported with the target type the *declaration*
+    /// spells, so a class template's `operator T` would have an instantiation
+    /// tell the reader about a type called `T`.
+    fn build_operators(
+        apis: &ApiVec<PodPhase>,
+        parse_callback_results: &ParseCallbackResults,
+    ) -> HashMap<QualifiedName, (Vec<ConversionFunction>, Vec<CallOperator>)> {
+        apis.iter()
+            .filter_map(|api| match api {
+                Api::Struct { name, .. } => Some(name.name.clone()),
+                _ => None,
+            })
+            .filter_map(|owner| {
+                let conversions = parse_callback_results.conversion_functions(&owner);
+                let calls = parse_callback_results.call_operators(&owner);
+                (!conversions.is_empty() || !calls.is_empty())
+                    .then(|| (owner, (conversions.to_vec(), calls.to_vec())))
             })
             .collect()
     }
@@ -2223,6 +2260,104 @@ impl<'a> FnAnalyzer<'a> {
                 } else {
                     ConvertErrorFromCpp::MemberFunctionTemplate(template_parameters)
                 },
+                ctx: Some(ctx),
+            });
+        }
+        results
+    }
+
+    /// Leave a note in place of each conversion operator and call operator a
+    /// class declares, none of which autocxx binds.
+    ///
+    /// The notes above are named from C++ and these are not: `operator long
+    /// long` and `operator()` are no identifiers, so the name is invented here
+    /// and the overload tracker numbers it, exactly as it numbers a class's
+    /// second `get`. Two conversion operators on one class therefore read as
+    /// `conversion_operator` and `conversion_operator1`, with the target type
+    /// each one converts to in its own message.
+    ///
+    /// Only an ordinary class gets these. A class template's `impl` block is
+    /// never generated, and an instantiation is not offered them either:
+    /// bindgen spells a conversion operator's target type from the class
+    /// template's declaration, so `operator T` for an instantiation would name
+    /// a type which exists nowhere.
+    ///
+    /// Runs beside the notes above, after every pass which gives a class a
+    /// member, so those names are taken before these ask.
+    fn add_operator_notes(&mut self, apis: ApiVec<FnPrePhase1>) -> ApiVec<FnPrePhase1> {
+        if self.operators.is_empty() {
+            return apis;
+        }
+        let owners: Vec<QualifiedName> = apis
+            .iter()
+            .filter_map(|api| match api {
+                Api::Struct { name, .. } if !self.is_generic_type(&name.name) => {
+                    Some(name.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Every name already spoken for, for the reason
+        // `add_member_function_template_notes` gathers the same set: a note
+        // which took one costs both itself and whatever it landed on.
+        let mut taken: HashSet<QualifiedName> = apis
+            .iter()
+            .map(|api| api.name().clone())
+            .chain(self.extra_apis.iter().map(|api| api.name().clone()))
+            .collect();
+        let mut notes = Vec::new();
+        for self_ty in owners {
+            let Some((conversions, calls)) = self.operators.get(&self_ty) else {
+                continue;
+            };
+            // A private operator gets no note, for the reason a private
+            // anything gets none: nothing generated outside the class may name
+            // it, so there is nothing the reader could do about it.
+            for conversion in conversions
+                .iter()
+                .filter(|conversion| matches!(conversion.visibility, CppVisibility::Public))
+            {
+                notes.push((
+                    self_ty.clone(),
+                    "conversion_operator",
+                    ConvertErrorFromCpp::ConversionOperator(conversion.target_type.clone()),
+                ));
+            }
+            for call in calls
+                .iter()
+                .filter(|call| matches!(call.visibility, CppVisibility::Public))
+            {
+                notes.push((
+                    self_ty.clone(),
+                    "call_operator",
+                    ConvertErrorFromCpp::CallOperator(call.parameters),
+                ));
+            }
+        }
+
+        let mut results = apis;
+        for (self_ty, stem_name, err) in notes {
+            let stem = format!("{}_{stem_name}", self_ty.get_final_item());
+            let mut ident = stem.clone();
+            let mut suffix = 1;
+            while !taken.insert(QualifiedName::new(
+                self_ty.get_namespace(),
+                make_ident(&ident),
+            )) {
+                ident = format!("{stem}{suffix}");
+                suffix += 1;
+            }
+            let name = ApiName::new(self_ty.get_namespace(), make_ident(ident));
+            let rust_name = self.get_overload_name(
+                self_ty.get_namespace(),
+                self_ty.get_final_item(),
+                stem_name.to_string(),
+            );
+            let ctx = self.error_context_for_method(&self_ty, &rust_name);
+            results.push(Api::IgnoredItem {
+                name,
+                err,
                 ctx: Some(ctx),
             });
         }
