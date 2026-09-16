@@ -91,6 +91,16 @@ diff -u -r bg-base/codegen/mod.rs bg-work/codegen/mod.rs
 diff -u -r bg-base/options/cli.rs bg-work/options/cli.rs
 --- a/options/cli.rs
 +++ b/options/cli.rs
+@@ -493,6 +493,9 @@
+     /// Output C++ overloaded operators
+     #[arg(long)]
+     represent_cxx_operators: bool,
++    /// Wrap a lowered std::array in a newtype marker
++    #[arg(long)]
++    use_std_array_newtype_wrapper: bool,
+     /// Wrap opaque types in a newtype marker
+     #[arg(long)]
+     use_opaque_newtype_wrapper: bool,
 @@ -712,6 +712,7 @@
          use_distinct_char32_t,
          use_distinct_char8_t,

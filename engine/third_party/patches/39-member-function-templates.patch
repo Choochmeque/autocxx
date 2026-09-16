@@ -383,6 +383,16 @@ the option off nothing changes at all.
                      warn!(
 --- a/options/cli.rs
 +++ b/options/cli.rs
+@@ -478,6 +478,9 @@
+     /// Report a class template's member functions through `ParseCallbacks`.
+     #[arg(long)]
+     report_template_member_functions: bool,
++    /// Report a class's member function templates through `ParseCallbacks`.
++    #[arg(long)]
++    report_member_function_templates: bool,
+     /// Always be specific about the 'receiver' of a virtual function.
+     #[arg(long)]
+     use_specific_virtual_function_receiver: bool,
 @@ -706,6 +706,7 @@
          c_naming,
          explicit_padding,
