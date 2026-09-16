@@ -1,0 +1,72 @@
+Subject: Size a field whose type bindgen has only a declaration of from what clang measured
+
+A field is written as the Rust type codegen writes for the type it resolves to,
+and the struct holding it is padded out around the width of that type. Where
+bindgen holds only a declaration of the type, what codegen writes is an empty
+struct - a `_unused: [u8; 0]` and nothing else - so the field covers no bytes
+whatever the target gave the member. The struct is then laid out as though it
+did: the tracker counts the bytes the member's offset reports, pads the struct
+out to the size clang measured, and emits a type short of the object C++ builds
+in it. A caller who asks C++ to construct one in storage sized from the Rust
+type gets it built past the end.
+
+C++ has no such member: a class has to be complete to declare one of. bindgen
+does, because a nested class of a class template's instantiation reaches
+`CompInfo::from_ty` with no definition cursor to read - `location` is what says
+whether the declaration it was reached through was a definition, and there is
+none - so `Beta<int>::iterator` is recorded as a declaration even though clang
+instantiated it and measured it. `Beta<int>::Cursor` holds one of those, and a
+class holding a `Cursor` came to nothing at all against the byte C++ gives an
+empty class.
+
+So take the route a field of an instantiation whose width nothing establishes
+already takes: the width of what is written is unestablished, and the field is
+written as a blob of the layout clang measured, which is that layout by
+construction. Where clang measured nothing either - a declaration bindgen holds
+because the header only declared the class, which nothing can be a member of -
+the field is left as it was.
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -1760,14 +1760,20 @@
+ /// whose size is that struct's and not the one clang measured for the
+ /// instantiation.
+ ///
+-/// Where nothing establishes how wide that type would be *and* nothing measured
+-/// it either - which is an instantiation written as a definition clang did not
+-/// instantiate - the field is written as a blob of the layout clang measured
+-/// instead, which is that layout by construction. Leaving it as its own type
+-/// would leave the struct holding it short of the object C++ builds there,
+-/// silently: the tracker would count the bytes the target gave the member, pad
+-/// the struct out as if the field had covered them, and emit a type narrower
+-/// than the run it believed was filled.
++/// Where nothing establishes how wide that type would be, the field is written
++/// as a blob of the layout clang measured instead, which is that layout by
++/// construction. Leaving it as its own type would leave the struct holding it
++/// short of the object C++ builds there, silently: the tracker would count the
++/// bytes the target gave the member, pad the struct out as if the field had
++/// covered them, and emit a type narrower than the run it believed was filled.
++/// Two shapes reach that. One is an instantiation written as a definition clang
++/// did not instantiate. The other is a member whose type bindgen holds only a
++/// declaration of, which it writes as an empty struct: a class C++ cannot
++/// declare a member of, but bindgen has only a declaration of a nested class of
++/// a class template's instantiation, which C++ can. `Beta<int>::Cursor` holding
++/// a `Beta<int>::iterator` was written as a struct holding an empty one, and a
++/// class holding *it* came to nothing at all against the byte C++ gives an
++/// empty class.
+ fn field_representation_layout(
+     ctx: &BindgenContext,
+     item: &Item,
+@@ -1846,6 +1852,13 @@
+         TypeKind::TemplateInstantiation(ref inst) => {
+             instantiation_width(ctx, item, inst, measuring)
+         }
++        // A declaration is written as an empty struct and holds nothing, which
++        // is not the width of the object C++ declared wherever clang measured
++        // one - and clang measures one wherever it has the definition this
++        // does not.
++        TypeKind::Comp(ref comp) if comp.is_forward_declaration() => {
++            WrittenWidth::Unestablished
++        }
+         _ => WrittenWidth::AsMeasured,
+     };
+     measuring.remove(&item.id());

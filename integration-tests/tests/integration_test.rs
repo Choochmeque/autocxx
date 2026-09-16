@@ -15297,11 +15297,13 @@ fn test_string_view_member_does_not_shrink_its_class() {
 /// bytes the target left, and the only way a packed class comes by one is a
 /// field written narrower than the member C++ declared. Both directions are
 /// here, the array first and the array last, and the same gap without an array
-/// at all. The last of them is packed to two bytes rather than one, where the
-/// run may not be written: the tracker does not align a packed class's bases
-/// and Rust aligns each to the smaller of its own alignment and two, so the
-/// offset the tracker has reached is behind the one the emitted struct has, and
-/// a run measured from it would push every field after it along.
+/// at all. The last of them has two bases and is packed to two bytes, where no
+/// run may be written: the tracker does not align a packed class's bases and
+/// Rust aligns each to the smaller of its own alignment and two, so the offset
+/// the tracker has reached is behind the one the emitted struct has, and a run
+/// measured from it would push every field after it along. Rust's own alignment
+/// closes that one. `test_run_of_bytes_a_packed_class_leaves_does_not_shrink_it`
+/// has the classes where the run is written.
 ///
 /// One shape is left out, because it is wrong for reasons no array sizing
 /// reaches and pinning it would only record the wrong number. A member declared
@@ -16241,6 +16243,390 @@ fn test_member_bindgen_could_not_render_does_not_shrink_its_class() {
             "fx_HoldsBeta",
             "fx_HoldsBox",
             "fx_Vector",
+            "fx_size",
+            "fx_align",
+        ],
+        &[],
+    );
+}
+
+/// An instantiation of a class template is laid out with its arguments wherever
+/// the definition's members reach a parameter.
+///
+/// bindgen writes every instantiation of one template as the same Rust struct -
+/// the one it wrote for the definition, given whichever of the arguments that
+/// struct takes - so a member declared with a parameter is written as whatever
+/// the argument is written as, and the width of the whole follows the
+/// arguments. Laying the definition out with them is what sizes such a field,
+/// and it reached a member declared *as* a parameter and nothing else: `T a[2]`
+/// and `Inner<T>` stayed unmeasured, so a class holding an `fx_Arr<std::string>`
+/// came to 24 bytes against C++'s 56, the prelude standing one pointer in for
+/// the three a `std::string` is.
+///
+/// One row per route from a member to a parameter - the parameter itself, an
+/// array of it, an instantiation of another template given it, and an array
+/// inside that one - and one for an argument whose own width nothing
+/// establishes, where the field is written as a blob of the layout clang
+/// measured rather than laid out at all. Then the rows which compensate for
+/// nothing: an instantiation of concrete arguments inside the definition, which
+/// clang did lay out; a member declared as a pointer to the parameter, which is
+/// a pointer whatever stands in for it; and an argument nothing substitutes.
+#[test]
+fn test_instantiation_laid_out_with_its_arguments_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <string>
+        #include <unordered_map>
+        // The parameter reached through an array.
+        template <typename T> struct fx_Arr { T a[2]; };
+        struct fx_HoldsArr { fx_Arr<std::string> b; uint32_t n; };
+        // And through an instantiation of another template.
+        template <typename T> struct fx_Inner { T v; };
+        template <typename T> struct fx_Outer { fx_Inner<T> i; uint32_t k; };
+        struct fx_HoldsOuter { fx_Outer<std::string> o; uint32_t n; };
+        // And through an array inside that one.
+        template <typename T> struct fx_InnerArr { T v[2]; };
+        template <typename T> struct fx_OuterArr { fx_InnerArr<T> i; uint32_t k; };
+        struct fx_HoldsOuterArr { fx_OuterArr<std::string> o; uint32_t n; };
+        // An argument whose own width nothing establishes: the field is written
+        // as a blob of what clang measured for the instantiation.
+        template <typename T> struct fx_Box { T value; };
+        struct fx_HoldsBoxedMap { fx_Box<std::unordered_map<std::string, uint32_t> > b; uint32_t n; };
+        // An instantiation of concrete arguments inside the definition, which
+        // clang laid out itself.
+        template <typename T> struct fx_Pair { fx_Box<int> b; T v; };
+        struct fx_HoldsPair { fx_Pair<std::string> p; uint32_t n; };
+        // A member declared as a pointer to the parameter: a pointer whatever
+        // stands in for it.
+        template <typename T> struct fx_PtrHolder { T *p; uint32_t k; };
+        struct fx_HoldsPtrHolder { fx_PtrHolder<std::string> p; uint32_t n; };
+        // An argument nothing substitutes: the arithmetic has to leave this
+        // alone.
+        struct fx_HoldsPlain { fx_Arr<uint64_t> b; uint32_t n; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_HoldsArr);
+                case 1: return sizeof(fx_HoldsOuter);
+                case 2: return sizeof(fx_HoldsOuterArr);
+                case 3: return sizeof(fx_HoldsBoxedMap);
+                case 4: return sizeof(fx_HoldsPair);
+                case 5: return sizeof(fx_HoldsPtrHolder);
+                default: return sizeof(fx_HoldsPlain);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_HoldsArr);
+                case 1: return alignof(fx_HoldsOuter);
+                case 2: return alignof(fx_HoldsOuterArr);
+                case 3: return alignof(fx_HoldsBoxedMap);
+                case 4: return alignof(fx_HoldsPair);
+                case 5: return alignof(fx_HoldsPtrHolder);
+                default: return alignof(fx_HoldsPlain);
+            }
+        }
+    "};
+    let rs = quote! {
+        // Every row reported at once: one short class says little about the
+        // others, and the first assertion to fire would hide them.
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_HoldsArr, "an array of the parameter");
+        check!(1, ffi::fx_HoldsOuter, "an instantiation given the parameter");
+        check!(2, ffi::fx_HoldsOuterArr, "an array inside that instantiation");
+        check!(3, ffi::fx_HoldsBoxedMap, "an argument of no established width");
+        check!(4, ffi::fx_HoldsPair, "an instantiation of concrete arguments");
+        check!(5, ffi::fx_HoldsPtrHolder, "a pointer to the parameter");
+        check!(6, ffi::fx_HoldsPlain, "an argument nothing substitutes");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class holding an instantiation disagrees with C++:{report}"
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_HoldsArr",
+            "fx_HoldsOuter",
+            "fx_HoldsOuterArr",
+            "fx_HoldsBoxedMap",
+            "fx_HoldsPair",
+            "fx_HoldsPtrHolder",
+            "fx_HoldsPlain",
+            "fx_size",
+            "fx_align",
+        ],
+        &[],
+    );
+}
+
+/// The run of bytes a packed class leaves in front of a member is written out,
+/// whatever the class is packed to.
+///
+/// A packed class's fields are contiguous, so a gap worked out from an
+/// alignment is not a gap it has and nothing is written for one. A gap the
+/// member's own offset reports is a run of bytes the target left, and the only
+/// way a packed class comes by one is a field written narrower than the member
+/// C++ declared. That run was written only for a class packed to a single byte,
+/// because the tracker does not model where a packed class lays its fields
+/// down: anywhere else the offset it has reached might not be the emitted
+/// struct's, and a run measured from it would push every field after it along.
+/// It now tracks whether its offset is still the emitted one and writes the run
+/// while it is, which is most of the time - `#pragma pack(2) { std::string_view
+/// s; uint32_t n; }` was 12 bytes against C++'s 20.
+///
+/// The row with two bases is where it is not: the tracker aligns neither the
+/// bases nor the fields of a packed class, so its offset is behind the emitted
+/// struct's by the time the member arrives and no run may be written from the
+/// difference. Rust's own alignment closes that one, as it did before this.
+///
+/// A packed class whose own alignment is more than four bytes is a different
+/// matter, and is left to
+/// `test_packed_class_no_rust_type_can_hold_is_refused_rather_than_shrunk`.
+#[test]
+fn test_run_of_bytes_a_packed_class_leaves_does_not_shrink_it() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <string>
+        #include <string_view>
+        #include <unordered_map>
+        struct fx_A { char a; };
+        struct fx_B { int b; };
+        #pragma pack(push, 2)
+        // A member written narrower than the view C++ declared, in a class
+        // packed to two bytes. Views rather than strings, so that nothing in a
+        // packed class needs its destructor run at an alignment the target did
+        // not give it.
+        struct fx_PackedTwo { std::string_view s; uint32_t n; };
+        // Two bases in front of such a member: the tracker's offset is behind
+        // the emitted struct's there, so no run is written and Rust's own
+        // alignment closes the gap.
+        struct fx_PackedBases : fx_A, fx_B { std::string_view s; };
+        #pragma pack(pop)
+        #pragma pack(push, 4)
+        struct fx_PackedFour { std::string_view s; uint32_t n; };
+        #pragma pack(pop)
+        #pragma pack(push, 2)
+        // No substitution at all: no run, and nothing to write.
+        struct fx_PackedPlain { uint64_t a; uint32_t n; };
+        #pragma pack(pop)
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_PackedTwo);
+                case 1: return sizeof(fx_PackedFour);
+                case 2: return sizeof(fx_PackedBases);
+                default: return sizeof(fx_PackedPlain);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_PackedTwo);
+                case 1: return alignof(fx_PackedFour);
+                case 2: return alignof(fx_PackedBases);
+                default: return alignof(fx_PackedPlain);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_PackedTwo, "a narrowed member packed to two bytes");
+        check!(1, ffi::fx_PackedFour, "a narrowed member packed to four bytes");
+        check!(2, ffi::fx_PackedBases, "bases in front of a narrowed member");
+        check!(3, ffi::fx_PackedPlain, "no substitution in a packed class");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a packed class disagrees with C++:{report}"
+        );
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &[
+                "fx_PackedTwo",
+                "fx_PackedFour",
+                "fx_PackedBases",
+                "fx_PackedPlain",
+                "fx_size",
+                "fx_align",
+            ],
+            &[],
+            None,
+        ),
+        combine_modifiers(
+            make_cpp17_adder(),
+            // C4121 is cl saying a member's alignment was sensitive to
+            // packing, which is what every row here is: a class whose members
+            // the target lays out at offsets their own alignment would not put
+            // them at. Take the packing away and the rows are not the rows.
+            make_msvc_warning_scope(&[4121]),
+        ),
+        None,
+        None,
+    );
+}
+
+/// A packed class more than four bytes aligned, whose alignment comes only from
+/// a member bindgen could not render, fails the build naming the type rather
+/// than being written short.
+///
+/// The field wants writing as a blob of the layout clang measured, at the
+/// alignment the packed class gives that member - and no Rust type says both
+/// things. `blob` writes `repr(align)` above four-byte alignment, which a
+/// packed struct may not transitively hold; a blob at a lower alignment leaves
+/// the struct less aligned than the class, and `repr(align)` on a packed struct
+/// to make up the difference is an error of its own; and a blob at byte
+/// alignment puts every field after it somewhere else. So the field is left as
+/// its own type, which is narrower than the member, and the class comes out
+/// short: two bytes here against the target's forty-eight.
+///
+/// What makes that a failed build rather than a wrong number is the layout
+/// assertion autocxx writes for the class, which is what this pins. Without it
+/// `within_box` would have C++ construct a forty-eight byte object into two
+/// bytes of Rust storage.
+///
+/// `__attribute__((packed, aligned(8)))` because there is no other way to reach
+/// it: `#pragma pack(8)` makes a class packed only by way of a member more
+/// strictly aligned than eight bytes, and bindgen writes `repr(align)` beside
+/// `repr(packed)` for such a class whatever its fields are, which rustc rejects
+/// before any of this is reached. cl.exe has no GNU attributes, so this is not
+/// compiled for MSVC.
+#[test]
+#[cfg(not(target_env = "msvc"))]
+fn test_packed_class_no_rust_type_can_hold_is_refused_rather_than_shrunk() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        #include <string>
+        #include <unordered_map>
+        struct __attribute__((packed, aligned(8))) fx_GnuPacked {
+          char c;
+          std::unordered_map<std::string, uint32_t> m;
+        };
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fx_GnuPacked"],
+        &[],
+        "autocxx sized fx_GnuPacked at",
+    );
+}
+
+/// A class holding a member whose type bindgen has only a declaration of is
+/// sized in Rust the way C++ sizes it.
+///
+/// C++ has no such member - a class has to be complete to declare one of - but
+/// bindgen records a nested class of a class template's instantiation as a
+/// declaration whenever the cursor it was reached through is not a definition,
+/// and a constructor parameter is not one. What codegen writes for a
+/// declaration is an empty struct, so the field covered no bytes at all while
+/// the tracker counted the ones the target gave the member. A class holding a
+/// `Beta<int>::Cursor` whose own member is a `Beta<int>::iterator` came to
+/// nothing against the byte C++ gives an empty class.
+///
+/// The field is written as a blob of the layout clang measured instead. One row
+/// for the empty nested class, one for a wide one, and one for an array of it.
+#[test]
+fn test_member_bindgen_has_only_a_declaration_of_does_not_shrink_its_class() {
+    let hdr = indoc! {"
+        #include <cstddef>
+        #include <cstdint>
+        namespace outer {
+        template <typename T> class fx_Beta {
+        public:
+          class fx_Empty {};
+          class fx_Wide { public: uint64_t a; uint64_t b; };
+          // The constructor parameter is where each nested class is first seen,
+          // which is what leaves bindgen holding a declaration of it.
+          class fx_Cursor { public: fx_Cursor(fx_Empty); fx_Empty e; };
+          class fx_Holder { public: fx_Holder(fx_Wide); fx_Wide w; uint32_t n; };
+          class fx_Arrayed { public: fx_Arrayed(fx_Wide); fx_Wide w[2]; uint32_t n; };
+        };
+        } // namespace outer
+        struct fx_UsesEmpty { outer::fx_Beta<int>::fx_Cursor c; };
+        struct fx_UsesWide { outer::fx_Beta<int>::fx_Holder h; uint32_t n; };
+        struct fx_UsesArrayed { outer::fx_Beta<int>::fx_Arrayed a; uint32_t n; };
+        inline size_t fx_size(size_t which) {
+            switch (which) {
+                case 0: return sizeof(fx_UsesEmpty);
+                case 1: return sizeof(fx_UsesWide);
+                default: return sizeof(fx_UsesArrayed);
+            }
+        }
+        inline size_t fx_align(size_t which) {
+            switch (which) {
+                case 0: return alignof(fx_UsesEmpty);
+                case 1: return alignof(fx_UsesWide);
+                default: return alignof(fx_UsesArrayed);
+            }
+        }
+    "};
+    let rs = quote! {
+        let mut report = String::new();
+        macro_rules! check {
+            ($which:expr, $class:ty, $name:literal) => {
+                let (rust_size, cpp_size) =
+                    (std::mem::size_of::<$class>(), ffi::fx_size($which));
+                let (rust_align, cpp_align) =
+                    (std::mem::align_of::<$class>(), ffi::fx_align($which));
+                if rust_size != cpp_size || rust_align != cpp_align {
+                    report.push_str(&format!(
+                        "\n{}: Rust {}/{}, C++ {}/{} (size/align)",
+                        $name, rust_size, rust_align, cpp_size, cpp_align
+                    ));
+                }
+            };
+        }
+        check!(0, ffi::fx_UsesEmpty, "an empty class bindgen only saw declared");
+        check!(1, ffi::fx_UsesWide, "a wide one");
+        check!(2, ffi::fx_UsesArrayed, "an array of the wide one");
+        assert!(
+            report.is_empty(),
+            "Rust's idea of a class holding an incomplete member disagrees with C++:{report}"
+        );
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_UsesEmpty",
+            "fx_UsesWide",
+            "fx_UsesArrayed",
             "fx_size",
             "fx_align",
         ],
