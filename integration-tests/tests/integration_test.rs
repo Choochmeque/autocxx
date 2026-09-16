@@ -9552,6 +9552,144 @@ fn test_inherited_method_honours_a_throws_designation_on_a_nested_base() {
     );
 }
 
+/// The same designation written with the spelling bindgen flattened the nested
+/// base into, which a nested class answers to everywhere else. The base is not
+/// generated here, so the member imported onto the deriving class is the only
+/// binding there is for the designation to reach.
+#[test]
+fn test_inherited_method_honours_a_flattened_throws_designation_on_a_nested_base() {
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void inh_FlatOuter::inh_FlatBase::boom() const {
+            throw std::runtime_error(\"inherited error\");
+        }
+    "};
+    let hdr = indoc! {"
+        struct inh_FlatOuter {
+            struct inh_FlatBase {
+                void boom() const;
+            };
+        };
+        struct inh_FlatDerived : inh_FlatOuter::inh_FlatBase {
+            inh_FlatDerived() {}
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_FlatDerived::new().within_unique_ptr();
+        assert!(d.boom().is_err());
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("inh_FlatDerived")
+            throws!("inh_FlatOuter_inh_FlatBase::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Asking about a second spelling of the base must not make a designation
+/// which named nothing look as though it matched something. The member is
+/// spelled wrong here, under a base spelled right.
+#[test]
+fn test_throws_naming_no_member_of_a_nested_base_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct inh_TypoOuter {
+            struct inh_TypoBase {
+                uint32_t boom() const { return 1; }
+            };
+        };
+        struct inh_TypoDerived : inh_TypoOuter::inh_TypoBase {};
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("inh_TypoDerived")
+            throws!("inh_TypoOuter_inh_TypoBase::bom")
+        },
+        None,
+        &[
+            "DirectiveMatchedNothing",
+            "throws",
+            "inh_TypoOuter_inh_TypoBase::bom",
+        ],
+    );
+}
+
+const INHERITED_NESTED_BASE_CXX: &str = indoc! {"
+    #include <stdexcept>
+    void inh_BothOuter::inh_BothBase::boom() const {
+        throw std::runtime_error(\"inherited error\");
+    }
+"};
+
+const INHERITED_NESTED_BASE_HDR: &str = indoc! {"
+    struct inh_BothOuter {
+        struct inh_BothBase {
+            inh_BothBase() {}
+            void boom() const;
+        };
+    };
+    struct inh_BothDerived : inh_BothOuter::inh_BothBase {
+        inh_BothDerived() {}
+    };
+"};
+
+/// One C++ function, bound twice - on the nested base which declares it and on
+/// the class which inherits it - and one designation. Both bindings are the
+/// same function and are fallible together, whichever of the base's two
+/// spellings the designation was written with.
+#[test]
+fn test_throws_on_a_nested_base_reaches_both_bindings_in_the_cpp_spelling() {
+    run_test_ex(
+        INHERITED_NESTED_BASE_CXX,
+        INHERITED_NESTED_BASE_HDR,
+        quote! {
+            let b = ffi::inh_BothOuter_inh_BothBase::new().within_unique_ptr();
+            assert!(b.boom().is_err());
+            let d = ffi::inh_BothDerived::new().within_unique_ptr();
+            assert!(d.boom().is_err());
+        },
+        quote! {
+            generate!("inh_BothOuter::inh_BothBase")
+            generate!("inh_BothDerived")
+            throws!("inh_BothOuter::inh_BothBase::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+fn test_throws_on_a_nested_base_reaches_both_bindings_in_the_flattened_spelling() {
+    run_test_ex(
+        INHERITED_NESTED_BASE_CXX,
+        INHERITED_NESTED_BASE_HDR,
+        quote! {
+            let b = ffi::inh_BothOuter_inh_BothBase::new().within_unique_ptr();
+            assert!(b.boom().is_err());
+            let d = ffi::inh_BothDerived::new().within_unique_ptr();
+            assert!(d.boom().is_err());
+        },
+        quote! {
+            generate!("inh_BothOuter::inh_BothBase")
+            generate!("inh_BothDerived")
+            throws!("inh_BothOuter_inh_BothBase::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
 /// The base is a private nested class: its public members are callable on a
 /// derived object, but nothing outside `inh_Outer` may name the class, so the
 /// shim has no way to say which member it means.
@@ -42439,6 +42577,43 @@ fn test_block_functions_not_imported_onto_derived_class() {
         },
         None,
         Some(Box::new(CppMatcher::new(&["kept_up"], &["gone_up"]))),
+        None,
+    );
+}
+
+/// The base is nested, so it answers to two spellings, and a directive written
+/// with either withholds the member on the base itself - which is what stops
+/// the import.
+#[test]
+fn test_block_functions_on_a_nested_base_not_imported_in_either_spelling() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct BfNestOuter {
+            struct BfNestBase {
+                uint32_t gone_flat() const { return 1; }
+                uint32_t gone_nested() const { return 2; }
+                uint32_t kept() const { return 3; }
+            };
+        };
+        struct BfNestDerived : BfNestOuter::BfNestBase {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::BfNestDerived::new().within_unique_ptr();
+            assert_eq!(d.kept(), 3);
+        },
+        quote! {
+            generate!("BfNestDerived")
+            block_functions!("BfNestOuter_BfNestBase::gone_flat")
+            block_functions!("BfNestOuter::BfNestBase::gone_nested")
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["kept"],
+            &["gone_flat", "gone_nested"],
+        ))),
         None,
     );
 }
