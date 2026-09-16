@@ -634,6 +634,13 @@ impl IncludeCppConfig {
             .any(|entry| name_matches_directive(cpp_name, entry))
     }
 
+    /// Whether a `throws!` directive designates this function.
+    ///
+    /// `cpp_name` is one of the names the function answers to, on the same
+    /// terms as [`Self::is_on_function_blocklist`]: a method is asked about
+    /// under each spelling of the class which declares it and never under its
+    /// class-less name, and a caller asks about every spelling so that each
+    /// records its own match.
     pub fn is_on_throws_list(&self, cpp_name: &str) -> bool {
         self.throws_list
             .matches(|entry| function_name_matches_directive(cpp_name, entry))

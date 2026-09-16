@@ -94,18 +94,26 @@ functions are marked as throwing:
 |---------|---------|
 | `throws!("do_something")` | Any function named `do_something` |
 | `throws!("MyClass::method")` | Method `method` on class `MyClass` |
-| `throws!("ns::do_something")` | Function `do_something` in namespace `ns` |
+| `throws!("ns::do_something")` | Free function `do_something` in namespace `ns` |
 | `throws!("ns::MyClass::method")` | Method on a namespaced class |
 | `throws!("Outer::Inner::method")` | Method on a nested class |
 
 A nested class may also be named by the flattened `Outer_Inner` spelling
 autocxx knows it by, exactly as in `generate!`.
 
+The class may not be left off, exactly as in `block_functions!`:
+`throws!("ns::do_something")` names a free function in `ns`, never a method of
+some class in `ns`. A designation which names only the namespace of a method
+therefore matches nothing and is refused, rather than making an unrelated
+function of that name fallible.
+
 ### Partial matching
 
 Partial matching is supported: a shorter pattern will match functions in any
 namespace. For example, `throws!("do_something")` will match both a top-level
-`do_something` and `my_namespace::do_something`.
+`do_something` and `my_namespace::do_something` - and, since what is dropped
+there is the whole qualification rather than the class alone, a
+`MyClass::do_something` as well.
 
 ```rust,ignore,autocxx,hidecpp
 autocxx_integration_tests::doctest(

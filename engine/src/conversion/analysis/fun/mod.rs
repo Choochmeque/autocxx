@@ -3138,7 +3138,8 @@ impl<'a> FnAnalyzer<'a> {
             .unwrap_or_default();
 
         // Check if this function is marked as potentially throwing C++ exceptions.
-        // For methods, we also check with the class name prepended (e.g., "MyClass::method").
+        // A method is asked about only with the class name prepended (e.g.,
+        // "MyClass::method"), exactly as `block_functions!` asks.
         // Every spelling the class answers to, because a nested class has two:
         // the `Outer_Inner` bindgen flattened it into and the `Outer::Inner`
         // C++ itself uses, and the designation is written by whoever wrote the
@@ -3151,9 +3152,19 @@ impl<'a> FnAnalyzer<'a> {
         // leave a second designation naming this same function by another of
         // its spellings looking as though it matched nothing, and
         // `confirm_name_matching_directives_matched` would refuse it.
-        let designated_by_own_name = self
-            .config
-            .is_on_throws_list(&diagnostic_name.to_cpp_name());
+        //
+        // The class-less name is a free function's, and never a method's: a
+        // method's diagnostic name keeps the namespaces while dropping the
+        // class, so asking under it would let `throws!("ns::f")` designate the
+        // method `ns::C::f` - and count itself matched - with no free function
+        // `ns::f` in sight. A method answers only under the spellings of its
+        // class below, which is also how a name written with no namespaces at
+        // all still reaches it: the throws list matches any tail of the name
+        // asked about. Same rule as `is_blocked_by_directive`.
+        let designated_by_own_name = matches!(kind, FnKind::Function)
+            && self
+                .config
+                .is_on_throws_list(&diagnostic_name.to_cpp_name());
         let designated_by_class = match &kind {
             FnKind::Method { impl_for, .. } | FnKind::TraitMethod { impl_for, .. } => {
                 let mut designated = false;

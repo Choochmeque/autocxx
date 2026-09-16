@@ -661,10 +661,19 @@ macro_rules! smart_pointer {
 /// The syntax is:
 /// `throws!("function_name")`
 ///
-/// Qualified names are supported for namespaced functions and methods:
-/// * `throws!("do_something")` - matches any function named `do_something`
-/// * `throws!("MyClass::do_something")` - matches method `do_something` on `MyClass`
-/// * `throws!("my_namespace::do_something")` - matches `do_something` in `my_namespace`
+/// Name the function as C++ names it: a member function with the class which
+/// declares it in front, and a free function without a class, by its
+/// namespaces alone:
+/// * `throws!("MyClass::do_something")` - the method `do_something` of `MyClass`
+/// * `throws!("my_namespace::do_something")` - the free function `do_something`
+///   in `my_namespace`
+/// * `throws!("do_something")` - every function of that name, anywhere
+///
+/// The namespaces may be left off, at the cost the last of those shows: a name
+/// written short claims every function answering to it, in every class and
+/// every namespace. The class may not be left off, exactly as in
+/// [`block_functions`]: `throws!("my_namespace::do_something")` names a free
+/// function in `my_namespace`, never a method of some class in it.
 ///
 /// A designation which matches no function autocxx met is a build error. It
 /// would otherwise leave that function declared as never throwing, and an

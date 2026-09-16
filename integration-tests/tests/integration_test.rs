@@ -41707,6 +41707,75 @@ fn test_throws_directives_in_two_spellings_are_both_confirmed() {
     );
 }
 
+/// A designation naming a free function must not reach a method which shares
+/// the name. The name autocxx knows a method by for diagnostics keeps the
+/// namespaces and drops the class, so `fx_ovm::fx_Host::ping` answers to
+/// `fx_ovm::ping` under it - the very spelling which names the free function
+/// beside it. The free function becomes fallible; the method is called here
+/// unwrapped, which is how a `Result` on it would be caught.
+#[test]
+fn test_throws_on_a_free_function_leaves_a_same_named_method_alone() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        namespace fx_ovm {
+            inline void ping() { throw std::runtime_error(\"fx free ping\"); }
+            struct fx_Host {
+                uint32_t a;
+                uint32_t ping() const { return a; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let err = ffi::fx_ovm::ping().err().expect("this free function throws");
+            assert_eq!(err.what(), "fx free ping");
+            let host = ffi::fx_ovm::fx_Host { a: 7 };
+            assert_eq!(host.ping(), 7);
+        },
+        quote! {
+            generate!("fx_ovm::ping")
+            generate_pod!("fx_ovm::fx_Host")
+            throws!("fx_ovm::ping")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The class may not be left off a designation naming a method, any more than
+/// it may be left off a `block_functions!`. Written without it this names a
+/// free function in `fx_ovo`, there is none, and a designation which matched
+/// nothing is refused - rather than quietly making the method fallible on the
+/// strength of a name nobody wrote for it.
+#[test]
+fn test_throws_without_the_class_does_not_reach_a_method() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        namespace fx_ovo {
+            struct fx_Only {
+                uint32_t a;
+                void beep() const { throw std::runtime_error(\"fx beep\"); }
+            };
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_pod!("fx_ovo::fx_Only")
+            throws!("fx_ovo::beep")
+        },
+        None,
+        &["DirectiveMatchedNothing", "throws", "fx_ovo::beep"],
+    );
+}
+
 /// `exclude_impls!()` withholds every synthesized impl, which makes a
 /// `block_constructors!` beside it redundant rather than wrong. The class it
 /// names is right there, so it must not be reported as naming nothing.
