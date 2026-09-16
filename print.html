@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a215f5aa.js";
+            window.path_to_searchindex_js = "searchindex-702b644c.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -2837,29 +2837,76 @@ bug reports, try to investigate them. A fair proportion of the bug reports
 boil down to certain key known areas of technical debt or limitations,
 described below, and you can mark them as a duplicate or similar.</p>
 <p>Releases typically happen every month or two, dependent on what changes
-have been made. Ideally, autocxx would release after every single pull
-request but the process takes about 15 minutes (see below) so it’s not
-that frequent.</p>
+have been made.</p>
 <h2 id="release-process"><a class="header" href="#release-process">Release process</a></h2>
-<p>To make a new release of autocxx,</p>
+<p>A release is a tag push. <code>.github/workflows/release.yml</code> answers a tag matching
+<code>v*</code> by publishing to crates.io and creating the github release. It authenticates
+by OIDC through crates.io trusted publishing, so there is no API token in this
+repository’s secrets and nothing to rotate.</p>
+<p>Seven crates are published, and cargo works out the order from the
+dependencies: <code>autocxx-parser</code>, <code>autocxx-engine</code>, <code>autocxx-macro</code>, <code>autocxx</code>,
+<code>autocxx-build</code>, <code>autocxx-integration-tests</code>, <code>autocxx-gen</code>. The last is in the
+set because <code>autocxx-gen</code> dev-depends on it by exact version, so a release
+leaving it out cannot resolve. The other workspace members - <code>demo</code>,
+<code>tools/reduce</code>, <code>tools/mdbook-preprocessor</code>, <code>tools/patch-check</code> and
+<code>integration-tests/fixture-deps</code> - are not published, and the first three hold
+no crates.io name at all.</p>
+<p>To make a new release:</p>
 <ul>
-<li>First ensure there’s green CI on github.</li>
-<li>Check out <code>main</code> locally and ensure it’s up to date with <code>origin/main</code>.</li>
-<li>Make a new branch</li>
-<li>Run <code>tools/upgrade-version.sh OLD NEW</code> where <code>OLD</code> is the previous
-released version number, and <code>NEW</code> is the new version number.</li>
-<li>Commit that and make a PR; ensure it passes tests on github CI.</li>
-<li>If so, merge that PR, and update locally.</li>
-<li>Run <code>tools/publish-all.sh</code>. This will do the actual <code>cargo publish</code>
-for all the various crates. It first flattens bindgen’s sources out of the
-submodule into <code>engine/third_party/bindgen-src</code>, because <code>cargo package</code>
-cannot carry a directory containing a <code>Cargo.toml</code> and the submodule has two;
-see “Rolling bindgen” below. That directory is left untracked on purpose, so
-the publish runs <code>--allow-dirty</code>.</li>
-<li>On <a href="https://github.com/Choochmeque/autocxx/releases">github releases</a>,
-choose Draft a new release. Add a tag for <code>v0.X.Y</code>. Go through
-the process to automatically create release notes.</li>
+<li>Ensure there’s green CI on main.</li>
+<li>Make a branch and run <code>tools/upgrade-version.sh OLD NEW</code>, where <code>OLD</code> is the
+released version number and <code>NEW</code> is the new one. It rewrites the manifests
+only, so run <code>cargo check --workspace</code> after it and commit the moved
+<code>Cargo.lock</code> alongside them - CI builds <code>--locked</code>, and the release refuses a
+working tree carrying anything the tag does not. The version bump is an
+ordinary pull request; the workflow never edits a manifest, and refuses a tag
+which disagrees with one.</li>
+<li>Merge that pull request.</li>
+<li>Tag the merged commit <code>vNEW</code> and push the tag. The workflow refuses a tag
+pointing anywhere but main.</li>
 </ul>
+<p>The workflow runs three jobs. <code>gate</code> holds no publishing credential: it checks
+the tag’s commit and versions, then packages and builds all seven crates from
+their packaged form, which is everything the publish does except the upload. It
+hands on the flattened bindgen sources it built, so that what reaches crates.io
+is what it checked. <code>publish</code> mints a crates.io token, valid for thirty minutes,
+as its last step before uploading; it compiles nothing, because the OIDC claim a
+token is minted from is reachable by every step of the job that holds it, build
+scripts included. <code>github-release</code> creates the release with generated notes.</p>
+<p><code>publish</code> runs in a github environment named <code>release</code>, which is where required
+reviewers go if you want a manual gate between the tag and the upload.</p>
+<h3 id="cratesio-setup-once-per-crate"><a class="header" href="#cratesio-setup-once-per-crate">crates.io setup, once per crate</a></h3>
+<p>The workflow cannot publish anything until this is done, and it is done in the
+crates.io UI rather than here. For each of the seven crates, under Settings →
+Trusted Publishing → Add → GitHub:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Value</th></tr>
+</thead>
+<tbody>
+<tr><td>Repository owner</td><td><code>Choochmeque</code></td></tr>
+<tr><td>Repository name</td><td><code>autocxx</code></td></tr>
+<tr><td>Workflow filename</td><td><code>release.yml</code></td></tr>
+<tr><td>Environment</td><td><code>release</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>You must own the crate on crates.io to add this, and the crate must already
+exist there - a name’s first publish still needs an API token. Renaming the
+workflow file, the repository or the environment invalidates all seven
+configurations.</p>
+<p>Do all seven before the first tag. The dry run needs no credential, so it cannot
+tell you that the sixth crate’s configuration is missing; that shows up as a
+rejected upload after five crates have already been published.</p>
+<h3 id="when-a-publish-fails-partway"><a class="header" href="#when-a-publish-fails-partway">When a publish fails partway</a></h3>
+<p>cargo’s multi-crate publish is not atomic, and a crates.io publish cannot be
+undone or repeated. A run which uploads three crates and then fails leaves those
+three published; cargo warns that a version already exists rather than skipping
+it, so re-pushing the tag is not a clean retry. Publish what remains by hand -
+<code>tools/publish-all.sh</code> is the same sequence, run locally against an API token -
+and then move to a new version number rather than trying to complete the old
+one from CI.</p>
 <h2 id="rolling-bindgen"><a class="header" href="#rolling-bindgen">Rolling bindgen</a></h2>
 <p>The engine needs facts about C++ which bindgen does not report: access specifiers, special
 members, virtualness, the original C++ spelling behind a flattened nested name, and markers
@@ -2888,14 +2935,16 @@ absolute paths, and <code>crate::</code> becomes <code>crate::vendored_bindgen::
 </ul>
 <p>A checkout therefore needs <code>git submodule update --init --recursive</code>, and CI jobs which
 compile the engine check out with <code>submodules: recursive</code>.</p>
-<p>Publishing needs one more step, which <code>tools/publish-all.sh</code> runs. <code>cargo package</code> prunes
-every directory below the package root which contains a <code>Cargo.toml</code>, reading it as a
-separate package; neither <code>include</code> nor <code>exclude</code> lifts that, so the submodule can never
-reach crates.io as it stands. <code>AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine</code>
-therefore copies the sources to <code>engine/third_party/bindgen-src</code> with those manifests
-renamed, and <code>build.rs</code> prefers that directory when it exists - which in a published crate
-is always. It is left untracked, so the publish is <code>--allow-dirty</code> and no bindgen source is
-committed here.</p>
+<p>Publishing needs one more step, which the release workflow and
+<code>tools/publish-all.sh</code> both run. <code>cargo package</code> prunes every directory below the package
+root which contains a <code>Cargo.toml</code>, reading it as a separate package; neither <code>include</code> nor
+<code>exclude</code> lifts that, so the submodule can never reach crates.io as it stands.
+<code>AUTOCXX_VENDOR_BINDGEN=1 cargo build -p autocxx-engine</code> therefore copies the sources to
+<code>engine/third_party/bindgen-src</code> with those manifests renamed, and <code>build.rs</code> prefers the
+submodule where there is one - which in a published crate there never is. The copy is left
+untracked, so the publish is <code>--allow-dirty</code> and no bindgen source is committed here. The
+variable belongs on that one command: a packaged crate has no submodule to flatten, so a
+build script which saw it set there aborts the verification build.</p>
 <p>To move to a new bindgen release:</p>
 <ul>
 <li><code>cd engine/third_party/rust-bindgen &amp;&amp; git fetch &amp;&amp; git checkout &lt;new tag&gt;</code></li>
