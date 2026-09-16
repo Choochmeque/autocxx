@@ -108,7 +108,10 @@ pub(super) fn gen_function(
     let vis = analysis.vis;
     let kind = analysis.kind;
     let may_throw = analysis.may_throw;
-    let doc_attrs = minisynize_vec(fun.doc_attrs);
+    // What C++ documented, then autocxx's own note about the name it had to
+    // give this - which only exists where the two names differ.
+    let mut doc_attrs = minisynize_vec(fun.doc_attrs);
+    doc_attrs.extend(minisynize_vec(analysis.rename_doc));
     let deprecation = fun
         .deprecation
         .as_ref()

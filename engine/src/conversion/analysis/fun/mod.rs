@@ -57,8 +57,8 @@ use function_wrapper::{
 use itertools::Itertools;
 use quote::{quote, ToTokens};
 use syn::{
-    parse_quote, punctuated::Punctuated, token::Comma, Ident, Pat, PatType, ReturnType, Type,
-    TypePtr, TypeReference, Visibility,
+    parse_quote, punctuated::Punctuated, token::Comma, Attribute, Ident, Pat, PatType, ReturnType,
+    Type, TypePtr, TypeReference, Visibility,
 };
 
 use crate::{
@@ -196,6 +196,10 @@ pub(crate) struct FnAnalysis {
     pub(crate) rust_wrapper_needed: bool,
     /// Whether this function may throw C++ exceptions
     pub(crate) may_throw: bool,
+    /// Where the Rust name is not the name C++ spells this function with, a
+    /// doc attribute saying what C++ calls it and - for one of several
+    /// overloads - which of them this is. Empty otherwise. See [`rename_doc`].
+    pub(crate) rename_doc: Vec<Attribute>,
 }
 
 #[derive(Clone, Debug)]
@@ -1881,10 +1885,13 @@ impl<'a> FnAnalyzer<'a> {
                 ident = format!("{stem}{suffix}");
                 suffix += 1;
             }
-            let rust_name = self.get_overload_name(
+            // No declaration key: the note stands for a whole overload set,
+            // not any one declaration of the name.
+            let (rust_name, _) = self.get_overload_name(
                 derived.get_namespace(),
                 derived.get_final_item(),
                 rust_name,
+                None,
             );
             let ctx = self.error_context_for_method(&derived, &rust_name);
             results.push(Api::IgnoredItem {
@@ -2063,10 +2070,16 @@ impl<'a> FnAnalyzer<'a> {
                 // it through garbage collection - see
                 // `filter_apis_by_following_edges_from_allowlist`.
                 Member::Refuse(name, self_ty, rust_name, err) => {
-                    let rust_name = self.get_overload_name(
+                    // A refused member is still a declaration of its name, so
+                    // it counts toward the positions the bound members report.
+                    let cpp_declared_name = name
+                        .cpp_name_if_present()
+                        .map(|n| n.for_validation().to_string());
+                    let (rust_name, _) = self.get_overload_name(
                         self_ty.get_namespace(),
                         self_ty.get_final_item(),
                         rust_name,
+                        cpp_declared_name.as_deref(),
                     );
                     let ctx = self.error_context_for_method(&self_ty, &rust_name);
                     results.push(Api::IgnoredItem {
@@ -2190,10 +2203,17 @@ impl<'a> FnAnalyzer<'a> {
 
         let mut results = apis;
         for (name, self_ty, rust_name, from_class_template, template_parameters) in notes {
-            let rust_name = self.get_overload_name(
+            // A member function template is a declaration of its name too,
+            // though it runs after every method which is analyzed, so no
+            // bound method's position counts it.
+            let cpp_declared_name = name
+                .cpp_name_if_present()
+                .map(|n| n.for_validation().to_string());
+            let (rust_name, _) = self.get_overload_name(
                 self_ty.get_namespace(),
                 self_ty.get_final_item(),
                 rust_name,
+                cpp_declared_name.as_deref(),
             );
             let ctx = self.error_context_for_method(&self_ty, &rust_name);
             results.push(Api::IgnoredItem {
@@ -2306,6 +2326,18 @@ impl<'a> FnAnalyzer<'a> {
         // Work out naming, part one.
         let ideal_rust_name = ideal_rust_name(initial_rust_name, cpp_original_name);
 
+        // The name C++ declares this function under, keying the count of which
+        // declaration of that name this is. Falls back to the ideal Rust name,
+        // which is the C++ name wherever bindgen recorded no other. `None` for
+        // a function autocxx synthesized: that is no declaration and must not
+        // shift the count of one.
+        let cpp_declared_name: Option<String> =
+            matches!(fun.provenance, Provenance::Bindgen).then(|| {
+                cpp_original_name
+                    .map(|n| n.for_validation().to_string())
+                    .unwrap_or_else(|| ideal_rust_name.clone())
+            });
+
         // Let's spend some time figuring out the kind of this function (i.e. method,
         // virtual function, etc.)
         // Part one, work out if this is a static method.
@@ -2329,6 +2361,15 @@ impl<'a> FnAnalyzer<'a> {
             &ideal_rust_name,
             &self_ty,
         );
+        // `Some` only where the overload tracker had to number this function,
+        // and then the count of declarations of the same C++ name in the same
+        // scope which came first - i.e. which C++ declaration this is. Keyed
+        // by the C++ name, not the requested Rust name, which a keyword rename
+        // can land on another function's genuine name. It stays `None` for a
+        // name autocxx predetermined and for the synthesized casts and
+        // allocators below, none of which has a C++ declaration behind it. It
+        // exists to be documented; see `rename_doc`.
+        let mut overload_index = None;
         let (kind, error_context, rust_name) = if let Some(trait_details) = trait_details {
             trait_details
         } else if let Some(self_ty) = self_ty {
@@ -2355,8 +2396,16 @@ impl<'a> FnAnalyzer<'a> {
                 if let Some(constructor_suffix) = rust_name.strip_prefix(nested_type_ident) {
                     rust_name = format!("new{constructor_suffix}");
                 }
-                rust_name = predetermined_rust_name
-                    .unwrap_or_else(|| self.get_overload_name(ns, type_ident, rust_name));
+                rust_name = predetermined_rust_name.unwrap_or_else(|| {
+                    let (name, index) = self.get_overload_name(
+                        ns,
+                        type_ident,
+                        rust_name,
+                        cpp_declared_name.as_deref(),
+                    );
+                    overload_index = index;
+                    name
+                });
                 let error_context = self.error_context_for_method(&self_ty, &rust_name);
 
                 // A copy constructor taking a non-const source - `T(T&)` or
@@ -2422,8 +2471,16 @@ impl<'a> FnAnalyzer<'a> {
                     )
                 }
             } else if matches!(fun.special_member, Some(SpecialMemberKind::Destructor)) {
-                rust_name = predetermined_rust_name
-                    .unwrap_or_else(|| self.get_overload_name(ns, type_ident, rust_name));
+                rust_name = predetermined_rust_name.unwrap_or_else(|| {
+                    let (name, index) = self.get_overload_name(
+                        ns,
+                        type_ident,
+                        rust_name,
+                        cpp_declared_name.as_deref(),
+                    );
+                    overload_index = index;
+                    name
+                });
                 let error_context = self.error_context_for_method(&self_ty, &rust_name);
                 let ty = Type::Path(self_ty.to_type_path());
                 (
@@ -2483,8 +2540,16 @@ impl<'a> FnAnalyzer<'a> {
                     }
                 };
                 // Disambiguate overloads.
-                let rust_name = predetermined_rust_name
-                    .unwrap_or_else(|| self.get_overload_name(ns, type_ident, rust_name));
+                let rust_name = predetermined_rust_name.unwrap_or_else(|| {
+                    let (name, index) = self.get_overload_name(
+                        ns,
+                        type_ident,
+                        rust_name,
+                        cpp_declared_name.as_deref(),
+                    );
+                    overload_index = index;
+                    name
+                });
                 let error_context = self.error_context_for_method(&self_ty, &rust_name);
                 (
                     FnKind::Method {
@@ -2498,13 +2563,23 @@ impl<'a> FnAnalyzer<'a> {
         } else {
             // Not a method.
             // What shall we call this function? It may be overloaded.
-            let rust_name = self.get_function_overload_name(ns, ideal_rust_name);
+            let (rust_name, index) =
+                self.get_function_overload_name(ns, ideal_rust_name, cpp_declared_name.as_deref());
+            overload_index = index;
             (
                 FnKind::Function,
                 ErrorContext::new_for_item(make_ident(&rust_name)),
                 rust_name,
             )
         };
+
+        let rename_doc = rename_doc(
+            &rust_name,
+            cpp_original_name,
+            &fun.provenance,
+            &kind,
+            overload_index,
+        );
 
         // Whether this is C++'s `operator=`. Three of the ignore reasons below
         // turn on it, because the reason recorded for an assignment operator is
@@ -3228,6 +3303,7 @@ impl<'a> FnAnalyzer<'a> {
             externally_callable,
             rust_wrapper_needed,
             may_throw,
+            rename_doc,
         };
         // For everything other than functions, the API name is immutable.
         // It would be nice to get to that point with functions, but at present
@@ -3326,9 +3402,20 @@ impl<'a> FnAnalyzer<'a> {
         }
     }
 
-    fn get_overload_name(&mut self, ns: &Namespace, type_ident: &str, rust_name: String) -> String {
+    /// The Rust name for a method, and the declaration ordinal
+    /// [`OverloadTracker`] reports alongside it. `cpp_declared_name` is what
+    /// C++ calls the declaration, or `None` where there is no declaration -
+    /// a synthesized function, or a note standing for a whole overload set -
+    /// which must not shift any real declaration's count.
+    fn get_overload_name(
+        &mut self,
+        ns: &Namespace,
+        type_ident: &str,
+        rust_name: String,
+        cpp_declared_name: Option<&str>,
+    ) -> (String, Option<usize>) {
         let overload_tracker = self.overload_trackers_by_mod.entry(ns.clone()).or_default();
-        overload_tracker.get_method_real_name(type_ident, rust_name)
+        overload_tracker.get_method_real_name(type_ident, rust_name, cpp_declared_name)
     }
 
     /// Determine if this synthetic function should actually result in the implementation
@@ -3342,7 +3429,8 @@ impl<'a> FnAnalyzer<'a> {
     ) -> Option<(FnKind, ErrorContext, String)> {
         synthesis.as_ref().and_then(|synthesis| match synthesis {
             TraitSynthesis::Cast { to_type, mutable } => {
-                let rust_name = self.get_function_overload_name(ns, ideal_rust_name.to_string());
+                let (rust_name, _) =
+                    self.get_function_overload_name(ns, ideal_rust_name.to_string(), None);
                 let from_type = self_ty.as_ref().unwrap();
                 let from_type_path = from_type.to_type_path();
                 let to_type = to_type.to_type_path();
@@ -3422,8 +3510,8 @@ impl<'a> FnAnalyzer<'a> {
         method_name: &str,
         kind: TraitMethodKind,
     ) -> Option<(FnKind, ErrorContext, String)> {
-        let rust_name =
-            self.get_function_overload_name(ty.get_namespace(), ideal_rust_name.to_string());
+        let (rust_name, _) =
+            self.get_function_overload_name(ty.get_namespace(), ideal_rust_name.to_string(), None);
         let typ = ty.to_type_path();
         Some((
             FnKind::TraitMethod {
@@ -3445,9 +3533,17 @@ impl<'a> FnAnalyzer<'a> {
         ))
     }
 
-    fn get_function_overload_name(&mut self, ns: &Namespace, ideal_rust_name: String) -> String {
+    /// The Rust name for a free function, and the declaration ordinal
+    /// [`OverloadTracker`] reports alongside it. `cpp_declared_name` as on
+    /// [`FnAnalyzer::get_overload_name`].
+    fn get_function_overload_name(
+        &mut self,
+        ns: &Namespace,
+        ideal_rust_name: String,
+        cpp_declared_name: Option<&str>,
+    ) -> (String, Option<usize>) {
         let overload_tracker = self.overload_trackers_by_mod.entry(ns.clone()).or_default();
-        overload_tracker.get_function_real_name(ideal_rust_name)
+        overload_tracker.get_function_real_name(ideal_rust_name, cpp_declared_name)
     }
 
     fn subclasses_by_superclass(&self, sup: &QualifiedName) -> impl Iterator<Item = SubclassName> {
@@ -4851,6 +4947,89 @@ fn ideal_rust_name(
             }
         }
     }
+}
+
+/// A note saying which C++ declaration a function came from, for a function
+/// autocxx could not give the name C++ spells it with.
+///
+/// Without one, `get1` or `new2` in the generated code means counting
+/// declarations in the header to find out which overload it is, and `type_`
+/// means guessing that C++ wrote `type`. The book says as much about the
+/// numbering: "essentially awful without rust-analyzer IDE support" - which is
+/// exactly where a doc comment shows up.
+///
+/// What is said here is deliberately less than the C++ signature a reader would
+/// most like. By this point the parameters have been through bindgen and carry
+/// Rust types - a `const int&` arrives as `*const c_int` - so writing a C++
+/// parameter list out would mean guessing at spellings autocxx no longer holds,
+/// and a plausible wrong signature is worse than a true short one. The C++ name
+/// and the position among the declarations of that name are both recorded
+/// facts, and the position is the one the Rust name loses: a suffix skips
+/// numbers taken by real functions, so `get3` need not be the fourth `get`.
+///
+/// The position is counted in the order autocxx met the declarations, and the
+/// note claims exactly that rather than the header's order, which analysis does
+/// not always follow - a member function template is met after every ordinary
+/// method. An ordinal of 0 means no earlier declaration shares the C++ name at
+/// all: the requested Rust name was taken by something else, as `type`'s
+/// keyword rename `type_` is by a genuine `type_`, and calling that an
+/// overload would number a set of one - so only the name is said.
+fn rename_doc(
+    rust_name: &str,
+    cpp_original_name: Option<&CppOriginalName>,
+    provenance: &Provenance,
+    kind: &FnKind,
+    overload_index: Option<usize>,
+) -> Vec<Attribute> {
+    if !matches!(provenance, Provenance::Bindgen) {
+        // autocxx synthesized this; there is no C++ declaration to point at.
+        return Vec::new();
+    }
+    let Some(cpp_name) = cpp_original_name.map(CppOriginalName::for_validation) else {
+        return Vec::new();
+    };
+    // A type has one destructor, so `drop` has nothing to disambiguate.
+    if matches!(
+        kind,
+        FnKind::TraitMethod {
+            kind: TraitMethodKind::Destructor,
+            ..
+        }
+    ) {
+        return Vec::new();
+    }
+    let is_constructor = matches!(
+        kind,
+        FnKind::Method {
+            method_kind: MethodKind::Constructor { .. },
+            ..
+        } | FnKind::TraitMethod {
+            kind: TraitMethodKind::CopyConstructor | TraitMethodKind::MoveConstructor,
+            ..
+        }
+    );
+    let note = match (overload_index, is_constructor) {
+        // A constructor's C++ name is the type's, so naming it says nothing the
+        // `impl` block does not; which of the constructors this is, does.
+        (Some(index @ 1..), true) => format!(
+            " C++: constructor {} of `{cpp_name}`, counting in the order autocxx met them.",
+            index + 1
+        ),
+        (Some(index @ 1..), false) => format!(
+            " C++: `{cpp_name}`, declaration {} of that name, counting in the order autocxx met \
+             them.",
+            index + 1
+        ),
+        // Renamed although no earlier declaration shares the C++ name: the
+        // requested Rust name was taken by something else. Nothing to number.
+        (Some(0), true) => format!(" C++: a constructor of `{cpp_name}`."),
+        (Some(0), false) => format!(" C++: `{cpp_name}`."),
+        // A lone constructor is the only one a reader could mean.
+        (None, true) => return Vec::new(),
+        (None, false) if rust_name != cpp_name => format!(" C++: `{cpp_name}`."),
+        (None, false) => return Vec::new(),
+    };
+    make_doc_attrs(note)
 }
 
 /// The Rust name a note left in place of a C++ member would take, or `None`

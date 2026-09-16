@@ -17,6 +17,10 @@ type Offsets = HashMap<String, usize>;
 struct ScopeNames {
     offsets: Offsets,
     assigned: HashSet<String>,
+    /// How many declarations of each C++ name have come through, keyed by
+    /// the name C++ spells - not the requested Rust name, which a keyword
+    /// rename can land on another function's genuine name.
+    declarations: Offsets,
 }
 
 /// Registry of all the overloads of a function found within a given
@@ -69,15 +73,42 @@ impl OverloadTracker {
         };
     }
 
-    pub(crate) fn get_function_real_name(&mut self, found_name: String) -> String {
-        self.get_name(None, found_name)
+    pub(crate) fn get_function_real_name(
+        &mut self,
+        found_name: String,
+        original_name: Option<&str>,
+    ) -> (String, Option<usize>) {
+        self.get_name(None, found_name, original_name)
     }
 
-    pub(crate) fn get_method_real_name(&mut self, type_name: &str, found_name: String) -> String {
-        self.get_name(Some(type_name), found_name)
+    pub(crate) fn get_method_real_name(
+        &mut self,
+        type_name: &str,
+        found_name: String,
+        original_name: Option<&str>,
+    ) -> (String, Option<usize>) {
+        self.get_name(Some(type_name), found_name, original_name)
     }
 
-    fn get_name(&mut self, type_name: Option<&str>, cpp_method_name: String) -> String {
+    /// The Rust name this function gets, and - where that is not the name it
+    /// asked for - how many declarations of the same C++ name came through
+    /// this scope first. That count is what tells a reader of the generated
+    /// code which C++ declaration a numbered name came from, and is not
+    /// recoverable from the suffix: the suffix skips numbers taken by real
+    /// functions.
+    ///
+    /// The count is keyed by `original_name` - what C++ calls the function -
+    /// not by the requested Rust name: `type`'s keyword rename `type_` beside
+    /// a genuine `type_` collides in Rust while C++ declares each name once,
+    /// so neither is an overload of anything. `None` marks a function with no
+    /// C++ declaration behind it (synthesized, or standing for a whole
+    /// overload set), which must not shift any declaration's count.
+    fn get_name(
+        &mut self,
+        type_name: Option<&str>,
+        cpp_method_name: String,
+        original_name: Option<&str>,
+    ) -> (String, Option<usize>) {
         let Self {
             fn_names,
             method_names_by_type,
@@ -97,6 +128,12 @@ impl OverloadTracker {
             ),
             None => (fn_names, &*reserved_fn_names),
         };
+        let declaration_ordinal = original_name.map(|original| {
+            let count = scope.declarations.entry(original.to_string()).or_default();
+            let prior = *count;
+            *count += 1;
+            prior
+        });
         let offset = scope.offsets.entry(cpp_method_name.clone()).or_default();
         let this_offset = *offset;
         *offset += 1;
@@ -106,14 +143,14 @@ impl OverloadTracker {
             // between them can do. Handing it out twice would generate two
             // Rust items of the same name.
             scope.assigned.insert(cpp_method_name.clone());
-            return cpp_method_name;
+            return (cpp_method_name, None);
         }
         let mut n = this_offset.max(1);
         loop {
             let candidate = format!("{cpp_method_name}{n}");
             if !reserved_names.contains(&candidate) && !scope.assigned.contains(&candidate) {
                 scope.assigned.insert(candidate.clone());
-                return candidate;
+                return (candidate, declaration_ordinal);
             }
             n += 1;
         }
@@ -124,21 +161,44 @@ impl OverloadTracker {
 mod tests {
     use super::OverloadTracker;
 
+    /// The name assigned, plus the ordinal reported alongside it: `None` where
+    /// the function kept the name it asked for, and otherwise how many
+    /// declarations of the same C++ name came through this scope first. Here
+    /// the C++ name is the requested name, as it is wherever no keyword rename
+    /// is in play.
+    fn fun(ot: &mut OverloadTracker, name: &str) -> (String, Option<usize>) {
+        ot.get_function_real_name(name.into(), Some(name))
+    }
+
+    /// A function whose requested Rust name is not what C++ calls it - a
+    /// keyword rename, `type` asking for `type_`.
+    fn fun_renamed(
+        ot: &mut OverloadTracker,
+        requested: &str,
+        cpp: &str,
+    ) -> (String, Option<usize>) {
+        ot.get_function_real_name(requested.into(), Some(cpp))
+    }
+
+    fn method(ot: &mut OverloadTracker, ty: &str, name: &str) -> (String, Option<usize>) {
+        ot.get_method_real_name(ty, name.into(), Some(name))
+    }
+
     #[test]
     fn test_by_function() {
         let mut ot = OverloadTracker::default();
-        assert_eq!(ot.get_function_real_name("bob".into()), "bob");
-        assert_eq!(ot.get_function_real_name("bob".into()), "bob1");
-        assert_eq!(ot.get_function_real_name("bob".into()), "bob2");
+        assert_eq!(fun(&mut ot, "bob"), ("bob".into(), None));
+        assert_eq!(fun(&mut ot, "bob"), ("bob1".into(), Some(1)));
+        assert_eq!(fun(&mut ot, "bob"), ("bob2".into(), Some(2)));
     }
 
     #[test]
     fn test_by_method() {
         let mut ot = OverloadTracker::default();
-        assert_eq!(ot.get_method_real_name("Ty1", "bob".into()), "bob");
-        assert_eq!(ot.get_method_real_name("Ty1", "bob".into()), "bob1");
-        assert_eq!(ot.get_method_real_name("Ty2", "bob".into()), "bob");
-        assert_eq!(ot.get_method_real_name("Ty2", "bob".into()), "bob1");
+        assert_eq!(method(&mut ot, "Ty1", "bob"), ("bob".into(), None));
+        assert_eq!(method(&mut ot, "Ty1", "bob"), ("bob1".into(), Some(1)));
+        assert_eq!(method(&mut ot, "Ty2", "bob"), ("bob".into(), None));
+        assert_eq!(method(&mut ot, "Ty2", "bob"), ("bob1".into(), Some(1)));
     }
 
     #[test]
@@ -148,10 +208,12 @@ mod tests {
         let mut ot = OverloadTracker::default();
         ot.reserve(Some("Ty"), "bob");
         ot.reserve(Some("Ty"), "bob2");
-        assert_eq!(ot.get_method_real_name("Ty", "bob".into()), "bob");
-        assert_eq!(ot.get_method_real_name("Ty", "bob".into()), "bob1");
-        assert_eq!(ot.get_method_real_name("Ty", "bob".into()), "bob3");
-        assert_eq!(ot.get_method_real_name("Ty", "bob2".into()), "bob2");
+        assert_eq!(method(&mut ot, "Ty", "bob"), ("bob".into(), None));
+        assert_eq!(method(&mut ot, "Ty", "bob"), ("bob1".into(), Some(1)));
+        // The suffix skipped a number, which is exactly why the ordinal is
+        // reported rather than read back off the name.
+        assert_eq!(method(&mut ot, "Ty", "bob"), ("bob3".into(), Some(2)));
+        assert_eq!(method(&mut ot, "Ty", "bob2"), ("bob2".into(), None));
     }
 
     #[test]
@@ -160,11 +222,11 @@ mod tests {
         ot.reserve(None, "g");
         ot.reserve(None, "g1");
         ot.reserve(None, "g2");
-        assert_eq!(ot.get_function_real_name("g".into()), "g");
-        assert_eq!(ot.get_function_real_name("g".into()), "g3");
-        assert_eq!(ot.get_function_real_name("g".into()), "g4");
-        assert_eq!(ot.get_function_real_name("g1".into()), "g1");
-        assert_eq!(ot.get_function_real_name("g2".into()), "g2");
+        assert_eq!(fun(&mut ot, "g"), ("g".into(), None));
+        assert_eq!(fun(&mut ot, "g"), ("g3".into(), Some(1)));
+        assert_eq!(fun(&mut ot, "g"), ("g4".into(), Some(2)));
+        assert_eq!(fun(&mut ot, "g1"), ("g1".into(), None));
+        assert_eq!(fun(&mut ot, "g2"), ("g2".into(), None));
     }
 
     #[test]
@@ -173,7 +235,7 @@ mod tests {
         // first occurrence.
         let mut ot = OverloadTracker::default();
         ot.reserve(None, "solo");
-        assert_eq!(ot.get_function_real_name("solo".into()), "solo");
+        assert_eq!(fun(&mut ot, "solo"), ("solo".into(), None));
     }
 
     #[test]
@@ -182,11 +244,11 @@ mod tests {
         let mut ot = OverloadTracker::default();
         ot.reserve(None, "f");
         ot.reserve(None, "f1");
-        assert_eq!(ot.get_function_real_name("f".into()), "f");
-        assert_eq!(ot.get_function_real_name("f".into()), "f2");
-        assert_eq!(ot.get_function_real_name("f1".into()), "f1");
+        assert_eq!(fun(&mut ot, "f"), ("f".into(), None));
+        assert_eq!(fun(&mut ot, "f"), ("f2".into(), Some(1)));
+        assert_eq!(fun(&mut ot, "f1"), ("f1".into(), None));
         // f1's own overload takes f11; that's free.
-        assert_eq!(ot.get_function_real_name("f1".into()), "f11");
+        assert_eq!(fun(&mut ot, "f1"), ("f11".into(), Some(1)));
     }
 
     #[test]
@@ -196,17 +258,80 @@ mod tests {
         // honoured within Ty2 itself.
         let mut ot = OverloadTracker::default();
         ot.reserve(Some("Ty2"), "bob1");
-        assert_eq!(ot.get_method_real_name("Ty1", "bob".into()), "bob");
-        assert_eq!(ot.get_method_real_name("Ty1", "bob".into()), "bob1");
-        assert_eq!(ot.get_method_real_name("Ty2", "bob".into()), "bob");
-        assert_eq!(ot.get_method_real_name("Ty2", "bob".into()), "bob2");
+        assert_eq!(method(&mut ot, "Ty1", "bob"), ("bob".into(), None));
+        assert_eq!(method(&mut ot, "Ty1", "bob"), ("bob1".into(), Some(1)));
+        assert_eq!(method(&mut ot, "Ty2", "bob"), ("bob".into(), None));
+        assert_eq!(method(&mut ot, "Ty2", "bob"), ("bob2".into(), Some(1)));
     }
 
     #[test]
     fn test_free_fn_reservation_does_not_affect_methods() {
         let mut ot = OverloadTracker::default();
         ot.reserve(None, "bob1");
-        assert_eq!(ot.get_method_real_name("Ty", "bob".into()), "bob");
-        assert_eq!(ot.get_method_real_name("Ty", "bob".into()), "bob1");
+        assert_eq!(method(&mut ot, "Ty", "bob"), ("bob".into(), None));
+        assert_eq!(method(&mut ot, "Ty", "bob"), ("bob1".into(), Some(1)));
+    }
+
+    #[test]
+    fn test_a_name_taken_by_another_names_suffix_reports_no_earlier_overload() {
+        // `foo1` arriving after `foo`'s suffix already took that name is the
+        // first `foo1`, however it ends up spelled, so there is no overload
+        // ordinal to report for it.
+        let mut ot = OverloadTracker::default();
+        assert_eq!(fun(&mut ot, "foo"), ("foo".into(), None));
+        assert_eq!(fun(&mut ot, "foo"), ("foo1".into(), Some(1)));
+        assert_eq!(fun(&mut ot, "foo1"), ("foo11".into(), Some(0)));
+    }
+
+    #[test]
+    fn test_ordinal_counts_cpp_declarations_not_rust_requests() {
+        // `void type_(); void type(int);` - the keyword rename of `type`
+        // requests `type_` and collides with the genuine `type_`, but C++
+        // declares each name once, so neither has an earlier declaration
+        // to count.
+        let mut ot = OverloadTracker::default();
+        assert_eq!(
+            fun_renamed(&mut ot, "type_", "type_"),
+            ("type_".into(), None)
+        );
+        assert_eq!(
+            fun_renamed(&mut ot, "type_", "type"),
+            ("type_1".into(), Some(0))
+        );
+    }
+
+    #[test]
+    fn test_ordinal_counts_every_declaration_of_the_cpp_name() {
+        // `void type(); void type(int);` - two declarations of `type`, both
+        // requesting the keyword rename `type_`.
+        let mut ot = OverloadTracker::default();
+        assert_eq!(
+            fun_renamed(&mut ot, "type_", "type"),
+            ("type_".into(), None)
+        );
+        assert_eq!(
+            fun_renamed(&mut ot, "type_", "type"),
+            ("type_1".into(), Some(1))
+        );
+    }
+
+    #[test]
+    fn test_no_original_name_reports_and_shifts_no_ordinal() {
+        // A synthesized function has no C++ declaration behind it: it takes a
+        // numbered name but neither reports a position nor shifts the count
+        // of a real declaration arriving later.
+        let mut ot = OverloadTracker::default();
+        assert_eq!(
+            ot.get_function_real_name("f".into(), None),
+            ("f".into(), None)
+        );
+        assert_eq!(
+            ot.get_function_real_name("f".into(), None),
+            ("f1".into(), None)
+        );
+        assert_eq!(
+            ot.get_function_real_name("f".into(), Some("f")),
+            ("f2".into(), Some(0))
+        );
     }
 }

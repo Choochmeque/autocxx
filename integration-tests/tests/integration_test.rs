@@ -42080,3 +42080,153 @@ fn test_block_functions_leaves_no_subclass_items() {
         }),
     );
 }
+/// autocxx numbers overloads `get`, `get1`, `get2`, and the generated code
+/// says nothing about which C++ declaration each one came from - the book's
+/// own verdict is that this is "essentially awful without rust-analyzer IDE
+/// support", and an IDE shows doc comments. So each renamed function carries
+/// one naming the C++ declaration behind it.
+#[test]
+fn test_numbered_overloads_say_which_cpp_declaration_they_are() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Thing {
+        public:
+            uint32_t get() const { return 1; }
+            uint32_t get(uint32_t x) const { return x; }
+            uint32_t get(uint32_t x, uint32_t y) const { return x + y; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let t = ffi::Thing::new().within_unique_ptr();
+            assert_eq!(t.get2(2, 3), 5);
+        },
+        quote! {
+            generate!("Thing")
+        },
+        None,
+        Some(make_checks(vec![
+            make_string_finder(vec![
+                "\" C++: `get`, declaration 2 of that name, counting in the order autocxx met them.\""
+                    .to_string(),
+                "\" C++: `get`, declaration 3 of that name, counting in the order autocxx met them.\""
+                    .to_string(),
+            ]),
+            // The first `get` keeps its C++ name, so there is nothing to say
+            // about it and nothing is said.
+            make_string_absence_finder(vec![
+                "\" C++: `get`, declaration 1 of that name".to_string()
+            ]),
+        ])),
+        None,
+    );
+}
+
+/// Constructors are numbered in the same way and lose even the C++ name doing
+/// it: nothing in `new1` says which `Thing(..)` it calls.
+#[test]
+fn test_numbered_constructors_say_which_cpp_declaration_they_are() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Thing {
+        public:
+            Thing() : a(0) {}
+            Thing(uint32_t x) : a(x) {}
+            uint32_t get() const { return a; }
+        private:
+            uint32_t a;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let t = ffi::Thing::new1(7).within_unique_ptr();
+            assert_eq!(t.get(), 7);
+        },
+        quote! {
+            generate!("Thing")
+        },
+        None,
+        Some(make_checks(vec![
+            make_string_finder(vec![
+                "\" C++: constructor 2 of `Thing`, counting in the order autocxx met them.\""
+                    .to_string(),
+            ]),
+            // A lone `new` would be the only constructor there is, and the
+            // implicit copy and move constructors autocxx synthesizes have no
+            // C++ declaration to point at.
+            make_string_absence_finder(vec!["\" C++: constructor 1 of".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// The other rename: a C++ name Rust will not accept as an identifier. Here
+/// the Rust name is not a number away from the C++ one, so the note is just
+/// the name.
+#[test]
+fn test_functions_renamed_off_a_rust_keyword_say_their_cpp_name() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class Keywords {
+        public:
+            uint32_t type() const { return 1; }
+            uint32_t match() const { return 2; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let k = ffi::Keywords::new().within_unique_ptr();
+            assert_eq!(k.type_(), 1);
+            assert_eq!(k.match_(), 2);
+        },
+        quote! {
+            generate!("Keywords")
+        },
+        None,
+        Some(make_string_finder(vec![
+            "\" C++: `type`.\"".to_string(),
+            "\" C++: `match`.\"".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The two renames colliding: `type`'s keyword rename requests `type_`, which
+/// the genuine `type_` beside it already holds. C++ declares each name once,
+/// so there is no overload to number - the note is the name alone, not
+/// "declaration 2" of a `type` C++ declares one of.
+#[test]
+fn test_keyword_rename_colliding_with_a_genuine_name_is_not_called_an_overload() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline uint32_t type_() { return 1; }
+        inline uint32_t type(uint32_t x) { return x + 10; }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::type_(), 1);
+            assert_eq!(ffi::type_1(2), 12);
+        },
+        quote! {
+            generate!("type_")
+            generate!("type")
+        },
+        None,
+        Some(make_checks(vec![
+            make_string_finder(vec!["\" C++: `type`.\"".to_string()]),
+            make_string_absence_finder(vec![
+                "of that name".to_string(),
+                "\" C++: constructor".to_string(),
+            ]),
+        ])),
+        None,
+    );
+}
