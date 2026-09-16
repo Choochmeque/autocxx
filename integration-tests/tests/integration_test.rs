@@ -9209,6 +9209,127 @@ fn test_inherited_method_declines_a_base_whose_own_name_is_merged() {
     );
 }
 
+/// The merged name leaves a note too, and names the base which merged it.
+/// Declining it used to be the one silent arm of this gate, so the name went
+/// missing from the deriving class with nothing said - the same disappearance
+/// the overload-set note above exists to stop.
+#[test]
+fn test_inherited_merged_name_leaves_a_note() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_MA {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_MB : public inh_MA {
+        public:
+            using inh_MA::foo;
+            uint32_t foo(uint32_t) const { return 2; }
+            uint32_t solo() const { return 5; }
+        };
+        class inh_MD : public inh_MB {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::inh_MD::new().within_unique_ptr();
+            // The name the base does not merge still arrives.
+            assert_eq!(d.solo(), 5);
+        },
+        directives_from_lists(&["inh_MD"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "fn foo (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+            "The base class inh_MB declares this name both for itself and through a using-declaration".to_string(),
+            "Call the member you want on a reference to inh_MB instead".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// The note names the base by its C++ spelling, as the overload-set note does:
+/// bindgen's identifier for a nested base is the flattened `inh_NMOuter_MB`,
+/// which names nothing in C++.
+#[test]
+fn test_inherited_merged_name_note_spells_a_nested_base_in_cpp() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_NMOuter {
+        public:
+            class MA {
+            public:
+                uint32_t foo() const { return 1; }
+            };
+            class MB : public MA {
+            public:
+                using MA::foo;
+                uint32_t foo(uint32_t) const { return 2; }
+            };
+        };
+        class inh_NMD : public inh_NMOuter::MB {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_NMD::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_NMD"], &[], None),
+        None,
+        Some(make_string_finder(vec![
+            "The base class inh_NMOuter::MB declares this name both for itself".to_string(),
+            "on a reference to inh_NMOuter::MB instead".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// One note for the name, not one per member of the merged set: the base here
+/// declares two members of `foo` beside its using-declaration, and the gate
+/// reaches each of them.
+#[test]
+fn test_inherited_merged_name_notes_once_per_name() {
+    struct OneNote;
+    impl CodeCheckerFns for OneNote {
+        fn check_rust(&self, rs: syn::File) -> Result<(), TestError> {
+            let text = quote::quote!(#rs).to_string();
+            let count = text.matches("declares this name both for itself").count();
+            if count != 1 {
+                return Err(TestError::RsCodeExaminationFail(format!(
+                    "expected exactly one merged-name note, found {count}"
+                )));
+            }
+            Ok(())
+        }
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        class inh_RA {
+        public:
+            uint32_t foo() const { return 1; }
+        };
+        class inh_RB : public inh_RA {
+        public:
+            using inh_RA::foo;
+            uint32_t foo(uint32_t) const { return 2; }
+            uint32_t foo(uint32_t, uint32_t) const { return 3; }
+        };
+        class inh_RD : public inh_RB {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _d = ffi::inh_RD::new().within_unique_ptr();
+        },
+        directives_from_lists(&["inh_RD"], &[], None),
+        None,
+        Some(Box::new(OneNote)),
+        None,
+    );
+}
+
 /// A using-declaration is a declaration of the name in the class which wrote
 /// it, and this one puts the inherited `foo` behind `private:`.
 #[test]
@@ -41704,6 +41825,75 @@ fn test_throws_directives_in_two_spellings_are_both_confirmed() {
         None,
         None,
         None,
+    );
+}
+
+/// A designation naming a free function must not reach a method which shares
+/// the name. The name autocxx knows a method by for diagnostics keeps the
+/// namespaces and drops the class, so `fx_ovm::fx_Host::ping` answers to
+/// `fx_ovm::ping` under it - the very spelling which names the free function
+/// beside it. The free function becomes fallible; the method is called here
+/// unwrapped, which is how a `Result` on it would be caught.
+#[test]
+fn test_throws_on_a_free_function_leaves_a_same_named_method_alone() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        namespace fx_ovm {
+            inline void ping() { throw std::runtime_error(\"fx free ping\"); }
+            struct fx_Host {
+                uint32_t a;
+                uint32_t ping() const { return a; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let err = ffi::fx_ovm::ping().err().expect("this free function throws");
+            assert_eq!(err.what(), "fx free ping");
+            let host = ffi::fx_ovm::fx_Host { a: 7 };
+            assert_eq!(host.ping(), 7);
+        },
+        quote! {
+            generate!("fx_ovm::ping")
+            generate_pod!("fx_ovm::fx_Host")
+            throws!("fx_ovm::ping")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// The class may not be left off a designation naming a method, any more than
+/// it may be left off a `block_functions!`. Written without it this names a
+/// free function in `fx_ovo`, there is none, and a designation which matched
+/// nothing is refused - rather than quietly making the method fallible on the
+/// strength of a name nobody wrote for it.
+#[test]
+fn test_throws_without_the_class_does_not_reach_a_method() {
+    let hdr = indoc! {"
+        #include <stdexcept>
+        #include <cstdint>
+        namespace fx_ovo {
+            struct fx_Only {
+                uint32_t a;
+                void beep() const { throw std::runtime_error(\"fx beep\"); }
+            };
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate_pod!("fx_ovo::fx_Only")
+            throws!("fx_ovo::beep")
+        },
+        None,
+        &["DirectiveMatchedNothing", "throws", "fx_ovo::beep"],
     );
 }
 

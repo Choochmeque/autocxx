@@ -286,6 +286,12 @@ pub enum ConvertErrorFromCpp {
         base: String,
         count: usize,
     },
+    #[error("The base class {base} declares this name both for itself and through a using-declaration, so its members of that name are a set merged with a base of its own, and autocxx inherits a base class member onto a deriving class only where the base declares exactly one member of the name. The shim it would write calls the member by name on the receiver cast to the base, and which of a merged set the call would pick is no more answerable than which of an overload set - less so, since bindgen reports the using-declaration without saying how many members it brings in. Call the member you want on a reference to {base} instead - where that base is generated too, its AsRef impl hands you a shared one, which reaches the members callable on a const receiver - or bind a C++ function of your own which takes the deriving class and picks the member there; the mutable ones need that route.")]
+    InheritedMergedName {
+        /// The base's C++ spelling: bindgen's flattened identifier for a
+        /// nested base (`Outer_Base`) names nothing in C++.
+        base: String,
+    },
     #[error("autocxx could not read the Rust signature bindgen reported for this member function of a class template: {0}. Nothing about the C++ decides this - bindgen renders that signature from the Rust types it would itself have generated - so there is nothing to change in the header; please report it.")]
     TemplateMemberSignatureNotRust(String),
     #[error("This is a member function template, declared with template parameters of its own ({0} of them). autocxx does not bind member function templates: a call has to reach one chosen specialization, and nothing autocxx generates can name one. Bind a non-template C++ function which calls it, choosing the template arguments there. Writing an explicit specialization or an explicit instantiation in the header is not enough on its own - libclang reports either outside the class, so autocxx does not see it as a member. See https://github.com/google/autocxx/issues/109.")]
