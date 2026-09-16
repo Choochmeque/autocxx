@@ -22,6 +22,7 @@
 // do anything - all the magic is handled entirely by
 // autocxx_macro::include_cpp_impl.
 
+mod argv;
 mod fallible;
 mod reference_wrapper;
 mod rvalue_param;
@@ -29,6 +30,7 @@ pub mod subclass;
 mod value_param;
 mod volatile;
 
+pub use argv::{ArgvError, ArgvHolder};
 pub use fallible::{StackSlot, TryWithinBox, TryWithinUniquePtr};
 pub use reference_wrapper::{
     AsCppMutRef, AsCppRef, CppLtRef, CppMutLtRef, CppMutRef, CppPin, CppRef, CppUniquePtrPin,
