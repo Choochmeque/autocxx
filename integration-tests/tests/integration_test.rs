@@ -41135,3 +41135,130 @@ fn test_block_of_an_enum_alias_is_confirmed() {
         None,
     );
 }
+
+/// A `const` reference whose referent is written with a namespace-qualified
+/// alias - `const std::int32_t&` - is still a reference to a `const`. clang
+/// hands a qualified name over wrapped in an elaborated type, and unwrapping
+/// that dropped the qualifier: the generated C++ said `::c_int &`, which no
+/// longer named the function whose address it was taking, while Rust got a
+/// `Pin<&mut>` for something C++ will not let anyone write to.
+#[test]
+fn test_const_reference_to_int32_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline std::int32_t fx_pick32(const std::int32_t& value) { return value; }
+    "};
+    let rs = quote! {
+        let value = autocxx::c_int(42);
+        assert_eq!(ffi::fx_pick32(&value), autocxx::c_int(42));
+    };
+    run_test("", hdr, rs, &["fx_pick32"], &[]);
+}
+
+/// The same for `std::int64_t`, whose alias resolves through a different
+/// atom - and a different one per target (`long` on LP64 Linux, `long long`
+/// elsewhere), so the test infers the newtype instead of naming it.
+#[test]
+fn test_const_reference_to_int64_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline std::int64_t fx_pick64(const std::int64_t& value) { return value; }
+    "};
+    let rs = quote! {
+        let value = 42i64.into();
+        assert_eq!(ffi::fx_pick64(&value).0, 42i64);
+    };
+    run_test("", hdr, rs, &["fx_pick64"], &[]);
+}
+
+/// The same alias named without its namespace, which is the same C++ type by
+/// a different road: nothing is elaborated, so the parameter arrives as `&i32`
+/// and always did. The qualified spelling above is the one that was lost.
+#[test]
+fn test_const_reference_to_unqualified_int32_typedef_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline int32_t fx_pick32u(const int32_t& value) { return value; }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::fx_pick32u(&42), 42);
+    };
+    run_test("", hdr, rs, &["fx_pick32u"], &[]);
+}
+
+/// The contrast which always worked: a `const` reference to an atom C++ wrote
+/// out. Every spelling here is the same C++ type, so all of them have to
+/// arrive the same way.
+#[test]
+fn test_const_reference_to_int_parameter() {
+    let hdr = indoc! {"
+        inline int fx_pick_int(const int& value) { return value; }
+    "};
+    let rs = quote! {
+        let value = autocxx::c_int(42);
+        assert_eq!(ffi::fx_pick_int(&value), autocxx::c_int(42));
+    };
+    run_test("", hdr, rs, &["fx_pick_int"], &[]);
+}
+
+/// The shape which found this, reduced from a real library's config getter:
+/// an overloaded `const` method taking `const std::int32_t&`. The overload is
+/// what makes autocxx write a wrapper, so the member-pointer cast in that
+/// wrapper has to spell the parameter exactly as C++ declared it.
+#[test]
+fn test_const_reference_to_int32_typedef_method_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        class fx_Settings {
+        public:
+            std::int32_t fx_get(const std::int32_t& fallback) const { return fallback; }
+            std::int32_t fx_get(const std::int32_t& fallback, std::int32_t bump) const {
+                return fallback + bump;
+            }
+        };
+    "};
+    let rs = quote! {
+        let settings = ffi::fx_Settings::new().within_unique_ptr();
+        let fallback = autocxx::c_int(40);
+        assert_eq!(settings.fx_get(&fallback), autocxx::c_int(40));
+        assert_eq!(settings.fx_get1(&fallback, autocxx::c_int(2)), autocxx::c_int(42));
+    };
+    run_test("", hdr, rs, &["fx_Settings"], &[]);
+}
+
+/// A qualified name is not enough on its own: an alias of a class carries its
+/// `const` through, the class having a declaration the qualifier can be
+/// recorded against. Here to say where the blast radius stops.
+#[test]
+fn test_const_reference_to_qualified_class_alias_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace fx_qns {
+            struct fx_Item { uint32_t a; };
+            typedef fx_Item fx_ItemAlias;
+        }
+        inline uint32_t fx_read_alias(const fx_qns::fx_ItemAlias& item) {
+            return item.a;
+        }
+    "};
+    let rs = quote! {
+        let item = ffi::fx_qns::fx_Item { a: 42 };
+        assert_eq!(ffi::fx_read_alias(&item), 42);
+    };
+    run_test("", hdr, rs, &["fx_read_alias"], &["fx_qns::fx_Item"]);
+}
+
+/// A `const` reference to a typedefed atom as a *return*, borrowing from the
+/// only reference parameter.
+#[test]
+fn test_const_reference_to_int32_typedef_return() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        inline const std::int32_t& fx_same32(const std::int32_t& value) { return value; }
+    "};
+    let rs = quote! {
+        let value = autocxx::c_int(42);
+        assert_eq!(*ffi::fx_same32(&value), autocxx::c_int(42));
+    };
+    run_test("", hdr, rs, &["fx_same32"], &[]);
+}
