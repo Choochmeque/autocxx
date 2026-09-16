@@ -332,7 +332,7 @@ fn test_gen() -> Result<(), Box<dyn std::error::Error>> {
         RsFindMode::AutocxxRs,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -402,7 +402,7 @@ fn test_gen_archive() -> Result<(), Box<dyn std::error::Error>> {
         RsFindMode::AutocxxRsArchive,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -429,7 +429,7 @@ fn test_gen_archive_with_discovered_extern_rust_fn() -> Result<(), Box<dyn std::
         RsFindMode::AutocxxRsArchive,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -451,7 +451,7 @@ fn test_gen_nested_mod() -> Result<(), Box<dyn std::error::Error>> {
         RsFindMode::AutocxxRs,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -482,7 +482,7 @@ fn test_gen_nested_mod_with_discovered_extern_rust_fn() -> Result<(), Box<dyn st
         RsFindMode::AutocxxRs,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -506,7 +506,7 @@ fn test_gen_archive_first_entry() -> Result<(), Box<dyn std::error::Error>> {
         })),
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -530,7 +530,7 @@ fn test_gen_archive_second_entry() -> Result<(), Box<dyn std::error::Error>> {
         })),
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -566,7 +566,7 @@ fn test_gen_multiple_in_archive() -> Result<(), Box<dyn std::error::Error>> {
         RsFindMode::AutocxxRsArchive,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
@@ -617,7 +617,7 @@ fn test_gen_fixed_num() -> Result<(), Box<dyn std::error::Error>> {
         RsFindMode::AutocxxRsFile,
     );
     if KEEP_TEMPDIRS {
-        println!("Tempdir: {:?}", tmp_dir.into_path().to_str());
+        println!("Tempdir: {:?}", tmp_dir.keep().to_str());
     }
     r.unwrap();
     Ok(())
