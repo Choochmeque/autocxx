@@ -17,7 +17,10 @@ use std::{
 use anyhow::Error;
 use clap::{crate_authors, crate_version, Arg, ArgAction, ArgMatches, Command};
 use itertools::Itertools;
-use mdbook::{book::Book, preprocess::CmdPreprocessor};
+use mdbook_preprocessor::{
+    book::{Book, BookItem},
+    parse_input,
+};
 use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use rayon::prelude::*;
@@ -85,13 +88,13 @@ fn main() {
 }
 
 fn preprocess(args: &ArgMatches) -> Result<(), Error> {
-    let (_, mut book) = CmdPreprocessor::parse_input(io::stdin())?;
+    let (_, mut book) = parse_input(io::stdin())?;
 
     env_logger::builder().init();
     let mut test_cases = Vec::new();
 
     Book::for_each_mut(&mut book, |sec| {
-        if let mdbook::BookItem::Chapter(chapter) = sec {
+        if let BookItem::Chapter(chapter) = sec {
             let filename = chapter
                 .path
                 .as_ref()

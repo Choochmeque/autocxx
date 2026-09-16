@@ -23,6 +23,7 @@ rayon = "1.5"
 gag = "1.0"
 env_logger = "0.11"
 quote = "1"
+mdbook-preprocessor = "0.5"
 
 [dependencies.syn]
 version = "3"
@@ -31,7 +32,3 @@ features = ["parsing", "full"]
 [dependencies.proc-macro2]
 version = "1.0.11"
 features = ["span-locations"]
-
-[dependencies.mdbook]
-version = "0.4"
-default-features = false
