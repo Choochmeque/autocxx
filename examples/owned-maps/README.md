@@ -14,5 +14,5 @@ from the C++ spellings.
 cargo run
 ```
 
-See the [built-in types chapter](https://autocxx.dev/book/primitives.html) for
+See the [built-in types chapter](https://autocxx.dev/primitives.html) for
 what those types can do and which maps are refused.

@@ -42962,17 +42962,17 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
 }
 
-/// A function taking `const std::map<K, V>&` is callable, the map being built
-/// in C++ out of two lists Rust passes.
+/// A function taking `const std::map<K, V>&` is callable, with a map Rust
+/// built through the generated type's own methods.
 ///
-/// cxx has no map type, so there is nothing for a map to cross the boundary as.
-/// What crosses instead is the keys and the values, paired by index, and the
-/// C++ wrapper assembles the map for the duration of the call. The C++ here
-/// reads what it was given back out, so the assertion is about the map the
-/// function received and not merely about the call having happened.
+/// cxx has no map type, so what crosses is the generated opaque type standing
+/// for this one specialization - the C++ type the header wrote, handed over as
+/// itself. The C++ here reads what it was given back out, so the assertion is
+/// about the map the function received and not merely about the call having
+/// happened.
 ///
-/// A `std::string` key or value is a Rust `Vec<String>`, because cxx gives Rust
-/// no way to put a string into a `std::vector<std::string>`.
+/// A `std::string` key or value crosses as a `&CxxString`, which is how
+/// autocxx spells one everywhere else; an atom crosses by value.
 #[test]
 fn test_map_parameter_of_strings() {
     let hdr = indoc! {"

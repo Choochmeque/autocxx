@@ -141,9 +141,11 @@ pub(crate) enum HolderSurface {
         key_is_string: bool,
         /// Likewise for the value.
         value_is_string: bool,
-        /// Whether entries come out in key order, which `std::map` promises
-        /// and `std::unordered_map` does not. Read only by the documentation
-        /// on [`MapShim::Keys`] and [`MapShim::Values`].
+        /// Whether this is the ordered map, whose entries come out in key
+        /// order where `std::unordered_map`'s do not. It picks the standard
+        /// header the shims ask for, and what the generated type's
+        /// documentation promises about [`MapShim::Keys`] and
+        /// [`MapShim::Values`]; nothing else differs between the two.
         ordered: bool,
         deps: HashSet<QualifiedName>,
     },
