@@ -43410,6 +43410,38 @@ fn test_map_can_be_named_by_a_concrete_directive() {
     );
 }
 
+/// A `concrete!` directive naming a map no signature mentions gets the opaque
+/// type and no methods.
+///
+/// The surface is worked out where the type converter meets the map - that is
+/// where the key and the value are converted, and where a shape autocxx cannot
+/// serve is refused - and a directive alone meets nothing. Pinned rather than
+/// papered over: a header whose functions traffic in the map has nothing to do
+/// about it, which is every header this feature is for, and one which only
+/// declares the specialization gets a type it can hold and pass along.
+#[test]
+fn test_map_named_by_a_concrete_directive_alone_has_no_methods() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t unrelated() { return 1; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {
+            let m = ffi::M::new();
+            assert_eq!(m.len(), 0);
+        },
+        quote! {
+            generate!("unrelated")
+            concrete!("std::map<int, int>", M)
+        },
+        None,
+        &["no associated function or constant named `new`"],
+    );
+}
+
 /// A floating-point key is refused. `std::less<double>` owes the map a strict
 /// weak ordering and NaN gives it none, so safe Rust must not be able to put
 /// one in. A float *value* is fine.

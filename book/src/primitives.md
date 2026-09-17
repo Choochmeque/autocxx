@@ -266,6 +266,12 @@ derives from the C++ spelling — `std::map<std::string, uint32_t>` becomes
 `std_map_std_string_uint32_t_AutocxxConcrete` — so a header change which renames
 the key or value type shows up as a Rust name change.
 
+The directive names the type; it does not on its own give it the methods. Those
+are worked out where a signature mentions the map, which is where the key and
+the value are looked at at all. A `concrete!` for a specialization no bound
+function traffics in gets an opaque type you can hold and pass along, and
+nothing else.
+
 The methods are `std::map`'s own:
 
 | Rust | C++ |
