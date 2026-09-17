@@ -236,6 +236,9 @@ jobs:
       - name: Build non-trivial-type-on-stack example
         working-directory: ./examples/non-trivial-type-on-stack
         run: cargo build
+      - name: Build owned-maps example
+        working-directory: ./examples/owned-maps
+        run: cargo run
       - name: Build reference-wrappers example
         working-directory: ./examples/reference-wrappers
         # Needs the arbitrary_self_types feature, so nightly only. The Windows
