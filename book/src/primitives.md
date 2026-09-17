@@ -209,10 +209,11 @@ not get it says so by name.
 
 ## Maps
 
-`cxx` has no map type, so there is nothing for a `std::map` to cross the
-boundary *as*. A function which takes one by `const` reference is nonetheless
-callable: the keys and the values cross as two lists, and the map is built in
-C++ out of them for the duration of the call.
+`cxx` has no map type, and nothing standing for every possible `std::map` could
+be declared in a crate your generated code does not own. So `autocxx` does for
+a map what it already does for any other template instantiation: each
+specialization your headers actually use becomes a generated opaque type of its
+own, with a set of methods on it.
 
 ```rust,ignore,autocxx
 autocxx_integration_tests::doctest(
@@ -220,111 +221,160 @@ autocxx_integration_tests::doctest(
 "#include <map>
 #include <string>
 #include <cstdint>
-inline uint32_t lookup(const std::map<std::string, uint32_t>& m) { return m.at(\"beta\"); }",
+inline std::map<std::string, uint32_t> settings() {
+    std::map<std::string, uint32_t> m;
+    m.emplace(\"width\", 80);
+    return m;
+}
+inline uint32_t lookup(const std::map<std::string, uint32_t>& m) { return m.at(\"width\"); }",
 {
 use autocxx::prelude::*;
 
 include_cpp! {
     #include "input.h"
     safety!(unsafe_ffi)
+    generate!("settings")
     generate!("lookup")
+    concrete!("std::map<std::string, uint32_t>", Settings)
 }
 
 fn main() {
-    let keys = vec!["alpha".to_string(), "beta".to_string()];
-    let mut values = cxx::CxxVector::new();
-    values.pin_mut().push(2u32);
-    values.pin_mut().push(7u32);
-    assert_eq!(ffi::lookup(&keys, &values), 7);
+    let mut m = ffi::Settings::new();
+    cxx::let_cxx_string!(height = "height");
+    m.pin_mut().insert(&height, 25);
+    assert_eq!(m.len(), 1);
+
+    let m = ffi::settings();
+    assert_eq!(ffi::lookup(&m), 80);
+    cxx::let_cxx_string!(width = "width");
+    assert_eq!(m.get(&width), Some(&80));
 }
 }
 )
 ```
 
-The binding keeps the function's own name, and the parameter's name decides the
-two it takes: `m` becomes `m_keys` and `m_values` — or the first numbered pair
-clear of the function's other parameters, where one of those already holds such
-a name. They are paired by index —
-the first key with the first value, and so on — and must be the same length; a
-call whose lists disagree panics, naming both parameters, rather than building a
-map out of the part which lines up. Where a key appears twice, the first of its
-values wins. Each binding says all of this in its own documentation, which is
-worth reading: the signature no longer looks like the C++ one.
+The type is opaque, like every C++ class `autocxx` cannot lay out: you reach one
+through a `UniquePtr`, a `&`, or a `Pin<&mut>`, never by value. A map returned
+by value from C++ arrives as `UniquePtr<Settings>`; one returned by reference as
+`&Settings`; a `const std::map<K, V>&` parameter takes `&Settings`, and a
+`std::map<K, V>&` parameter takes `Pin<&mut Settings>` and C++ writes through it.
 
-Which list each half is depends on what it holds. A `std::string` key or value
-is a Rust `Vec<String>`, because `cxx` gives Rust no way to put a string into a
-`std::vector<std::string>`. Anything else is a `&CxxVector<T>` — `c_int` for an
-`int`, `u32` for a `uint32_t`, and so on, exactly as an ordinary
-`const std::vector<T>&` parameter would be.
+Give the type a readable name with a
+[`concrete!`](https://docs.rs/autocxx/latest/autocxx/macro.concrete.html)
+directive, as above. Without one it still exists, under the name `autocxx`
+derives from the C++ spelling — `std::map<std::string, uint32_t>` becomes
+`std_map_std_string_uint32_t_AutocxxConcrete` — so a header change which renames
+the key or value type shows up as a Rust name change.
 
-This is the whole of it, and everything outside it is refused with an
-explanation rather than bound:
+The directive names the type; it does not on its own give it the methods. Those
+are worked out where a signature mentions the map, which is where the key and
+the value are looked at at all. A `concrete!` for a specialization no bound
+function traffics in gets an opaque type you can hold and pass along, and
+nothing else.
 
-- The parameter must be a `const` reference. A map returned, taken by value, or
-  taken by mutable reference is not supported — the map the wrapper builds lives
-  only for the call, and Rust has no type to be handed an owned one as.
+The methods are `std::map`'s own:
+
+| Rust | C++ |
+| --- | --- |
+| `new() -> UniquePtr<Self>` | default construction |
+| `len()`, `is_empty()` | `size`, `empty` |
+| `contains(key)`, `get(key) -> Option<&V>` | `find` |
+| `insert(key, value) -> bool` | `insert` — the first value for a key wins |
+| `insert_or_assign(key, value) -> bool` | `insert_or_assign` — the one which overwrites |
+| `erase(key) -> bool` | `erase` |
+| `keys()`, `values()` | snapshots, as `UniquePtr<CxxVector<_>>` |
+
+Mutation goes through `Pin<&mut Self>`; nothing hands out a `&mut` into the map.
+`get` borrows the map for as long as the reference lives, which is what keeps an
+insertion from happening underneath it. `keys` and `values` are owned snapshots
+taken when called, each in the map's iteration order — for a `std::map` that is
+key order — so the two line up entry by entry as long as the map has not changed
+between the calls; take both before mutating where the pairing matters. An atom key or value crosses by value
+and a `std::string` one as `&CxxString`, exactly as anywhere else in `autocxx`.
+All the glue is `noexcept`: a C++ exception crossing into Rust is undefined
+behaviour, so an allocation failure terminates rather than unwinding, as in
+`cxx`'s own container glue.
+
+Everything outside this is refused with an explanation rather than bound:
+
 - The key and the value must each be a type `cxx` will put in a `std::vector`:
-  an integer, a character type, or `std::string`. A map of classes is refused
-  rather than half-supported.
+  an integer, a character type, or `std::string`, plus `float` and `double` as
+  values. `keys()` and `values()` hand back `CxxVector`s, so a key or value
+  without one is a type two of the methods could not be written for. A map of
+  classes is refused rather than half-supported, and is the next piece of work.
+- A floating-point *key* is refused whichever map it is: `std::less` owes the
+  map a strict weak ordering and NaN gives it none, and safe Rust must not be
+  able to hand a C++ container an argument outside its contract.
 - `std::map` and `std::unordered_map` only, with the default comparator and
   allocator. A `std::map` which fixes either to something else is refused.
   Two things escape that refusal, because `autocxx` cannot see them: a
   transparent `std::less<>` comparator, and `std::unordered_map`'s hash,
   equality predicate and allocator.
-- A `virtual` method taking a map cannot be overridden from a
-  [`subclass!`](https://docs.rs/autocxx/latest/autocxx/macro.subclass.html) —
-  calling it from Rust works; overriding it is refused — and a superclass
-  constructor taking one is refused too, because the peer class would have to
-  pass the two lists on to a constructor which wants the map itself.
+- A superclass constructor taking a map cannot serve a
+  [`subclass!`](https://docs.rs/autocxx/latest/autocxx/macro.subclass.html);
+  a `virtual` *method* taking one can be overridden like any other.
 
-The map the wrapper builds is always the default-shaped one, so the call it
-makes is not left to overload resolution: it goes through a pointer of the
-function's exact declared type. A call can therefore only ever reach a function
-taking exactly the map that was built — never an overload taking the map by
-rvalue reference, a differently shaped map, or anything a conversion could
-quietly turn the map into. The two escapes above end at that same wall, one
-declaration at a time: a lone `f(const std::map<K, V, std::less<>>&)`, or a
-lone custom-hash `std::unordered_map` parameter, is a different type from the
-map that gets built, so the generated C++ fails to compile — loudly, naming the
-wrapper — instead of calling anything else. Where one C++ name has *two*
+The two escapes end at the same wall, one declaration at a time. A lone
+`f(const std::map<K, V, std::less<>>&)`, or a lone custom-hash
+`std::unordered_map` parameter, is a different C++ type from the one the
+generated typedef names, so the generated C++ fails to compile — loudly, naming
+the function — rather than calling anything else. Where one C++ name has *two*
 declarations `autocxx` cannot tell apart — `std::less<>` beside the default
 comparator, or two hashes of one `std::unordered_map` shape — both are refused
-outright: there is no way to know which one a call was meant to reach.
-A function template of the same name is a third competitor, and the one the
-cast itself cannot fence out: address-of overload resolution deduces a
-specialization from the cast's target type, and prefers the plain declaration
-only where it matches that target exactly — which is precisely what an erased
-`std::less<>` breaks, so the cast would compile and quietly call the template.
-bindgen parses no item for a function template; a report `autocxx` takes while
-the headers are parsed is what sees them, and a map-taking function which
-shares its name with one — declared in its own namespace or class, or merged
-into its class by a `using Base::pick;` — is refused whole. A `using` whose
-source `autocxx` cannot audit for templates — a template-instantiation base,
-say — refuses the same way, unjudged.
-Constructors are the one place without a typed pointer to call through — C++
-has no way to name one — so two fences hold instead. The map is bound to a
-`const` lvalue before the constructor is chosen, which keeps a
-`T(std::map<K, V>&&)` overload from outcompeting the
-`T(const std::map<K, V>&)` the binding was built from. And a map parameter is
-served in a constructor only where the class declares no other constructor
-which arguments could reach at all — the copy and move constructors do not
-count, and nor does another constructor taking only a reference to such a
-map; anything else, a `T(Bait)` beside the map among them, is refused with an
-explanation. With
-nothing else for direct-initialization to choose, a difference `autocxx`
-cannot see — that transparent `std::less<>` again — is a loud build failure
-rather than a quiet conversion into some other constructor.
+outright: there is no way to know which one a call was meant to reach. The
+comparison sees the map through whatever spells it — a typedef, a pointer, a
+by-value parameter — so writing one twin through an alias changes nothing.
 
-One escape does not end at that wall, and is recorded here instead of promised
+That wall stands whichever route a call takes. Every function `cxx` declares
+itself is bound by assigning its address to a function pointer of the declared
+type, so the call can only ever reach a function of exactly that signature —
+never an overload a conversion could carry the map into. A signature which
+needs a wrapper of `autocxx`'s own, because something else in it does — a
+static method, an rvalue-reference parameter, a `std::string_view` — gets the
+same exactness by hand: the wrapper calls through a pointer of the declared
+type too, so `f(Bait)` beside a map-taking `f` cannot quietly capture the call
+through `Bait`'s converting constructor, and a pair its neighbours tell apart
+only by spelling — `f(std::string_view)` beside `f(const std::string_view&)`,
+`f(T&&)` beside `f(const T&&)` — still reaches the declaration each binding
+was built from.
+
+A function template of the same name is the third competitor, and the one no
+argument type fences out on its own: where the bound declaration's shape was
+erased, the plain declaration is not an exact match, the template's
+specialization is, and the call would compile and quietly reach the template.
+bindgen parses no item for a function template; a report `autocxx` takes while
+the headers are parsed is what sees them, and a map-taking function which shares
+its name with one — declared in its own namespace or class, or merged into its
+class by a `using Base::pick;` — is refused whole. A `using` whose source
+`autocxx` cannot audit for templates — a template-instantiation base, say —
+refuses the same way, unjudged.
+
+Constructors are the one call C++ gives no way to name exactly, so a map
+parameter is served in a constructor only where the class declares no other
+constructor which arguments could reach at all — the copy and move constructors
+do not count, and nor does another constructor taking only a reference to a map
+*provably* of another shape. Provably, because bindgen spells one C++ type more
+than one way — `uint32_t` comes out as `u32` where `unsigned int` comes out as
+`c_uint` — so only a different map template, or a key or value of another width
+or signedness on every supported platform, says the sibling's reference cannot
+bind the map the binding hands over. A reference `autocxx` cannot prove
+different counts wherever its kind binds what the binding presents: any
+reference beside a map taken by value or by non-`const` reference — the
+argument presented is an rvalue or a mutable lvalue — and a `const` reference
+even beside a map taken by `const` reference, a const lvalue being exactly what
+it binds. An `M&&` or `M&` sibling beside that `const` reference stays
+harmless — neither binds a const lvalue. Anything else,
+a `T(Bait)` beside the map among them, is refused with an explanation. With
+nothing else for direct-initialization to choose, a difference
+`autocxx` cannot see — that transparent `std::less<>` again — is a loud build
+failure rather than a quiet conversion into some other constructor.
+
+One escape does not end at a wall, and is recorded here instead of promised
 away: the template report sees what a scope *declares*, not what is visible in
 it. A function template pulled into the function's own namespace by a
-namespace-scope `using other::pick;` joins the overload set the cast resolves
-in without declaring anything the report can see — and where the bound
-declaration's shape was erased, that transparent `std::less<>` once more, the
-generated call would compile and quietly reach the template. The two escapes
-above end in a loud build failure; this one does not, and a header which pairs
-a map-taking function with a same-named template behind such a `using` is the
-one map shape to keep away from `autocxx` by hand.
-
-A map you can hold, fill and keep on the Rust side is a separate piece of work,
-and would need an owned opaque map type of `autocxx`'s own.
+namespace-scope `using other::pick;` joins the overload set without declaring
+anything the report can see — and where the bound declaration's shape was
+erased, that transparent `std::less<>` once more, the generated call would
+compile and quietly reach the template. A header which pairs a map-taking
+function with a same-named template behind such a `using` is the one map shape
+to keep away from `autocxx` by hand.

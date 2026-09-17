@@ -42962,17 +42962,17 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
 }
 
-/// A function taking `const std::map<K, V>&` is callable, the map being built
-/// in C++ out of two lists Rust passes.
+/// A function taking `const std::map<K, V>&` is callable, with a map Rust
+/// built through the generated type's own methods.
 ///
-/// cxx has no map type, so there is nothing for a map to cross the boundary as.
-/// What crosses instead is the keys and the values, paired by index, and the
-/// C++ wrapper assembles the map for the duration of the call. The C++ here
-/// reads what it was given back out, so the assertion is about the map the
-/// function received and not merely about the call having happened.
+/// cxx has no map type, so what crosses is the generated opaque type standing
+/// for this one specialization - the C++ type the header wrote, handed over as
+/// itself. The C++ here reads what it was given back out, so the assertion is
+/// about the map the function received and not merely about the call having
+/// happened.
 ///
-/// A `std::string` key or value is a Rust `Vec<String>`, because cxx gives Rust
-/// no way to put a string into a `std::vector<std::string>`.
+/// A `std::string` key or value crosses as a `&CxxString`, which is how
+/// autocxx spells one everywhere else; an atom crosses by value.
 #[test]
 fn test_map_parameter_of_strings() {
     let hdr = indoc! {"
@@ -42987,9 +42987,14 @@ fn test_map_parameter_of_strings() {
         }
     "};
     let rs = quote! {
-        let keys = vec!["alpha".to_string(), "beta".to_string()];
-        let values = vec!["one".to_string(), "two".to_string()];
-        assert_eq!(ffi::describe(&keys, &values), 3);
+        let mut m = ffi::std_map_std_string_std_string_AutocxxConcrete::new();
+        cxx::let_cxx_string!(alpha = "alpha");
+        cxx::let_cxx_string!(one = "one");
+        cxx::let_cxx_string!(beta = "beta");
+        cxx::let_cxx_string!(two = "two");
+        assert!(m.pin_mut().insert(&alpha, &one));
+        assert!(m.pin_mut().insert(&beta, &two));
+        assert_eq!(ffi::describe(&m), 3);
     };
     run_test("", hdr, rs, &["describe"], &[]);
 }
@@ -43013,13 +43018,10 @@ fn test_map_parameter_of_c_integers() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(2));
-        keys.pin_mut().push(autocxx::c_int(3));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_long(5));
-        values.pin_mut().push(autocxx::c_long(7));
-        assert_eq!(ffi::total(&keys, &values), 312);
+        let mut m = ffi::std_map_int_long_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(2), autocxx::c_long(5)));
+        assert!(m.pin_mut().insert(autocxx::c_int(3), autocxx::c_long(7)));
+        assert_eq!(ffi::total(&m), 312);
     };
     run_test("", hdr, rs, &["total"], &[]);
 }
@@ -43047,24 +43049,24 @@ fn test_map_parameter_shapes() {
     "};
     let rs = quote! {
         let registry = ffi::Registry::new().within_unique_ptr();
-        let keys = vec!["k".to_string()];
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(7u32);
-        assert_eq!(registry.lookup(&keys, &values), 17);
+        let mut u = ffi::std_unordered_map_std_string_uint32_t_AutocxxConcrete::new();
+        cxx::let_cxx_string!(k = "k");
+        assert!(u.pin_mut().insert(&k, 7u32));
+        assert_eq!(registry.lookup(&u), 17);
 
-        let mut a_keys = cxx::CxxVector::new();
-        a_keys.pin_mut().push(autocxx::c_int(1));
-        let a_values = vec!["x".to_string()];
-        let b_keys = vec!["y".to_string()];
-        let mut b_values = cxx::CxxVector::new();
-        b_values.pin_mut().push(autocxx::c_int(2));
-        assert_eq!(ffi::both(&a_keys, &a_values, &b_keys, &b_values), 11);
+        let mut a = ffi::std_map_int_std_string_AutocxxConcrete::new();
+        cxx::let_cxx_string!(x = "x");
+        assert!(a.pin_mut().insert(autocxx::c_int(1), &x));
+        let mut b = ffi::std_unordered_map_std_string_int_AutocxxConcrete::new();
+        cxx::let_cxx_string!(y = "y");
+        assert!(b.pin_mut().insert(&y, autocxx::c_int(2)));
+        assert_eq!(ffi::both(&a, &b), 11);
     };
     run_test("", hdr, rs, &["both", "Registry"], &[]);
 }
 
-/// Two empty lists make an empty map, which is a map and not a failure: a
-/// dictionary with nothing in it is a thing a caller means.
+/// A freshly made map is empty, which is a map and not a failure: a dictionary
+/// with nothing in it is a thing a caller means.
 #[test]
 fn test_map_parameter_empty() {
     let hdr = indoc! {"
@@ -43076,21 +43078,25 @@ fn test_map_parameter_empty() {
         }
     "};
     let rs = quote! {
-        let keys: Vec<String> = Vec::new();
-        let values: Vec<String> = Vec::new();
-        assert_eq!(ffi::count(&keys, &values), 42);
+        let m = ffi::std_map_std_string_std_string_AutocxxConcrete::new();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
+        assert_eq!(ffi::count(&m), 42);
     };
     run_test("", hdr, rs, &["count"], &[]);
 }
 
-/// Lists of different lengths are a caller's mistake, and the binding says so
-/// rather than building a map out of the part which lines up.
+/// A `const std::map<K, V>&` parameter is one parameter, of the generated type
+/// standing for that instantiation - not the two parallel lists an earlier
+/// patch of this series paired by index.
 ///
-/// The C++ helper pairs up to the shorter of the two - it has to do something
-/// total - so this is the check which keeps that from ever being what a caller
-/// gets. The panic names both parameters, since neither is on its own wrong.
+/// Pinned because it is a deliberate replacement rather than an addition. The
+/// lists could not carry a map C++ already had, rebuilt the whole container on
+/// every call, and put an index-pairing invariant into the signature with a
+/// panic behind it. Nothing named `_keys` or `_values` is generated for a map
+/// any more, and nothing asserts two lengths.
 #[test]
-fn test_map_parameter_length_mismatch_panics() {
+fn test_map_parameter_takes_the_map_itself() {
     let hdr = indoc! {"
         #include <map>
         #include <string>
@@ -43099,48 +43105,446 @@ fn test_map_parameter_length_mismatch_panics() {
             return m.size();
         }
     "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["size_of"], &[], None),
+        None,
+        Some(make_string_absence_finder(vec![
+            "m_keys".to_string(),
+            "m_values".to_string(),
+            "same length".to_string(),
+        ])),
+        None,
+    );
+}
+
+/// A map returned by value is owned by Rust, in the `UniquePtr` every opaque
+/// type crosses in, and reads back through the generated type's own methods.
+#[test]
+fn test_map_return_round_trip() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline std::map<std::string, uint32_t> settings() {
+            std::map<std::string, uint32_t> m;
+            m.emplace(\"width\", 80);
+            m.emplace(\"height\", 25);
+            return m;
+        }
+    "};
     let rs = quote! {
-        let keys = vec!["a".to_string(), "b".to_string()];
-        let values = vec!["one".to_string()];
-        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ffi::size_of(&keys, &values)
-        }))
-        .expect_err("a length mismatch should have panicked");
-        let message = err
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default());
-        assert!(message.contains("m_keys"), "{message}");
-        assert!(message.contains("m_values"), "{message}");
-        assert!(message.contains("same length"), "{message}");
-        // The equal-length call still works after it.
-        let values = vec!["one".to_string(), "two".to_string()];
-        assert_eq!(ffi::size_of(&keys, &values), 2);
+        let m = ffi::settings();
+        assert_eq!(m.len(), 2);
+        cxx::let_cxx_string!(width = "width");
+        cxx::let_cxx_string!(depth = "depth");
+        assert_eq!(m.get(&width), Some(&80u32));
+        assert!(m.contains(&width));
+        assert_eq!(m.get(&depth), None);
+        assert!(!m.contains(&depth));
+        // Ordered by key, and the two snapshots line up entry by entry.
+        let keys = m.keys();
+        let values = m.values();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(values.len(), 2);
+        assert_eq!(keys.get(0).unwrap().to_str().unwrap(), "height");
+        assert_eq!(values.get(0), Some(&25u32));
+        assert_eq!(keys.get(1).unwrap().to_str().unwrap(), "width");
+        assert_eq!(values.get(1), Some(&80u32));
+    };
+    run_test("", hdr, rs, &["settings"], &[]);
+}
+
+/// A map C++ already owns, handed over as a `unique_ptr`. Nothing about the
+/// generated type says how it was made, so this is the same `UniquePtr<T>` a
+/// by-value return arrives in.
+#[test]
+fn test_map_unique_ptr_return() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <memory>
+        #include <cstdint>
+        inline std::unique_ptr<std::map<int, int>> boxed() {
+            auto m = std::make_unique<std::map<int, int>>();
+            m->emplace(1, 10);
+            return m;
+        }
+    "};
+    let rs = quote! {
+        let m = ffi::boxed();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get(autocxx::c_int(1)), Some(&autocxx::c_int(10)));
+    };
+    run_test("", hdr, rs, &["boxed"], &[]);
+}
+
+/// A map returned by `const` reference, which Rust reads without owning: the
+/// reference borrows whatever the C++ declaration says it does, under the same
+/// lifetime rules every other reference return follows.
+#[test]
+fn test_map_reference_return() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Registry {
+        public:
+            Registry() { entries_.emplace(1, 10); }
+            const std::map<int, int>& entries() const { return entries_; }
+        private:
+            std::map<int, int> entries_;
+        };
+    "};
+    let rs = quote! {
+        let registry = ffi::Registry::new().within_unique_ptr();
+        // The borrow is the registry's, so it may be read for as long as the
+        // registry lives and not one statement longer.
+        let entries = registry.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.get(autocxx::c_int(1)), Some(&autocxx::c_int(10)));
+    };
+    run_test("", hdr, rs, &["Registry"], &[]);
+}
+
+/// The whole method surface against `std::map`'s own semantics: the first value
+/// for a key wins, `insert_or_assign` is the one which overwrites, and `erase`
+/// says whether there was anything to erase.
+#[test]
+fn test_map_mutation_semantics() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t size_of(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.is_empty());
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(10)));
+        // The first value for a key wins; the second insert changes nothing.
+        assert!(!m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(99)));
+        assert_eq!(m.get(autocxx::c_int(1)), Some(&autocxx::c_int(10)));
+        // insert_or_assign overwrites, and says the key was not new.
+        assert!(!m.pin_mut().insert_or_assign(autocxx::c_int(1), autocxx::c_int(99)));
+        assert_eq!(m.get(autocxx::c_int(1)), Some(&autocxx::c_int(99)));
+        assert!(m.pin_mut().insert_or_assign(autocxx::c_int(2), autocxx::c_int(20)));
+        assert_eq!(ffi::size_of(&m), 2);
+        assert!(m.pin_mut().erase(autocxx::c_int(2)));
+        assert!(!m.pin_mut().erase(autocxx::c_int(2)));
+        assert_eq!(m.len(), 1);
+        assert!(!m.contains(autocxx::c_int(2)));
     };
     run_test("", hdr, rs, &["size_of"], &[]);
 }
 
-/// A map anywhere but in a `const` reference parameter is refused, and says so.
-///
-/// Returning one is the shape a caller most often wants next and the one
-/// nothing here does: the map the wrapper builds lives only for the call, and
-/// Rust has no type to be handed an owned one as.
+/// Two instantiations of one template are two generated types, each with its
+/// own methods and its own C++ typedef, and neither is the other.
 #[test]
-fn test_map_return_is_refused() {
+fn test_two_map_instantiations_coexist() {
     let hdr = indoc! {"
         #include <map>
         #include <string>
-        inline std::map<std::string, std::string> settings() {
-            return std::map<std::string, std::string>();
+        #include <cstdint>
+        inline uint32_t by_name(const std::map<std::string, uint32_t>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t by_number(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    let rs = quote! {
+        let mut names = ffi::std_map_std_string_uint32_t_AutocxxConcrete::new();
+        cxx::let_cxx_string!(a = "a");
+        assert!(names.pin_mut().insert(&a, 1u32));
+        let mut numbers = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(numbers.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(ffi::by_name(&names), 2);
+        assert_eq!(ffi::by_number(&numbers), 101);
+    };
+    run_test("", hdr, rs, &["by_name", "by_number"], &[]);
+}
+
+/// Two `include_cpp!` modules using the same instantiation each generate a
+/// type and shims of their own, and the two sets link into one binary: the
+/// bridge names carry the per-module suffix every other generated helper's
+/// do, so nothing collides even though the holder's name is the same in both.
+#[test]
+fn test_two_mods_share_a_map_instantiation() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t first(const std::map<uint32_t, uint32_t>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t second(const std::map<uint32_t, uint32_t>& m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let rs = quote! {
+        use autocxx::prelude::*;
+        include_cpp! {
+            #hexathorpe include "input.h"
+            safety!(unsafe_ffi)
+            generate!("first")
+        }
+        include_cpp! {
+            #hexathorpe include "input.h"
+            name!(ffi2)
+            safety!(unsafe_ffi)
+            generate!("second")
+        }
+        fn main() {
+            let mut m = ffi::std_map_uint32_t_uint32_t_AutocxxConcrete::new();
+            assert!(m.pin_mut().insert(3u32, 4u32));
+            assert_eq!(ffi::first(&m), 2);
+            let n = ffi2::std_map_uint32_t_uint32_t_AutocxxConcrete::new();
+            assert_eq!(ffi2::second(&n), 100);
+        }
+    };
+    do_run_test_manual("", hdr, rs, None, None).unwrap();
+}
+
+/// An ordered and an unordered map of the same key and value are two different
+/// C++ templates, so they are two generated types too - the name carries which
+/// container it is, not only the arguments.
+#[test]
+fn test_ordered_and_unordered_maps_of_one_shape_coexist() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <unordered_map>
+        #include <cstdint>
+        inline uint32_t ordered(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t unordered(const std::unordered_map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    let rs = quote! {
+        let mut o = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(o.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        let mut u = ffi::std_unordered_map_int_int_AutocxxConcrete::new();
+        assert!(u.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(ffi::ordered(&o), 2);
+        assert_eq!(ffi::unordered(&u), 101);
+    };
+    run_test("", hdr, rs, &["ordered", "unordered"], &[]);
+}
+
+/// The generated name, pinned.
+///
+/// It is derived from the C++ spelling of the instantiation by the same
+/// machinery which names every other concrete template, so a header change
+/// which renames the key or the value renames the Rust type too - visibly,
+/// rather than by silently binding something else. A `concrete!` directive is
+/// how a caller opts out of depending on that.
+#[test]
+fn test_map_generated_name_is_stable() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline uint32_t describe(const std::map<std::string, uint32_t>& m) {
+            return m.size();
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["describe"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            vec![
+                "std_map_std_string_uint32_t_AutocxxConcrete".to_string(),
+                "std_map_std_string_uint32_t_AutocxxConcrete_autocxx_insert_or_assign".to_string(),
+            ],
+        )])),
+        None,
+    );
+}
+
+/// A `concrete!` directive names the instantiation, and the map surface lands
+/// on the name the caller chose.
+#[test]
+fn test_map_can_be_named_by_a_concrete_directive() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline std::map<std::string, uint32_t> settings() {
+            std::map<std::string, uint32_t> m;
+            m.emplace(\"width\", 80);
+            return m;
+        }
+        inline uint32_t lookup(const std::map<std::string, uint32_t>& m) {
+            return m.at(\"width\");
+        }
+    "};
+    let rs = quote! {
+        let mut m = ffi::Settings::new();
+        cxx::let_cxx_string!(height = "height");
+        assert!(m.pin_mut().insert(&height, 25u32));
+        assert_eq!(m.len(), 1);
+
+        let m = ffi::settings();
+        assert_eq!(ffi::lookup(&m), 80);
+        cxx::let_cxx_string!(width = "width");
+        assert_eq!(m.get(&width), Some(&80u32));
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            generate!("settings")
+            generate!("lookup")
+            concrete!("std::map<std::string, uint32_t>", Settings)
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A `concrete!` directive naming a map no signature mentions gets the opaque
+/// type and no methods.
+///
+/// The surface is worked out where the type converter meets the map - that is
+/// where the key and the value are converted, and where a shape autocxx cannot
+/// serve is refused - and a directive alone meets nothing. Pinned rather than
+/// papered over: a header whose functions traffic in the map has nothing to do
+/// about it, which is every header this feature is for, and one which only
+/// declares the specialization gets a type it can hold and pass along.
+#[test]
+fn test_map_named_by_a_concrete_directive_alone_has_no_methods() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t unrelated() { return 1; }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {
+            let m = ffi::M::new();
+            assert_eq!(m.len(), 0);
+        },
+        quote! {
+            generate!("unrelated")
+            concrete!("std::map<int, int>", M)
+        },
+        None,
+        &["no associated function or constant named `new`"],
+    );
+}
+
+/// A floating-point key is refused. `std::less<double>` owes the map a strict
+/// weak ordering and NaN gives it none, so safe Rust must not be able to put
+/// one in. A float *value* is fine.
+#[test]
+fn test_map_with_floating_point_key_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t take(const std::map<double, int>& m) { return m.size(); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take"],
+        &[],
+        "shape autocxx generates no type for",
+    );
+}
+
+/// A floating-point value is not a key, and is served.
+#[test]
+fn test_map_with_floating_point_value() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t take(const std::map<int, double>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_double_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), 1.5f64));
+        assert_eq!(m.get(autocxx::c_int(1)), Some(&1.5f64));
+        assert_eq!(ffi::take(&m), 1);
+    };
+    run_test("", hdr, rs, &["take"], &[]);
+}
+
+/// A `const`-qualified value is refused: `insert_or_assign` assigns to the
+/// stored value and `values()` copies them into a `std::vector`, and neither
+/// is C++ over a `const` element - the shims would be generated invalid from
+/// a header which is itself fine.
+#[test]
+fn test_map_with_const_qualified_value_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t take(const std::map<int, const int>& m) {
+            (void)m;
+            return 42;
         }
     "};
     run_test_expect_fail_with_error(
         "",
         hdr,
         quote! {},
-        &["settings"],
+        &["take"],
         &[],
-        "Rust has no type which is one",
+        "shape autocxx generates no type for",
+    );
+}
+
+/// A `const`-qualified key likewise: `keys()` copies them into a
+/// `std::vector`, which no allocator serves a `const` element for.
+#[test]
+fn test_map_with_const_qualified_key_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t take(const std::map<const int, int>& m) {
+            (void)m;
+            return 42;
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take"],
+        &[],
+        "shape autocxx generates no type for",
+    );
+}
+
+/// A `volatile`-qualified key or value is refused for the same reason.
+#[test]
+fn test_map_with_volatile_qualified_value_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t take(const std::map<int, volatile int>& m) {
+            (void)m;
+            return 42;
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take"],
+        &[],
+        "shape autocxx generates no type for",
     );
 }
 
@@ -43162,7 +43566,7 @@ fn test_map_parameter_of_classes_is_refused() {
         quote! {},
         &["take", "Entry"],
         &[],
-        "Rust has no type which is one",
+        "shape autocxx generates no type for",
     );
 }
 
@@ -43190,7 +43594,7 @@ fn test_map_parameter_with_custom_comparator_is_refused() {
         quote! {},
         &["take", "Backwards"],
         &[],
-        "Rust has no type which is one",
+        "shape autocxx generates no type for",
     );
 }
 
@@ -43198,26 +43602,28 @@ fn test_map_parameter_with_custom_comparator_is_refused() {
 /// temporary, so anything the function wrote through the reference would be
 /// written to storage destroyed when the call returned.
 #[test]
-fn test_mutable_map_reference_is_refused() {
+fn test_mutable_map_reference_is_mutated() {
     let hdr = indoc! {"
         #include <map>
-        #include <string>
-        inline void fill(std::map<std::string, std::string>& m) { m.clear(); }
+        #include <cstdint>
+        inline void bump(std::map<int, int>& m) {
+            for (auto& entry : m) entry.second += 1;
+        }
     "};
-    run_test_expect_fail_with_error(
-        "",
-        hdr,
-        quote! {},
-        &["fill"],
-        &[],
-        "Rust has no type which is one",
-    );
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(10)));
+        ffi::bump(m.pin_mut());
+        assert_eq!(m.get(autocxx::c_int(1)), Some(&autocxx::c_int(11)));
+    };
+    run_test("", hdr, rs, &["bump"], &[]);
 }
 
-/// The binding says in its own documentation what its signature cannot: that
-/// two of its parameters were one of the C++ function's.
+/// The generated type says in its own documentation what its name cannot: that
+/// it is one C++ `std::map` specialization, held opaquely, and what its
+/// snapshots promise about ordering.
 #[test]
-fn test_map_parameter_is_documented() {
+fn test_map_type_is_documented() {
     let hdr = indoc! {"
         #include <map>
         #include <string>
@@ -43233,23 +43639,28 @@ fn test_map_parameter_is_documented() {
         directives_from_lists(&["describe"], &[], None),
         None,
         Some(make_checks_without_building(vec![make_string_finder(
-            ["m_keys", "m_values", "paired by index"]
-                .map(|s| s.to_string())
-                .to_vec(),
+            [
+                "C++ `std::map<K, V>`, held opaquely",
+                "Entries come out in key order",
+                "std::map::insert",
+            ]
+            .map(|s| s.to_string())
+            .to_vec(),
         )])),
         None,
     );
 }
 
-/// A `subclass!` whose superclass has a virtual method taking a map is turned
-/// down, rather than given an override which pairs two lists back into one.
+/// A `subclass!` whose superclass has a virtual method taking a map gets an
+/// override which takes the map itself, and Rust reads it through the
+/// generated type's own methods.
 ///
-/// Calling such a method from Rust works; overriding it does not. The way in
-/// builds the map out of what the caller lends for the call, and the way out
-/// would have to hand Rust two lists over storage the wrapper destroys on
-/// return - the same bargain a `std::string_view` parameter is refused on.
+/// This is the shape which could not be served while a map parameter was two
+/// borrowed lists: the way out would have had to hand Rust storage the C++
+/// wrapper destroys on return. A reference to the map C++ already has borrows
+/// nothing of autocxx's own.
 #[test]
-fn test_map_parameter_in_subclass_is_refused() {
+fn test_map_parameter_in_subclass() {
     let hdr = indoc! {"
         #include <map>
         #include <string>
@@ -43257,34 +43668,50 @@ fn test_map_parameter_in_subclass_is_refused() {
         class Observer {
         public:
             Observer() {}
-            virtual uint32_t note(const std::map<std::string, std::string>& m) const = 0;
+            virtual uint32_t note(const std::map<std::string, uint32_t>& m) const = 0;
             virtual ~Observer() {}
         };
+        inline uint32_t ask(const Observer& o) {
+            std::map<std::string, uint32_t> m;
+            m.emplace(\"n\", 7);
+            return o.note(m);
+        }
     "};
-    run_test_expect_fail_with_errors_ex(
+    run_test_ex(
         "",
         hdr,
-        quote! {},
         quote! {
+            use autocxx::subclass::CppSubclass;
+            let obs = MyObserver::new_cpp_owned(MyObserver { cpp_peer: Default::default() });
+            let obs = MyObserver::as_Observer_unique_ptr(obs);
+            assert_eq!(ffi::ask(&obs), 107);
+        },
+        quote! {
+            generate!("ask")
             subclass!("Observer", MyObserver)
         },
+        None,
+        None,
         Some(quote! {
-            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
             #[autocxx::subclass::subclass]
             pub struct MyObserver {}
             impl Observer_methods for MyObserver {
-                fn note(&self, _m_keys: &Vec<String>, _m_values: &Vec<String>) -> u32 { 0 }
+                fn note(&self, m: &ffi::std_map_std_string_uint32_t_AutocxxConcrete) -> u32 {
+                    cxx::let_cxx_string!(n = "n");
+                    m.len() as u32 * 100 + m.get(&n).copied().unwrap_or_default()
+                }
             }
         }),
-        &["one of this function's has no opposite"],
     );
 }
 
-/// A map argument cannot pick the wrong member of an overload set: the wrapper
-/// calls the function through a pointer of its exact declared type. Here the
-/// rvalue-reference overload would win a call by name - the built map starts
-/// out a prvalue - and the typed pointer reaches the `const` reference one the
-/// binding was built from.
+/// A map argument cannot pick the wrong member of an overload set. What it is
+/// handed is the declared type itself, so the `const` reference overload the
+/// binding was built from is an exact match, and the rvalue-reference one is
+/// not viable for an lvalue at all. cxx binds the function by assigning its
+/// address to a pointer of the declared type, which settles it before overload
+/// resolution has a call to weigh.
 #[test]
 fn test_map_parameter_ignores_rvalue_overload() {
     let hdr = indoc! {"
@@ -43298,11 +43725,9 @@ fn test_map_parameter_ignores_rvalue_overload() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::pick(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::pick(&m), 2);
     };
     run_test("", hdr, rs, &["pick"], &[]);
 }
@@ -43330,12 +43755,10 @@ fn test_map_parameter_ignores_rvalue_overload_on_methods() {
     "};
     let rs = quote! {
         let registry = ffi::Registry::new().within_unique_ptr();
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(registry.look(&keys, &values), 2);
-        assert_eq!(ffi::Registry::slook(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(registry.look(&m), 2);
+        assert_eq!(ffi::Registry::slook(&m), 2);
     };
     run_test("", hdr, rs, &["Registry"], &[]);
 }
@@ -43365,11 +43788,9 @@ fn test_map_parameter_ignores_rvalue_overload_on_constructors() {
         };
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        let holder = ffi::Holder::new(&keys, &values).within_unique_ptr();
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        let holder = ffi::Holder::new(&m).within_unique_ptr();
         assert_eq!(holder.which(), 2);
     };
     run_test("", hdr, rs, &["Holder"], &[]);
@@ -43429,6 +43850,288 @@ fn test_map_parameter_indistinguishable_overloads_with_different_names_are_refus
     );
 }
 
+/// The same pair reached through aliases. bindgen renders each parameter as
+/// its alias, so the two declarations look nothing alike here until each
+/// alias is resolved to the map it names - at which point they are the pair
+/// above and are refused the same way. Unresolved, both bindings were
+/// generated, took the one generated type between them and selected the
+/// default-map overload, one of them silently calling the other's function.
+#[test]
+fn test_map_parameter_aliased_indistinguishable_overloads_are_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        using OrdinaryMap = std::map<int, int>;
+        using TransparentMap = std::map<int, int, std::less<>>;
+        inline uint32_t which(const OrdinaryMap& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t which(const TransparentMap& m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["which"],
+        &[],
+        "cannot know which of them a call was meant to reach",
+    );
+}
+
+/// A lone map taken by value: served like any other opaque class taken by
+/// value, moved out of the `UniquePtr` Rust held, through a wrapper whose
+/// typed pointer spells the by-value signature exactly.
+#[test]
+fn test_map_parameter_by_value() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t grab(std::map<int, int> m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::grab(m), 2);
+    };
+    run_test("", hdr, rs, &["grab"], &[]);
+}
+
+/// The same shape declared twice. A map by value crosses as the generated type
+/// like any other opaque class, so these two declarations are as bound - and
+/// as indistinguishable once bindgen erases the std::less<> - as the
+/// references above, and the census has to count them the same way.
+#[test]
+fn test_map_parameter_by_value_indistinguishable_overloads_are_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t grab(std::map<int, int> m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t grab(std::map<int, int, std::less<>> m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["grab"],
+        &[],
+        "cannot know which of them a call was meant to reach",
+    );
+}
+
+/// A by-value map constructor with no sibling at all keeps its binding:
+/// the class declares nothing else an argument list could reach, so
+/// direct-initialization has one choice and erasure has nothing to divert
+/// the call to.
+#[test]
+fn test_map_parameter_by_value_in_a_lone_constructor() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Taker {
+        public:
+            Taker(std::map<int, int> m) : size_(static_cast<uint32_t>(m.size())) {}
+            uint32_t size() const { return size_; }
+        private:
+            uint32_t size_;
+        };
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        let taker = ffi::Taker::new(m).within_unique_ptr();
+        assert_eq!(taker.size(), 1);
+    };
+    run_test("", hdr, rs, &["Taker"], &[]);
+}
+
+/// The exemption the capture census keeps: a reference to a map provably of
+/// another shape - int against uint32_t here, one signed and one not on
+/// every supported platform - binds no map this constructor could hand
+/// over, whatever the argument category, so it is no reason to refuse and
+/// the by-value constructor keeps its binding. Its reference-taking sibling
+/// loses its own, a by-value constructor being reachable beside it.
+#[test]
+fn test_map_parameter_by_value_in_constructor_beside_a_reference_to_another_map() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Picky {
+        public:
+            Picky(std::map<int, int> m) : size_(static_cast<uint32_t>(m.size())) {}
+            Picky(const std::map<int, uint32_t>& m)
+                : size_(static_cast<uint32_t>(m.size()) + 100) {}
+            uint32_t size() const { return size_; }
+        private:
+            uint32_t size_;
+        };
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        let picky = ffi::Picky::new(m).within_unique_ptr();
+        assert_eq!(picky.size(), 1);
+    };
+    run_test("", hdr, rs, &["Picky"], &[]);
+}
+
+/// The exemption must not trust unequal renderings: bindgen writes uint32_t
+/// as u32 and unsigned int as c_uint, two spellings of one C++ type on every
+/// supported platform, so the sibling's reference binds exactly the map the
+/// wrapper builds. Had the unequal spellings exempted it, the by-value
+/// declaration's transparent comparator - which bindgen's rendering
+/// conceals - would have made the built map a type its own constructor
+/// cannot take, and direct-initialization would have quietly handed the
+/// call to the sibling. Equality autocxx cannot disprove keeps the sibling
+/// capture-capable, so both constructors are refused: the message alone
+/// would not prove that - the reference constructor is refused beside the
+/// by-value one whatever happens - so the check also pins the absence of
+/// the map type only a surviving by-value binding would use.
+#[test]
+fn test_map_parameter_in_constructor_beside_a_reference_to_the_same_map_spelled_differently() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Holder {
+        public:
+            Holder(std::map<uint32_t, int, std::less<>> m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            Holder(const std::map<unsigned int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Holder"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(
+                ["another constructor which an argument list could also reach"]
+                    .map(|s| s.to_string())
+                    .to_vec(),
+            ),
+            make_string_absence_finder(vec!["std_map_uint32_t_int_AutocxxConcrete".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// The same two spellings with both constructors taking the map by const
+/// reference. The const-lvalue leg of the census cannot lean on the
+/// indistinguishable-twin refusal here - these renderings are unequal, so
+/// that refusal never fires - yet the argument the transparent
+/// declaration's binding presents is a const lvalue of exactly the type
+/// the sibling's reference binds, and the call would land there silently.
+/// A const-reference sibling autocxx cannot prove different is
+/// capture-capable, so both constructors are refused.
+#[test]
+fn test_map_parameter_const_ref_in_constructor_beside_a_const_ref_to_the_same_map_spelled_differently(
+) {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Keeper {
+        public:
+            Keeper(const std::map<uint32_t, int, std::less<>>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            Keeper(const std::map<unsigned int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Keeper"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            make_string_finder(
+                ["another constructor which an argument list could also reach"]
+                    .map(|s| s.to_string())
+                    .to_vec(),
+            ),
+            make_string_absence_finder(vec!["std_map_uint32_t_int_AutocxxConcrete".to_string()]),
+        ])),
+        None,
+    );
+}
+
+/// The exemption the const-lvalue leg keeps: two const-reference
+/// constructors whose maps provably differ - int against uint32_t values,
+/// one signed and one not on every supported platform - cannot capture
+/// each other's calls, so both keep their bindings.
+#[test]
+fn test_map_parameter_const_ref_constructors_of_provably_different_maps_both_bind() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Duo {
+        public:
+            Duo(const std::map<int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            Duo(const std::map<int, uint32_t>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    let rs = quote! {
+        let mut a = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(a.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        let first = ffi::Duo::new(&a).within_unique_ptr();
+        assert_eq!(first.which(), 2);
+        let mut b = ffi::std_map_int_uint32_t_AutocxxConcrete::new();
+        assert!(b.pin_mut().insert(autocxx::c_int(4), 5u32));
+        let second = ffi::Duo::new1(&b).within_unique_ptr();
+        assert_eq!(second.which(), 101);
+    };
+    run_test("", hdr, rs, &["Duo"], &[]);
+}
+
+/// The control for the proof the exemption now demands: uint16_t and
+/// uint32_t can never be one C++ type - no supported platform gives one
+/// width to both - so the reference sibling binds no map this constructor
+/// could hand over and the by-value constructor keeps its binding.
+#[test]
+fn test_map_parameter_by_value_in_constructor_beside_a_reference_to_a_narrower_map() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Sized {
+        public:
+            Sized(std::map<uint32_t, int> m) : size_(static_cast<uint32_t>(m.size())) {}
+            Sized(const std::map<uint16_t, int>& m)
+                : size_(static_cast<uint32_t>(m.size()) + 100) {}
+            uint32_t size() const { return size_; }
+        private:
+            uint32_t size_;
+        };
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_uint32_t_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(4u32, autocxx::c_int(5)));
+        let sized = ffi::Sized::new(m).within_unique_ptr();
+        assert_eq!(sized.size(), 1);
+    };
+    run_test("", hdr, rs, &["Sized"], &[]);
+}
+
 /// A function template of the same name in the same namespace defeats even the
 /// exact-typed cast: address-of overload resolution deduces a specialization
 /// from the cast's target type, and prefers the plain declaration only where
@@ -43448,6 +44151,32 @@ fn test_map_parameter_shadowed_by_function_template_is_refused() {
             return static_cast<uint32_t>(m.size()) + 1;
         }
         template <class T> uint32_t pick(const T&) { return 100; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["pick"],
+        &[],
+        "function template of this name",
+    );
+}
+
+/// The same shadow with the map behind a pointer, beside a pointer template.
+/// The refusal covers every parameter shape which names a map, pointers
+/// included: cxx binds this declaration through a typed function pointer, the
+/// transparent declaration does not match that pointer's type and the deduced
+/// specialization does, so without the refusal the binding compiles and
+/// quietly calls the template.
+#[test]
+fn test_map_parameter_pointer_shadowed_by_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int, std::less<>>* m) {
+            return static_cast<uint32_t>(m->size()) + 1;
+        }
+        template <class T> uint32_t pick(const T*) { return 100; }
     "};
     run_test_expect_fail_with_error(
         "",
@@ -43556,11 +44285,9 @@ fn test_map_parameter_beside_an_out_of_line_template_of_another_namespace() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(1));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(2));
-        assert_eq!(ffi::pick(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(ffi::pick(&m), 2);
     };
     run_test("", hdr, rs, &["pick"], &[]);
 }
@@ -43585,11 +44312,9 @@ fn test_map_parameter_beside_a_member_templates_out_of_line_definition() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(1));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(2));
-        assert_eq!(ffi::pick(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(ffi::pick(&m), 2);
     };
     run_test("", hdr, rs, &["pick", "Chooser"], &[]);
 }
@@ -43637,11 +44362,9 @@ fn test_map_parameter_beside_a_differently_named_function_template() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(1));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(2));
-        assert_eq!(ffi::take(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(ffi::take(&m), 2);
     };
     run_test("", hdr, rs, &["take"], &[]);
 }
@@ -43662,11 +44385,9 @@ fn test_map_parameter_beside_a_function_template_in_another_namespace() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(1));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(2));
-        assert_eq!(ffi::pick(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(ffi::pick(&m), 2);
     };
     run_test("", hdr, rs, &["pick"], &[]);
 }
@@ -43874,21 +44595,19 @@ fn test_map_parameter_with_a_template_free_chain_of_using_declarations() {
     "};
     let rs = quote! {
         let sink = ffi::Sink::new().within_unique_ptr();
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(1));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(2));
-        assert_eq!(sink.pick(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(1), autocxx::c_int(2)));
+        assert_eq!(sink.pick(&m), 2);
     };
     run_test("", hdr, rs, &["Source", "Relay", "Sink"], &[]);
 }
 
 /// A lone transparent-comparator declaration passes the default-shape check -
-/// bindgen writes std::less<> and std::less<K> identically - so a binding is
-/// generated which builds a std::map<K, V>. That is a different C++ type from
-/// the function's, and the typed-pointer call fails to compile rather than
-/// resolving to anything else. A loud build error, not a refusal: autocxx
-/// cannot see the difference, and this is where it surfaces.
+/// bindgen writes std::less<> and std::less<K> identically - so a type is
+/// generated for std::map<K, V>. That is a different C++ type from the
+/// function's, and cxx's own function-pointer typecheck fails to bind rather
+/// than resolving to anything else. A loud build error, not a refusal:
+/// autocxx cannot see the difference, and this is where it surfaces.
 #[test]
 fn test_map_parameter_transparent_comparator_alone_fails_loudly() {
     let hdr = indoc! {"
@@ -43901,11 +44620,11 @@ fn test_map_parameter_transparent_comparator_alone_fails_loudly() {
     run_test_expect_fail("", hdr, quote! {}, &["take"], &[]);
 }
 
-/// The typed pointer also closes the conversion door: with no overload taking
-/// exactly the built map, a call by name would convert its way into `lure(Bait)`
-/// through Bait's constructor and silently call the wrong function. The cast
-/// has nothing of the exact type to resolve to, so the generated C++ fails to
-/// compile instead.
+/// That same typecheck closes the conversion door: with no overload taking
+/// exactly the generated type, a call by name would convert its way into
+/// `lure(Bait)` through Bait's constructor and silently call the wrong
+/// function. The function pointer has nothing of the exact type to bind to, so
+/// the generated C++ fails to compile instead.
 #[test]
 fn test_map_parameter_cannot_be_lured_into_a_conversion() {
     let hdr = indoc! {"
@@ -43922,12 +44641,62 @@ fn test_map_parameter_cannot_be_lured_into_a_conversion() {
     run_test_expect_fail("", hdr, quote! {}, &["lure", "Bait"], &[]);
 }
 
-/// A constructor has no typed pointer to close that door with - C++ has no
+/// The lure again behind a wrapper: a static method always calls through
+/// generated C++, and a call by name from there would convert the map into
+/// `Bait` exactly as above. The wrapper therefore calls through a pointer of
+/// the function's exact type too, and with no overload of that type - the
+/// declared comparator is transparent, however identical it looks here - the
+/// generated C++ fails to compile rather than picking `pick(Bait)`.
+#[test]
+fn test_map_parameter_cannot_be_lured_through_a_static_wrapper() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Bait {
+            Bait(const std::map<int, int>&) {}
+        };
+        struct Sink {
+            static uint32_t pick(const std::map<int, int, std::less<>>& m) {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            static uint32_t pick(Bait) { return 100; }
+        };
+    "};
+    run_test_expect_fail("", hdr, quote! {}, &["Sink", "Bait"], &[]);
+}
+
+/// The benign half of that coin: where the declaration really is the
+/// default-shaped map, the wrapper's typed pointer binds it and the call
+/// reaches it, with the converting sibling left alone.
+#[test]
+fn test_map_parameter_on_a_static_method_picks_the_exact_overload() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Bait {
+            Bait(const std::map<int, int>&) {}
+        };
+        struct Sink {
+            static uint32_t pick(const std::map<int, int>& m) {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            static uint32_t pick(Bait) { return 100; }
+        };
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::Sink::pick(&m), 2);
+    };
+    run_test("", hdr, rs, &["Sink", "Bait"], &[]);
+}
+
+/// A constructor has no such typecheck to close that door with - C++ has no
 /// syntax naming one constructor exactly - so where the class declares any
 /// other constructor an argument could reach, the map parameter is refused
 /// outright. Here `Holder(Bait)` is reachable: had the map constructor been
-/// bound, a transparent-comparator declaration would have made the built map
-/// a different type, and direct-initialization would have quietly built a
+/// bound, a transparent-comparator declaration would have made the generated
+/// type a different one, and direct-initialization would have quietly built a
 /// `Bait` from it and called the wrong constructor.
 #[test]
 fn test_map_parameter_in_constructor_with_a_reachable_sibling_is_refused() {
@@ -43962,11 +44731,12 @@ fn test_map_parameter_in_constructor_with_a_reachable_sibling_is_refused() {
     );
 }
 
-/// The boundary of the sibling exemption: a constructor taking a map by
-/// *reference* is harmless beside the map constructor, but one taking a map
-/// by *value* is an exact match for the map the wrapper builds, and would
+/// One boundary of the sibling exemption: a constructor taking a map by
+/// *value* is an exact match for the map the wrapper builds, and would
 /// capture the call silently were the declared reference secretly
-/// transparent. It counts as reachable, so the map constructor is refused.
+/// transparent. It counts as reachable whatever the erased shape - a
+/// by-value sibling is never exempt - so the reference-taking map
+/// constructor is refused.
 #[test]
 fn test_map_parameter_in_constructor_with_a_by_value_map_sibling_is_refused() {
     let hdr = indoc! {"
@@ -43998,11 +44768,75 @@ fn test_map_parameter_in_constructor_with_a_by_value_map_sibling_is_refused() {
     );
 }
 
+/// The same boundary from the other side. A constructor taking its map by
+/// value is served by building the default-shaped map and moving it into
+/// the call, and an rvalue is exactly what a const-reference sibling binds:
+/// had the by-value declaration secretly been transparent - the difference
+/// bindgen's rendering discards - the intended constructor would not be
+/// viable and `Holder(const std::map<int, int>&)` would take the call
+/// silently. This exact class once bound, built its map and reached the
+/// reference constructor. A reference sibling of the same erased shape
+/// therefore counts as reachable beside a by-value map constructor, the
+/// map parameter is refused, and the construction below fails to compile
+/// rather than running the wrong constructor.
+#[test]
+fn test_map_parameter_by_value_in_constructor_with_a_map_reference_sibling_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Holder {
+        public:
+            Holder(std::map<int, int, std::less<>> m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            Holder(const std::map<int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    let rs = quote! {
+        let m = ffi::std_map_int_int_AutocxxConcrete::new();
+        let _holder = ffi::Holder::new(m).within_unique_ptr();
+    };
+    run_test_expect_fail("", hdr, rs, &["Holder"], &[]);
+}
+
+/// The mutable-lvalue row of the same table: a constructor taking its map
+/// by non-const reference presents a mutable lvalue, which a
+/// const-reference sibling binds the moment erasure makes the intended
+/// constructor unviable - this one's declared comparator is transparent, so
+/// bound, it would have quietly run the sibling. Reachable, refused, and
+/// the construction below fails to compile instead.
+#[test]
+fn test_map_parameter_by_mutable_reference_in_constructor_with_a_const_reference_sibling_is_refused(
+) {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Holder {
+        public:
+            Holder(std::map<int, int, std::less<>>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            Holder(const std::map<int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        let _holder = ffi::Holder::new(m.pin_mut()).within_unique_ptr();
+    };
+    run_test_expect_fail("", hdr, rs, &["Holder"], &[]);
+}
+
 /// The exact-type call under C++17, where noexcept is part of the function's
 /// type: the standard lets a noexcept function initialize a pointer without
 /// it, so the typed call still reaches the right overload.
 #[test]
-fn test_map_parameter_exact_call_with_noexcept_cpp17() {
+fn test_map_parameter_with_noexcept_cpp17() {
     let hdr = indoc! {"
         #include <map>
         #include <cstdint>
@@ -44014,11 +44848,38 @@ fn test_map_parameter_exact_call_with_noexcept_cpp17() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::pick(&keys, &values), 2);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::pick(&m), 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["pick"], &[], None),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// A `std::string_view` parameter beside a map parameter: the two features
+/// compose, the view built in the wrapper over bytes Rust lends and the map
+/// passed as itself.
+#[test]
+fn test_map_parameter_beside_a_string_view() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string_view>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int>& m, std::string_view v) {
+            return static_cast<uint32_t>(m.size() + v.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::pick(&m, "ab"), 4);
     };
     run_test_ex(
         "",
@@ -44032,7 +44893,7 @@ fn test_map_parameter_exact_call_with_noexcept_cpp17() {
 }
 
 /// A `std::string_view` beside the map, in both of the spellings the wrapper
-/// can build a view for. The exact-type cast has to repeat whichever C++
+/// can build a view for. The exact-typed cast has to repeat whichever C++
 /// wrote - the value spelling and the `const&` one are different function
 /// types - so each binding reaches its own declaration, never the sibling's.
 #[test]
@@ -44049,12 +44910,10 @@ fn test_map_parameter_beside_a_string_view_reference() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::pick(&keys, &values, "ab"), 4);
-        assert_eq!(ffi::pick1(&keys, &values, "ab"), 103);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::pick(&m, "ab"), 4);
+        assert_eq!(ffi::pick1(&m, "ab"), 103);
     };
     run_test_ex(
         "",
@@ -44088,21 +44947,43 @@ fn test_map_parameter_beside_a_const_rvalue_reference() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
         let freight = ffi::Freight::new().within_unique_ptr();
-        assert_eq!(ffi::grade(&keys, &values, freight), 2);
+        assert_eq!(ffi::grade(&m, freight), 2);
         let freight = ffi::Freight::new().within_unique_ptr();
-        assert_eq!(ffi::grade1(&keys, &values, freight), 101);
+        assert_eq!(ffi::grade1(&m, freight), 101);
     };
     run_test("", hdr, rs, &["grade", "Freight"], &[]);
 }
 
-/// A top-level cv-qualifier on the return type is part of the function's
-/// type, so the exact-type cast has to repeat it even though the wrapper's
-/// own return - a value copied out of C++ - is unqualified.
+/// An rvalue-reference parameter beside a map parameter: the two compose, the
+/// map passed as itself and the value moved out of the `UniquePtr` Rust held.
+#[test]
+fn test_map_parameter_beside_an_rvalue_reference() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        struct Freight {
+            std::string cargo;
+        };
+        inline uint32_t grade(const std::map<int, int>& m, Freight&& f) {
+            return static_cast<uint32_t>(m.size() + f.cargo.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        let freight = ffi::Freight::new().within_unique_ptr();
+        assert_eq!(ffi::grade(&m, freight), 2);
+    };
+    run_test("", hdr, rs, &["grade", "Freight"], &[]);
+}
+
+/// A top-level cv-qualifier on the return type beside a map parameter. The
+/// qualifier is dropped on the way to Rust, the value having been copied out
+/// of C++, and the map is unaffected by it.
 #[test]
 fn test_map_parameter_with_cv_qualified_return() {
     let hdr = indoc! {"
@@ -44116,19 +44997,18 @@ fn test_map_parameter_with_cv_qualified_return() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::csized(&keys, &values), 1);
-        assert_eq!(ffi::vsized(&keys, &values), 1);
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::csized(&m), 1);
+        assert_eq!(ffi::vsized(&m), 1);
     };
     run_test("", hdr, rs, &["csized", "vsized"], &[]);
 }
 
-/// A real parameter already named like a synthesized half moves the pair to
-/// the first numbered names clear of everything, both halves together. The
-/// panic message follows the names.
+/// A map parameter beside a real one whose name an earlier patch would have
+/// synthesized. There is nothing left to collide with: the map is one
+/// parameter under its own name, so `m_keys` is the caller's parameter and
+/// only that.
 #[test]
 fn test_map_parameter_beside_a_colliding_name() {
     let hdr = indoc! {"
@@ -44139,22 +45019,9 @@ fn test_map_parameter_beside_a_colliding_name() {
         }
     "};
     let rs = quote! {
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::clash(&keys, &values, 7), 17);
-        let empty = cxx::CxxVector::new();
-        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ffi::clash(&keys, &empty, 7)
-        }))
-        .expect_err("a length mismatch should have panicked");
-        let message = err
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default());
-        assert!(message.contains("m_keys1"), "{message}");
-        assert!(message.contains("m_values1"), "{message}");
+        let mut m = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(m.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::clash(&m, 7), 17);
     };
     run_test("", hdr, rs, &["clash"], &[]);
 }
@@ -44218,11 +45085,9 @@ fn test_global_struct_map_is_generated() {
     let rs = quote! {
         let m = ffi::map { x: 42 };
         assert_eq!(ffi::use_map(&m), 42);
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::real_map(&keys, &values), 1);
+        let mut real = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(real.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::real_map(&real), 1);
     };
     run_test("", hdr, rs, &["use_map", "real_map"], &["map"]);
 }
@@ -44252,11 +45117,9 @@ fn test_global_template_named_map_is_generated() {
     let rs = quote! {
         let m = ffi::make_m();
         assert_eq!(ffi::unwrap(m.as_ref().unwrap()), 42);
-        let mut keys = cxx::CxxVector::new();
-        keys.pin_mut().push(autocxx::c_int(4));
-        let mut values = cxx::CxxVector::new();
-        values.pin_mut().push(autocxx::c_int(5));
-        assert_eq!(ffi::real_map(&keys, &values), 1);
+        let mut real = ffi::std_map_int_int_AutocxxConcrete::new();
+        assert!(real.pin_mut().insert(autocxx::c_int(4), autocxx::c_int(5)));
+        assert_eq!(ffi::real_map(&real), 1);
     };
     run_test("", hdr, rs, &["make_m", "unwrap", "real_map"], &[]);
 }

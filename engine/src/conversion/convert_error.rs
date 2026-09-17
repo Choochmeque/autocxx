@@ -207,32 +207,27 @@ pub enum ConvertErrorFromCpp {
     #[error("This is a C++ alias template: C++ declared {declared} template parameter(s) for it, of which {type_params} are type parameters. bindgen represents no other kind, so it emitted the alias as a plain typedef - but naming the alias in C++ requires the template arguments that typedef has lost, so autocxx cannot generate C++ which uses it. Naming the type the alias points at in a 'generate!' directive is usually what was wanted.")]
     AliasTemplate { declared: usize, type_params: usize },
     /// Attached wherever a `std::map` or `std::unordered_map` is named in a
-    /// position autocxx generates nothing for, which is every position but the
-    /// one the message describes.
+    /// shape autocxx generates no type for.
     ///
-    /// Rust has no type which is a C++ map: cxx declares none, and autocxx
-    /// declares none either. What it does instead is build one in C++, for the
-    /// single shape where building it is enough - a `const` reference
-    /// parameter, whose map lives only for the duration of the call.
-    #[error("A std::map or std::unordered_map appears here, and Rust has no type which is one: cxx has no map, so autocxx cannot hand one over, return one, or store one. The one supported shape is a parameter declared const std::map<K, V>& (or const std::unordered_map<K, V>&) whose key and value are each a type cxx can put in a std::vector - an integer, or std::string. autocxx builds the map in C++ for the duration of the call, and the Rust binding takes the keys and the values as two parallel vectors in that parameter's place. Anything else about the map is what put this message here: a map returned or taken by value or by mutable reference, a key or value type which is not one of those atoms, a comparator, hash or allocator other than the default, a map in a constructor a subclass! peer would have to pass on, two declarations of one C++ name which differ only in a way autocxx cannot see - std::less<> against the default comparator, or a custom hash - and are refused together because autocxx cannot know which of them a call was meant to reach, or a function template of this name in the same class or namespace: one exists here, and C++ would let the exact cast autocxx calls through select it, so a call could quietly reach the template instead of this declaration. An owned map type Rust can hold is a separate piece of work.")]
+    /// cxx has no map type, and nothing standing for every possible map could
+    /// be declared in a crate the generated code does not own. So autocxx does
+    /// for a map what it does for any other template instantiation: the one
+    /// specialization the header uses becomes its own generated opaque type.
+    /// That needs the map to be of the default-comparator kind, and its key
+    /// and value to be types the generated methods can hand over.
+    #[error("A std::map or std::unordered_map appears here in a shape autocxx generates no type for. autocxx gives each map specialization a generated opaque type of its own - reached through a UniquePtr, a & or a Pin<&mut>, with len, is_empty, contains, get, insert, insert_or_assign, erase, keys and values on it - but only where the map uses the default comparator, hash and allocator, and where its key and value are each a type cxx will put in a std::vector: an integer, a character type, or std::string, plus float and double as values. Any of these is what put this message here. A comparator, hash or allocator other than the default: the generated type names the default-shaped map, and one ordered or hashed by anything else is a different C++ type. A key or value which is not one of those atoms - a class, above all - which keys() and values() could not hand back; a map of classes is the next piece of work and is not this one. A floating-point key, which std::less cannot order because NaN compares false against everything, including itself. Two declarations of one C++ name which differ only in a way autocxx cannot see - std::less<> against the default comparator, or a custom unordered_map hash - which are refused together because autocxx cannot know which of them a call was meant to reach. A function template of this name in the same class or namespace: one exists here, and where bindgen's rendering erased the declared map's shape C++ would prefer the template's specialization to the declaration this binding was built from, so the call could quietly reach the template instead. A superclass constructor taking a map, which a subclass! peer cannot serve: the peer repeats its superclass constructor's parameters and passes them on, and nothing generated stands between the two. Or a constructor whose class declares others an argument list could reach, which has its own message.")]
     UnsupportedMap,
     /// A map parameter on a constructor whose class declares, inherits or
     /// templates other constructors an argument list could reach. C++ has no
-    /// syntax naming one constructor exactly, so the typed-pointer exactness
-    /// every other map call gets has nothing to grip here - see
-    /// `FnAnalyzer::map_refusal` for the rule and
-    /// `FnAnalyzer::build_constructor_capture_candidates` for what counts as
-    /// reachable.
-    #[error("A std::map or std::unordered_map is a parameter of a constructor here, and the class declares another constructor which an argument list could also reach - or inherits or templates constructors autocxx cannot enumerate. C++ has no syntax naming one constructor exactly, so autocxx can only hand the map it builds to direct-initialization to pick one; and where this constructor's own map differs from the built one in a way bindgen's rendering conceals - a std::less<> comparator, or a custom unordered_map hash - overload resolution would quietly choose one of those other constructors instead, converting the map through an unrelated class if that is what it takes. A map parameter is served in a constructor only where the class declares no other constructor taking arguments at all; the copy and move constructors do not count, and nor does a constructor whose only parameter is a reference to such a map - though one taking a map by value does, being an exact match for the map autocxx builds.")]
+    /// syntax naming one constructor exactly, so where bindgen's rendering
+    /// concealed the declared map's shape there is nothing to keep the call
+    /// from reaching a sibling - see `FnAnalyzer::map_refusal` for the rule
+    /// and `FnAnalyzer::build_constructor_capture_candidates` for what counts
+    /// as reachable.
+    #[error("A std::map or std::unordered_map is a parameter of a constructor here, and the class declares another constructor which an argument list could also reach - or inherits or templates constructors autocxx cannot enumerate. C++ has no syntax naming one constructor exactly, so autocxx can only hand the map to direct-initialization and let it pick; and where this constructor's declared map differs from the generated type in a way bindgen's rendering conceals - a std::less<> comparator, or a custom unordered_map hash - overload resolution would quietly choose one of those other constructors instead, converting the map through an unrelated class if that is what it takes. A map parameter is served in a constructor only where the class declares no other constructor taking arguments at all; the copy and move constructors do not count, and nor does a constructor whose only parameter is a reference to a map provably of another shape - provably, because bindgen spells one C++ type more than one way, uint32_t as u32 and unsigned int as c_uint, so only a different map template or a key or value of another width or signedness on every supported platform says the reference cannot bind the map this binding would pass. A reference to a map autocxx cannot prove different counts wherever its kind binds what this binding presents: any reference, where this constructor takes its map by value or by non-const reference, since the argument presented is then an rvalue or a mutable lvalue; and a const reference sibling even where this constructor takes its own map by const reference, a const lvalue being exactly what a const reference binds.")]
     MapInOverloadableConstructor,
-    /// autocxx builds a map parameter out of two adjacent wrapper parameters,
-    /// the keys and the values, and this says the second one was not there.
-    /// Nothing produces the first without the second, so reaching this is an
-    /// autocxx bug rather than a problem with the C++.
-    #[error("autocxx generates a C++ wrapper which builds a std::map out of two parameters, the keys and the values, and the values parameter is missing from the wrapper it generated. This is an autocxx bug; please report the header which produced it.")]
-    MapValuesParameterMissing,
-    /// A wrapper which builds a map calls its function through a pointer of
-    /// the function's exact type, so that the call can only ever reach the
+    /// A wrapper taking a map calls its function through a pointer of the
+    /// function's exact type, so that the call can only ever reach the
     /// declaration the binding was built from, and this says the signature
     /// held a conversion whose C++ type autocxx does not know. Guessing is not
     /// an option: a wrong guess could resolve the pointer against a different

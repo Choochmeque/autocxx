@@ -125,6 +125,30 @@ pub(crate) enum HolderSurface {
         payload: Box<Type>,
         deps: HashSet<QualifiedName>,
     },
+    /// A `std::map<K, V>` or `std::unordered_map<K, V>` with the default
+    /// comparator, hash and allocator, carrying the key and the value as the
+    /// `cxx::bridge` spells them.
+    ///
+    /// cxx has no map, so this is the only way Rust holds one: the
+    /// instantiation the header actually uses becomes a generated opaque type
+    /// of its own, exactly as any other template instantiation does, and the
+    /// shims are the whole of what Rust can do with it. See [`MapShim`].
+    Map {
+        key: Box<Type>,
+        value: Box<Type>,
+        /// Whether the key is a `std::string`, which decides how it crosses:
+        /// a `&CxxString`, where an atom crosses by value.
+        key_is_string: bool,
+        /// Likewise for the value.
+        value_is_string: bool,
+        /// Whether this is the ordered map, whose entries come out in key
+        /// order where `std::unordered_map`'s do not. It picks the standard
+        /// header the shims ask for, and what the generated type's
+        /// documentation promises about [`MapShim::Keys`] and
+        /// [`MapShim::Values`]; nothing else differs between the two.
+        ordered: bool,
+        deps: HashSet<QualifiedName>,
+    },
 }
 
 impl HolderSurface {
@@ -146,8 +170,89 @@ impl HolderSurface {
             | Self::WeakPtr { deps, .. }
             | Self::VectorOfPointers { deps, .. }
             | Self::CustomPtr { deps, .. }
-            | Self::ConstRef { deps, .. } => deps.iter(),
+            | Self::ConstRef { deps, .. }
+            | Self::Map { deps, .. } => deps.iter(),
         }
+    }
+}
+
+/// One of the C++ helper functions autocxx generates beside the opaque type it
+/// lowers a `std::map<K, V>` instantiation to.
+///
+/// Every one of them is written against the generated type's own typedef, so
+/// the key and the value are named `H::key_type` and `H::mapped_type` and
+/// nothing here has to re-derive a C++ spelling for either. All are `noexcept`:
+/// an exception crossing `extern "C"` into Rust is undefined behaviour, so an
+/// allocation failure terminates instead, as in cxx's own container glue.
+#[derive(Copy, Clone)]
+pub(crate) enum MapShim {
+    /// A default-constructed map on the heap, which is the only way Rust makes
+    /// one: the generated type is opaque, so it exists only behind a
+    /// `UniquePtr` or a reference.
+    New,
+    /// `std::map::size`, as a `size_t`.
+    Len,
+    /// `std::map::find`, as a pointer to the value or null. `contains` and
+    /// `get` are both this one shim: a second call to ask whether the entry is
+    /// there would search the map twice and could answer about a different
+    /// map, and the pointer says both things at once.
+    Find,
+    /// `std::map::insert`, whose `pair::second` this returns: false where the
+    /// map already held the key, whose entry is then left alone.
+    Insert,
+    /// `std::map::insert_or_assign`'s effect, written out rather than called,
+    /// so that nothing here needs C++17. Returns whether the key was new.
+    InsertOrAssign,
+    /// `std::map::erase` taking a key, whose count this reduces to a bool - a
+    /// map holds at most one entry per key.
+    Erase,
+    /// A snapshot of the keys, in iteration order, as a `std::vector`. Ordered
+    /// by key for a `std::map`; in whatever order a `std::unordered_map`
+    /// iterates, which is stable for as long as nobody mutates it.
+    Keys,
+    /// A snapshot of the values, in the same iteration order - so the two
+    /// line up entry by entry over a map unchanged between the calls, both
+    /// being owned copies with no borrow tying either to the map.
+    Values,
+}
+
+impl MapShim {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::New,
+        Self::Len,
+        Self::Find,
+        Self::Insert,
+        Self::InsertOrAssign,
+        Self::Erase,
+        Self::Keys,
+        Self::Values,
+    ];
+
+    /// What the method is called on the Rust side, and the tail of what the
+    /// C++ function is called.
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Len => "len",
+            Self::Find => "find",
+            Self::Insert => "insert",
+            Self::InsertOrAssign => "insert_or_assign",
+            Self::Erase => "erase",
+            Self::Keys => "keys",
+            Self::Values => "values",
+        }
+    }
+
+    /// The C++ function's name, and the name the `cxx::bridge` declares it by.
+    ///
+    /// Suffixed per module, unlike the other holders' shims: two `include_cpp!`
+    /// blocks in one binary can use the same instantiation, the holder's name
+    /// is the same in both because it is derived from the C++ spelling, and
+    /// cxx defines a non-inline `extern "C"` wrapper for every bridge function
+    /// it declares - so without the suffix the two generated translation units
+    /// define one symbol twice, which a linker may reject.
+    pub(crate) fn cpp_name(self, holder: &QualifiedName, config: &IncludeCppConfig) -> String {
+        config.uniquify_name_per_mod(&shim_cpp_name(holder, self.rust_name()))
     }
 }
 

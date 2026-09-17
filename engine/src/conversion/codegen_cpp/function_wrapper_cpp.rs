@@ -8,15 +8,12 @@
 
 use syn::{Type, TypeReference};
 
-use crate::{
-    conversion::{
-        analysis::fun::function_wrapper::{
-            BridgePointer, MapBuild, MapHalf, PointerCppConversion, StringViewSpelling,
-            TypeConversionPolicy, WholeCppConversion, WholeRustConversion,
-        },
-        ConvertErrorFromCpp,
+use crate::conversion::{
+    analysis::fun::function_wrapper::{
+        BridgePointer, PointerCppConversion, StringViewSpelling, TypeConversionPolicy,
+        WholeCppConversion, WholeRustConversion,
     },
-    types::QualifiedName,
+    ConvertErrorFromCpp,
 };
 
 use super::type_to_cpp::CppNameMap;
@@ -26,10 +23,6 @@ use super::type_to_cpp::CppNameMap;
 /// has to be this exact type: cxx checks its own shim against ours by
 /// assigning it to a function pointer.
 const RUST_BYTE_SLICE: &str = "::rust::Slice<::std::uint8_t const>";
-
-/// Likewise for the `&Vec<String>` a map's string keys or values cross as -
-/// cxx-gen's `write.rs` writes the vector, a space, `const` and then `&`.
-const RUST_STRING_VEC_REF: &str = "::rust::Vec<::rust::String> const&";
 
 impl TypeConversionPolicy {
     pub(super) fn unconverted_type(
@@ -52,21 +45,6 @@ impl TypeConversionPolicy {
                 cpp: WholeCppConversion::FromRustBytesToStringView(_),
                 ..
             } => Ok(RUST_BYTE_SLICE.to_string()),
-            // The two halves of a map parameter, each spelt by which list it
-            // is: the C++ vector comes out of the bridge type below, and the
-            // Rust one is written here for the same reason the byte slice is -
-            // `Vec<String>` is cxx's own type and not one this file's name map
-            // knows.
-            Self::Whole {
-                cpp: WholeCppConversion::IgnoredMapValuesParameter(MapHalf::RustStringVec),
-                ..
-            } => Ok(RUST_STRING_VEC_REF.to_string()),
-            Self::Whole {
-                cpp: WholeCppConversion::FromVectorsToMap(build),
-                ..
-            } if matches!(build.list, MapHalf::RustStringVec) => {
-                Ok(RUST_STRING_VEC_REF.to_string())
-            }
             // `&var`. What this conversion is handed is the C++ reference;
             // the pointer in `cxxbridge_type` is what it produces.
             Self::Pointer {
@@ -141,16 +119,9 @@ impl TypeConversionPolicy {
     /// The expression the wrapper passes to the call it makes, or `None` where
     /// this parameter is not passed at all.
     ///
-    /// `following_var_name` is what the wrapper calls the parameter after this
-    /// one, and is `None` where there is none or where the caller is asking
-    /// about a return value. One conversion reads it -
-    /// [`WholeCppConversion::FromVectorsToMap`], whose map is built out of two
-    /// adjacent parameters - and it is the only thing in this file which looks
-    /// past the parameter it was asked about.
     pub(super) fn cpp_conversion(
         &self,
         var_name: &str,
-        following_var_name: Option<&str>,
         cpp_name_map: &CppNameMap,
         is_return: bool,
     ) -> Result<Option<String>, ConvertErrorFromCpp> {
@@ -239,40 +210,6 @@ impl TypeConversionPolicy {
                  : ::std::string_view(reinterpret_cast<const char*>({var_name}.data()), \
                  {var_name}.size()))"
             )),
-            // The map built out of this parameter and the one after it. Named
-            // from the global namespace, so that an argument type's own
-            // namespaces cannot offer a better-matching function of that name.
-            // The map's type is written out rather than deduced, because the
-            // helper has no other way to know which of the two maps to build
-            // nor which comparator C++ declared.
-            //
-            // The `static_cast` binds the returned map to a `const` lvalue
-            // before the call sees it - the temporary lives to the end of the
-            // full-expression either way. Passed as the prvalue it starts out
-            // as, an `f(std::map<K, V>&&)` overload would outcompete the
-            // `f(const std::map<K, V>&)` this parameter was built from, and
-            // the binding would call a function which moves out of a map its
-            // documentation says is merely lent. A constructor is called by
-            // its type's name, where the typed-pointer exactness of
-            // `exact_function_call` has nothing to grip, so this cast is what
-            // keeps a `T(M&&)` constructor from outcompeting the `T(const M&)`
-            // one there too.
-            Self::Whole {
-                cpp: WholeCppConversion::FromVectorsToMap(build),
-                ..
-            } => {
-                let values =
-                    following_var_name.ok_or(ConvertErrorFromCpp::MapValuesParameterMissing)?;
-                let map_type = map_built_type(build, cpp_name_map)?;
-                Some(format!(
-                    "static_cast<const {map_type}&>(::autocxx_map_from_vectors<{map_type}>({var_name}, {values}))"
-                ))
-            }
-            // Read by the conversion above, and not an argument of its own.
-            Self::Whole {
-                cpp: WholeCppConversion::IgnoredMapValuesParameter(_),
-                ..
-            } => None,
             Self::Pointer {
                 cpp: PointerCppConversion::IgnoredPlacementPtrParameter,
                 ..
@@ -379,26 +316,12 @@ impl TypeConversionPolicy {
         )
     }
 
-    /// Whether [`Self::cpp_conversion`] builds a map, so that callers know to
-    /// ask for the header which declares it and for the helper which fills it -
-    /// and to make the call through an explicitly typed pointer, which is what
-    /// [`Self::target_parameter_type`] below exists to spell.
-    pub(super) fn builds_a_map(&self) -> Option<&QualifiedName> {
-        match self {
-            Self::Whole {
-                cpp: WholeCppConversion::FromVectorsToMap(build),
-                ..
-            } => Some(&build.map),
-            _ => None,
-        }
-    }
-
     /// The type the C++ function this wrapper calls declared for this
     /// parameter, or `None` for a wrapper parameter which is not passed to the
     /// call at all.
     ///
-    /// Read only for a wrapper which builds a map, which calls its function
-    /// through a pointer of exactly this signature rather than by name - see
+    /// Read only for a wrapper taking a map, which calls its function through
+    /// a pointer of exactly this signature rather than by name - see
     /// `exact_function_call` in `codegen_cpp` for why. The match is exhaustive
     /// on purpose, with no catch-all: every conversion either derives its C++
     /// spelling from a fact the analysis recorded - never from a guess, since
@@ -415,22 +338,11 @@ impl TypeConversionPolicy {
     ) -> Result<Option<String>, ConvertErrorFromCpp> {
         Ok(match self {
             // Not passed to the call: the pointer a placement-new return is
-            // constructed into, and the values half of a map pair.
+            // constructed into.
             Self::Pointer {
                 cpp: PointerCppConversion::IgnoredPlacementPtrParameter,
                 ..
-            }
-            | Self::Whole {
-                cpp: WholeCppConversion::IgnoredMapValuesParameter(_),
-                ..
             } => None,
-            // The map parameter itself, as C++ declared it - or rather as
-            // autocxx reads that declaration, which is the whole point of the
-            // typed call: where the two differ, the cast fails to compile.
-            Self::Whole {
-                cpp: WholeCppConversion::FromVectorsToMap(build),
-                ..
-            } => Some(format!("const {}&", map_built_type(build, cpp_name_map)?)),
             // A `std::string_view`, by value or by `const` reference as the
             // analysis recorded C++ declaring it. The wrapper builds the same
             // view either way; only the function's type tells them apart.
@@ -572,18 +484,15 @@ impl TypeConversionPolicy {
             } => self.unwrapped_type_as_string(cpp_name_map),
             // Refused: parameter conversions, which no construction site puts
             // on a return value. A `string_view` return is refused during
-            // analysis - `StringViewOutOfCpp` - and a map is served in
-            // parameter position alone, so any of these arriving here is an
-            // autocxx bug, not a spelling to guess at.
+            // analysis - `StringViewOutOfCpp` - and any of these arriving
+            // here is an autocxx bug, not a spelling to guess at.
             Self::Whole {
                 cpp:
                     WholeCppConversion::Move
                     | WholeCppConversion::MoveOrCopy
                     | WholeCppConversion::FromUniquePtrToValue
                     | WholeCppConversion::FromPtrToValue
-                    | WholeCppConversion::FromRustBytesToStringView(_)
-                    | WholeCppConversion::FromVectorsToMap(_)
-                    | WholeCppConversion::IgnoredMapValuesParameter(_),
+                    | WholeCppConversion::FromRustBytesToStringView(_),
                 ..
             } => Err(ConvertErrorFromCpp::MapTargetSignatureUnknown),
             Self::Pointer {
@@ -614,24 +523,6 @@ impl TypeConversionPolicy {
             }
         )
     }
-}
-
-/// The C++ spelling of the map a [`MapBuild`] builds: `std::map<K, V>` or
-/// `std::unordered_map<K, V>`, with the key and the value written as C++
-/// declared them. One place, because the helper call, the `static_cast` which
-/// gives its result a `const` lvalue, and the parameter type in
-/// [`TypeConversionPolicy::target_parameter_type`] must all name the same
-/// type.
-fn map_built_type(
-    build: &MapBuild,
-    cpp_name_map: &CppNameMap,
-) -> Result<String, ConvertErrorFromCpp> {
-    Ok(format!(
-        "{}<{}, {}>",
-        build.map.to_cpp_name(),
-        cpp_name_map.type_to_cpp(&build.key)?,
-        cpp_name_map.type_to_cpp(&build.value)?,
-    ))
 }
 
 /// The C++ reference which `pointer` stands for, for the two conversions which

@@ -7,7 +7,6 @@
 // except according to those terms.
 
 mod function_wrapper_cpp;
-mod map_prelude;
 mod move_or_copy_prelude;
 mod new_and_delete_prelude;
 mod string_view_prelude;
@@ -44,8 +43,8 @@ use super::{
         pod::PodAnalysis,
     },
     api::{
-        Api, ConstRefShim, CustomPtrShim, HolderSurface, Provenance, SharedPtrShim, SubclassName,
-        TypeKind, UniquePtrShim, VectorShim, WeakPtrShim,
+        Api, ConstRefShim, CustomPtrShim, HolderSurface, MapShim, Provenance, SharedPtrShim,
+        SubclassName, TypeKind, UniquePtrShim, VectorShim, WeakPtrShim,
     },
     apivec::ApiVec,
     parse::CppRefQualifier,
@@ -103,7 +102,6 @@ enum Header {
     NewDeletePrelude,
     MoveOrCopyPrelude,
     StringViewPrelude,
-    MapPrelude,
 }
 
 impl Header {
@@ -129,7 +127,6 @@ impl Header {
             Header::NewDeletePrelude => new_and_delete_prelude::NEW_AND_DELETE_PRELUDE.to_string(),
             Header::MoveOrCopyPrelude => move_or_copy_prelude::MOVE_OR_COPY_PRELUDE.to_string(),
             Header::StringViewPrelude => string_view_prelude::STRING_VIEW_PRELUDE.to_string(),
-            Header::MapPrelude => map_prelude::MAP_PRELUDE.to_string(),
         }
     }
 
@@ -327,6 +324,17 @@ impl<'a> CppCodeGenerator<'a> {
                         Some(HolderSurface::ConstRef { .. }) => {
                             self.generate_const_ref_shims(api.name())
                         }
+                        Some(HolderSurface::Map {
+                            key_is_string,
+                            value_is_string,
+                            ordered,
+                            ..
+                        }) => self.generate_map_shims(
+                            api.name(),
+                            *key_is_string,
+                            *value_is_string,
+                            *ordered,
+                        ),
                         None => {}
                     }
                 }
@@ -570,7 +578,7 @@ impl<'a> CppCodeGenerator<'a> {
         })
     }
 
-    /// The C++ type of the class whose method a map-building wrapper calls
+    /// The C++ type of the class whose method a map-taking wrapper calls
     /// through a member pointer: what the receiver conversion in first
     /// position refers to. The receiver arrives in one of the shapes the
     /// bridge gives it - a `&T`, a `Pin<&mut T>`, or the raw pointer some
@@ -755,32 +763,17 @@ impl<'a> CppCodeGenerator<'a> {
             .argument_conversion
             .iter()
             .enumerate()
-            .map(|(counter, conv)| {
-                // What the parameter after this one is called, for the single
-                // conversion which reads two of them - see `cpp_conversion`.
-                let following = (counter + 1 < details.argument_conversion.len())
-                    .then(|| get_arg_name(counter + 1));
-                let following = following.as_deref();
-                match conversion_direction {
-                    ConversionDirection::RustCallsCpp => conv.cpp_conversion(
-                        &get_arg_name(counter),
-                        following,
-                        &self.original_name_map,
-                        false,
-                    ),
-                    ConversionDirection::CppCallsCpp => Ok(Some(get_arg_name(counter))),
-                    ConversionDirection::CppCallsRust => conv
-                        .inverse()
-                        .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)
-                        .and_then(|conv| {
-                            conv.cpp_conversion(
-                                &get_arg_name(counter),
-                                following,
-                                &self.original_name_map,
-                                false,
-                            )
-                        }),
+            .map(|(counter, conv)| match conversion_direction {
+                ConversionDirection::RustCallsCpp => {
+                    conv.cpp_conversion(&get_arg_name(counter), &self.original_name_map, false)
                 }
+                ConversionDirection::CppCallsCpp => Ok(Some(get_arg_name(counter))),
+                ConversionDirection::CppCallsRust => conv
+                    .inverse()
+                    .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)
+                    .and_then(|conv| {
+                        conv.cpp_conversion(&get_arg_name(counter), &self.original_name_map, false)
+                    }),
             })
             .collect();
         let mut arg_list = arg_list?.into_iter().flatten();
@@ -799,25 +792,25 @@ impl<'a> CppCodeGenerator<'a> {
         // its declaration.
         let mut need_placement_new = false;
         // The exact C++ type of the function this wrapper calls, computed only
-        // for a wrapper which builds a map. Such a wrapper makes its call
-        // through a pointer of this type rather than by name: the map it
-        // builds is always of the default-comparator, default-allocator kind,
-        // and a call by name would let overload resolution weigh that map
-        // against every declaration sharing the name - so a binding built from
+        // for a wrapper whose signature carries a map. The argument standing
+        // for the map is always of the default-comparator, default-allocator
+        // kind - the one generated type - and a call by name would let
+        // overload resolution weigh that against every declaration sharing
+        // the name: a binding built from
         // `f(const std::map<K, V, std::less<>>&)`, whose comparator bindgen's
-        // rendering cannot distinguish from the default, would quietly call a
-        // sibling `f(const std::map<K, V>&)`, or convert its way into any
-        // other viable overload. Taking the address through
+        // rendering cannot distinguish from the default, would quietly
+        // convert its way into any other viable overload, `f(Bait)` by way of
+        // `Bait(const std::map<K, V>&)` included. Taking the address through
         // `static_cast<Ret (*)(Params)>(&f)` instead resolves against the
-        // declared *types*: the call can only ever reach a function of exactly
-        // the built map's signature, and where the one declaration is not that
-        // - the lone transparent-comparator overload - the cast fails to
-        // compile rather than calling anything else.
+        // declared *types*: the call can only ever reach a function of
+        // exactly the declared signature, and where the one declaration is
+        // not that - the lone transparent-comparator overload - the cast
+        // fails to compile rather than calling anything else. Direct bindings
+        // need none of this, because cxx's own generated shim assigns the
+        // function to a typed pointer already; the wrappers are the calls
+        // which would otherwise go by name.
         let exact_signature = if matches!(conversion_direction, ConversionDirection::RustCallsCpp)
-            && details
-                .argument_conversion
-                .iter()
-                .any(|conv| conv.builds_a_map().is_some())
+            && details.takes_a_map
         {
             let mut params = Vec::new();
             for (counter, conv) in details.argument_conversion.iter().enumerate() {
@@ -1054,22 +1047,14 @@ impl<'a> CppCodeGenerator<'a> {
         };
         if let Some(ret) = &details.return_conversion {
             let call_itself = match conversion_direction {
-                ConversionDirection::RustCallsCpp => ret.cpp_conversion(
-                    &underlying_function_call,
-                    None,
-                    &self.original_name_map,
-                    true,
-                )?,
+                ConversionDirection::RustCallsCpp => {
+                    ret.cpp_conversion(&underlying_function_call, &self.original_name_map, true)?
+                }
                 ConversionDirection::CppCallsCpp => Some(underlying_function_call),
                 ConversionDirection::CppCallsRust => ret
                     .inverse()
                     .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)?
-                    .cpp_conversion(
-                        &underlying_function_call,
-                        None,
-                        &self.original_name_map,
-                        true,
-                    )?,
+                    .cpp_conversion(&underlying_function_call, &self.original_name_map, true)?,
             }
             .expect(
                 "Expected some conversion type for return value which resulted in a parameter name",
@@ -1163,30 +1148,6 @@ impl<'a> CppCodeGenerator<'a> {
         {
             headers.push(Header::System("cstdint"));
             headers.push(Header::StringViewPrelude);
-        }
-        // Likewise of the arguments only: a map is served in parameter position
-        // and refused everywhere else. `<vector>` for the two parameters the
-        // helper takes, and the header which declares whichever map it builds.
-        let maps: Vec<_> = details
-            .argument_conversion
-            .iter()
-            .filter_map(|conv| conv.builds_a_map())
-            .collect();
-        if !maps.is_empty() {
-            // `<vector>` and `<string>` for the lists and for the elements the
-            // helper converts, `cxx.h` for the `rust::String` it converts one
-            // of them from, and the header which declares whichever map is
-            // being built.
-            headers.push(Header::System("string"));
-            headers.push(Header::System("vector"));
-            headers.push(Header::CxxH);
-            for map in maps {
-                headers.push(Header::System(match map.get_final_item() {
-                    "unordered_map" => "unordered_map",
-                    _ => "map",
-                }));
-            }
-            headers.push(Header::MapPrelude);
         }
         Ok(ExtraCpp {
             declaration,
@@ -1376,6 +1337,122 @@ impl<'a> CppCodeGenerator<'a> {
         self.additional_functions.push(ExtraCpp {
             declaration: Some(declaration),
             headers: vec![Header::System("vector"), Header::System("cstddef")],
+            ..Default::default()
+        })
+    }
+
+    /// The C++ helpers which are the whole of what Rust can do with the
+    /// generated type standing for one `std::map` instantiation.
+    ///
+    /// Written against that type's own typedef, so the key and the value are
+    /// `H::key_type` and `H::mapped_type` and nothing here re-derives a C++
+    /// spelling for either; `H::value_type` is the pair the map stores, whose
+    /// `first` is `const`, which is why `insert` names it rather than building
+    /// a `std::pair` of its own.
+    ///
+    /// Every one is `noexcept`. cxx routes these through `extern "C"`, and an
+    /// exception crossing that boundary is undefined behaviour, so an
+    /// allocation failure terminates rather than unwinding into Rust - the
+    /// same bargain cxx's own container glue makes.
+    ///
+    /// `insert_or_assign` is written out rather than called: the member is
+    /// C++17, and nothing else autocxx generates asks for more than C++14. The
+    /// two steps have its semantics - the mapped value replaced where the key
+    /// was there, the entry created where it was not - and its answer, which
+    /// is whether the key was new.
+    ///
+    /// `erase` takes the key rather than an iterator, so it can say whether
+    /// anything was there without a second lookup; a map holds at most one
+    /// entry per key, so its count is the bool.
+    ///
+    /// An atom key or value is taken by value and a `std::string` one by
+    /// `const` reference, which is what the bridge declares and so what these
+    /// have to repeat: cxx typechecks each shim by assigning it to a function
+    /// pointer of the type the bridge declared, and a `const uint32_t&`
+    /// parameter where the bridge said `uint32_t` is a different function
+    /// type.
+    ///
+    /// The two snapshots walk the map once each and reserve as they go. Each
+    /// is owned by its caller from the moment it returns - nothing ties it to
+    /// the map - so the two line up entry by entry only over a map unchanged
+    /// between the calls: a caller who wants the pairing takes both before
+    /// mutating.
+    fn generate_map_shims(
+        &mut self,
+        tn: &QualifiedName,
+        key_is_string: bool,
+        value_is_string: bool,
+        ordered: bool,
+    ) {
+        let holder = tn.get_final_item();
+        let key_param = if key_is_string {
+            format!("const {holder}::key_type&")
+        } else {
+            format!("{holder}::key_type")
+        };
+        let value_param = if value_is_string {
+            format!("const {holder}::mapped_type&")
+        } else {
+            format!("{holder}::mapped_type")
+        };
+        let declaration = MapShim::ALL
+            .iter()
+            .map(|shim| {
+                let name = shim.cpp_name(tn, self.config);
+                match shim {
+                    MapShim::New => format!(
+                        "inline ::std::unique_ptr<{holder}> {name}() noexcept {{ return ::std::make_unique<{holder}>(); }}"
+                    ),
+                    MapShim::Len => format!(
+                        "inline ::std::size_t {name}(const {holder}& self) noexcept {{ return self.size(); }}"
+                    ),
+                    // `addressof` rather than `&`: a value type may overload
+                    // `operator&` and one which does would hand back whatever
+                    // it likes.
+                    MapShim::Find => format!(
+                        "inline const {holder}::mapped_type* {name}(const {holder}& self, {key_param} key) noexcept {{ \
+                         const auto found = self.find(key); \
+                         return found == self.end() ? nullptr : ::std::addressof(found->second); }}"
+                    ),
+                    MapShim::Insert => format!(
+                        "inline bool {name}({holder}& self, {key_param} key, {value_param} value) noexcept {{ \
+                         return self.insert({holder}::value_type(key, value)).second; }}"
+                    ),
+                    MapShim::InsertOrAssign => format!(
+                        "inline bool {name}({holder}& self, {key_param} key, {value_param} value) noexcept {{ \
+                         const auto found = self.find(key); \
+                         if (found != self.end()) {{ found->second = value; return false; }} \
+                         self.insert({holder}::value_type(key, value)); return true; }}"
+                    ),
+                    MapShim::Erase => format!(
+                        "inline bool {name}({holder}& self, {key_param} key) noexcept {{ return self.erase(key) != 0; }}"
+                    ),
+                    MapShim::Keys => format!(
+                        "inline ::std::unique_ptr<::std::vector<{holder}::key_type>> {name}(const {holder}& self) noexcept {{ \
+                         auto result = ::std::make_unique<::std::vector<{holder}::key_type>>(); \
+                         result->reserve(self.size()); \
+                         for (const auto& entry : self) result->push_back(entry.first); \
+                         return result; }}"
+                    ),
+                    MapShim::Values => format!(
+                        "inline ::std::unique_ptr<::std::vector<{holder}::mapped_type>> {name}(const {holder}& self) noexcept {{ \
+                         auto result = ::std::make_unique<::std::vector<{holder}::mapped_type>>(); \
+                         result->reserve(self.size()); \
+                         for (const auto& entry : self) result->push_back(entry.second); \
+                         return result; }}"
+                    ),
+                }
+            })
+            .join("\n");
+        let container = if ordered { "map" } else { "unordered_map" };
+        self.additional_functions.push(ExtraCpp {
+            declaration: Some(declaration),
+            headers: vec![
+                Header::System(container),
+                Header::System("memory"),
+                Header::System("vector"),
+                Header::System("cstddef"),
+            ],
             ..Default::default()
         })
     }
