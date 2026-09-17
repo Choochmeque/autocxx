@@ -230,12 +230,35 @@ impl TypeConversionPolicy {
                     conversion_requires_unsafe: false,
                 }
             }
+            // The keys of a map parameter. Nothing about the vector changes;
+            // this exists for the one thing a caller can get wrong about a
+            // pairing autocxx made out of a single C++ parameter. It panics
+            // rather than pairing up to the shorter of the two, which would
+            // build the map out of part of what was passed and say nothing.
+            Self::Whole {
+                rust: WholeRustConversion::MapKeysPairedWith(values),
+                ..
+            } => {
+                let message = format!(
+                    "autocxx: `{var}` and `{values}` are paired by index to build the C++ \
+                     map this function takes, so they must be the same length",
+                    var = quote! { #var },
+                );
+                RustParamConversion::Param {
+                    ty: self.converted_rust_type(),
+                    local_variables: vec![MaybeUnsafeStmt::new(quote! {
+                        assert!(#var.len() == #values.len(), #message);
+                    })],
+                    conversion: quote! { #var },
+                    conversion_requires_unsafe: false,
+                }
+            }
             Self::Whole {
                 rust: WholeRustConversion::FromValueParamToPtr,
                 ..
             } => self.param_handler(var, counter, "ValueParamHandler", "ValueParam"),
             Self::Whole {
-                rust: WholeRustConversion::FromRValueParamToPtr,
+                rust: WholeRustConversion::FromRValueParamToPtr { .. },
                 ..
             } => self.param_handler(var, counter, "RValueParamHandler", "RValueParam"),
             // This type of conversion means that this function parameter appears in the cxx::bridge
