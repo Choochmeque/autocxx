@@ -315,7 +315,22 @@ generated typedef names, so the generated C++ fails to compile — loudly, namin
 the function — rather than calling anything else. Where one C++ name has *two*
 declarations `autocxx` cannot tell apart — `std::less<>` beside the default
 comparator, or two hashes of one `std::unordered_map` shape — both are refused
-outright: there is no way to know which one a call was meant to reach.
+outright: there is no way to know which one a call was meant to reach. The
+comparison sees the map through whatever spells it — a typedef, a pointer, a
+by-value parameter — so writing one twin through an alias changes nothing.
+
+That wall stands whichever route a call takes. Every function `cxx` declares
+itself is bound by assigning its address to a function pointer of the declared
+type, so the call can only ever reach a function of exactly that signature —
+never an overload a conversion could carry the map into. A signature which
+needs a wrapper of `autocxx`'s own, because something else in it does — a
+static method, an rvalue-reference parameter, a `std::string_view` — gets the
+same exactness by hand: the wrapper calls through a pointer of the declared
+type too, so `f(Bait)` beside a map-taking `f` cannot quietly capture the call
+through `Bait`'s converting constructor, and a pair its neighbours tell apart
+only by spelling — `f(std::string_view)` beside `f(const std::string_view&)`,
+`f(T&&)` beside `f(const T&&)` — still reaches the declaration each binding
+was built from.
 
 A function template of the same name is the third competitor, and the one no
 argument type fences out on its own: where the bound declaration's shape was

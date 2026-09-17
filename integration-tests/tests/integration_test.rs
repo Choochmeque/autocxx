@@ -43674,11 +43674,12 @@ fn test_map_parameter_in_subclass() {
     );
 }
 
-/// A map argument cannot pick the wrong member of an overload set: the wrapper
-/// calls the function through a pointer of its exact declared type. Here the
-/// rvalue-reference overload would win a call by name - the built map starts
-/// out a prvalue - and the typed pointer reaches the `const` reference one the
-/// binding was built from.
+/// A map argument cannot pick the wrong member of an overload set. What it is
+/// handed is the declared type itself, so the `const` reference overload the
+/// binding was built from is an exact match, and the rvalue-reference one is
+/// not viable for an lvalue at all. cxx binds the function by assigning its
+/// address to a pointer of the declared type, which settles it before overload
+/// resolution has a call to weigh.
 #[test]
 fn test_map_parameter_ignores_rvalue_overload() {
     let hdr = indoc! {"
@@ -44570,11 +44571,11 @@ fn test_map_parameter_with_a_template_free_chain_of_using_declarations() {
 }
 
 /// A lone transparent-comparator declaration passes the default-shape check -
-/// bindgen writes std::less<> and std::less<K> identically - so a binding is
-/// generated which builds a std::map<K, V>. That is a different C++ type from
-/// the function's, and the typed-pointer call fails to compile rather than
-/// resolving to anything else. A loud build error, not a refusal: autocxx
-/// cannot see the difference, and this is where it surfaces.
+/// bindgen writes std::less<> and std::less<K> identically - so a type is
+/// generated for std::map<K, V>. That is a different C++ type from the
+/// function's, and cxx's own function-pointer typecheck fails to bind rather
+/// than resolving to anything else. A loud build error, not a refusal:
+/// autocxx cannot see the difference, and this is where it surfaces.
 #[test]
 fn test_map_parameter_transparent_comparator_alone_fails_loudly() {
     let hdr = indoc! {"
@@ -44587,11 +44588,11 @@ fn test_map_parameter_transparent_comparator_alone_fails_loudly() {
     run_test_expect_fail("", hdr, quote! {}, &["take"], &[]);
 }
 
-/// The typed pointer also closes the conversion door: with no overload taking
-/// exactly the built map, a call by name would convert its way into `lure(Bait)`
-/// through Bait's constructor and silently call the wrong function. The cast
-/// has nothing of the exact type to resolve to, so the generated C++ fails to
-/// compile instead.
+/// That same typecheck closes the conversion door: with no overload taking
+/// exactly the generated type, a call by name would convert its way into
+/// `lure(Bait)` through Bait's constructor and silently call the wrong
+/// function. The function pointer has nothing of the exact type to bind to, so
+/// the generated C++ fails to compile instead.
 #[test]
 fn test_map_parameter_cannot_be_lured_into_a_conversion() {
     let hdr = indoc! {"
@@ -44658,12 +44659,12 @@ fn test_map_parameter_on_a_static_method_picks_the_exact_overload() {
     run_test("", hdr, rs, &["Sink", "Bait"], &[]);
 }
 
-/// A constructor has no typed pointer to close that door with - C++ has no
+/// A constructor has no such typecheck to close that door with - C++ has no
 /// syntax naming one constructor exactly - so where the class declares any
 /// other constructor an argument could reach, the map parameter is refused
 /// outright. Here `Holder(Bait)` is reachable: had the map constructor been
-/// bound, a transparent-comparator declaration would have made the built map
-/// a different type, and direct-initialization would have quietly built a
+/// bound, a transparent-comparator declaration would have made the generated
+/// type a different one, and direct-initialization would have quietly built a
 /// `Bait` from it and called the wrong constructor.
 #[test]
 fn test_map_parameter_in_constructor_with_a_reachable_sibling_is_refused() {
@@ -44803,7 +44804,7 @@ fn test_map_parameter_by_mutable_reference_in_constructor_with_a_const_reference
 /// type: the standard lets a noexcept function initialize a pointer without
 /// it, so the typed call still reaches the right overload.
 #[test]
-fn test_map_parameter_exact_call_with_noexcept_cpp17() {
+fn test_map_parameter_with_noexcept_cpp17() {
     let hdr = indoc! {"
         #include <map>
         #include <cstdint>
@@ -44948,9 +44949,9 @@ fn test_map_parameter_beside_an_rvalue_reference() {
     run_test("", hdr, rs, &["grade", "Freight"], &[]);
 }
 
-/// A top-level cv-qualifier on the return type is part of the function's
-/// type, so the exact-type cast has to repeat it even though the wrapper's
-/// own return - a value copied out of C++ - is unqualified.
+/// A top-level cv-qualifier on the return type beside a map parameter. The
+/// qualifier is dropped on the way to Rust, the value having been copied out
+/// of C++, and the map is unaffected by it.
 #[test]
 fn test_map_parameter_with_cv_qualified_return() {
     let hdr = indoc! {"
