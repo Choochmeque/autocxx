@@ -513,9 +513,9 @@ pub(crate) struct FnAnalyzer<'a> {
     /// The names of the function templates each namespace declares, from
     /// bindgen's parse-time report: bindgen parses no item for one, so no
     /// census over the APIs could see it. A free function taking a map is
-    /// refused where its own namespace also templates its name - the
-    /// template participates in address-of overload resolution against the
-    /// exact-typed pointer the wrapper calls through, see
+    /// refused where its own namespace also templates its name - the template
+    /// is in the overload set the generated call resolves in, and can win it
+    /// where bindgen's rendering erased the declared map's shape, see
     /// [`Self::map_refusal`].
     free_function_templates: HashMap<Namespace, HashSet<String>>,
     /// Every `using Base::foo;` each class writes, raw and unjudged, unlike
@@ -816,13 +816,12 @@ impl<'a> FnAnalyzer<'a> {
     /// when handed arguments, each as its rendered parameter types.
     ///
     /// A constructor is called by its type's name: C++ has no syntax naming
-    /// one exactly, so the typed-pointer exactness every other map call gets
-    /// has nothing to grip, and the map a wrapper builds goes to
+    /// one exactly, so the map a binding hands over goes to
     /// direct-initialization to pick a constructor for. That is only sound
-    /// where nothing but the intended constructor could be picked. The built
-    /// map is always the default-shaped one, and where the declaration read
-    /// was really `std::less<>`-transparent - a difference bindgen's
-    /// rendering discards - the built map is a different type, the intended
+    /// where nothing but the intended constructor could be picked. The
+    /// generated type is always the default-shaped map, and where the
+    /// declaration read was really `std::less<>`-transparent - a difference
+    /// bindgen's rendering discards - it is a different type, the intended
     /// constructor is not viable, and resolution would quietly convert its
     /// way into any other constructor it can reach: `Holder(Bait)` by way of
     /// `Bait(const std::map<K, V>&)` included. With no other reachable
@@ -835,7 +834,7 @@ impl<'a> FnAnalyzer<'a> {
     /// What counts as reachable: a bindgen-declared constructor which is
     /// public - a private or protected one can be picked but not called, a
     /// loud error - not deleted, for the same reason, not the copy or move
-    /// constructor - reaching either from a built map needs a second
+    /// constructor - reaching either from the map needs a second
     /// user-defined conversion, which C++ does not allow in one sequence -
     /// and taking at least one parameter, or variadic. Parameter count alone
     /// clears nothing beyond zero, because bindgen does not record default
@@ -4042,10 +4041,10 @@ impl<'a> FnAnalyzer<'a> {
     /// judged where it is recognised.
     fn map_refusal(&self, ns: &Namespace, fun: &FuncToConvert) -> Option<ConvertErrorFromCpp> {
         // A subclass peer's constructor repeats the superclass constructor's
-        // parameters and passes them on to it verbatim, and two vectors are
-        // not the map the superclass asked for. Nothing can be built in
-        // between - the peer's own constructor is called by name from another
-        // wrapper - so the shape is refused rather than generated wrong.
+        // parameters and passes them on verbatim, by name from another
+        // wrapper, with nothing generated in between to judge the overload set
+        // the way `build_constructor_capture_candidates` judges a real
+        // constructor's. The shape is refused rather than generated unjudged.
         if matches!(
             fun.provenance,
             Provenance::SynthesizedSubclassConstructor(_)

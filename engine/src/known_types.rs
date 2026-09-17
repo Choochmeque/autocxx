@@ -76,17 +76,17 @@ enum Behavior {
     /// typedef naming it.
     CCharacter,
     RustContainerByValueSafe,
-    /// `std::map`. cxx has no map type, so Rust never holds one and every
-    /// position which would hand one over is refused - see
+    /// `std::map`. cxx has no map type, so what Rust holds is a generated
+    /// opaque type per specialization - see
+    /// [`HolderSurface::Map`](crate::conversion::api::HolderSurface::Map) -
+    /// and a map in any other shape is refused with
     /// [`ConvertErrorFromCpp::UnsupportedMap`].
     ///
-    /// It is in this database for two reasons. One is the prelude entry, which
-    /// is what makes bindgen write the template arguments at all: bindgen
-    /// otherwise discards them, and every signature mentioning a map is then
-    /// refused for a reason which says nothing about maps. The other is that
-    /// having the arguments is what lets autocxx *build* a map, in the C++
-    /// wrapper for a function which takes `const std::map<K, V>&`, out of two
-    /// parallel vectors Rust passes.
+    /// It is in this database for the prelude entry, which is what makes
+    /// bindgen write the template arguments at all: bindgen otherwise discards
+    /// them, leaving nothing to name a specialization with, and every
+    /// signature mentioning a map refused for a reason which says nothing
+    /// about maps.
     ///
     /// The comparator and the allocator are parameters of the stand-in too, so
     /// that a map which fixes either to something other than the default is
@@ -109,14 +109,14 @@ enum Behavior {
     ///
     /// The cost is that a non-default hash, predicate or allocator is
     /// invisible here, so such a map is recognised as an ordinary one and the
-    /// wrapper builds `std::unordered_map<K, V>` for it. That is a different
-    /// C++ type from the one the function takes, and the wrapper calls the
-    /// function through a pointer of exactly the built type's signature, so
-    /// the generated C++ fails to compile - loudly, and naming the wrapper,
-    /// but without the refusal an ordered map with a custom comparator gets.
-    /// Where the same name also has a declaration the built type *does*
-    /// match, the two declarations are indistinguishable here, and both are
-    /// refused rather than one binding calling the other's function - see
+    /// generated type is `std::unordered_map<K, V>`. That is a different C++
+    /// type from the one the function takes, so nothing is viable at the call
+    /// and the generated C++ fails to compile - loudly, and naming the
+    /// function, but without the refusal an ordered map with a custom
+    /// comparator gets. Where the same name also has a declaration the
+    /// generated type *does* match, the two declarations are
+    /// indistinguishable here, and both are refused rather than one binding
+    /// calling the other's function - see
     /// `FnAnalyzer::build_indistinguishable_map_overloads`.
     CxxUnorderedMap,
 }
