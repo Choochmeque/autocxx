@@ -55,7 +55,7 @@ use super::{
         tdef::{resolve_typedefs, typedef_targets},
     },
     api::{
-        AnalysisPhase, Api, ConstRefShim, CustomPtrShim, HolderSurface, SharedPtrShim,
+        AnalysisPhase, Api, ConstRefShim, CustomPtrShim, HolderSurface, MapShim, SharedPtrShim,
         SubclassName, TypeKind, UniquePtrShim, VectorShim, WeakPtrShim, SUPER_FN_SUFFIX,
     },
     convert_error::ErrorContextType,
@@ -886,6 +886,23 @@ impl<'a> RsCodeGenerator<'a> {
                     Some(HolderSurface::ConstRef { payload, .. }) => {
                         self.generate_const_ref_surface(&name, &bridge_id, &payload, &mut result)
                     }
+                    Some(HolderSurface::Map {
+                        key,
+                        value,
+                        key_is_string,
+                        value_is_string,
+                        ordered,
+                        ..
+                    }) => self.generate_map_surface(
+                        &name,
+                        &bridge_id,
+                        &key,
+                        &value,
+                        key_is_string,
+                        value_is_string,
+                        ordered,
+                        &mut result,
+                    ),
                     None => {}
                 }
                 result
@@ -1786,6 +1803,185 @@ impl<'a> RsCodeGenerator<'a> {
                 #[doc = #iter_doc]
                 pub fn iter(&self) -> impl Iterator<Item = #element> + '_ {
                     (0usize..).map_while(move |pos| self.get(pos))
+                }
+            }
+        });
+    }
+
+    /// Declare the eight C++ helpers of a lowered `std::map` in the bridge,
+    /// and put the surface built from them on the generated type itself.
+    ///
+    /// Written here rather than as synthesized `Api::Function`s for the reason
+    /// [`Self::generate_shared_ptr_surface`] gives, and shaped after
+    /// `std::map` itself, which is what a caller reaching for one will already
+    /// know.
+    ///
+    /// An atom key or value crosses by value and a `std::string` one by
+    /// reference, which is how autocxx spells those everywhere else. There is
+    /// no one spelling for both, which is why this is a set of inherent
+    /// methods rather than an implementation of some shared trait: a trait
+    /// would have to fix one spelling for every instantiation, and generic
+    /// code over two maps of different key and value types has nothing to say
+    /// anyway - they are different C++ types with different code behind them.
+    ///
+    /// `find` is the only lookup: `contains` and `get` both read its pointer,
+    /// so neither searches the map a second time and the two can never
+    /// disagree about the same call.
+    ///
+    /// `get` hands back a reference into the map, borrowing it for as long as
+    /// the reference lives. Adding or removing entries meanwhile needs a
+    /// `Pin<&mut>`, which that borrow rules out, and a map does not move an
+    /// entry it keeps.
+    #[allow(clippy::too_many_arguments)] // one parameter per fact about the map
+    fn generate_map_surface(
+        &self,
+        name: &QualifiedName,
+        bridge_id: &crate::minisyn::Ident,
+        key: &Type,
+        value: &Type,
+        key_is_string: bool,
+        value_is_string: bool,
+        ordered: bool,
+        result: &mut RsCodegenResult,
+    ) {
+        let holder = name.get_final_ident();
+        // As in `generate_shared_ptr_surface`: the bridge mod has a flat
+        // namespace, and the output mod, where the methods go, uses the
+        // qualified spellings.
+        let bridge_key = unqualify_type(key.clone(), self.bridge_type_names);
+        let bridge_value = unqualify_type(value.clone(), self.bridge_type_names);
+        let by_reference = |ty: &Type, is_string: bool| -> Type {
+            if is_string {
+                parse_quote! { &#ty }
+            } else {
+                ty.clone()
+            }
+        };
+        let bridge_key_arg = by_reference(&bridge_key, key_is_string);
+        let bridge_value_arg = by_reference(&bridge_value, value_is_string);
+        let key_arg = by_reference(key, key_is_string);
+        let value_arg = by_reference(value, value_is_string);
+        for shim in MapShim::ALL {
+            let shim_id = make_ident(shim.cpp_name(name, self.config));
+            result.extern_c_mod_items.push(match shim {
+                MapShim::New => parse_quote! {
+                    fn #shim_id() -> UniquePtr<#bridge_id>;
+                },
+                MapShim::Len => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id) -> usize;
+                },
+                // Returning a raw pointer is safe, here as in every other
+                // binding autocxx writes for a C++ function returning `T*`;
+                // cxx would insist on an `unsafe fn` only for one taken as a
+                // parameter. The mod this is declared in is private to the
+                // generated `ffi` mod, so the only way to reach it is the two
+                // safe methods below.
+                MapShim::Find => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id, key: #bridge_key_arg) -> *const #bridge_value;
+                },
+                MapShim::Insert | MapShim::InsertOrAssign => parse_quote! {
+                    fn #shim_id(
+                        self_: Pin<&mut #bridge_id>,
+                        key: #bridge_key_arg,
+                        value: #bridge_value_arg,
+                    ) -> bool;
+                },
+                MapShim::Erase => parse_quote! {
+                    fn #shim_id(self_: Pin<&mut #bridge_id>, key: #bridge_key_arg) -> bool;
+                },
+                MapShim::Keys => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id) -> UniquePtr<CxxVector<#bridge_key>>;
+                },
+                MapShim::Values => parse_quote! {
+                    fn #shim_id(self_: &#bridge_id) -> UniquePtr<CxxVector<#bridge_value>>;
+                },
+            });
+        }
+        let new_id = make_ident(MapShim::New.cpp_name(name, self.config));
+        let len_id = make_ident(MapShim::Len.cpp_name(name, self.config));
+        let find_id = make_ident(MapShim::Find.cpp_name(name, self.config));
+        let insert_id = make_ident(MapShim::Insert.cpp_name(name, self.config));
+        let insert_or_assign_id = make_ident(MapShim::InsertOrAssign.cpp_name(name, self.config));
+        let erase_id = make_ident(MapShim::Erase.cpp_name(name, self.config));
+        let keys_id = make_ident(MapShim::Keys.cpp_name(name, self.config));
+        let values_id = make_ident(MapShim::Values.cpp_name(name, self.config));
+        let holder_doc = map_holder_doc(ordered);
+        let new_doc = map_new_doc();
+        let len_doc = map_len_doc();
+        let is_empty_doc = map_is_empty_doc();
+        let contains_doc = map_contains_doc();
+        let get_doc = map_get_doc();
+        let insert_doc = map_insert_doc();
+        let insert_or_assign_doc = map_insert_or_assign_doc();
+        let erase_doc = map_erase_doc();
+        let keys_doc = map_keys_doc(ordered);
+        let values_doc = map_values_doc();
+        result.output_mod_items.push(parse_quote! {
+            #[doc = #holder_doc]
+            impl #holder {
+                #[doc = #new_doc]
+                pub fn new() -> cxx::UniquePtr<Self> {
+                    cxxbridge::#new_id()
+                }
+
+                #[doc = #len_doc]
+                pub fn len(&self) -> usize {
+                    cxxbridge::#len_id(self)
+                }
+
+                #[doc = #is_empty_doc]
+                pub fn is_empty(&self) -> bool {
+                    self.len() == 0
+                }
+
+                #[doc = #contains_doc]
+                pub fn contains(&self, key: #key_arg) -> bool {
+                    !cxxbridge::#find_id(self, key).is_null()
+                }
+
+                #[doc = #get_doc]
+                pub fn get(&self, key: #key_arg) -> Option<&#value> {
+                    let found = cxxbridge::#find_id(self, key);
+                    // Safe: the shim answers with either null or the address
+                    // of a value inside an entry of this map, which outlives
+                    // the `&self` borrow the return type ties the reference
+                    // to. Entries are added and removed only through a
+                    // `Pin<&mut Self>`, which that borrow rules out, and a
+                    // map does not move an entry it keeps.
+                    unsafe { found.as_ref() }
+                }
+
+                #[doc = #insert_doc]
+                pub fn insert(
+                    self: ::core::pin::Pin<&mut Self>,
+                    key: #key_arg,
+                    value: #value_arg,
+                ) -> bool {
+                    cxxbridge::#insert_id(self, key, value)
+                }
+
+                #[doc = #insert_or_assign_doc]
+                pub fn insert_or_assign(
+                    self: ::core::pin::Pin<&mut Self>,
+                    key: #key_arg,
+                    value: #value_arg,
+                ) -> bool {
+                    cxxbridge::#insert_or_assign_id(self, key, value)
+                }
+
+                #[doc = #erase_doc]
+                pub fn erase(self: ::core::pin::Pin<&mut Self>, key: #key_arg) -> bool {
+                    cxxbridge::#erase_id(self, key)
+                }
+
+                #[doc = #keys_doc]
+                pub fn keys(&self) -> cxx::UniquePtr<cxx::CxxVector<#key>> {
+                    cxxbridge::#keys_id(self)
+                }
+
+                #[doc = #values_doc]
+                pub fn values(&self) -> cxx::UniquePtr<cxx::CxxVector<#value>> {
+                    cxxbridge::#values_id(self)
                 }
             }
         });
@@ -3004,6 +3200,122 @@ fn vector_iter_doc() -> String {
      `ExactSizeIterator`: the length is not fixed when iteration starts.\n\n\
      The items are raw pointers, with everything the type's own documentation \
      says about them."
+        .to_string()
+}
+
+fn map_holder_doc(ordered: bool) -> String {
+    let container = if ordered {
+        "std::map<K, V>"
+    } else {
+        "std::unordered_map<K, V>"
+    };
+    let ordering = if ordered {
+        "Entries come out in key order, which is `std::less<K>` - numeric \
+         order for a number, byte order for a `std::string`."
+    } else {
+        "The order entries come out in is C++'s to choose, and is not the \
+         keys' order. It does not change while nobody mutates the map, which \
+         is what makes `keys()` and `values()` line up."
+    };
+    format!(
+        "This type is a C++ `{container}`, held opaquely.\n\n\
+         cxx has no map type, so there is no `CxxMap` for this to be. What \
+         autocxx does instead is what it does for any other template \
+         instantiation it meets: the one specialization this header uses \
+         becomes its own generated type, declared to cxx as an opaque extern \
+         type whose C++ definition is exactly that specialization, with the \
+         methods below. A map of some other key and value is a different C++ \
+         type and gets a different generated type of its own.\n\n\
+         Like every opaque type, it never exists by value in Rust: it is \
+         reached through a `UniquePtr`, a `&`, or a `Pin<&mut>`. Nothing here \
+         claims a size or a layout for it, which differ between standard \
+         libraries.\n\n\
+         {ordering}\n\n\
+         The glue behind these methods is `noexcept`: a C++ exception \
+         crossing into Rust is undefined behaviour, so an allocation failure \
+         terminates the process rather than unwinding, as in cxx's own \
+         container glue.\n\n\
+         Nothing here makes the type `Send` or `Sync`."
+    )
+}
+
+fn map_new_doc() -> String {
+    "A new empty map on the heap, owned by the `UniquePtr`.\n\n\
+     The C++ map is default constructed. There is no way to make one by \
+     value: the type is opaque, so Rust never holds one directly."
+        .to_string()
+}
+
+fn map_len_doc() -> String {
+    "The number of entries - `std::map::size`.\n\n\
+     Read from C++ on every call, so it reflects any mutation C++ has made \
+     since the last one."
+        .to_string()
+}
+
+fn map_is_empty_doc() -> String {
+    "Whether the map has no entries. As `len() == 0`, and read afresh in the \
+     same way."
+        .to_string()
+}
+
+fn map_contains_doc() -> String {
+    "Whether the map holds an entry for `key`.\n\n\
+     One lookup, the same one `get` makes."
+        .to_string()
+}
+
+fn map_get_doc() -> String {
+    "The value stored for `key`, or `None`.\n\n\
+     The value belongs to the map, so the reference borrows the map for as \
+     long as it lives; adding or removing entries meanwhile needs a \
+     `Pin<&mut Self>`, which the borrow rules out."
+        .to_string()
+}
+
+fn map_insert_doc() -> String {
+    "Inserts a copy of `value` under a copy of `key`, and reports whether \
+     anything was inserted.\n\n\
+     This is C++ `std::map::insert`: where the map already holds an entry for \
+     `key`, that entry is left alone and this answers false. \
+     `insert_or_assign` is the one which overwrites."
+        .to_string()
+}
+
+fn map_insert_or_assign_doc() -> String {
+    "Stores a copy of `value` under `key`, replacing any value already there, \
+     and reports whether the key was new.\n\n\
+     This is C++ `std::map::insert_or_assign`, whose `pair::second` this is."
+        .to_string()
+}
+
+fn map_erase_doc() -> String {
+    "Removes the entry for `key`, and reports whether there was one.\n\n\
+     This is C++ `std::map::erase` taking a key, whose count of erased \
+     entries this reduces to a bool - a map holds at most one entry per key."
+        .to_string()
+}
+
+fn map_keys_doc(ordered: bool) -> String {
+    let order = if ordered {
+        "in key order"
+    } else {
+        "in the map's own iteration order"
+    };
+    format!(
+        "A copy of the keys, {order}.\n\n\
+         This is a snapshot: it is built when called and does not follow later \
+         changes to the map."
+    )
+}
+
+fn map_values_doc() -> String {
+    "A copy of the values, in the same order as `keys` walks the same map.\n\n\
+     This is a snapshot: it is built when called and does not follow later \
+     changes to the map. Both snapshots are owned - neither borrows the map \
+     once it returns - so they line up entry for entry only when the map has \
+     not changed between the two calls. Take both before mutating where the \
+     pairing matters."
         .to_string()
 }
 

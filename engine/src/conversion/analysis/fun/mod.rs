@@ -55,8 +55,8 @@ use indexmap::set::IndexSet as HashSet;
 use crate::vendored_bindgen::callbacks::ExceptionSpecification;
 use autocxx_parser::{ExternCppType, IncludeCppConfig, UnsafePolicy};
 use function_wrapper::{
-    CppExceptionSpecification, CppFunction, CppFunctionBody, MapBuild, MapHalf,
-    TypeConversionPolicy, RECEIVER_ARG_NAME,
+    CppExceptionSpecification, CppFunction, CppFunctionBody, TypeConversionPolicy,
+    RECEIVER_ARG_NAME,
 };
 use itertools::Itertools;
 use quote::{quote, ToTokens};
@@ -198,13 +198,6 @@ pub(crate) struct FnAnalysis {
     pub(crate) externally_callable: bool,
     /// Whether we need to generate a Rust-side calling function
     pub(crate) rust_wrapper_needed: bool,
-    /// Documentation autocxx has of its own to add to this binding, beyond
-    /// whatever the C++ declaration carried.
-    ///
-    /// Only a map parameter puts anything here: the binding's signature does
-    /// not say that two of its parameters were one of the C++ function's, and
-    /// a caller who cannot see the header has no other way to learn it.
-    pub(crate) extra_doc_attrs: Vec<syn::Attribute>,
     /// Whether this function may throw C++ exceptions
     pub(crate) may_throw: bool,
     /// Where the Rust name is not the name C++ spells this function with, a
@@ -425,6 +418,23 @@ enum TypeConversionSophistication {
     SimpleForSubclasses,
 }
 
+/// One constructor in the capture census: its rendered parameter types and,
+/// for the one shape whose reachability depends on the constructor being
+/// judged, the erased shape of the map it references. See the table on
+/// [`FnAnalyzer::build_constructor_capture_candidates`].
+struct ConstructorCapture {
+    rendering: String,
+    /// `Some` marks a constructor whose only parameter is a reference to one
+    /// of the two maps itself, carrying
+    /// [`map_params::MapSpellings::map_reference_parameter`] of that
+    /// parameter. Whether it can capture the judged constructor's call is
+    /// the census table's business: the shape must not be provably
+    /// different - see [`map_params::ErasedMapShape::provably_differs`] -
+    /// and the reference kind must bind what that constructor's binding
+    /// presents.
+    lone_map_reference: Option<map_params::MapReferenceParameter>,
+}
+
 pub(crate) struct FnAnalyzer<'a> {
     unsafe_policy: &'a UnsafePolicy,
     extra_apis: ApiVec<NullPhase>,
@@ -460,23 +470,30 @@ pub(crate) struct FnAnalyzer<'a> {
     /// Every enumeration, scoped or not. An enum is a scalar, which is what
     /// decides whether a `volatile` value of it can be copied out of C++.
     enums: HashSet<QualifiedName>,
+    /// The alias targets the map predicates resolve through, so a map behind
+    /// a typedef, a pointer or a by-value spelling is judged as the map the
+    /// type conversion will make of it.
+    map_spellings: map_params::MapSpellings,
     /// Overload sets in which two or more declarations take a map and are
     /// token-for-token identical once bindgen has rendered them - which is
     /// what `std::map<K, V, std::less<>>` against `std::map<K, V>` comes to,
     /// bindgen writing both comparators as the bare `std::less`, and what any
     /// two `std::unordered_map` hashes come to, the stand-in not carrying a
-    /// hash at all. Each entry is [`map_overload_key`] of every declaration in
+    /// hash at all. Each entry is [`map_params::MapSpellings::map_overload_key`]
+    /// of every declaration in
     /// such a pair, and a map parameter on a function matching one is refused:
     /// autocxx would build the same default-shaped map for both declarations
     /// and call whichever the one built type resolves to, so one of the two
     /// bindings would silently call the other's function.
     indistinguishable_map_overloads: HashSet<String>,
-    /// For each class, the rendered parameter types of every constructor
-    /// which direct-initialization could reach with some argument list. A map
-    /// parameter on a constructor is refused where the class has an entry
-    /// here beyond that constructor's own - see
-    /// [`Self::build_constructor_capture_candidates`].
-    constructor_capture_candidates: HashMap<QualifiedName, Vec<String>>,
+    /// For each class, every constructor direct-initialization could reach
+    /// with some argument list. A map parameter on a constructor is refused
+    /// where the class has an entry here beyond that constructor's own which
+    /// the call could land in - see
+    /// [`Self::build_constructor_capture_candidates`] and the table there
+    /// for the one entry kind whose reachability depends on the constructor
+    /// being judged.
+    constructor_capture_candidates: HashMap<QualifiedName, Vec<ConstructorCapture>>,
     /// The classes which write `using Base::Base;`. The constructors that
     /// brings in are candidates direct-initialization can choose exactly like
     /// declared ones, and which ones there are is the base's business, which
@@ -580,6 +597,7 @@ impl<'a> FnAnalyzer<'a> {
         force_wrapper_generation: bool,
     ) -> ApiVec<FnPrePhase3> {
         let ancestry = Self::build_ancestry(&apis);
+        let map_spellings = map_params::MapSpellings::new(&apis);
         let scoped_enums = apis
             .iter()
             .filter_map(|api| match api {
@@ -616,8 +634,15 @@ impl<'a> FnAnalyzer<'a> {
                     _ => None,
                 })
                 .collect(),
-            indistinguishable_map_overloads: Self::build_indistinguishable_map_overloads(&apis),
-            constructor_capture_candidates: Self::build_constructor_capture_candidates(&apis),
+            indistinguishable_map_overloads: Self::build_indistinguishable_map_overloads(
+                &apis,
+                &map_spellings,
+            ),
+            constructor_capture_candidates: Self::build_constructor_capture_candidates(
+                &apis,
+                &map_spellings,
+            ),
+            map_spellings,
             classes_with_inherited_constructors: Self::build_classes_with_inherited_constructors(
                 &apis,
             ),
@@ -752,23 +777,21 @@ impl<'a> FnAnalyzer<'a> {
             .collect()
     }
 
-    /// The member functions bindgen reported for each class template which
-    /// some concrete instantiation here instantiates.
-    ///
-    /// Collected from the instantiations rather than from the class templates,
-    /// because an instantiation is the only thing which is going to ask: a
-    /// class template's own members are never bound - see
-    /// `ConvertErrorFromCpp::MethodOfGenericType`.
     /// The overload sets in which a map parameter has to be refused because
     /// two declarations look exactly alike - see the field this fills in.
     ///
-    /// Grouped by [`map_overload_key`], which is the C++ name plus the whole
-    /// bindgen-rendered signature: two declarations under one key are ones
-    /// autocxx cannot tell apart in any way at all. Only signatures with a
-    /// recognisable map parameter are counted, so an identical-looking pair
-    /// with no map in it - which C++ cannot declare, and which bindgen has its
-    /// own deduplication for - changes nothing here.
-    fn build_indistinguishable_map_overloads(apis: &ApiVec<PodPhase>) -> HashSet<String> {
+    /// Grouped by [`map_params::MapSpellings::map_overload_key`], which is the
+    /// C++ name plus the whole bindgen-rendered signature with aliases
+    /// expanded: two declarations under one key are ones autocxx cannot tell
+    /// apart in any way at all. Only signatures with a recognisable map
+    /// parameter are counted - in any shape a binding hands a map over, by
+    /// reference, by pointer or by value - so an identical-looking pair with
+    /// no map in it, which C++ cannot declare and which bindgen has its own
+    /// deduplication for, changes nothing here.
+    fn build_indistinguishable_map_overloads(
+        apis: &ApiVec<PodPhase>,
+        map_spellings: &map_params::MapSpellings,
+    ) -> HashSet<String> {
         let mut seen_once = HashSet::new();
         let mut seen_twice = HashSet::new();
         for api in apis.iter() {
@@ -776,11 +799,11 @@ impl<'a> FnAnalyzer<'a> {
                 if !fun
                     .inputs
                     .iter()
-                    .any(|arg| map_params::recognise_arg(arg).is_some())
+                    .any(|arg| map_spellings.parameter_mentions_map(arg))
                 {
                     continue;
                 }
-                let key = map_overload_key(name.name.get_namespace(), fun);
+                let key = map_spellings.map_overload_key(name.name.get_namespace(), fun);
                 if !seen_once.insert(key.clone()) {
                     seen_twice.insert(key);
                 }
@@ -816,21 +839,55 @@ impl<'a> FnAnalyzer<'a> {
     /// user-defined conversion, which C++ does not allow in one sequence -
     /// and taking at least one parameter, or variadic. Parameter count alone
     /// clears nothing beyond zero, because bindgen does not record default
-    /// arguments, so a two-parameter constructor may be callable with one. A
-    /// constructor whose single parameter is a *reference* to one of the two
-    /// maps is left out - see [`map_params::parameter_is_map_reference`] for
-    /// why it cannot capture anything quietly, and why one taking a map by
-    /// value can and stays in.
+    /// arguments, so a two-parameter constructor may be callable with one.
+    ///
+    /// One shape is reachable from some constructors and not others, so its
+    /// entry carries the fact and [`Self::map_refusal`] decides per
+    /// constructor: a non-variadic sibling whose only parameter is a
+    /// *reference* to one of the two maps itself. What such a reference can
+    /// bind is fixed by the one argument the judged constructor's own
+    /// binding presents, so the exemption is this table and nothing wider:
+    ///
+    /// | sibling's lone parameter            | judged constructor's argument                        | captures?  |
+    /// |-------------------------------------|------------------------------------------------------|------------|
+    /// | reference to a map provably of another shape | anything                                    | no - no map binds a reference to a map of another type |
+    /// | `M&` or `M&&` to a map not provably of another shape | const lvalue, from a `const M&` parameter | no - neither kind binds a const lvalue |
+    /// | `const M&` to a map not provably of another shape | const lvalue                            | yes - a const lvalue is exactly what it binds; refused. An equal-rendering twin is also refused as indistinguishable, and an unequal rendering can still be one C++ type |
+    /// | any reference to a map not provably of another shape | rvalue (`M` by value, `M&&`) or mutable lvalue (`M&`) | yes - `const M&` binds either and `M&&` the rvalue; refused |
+    /// | anything else, a map by value included | any                                               | yes - refused, as every non-exempt entry always was |
+    ///
+    /// Provably, not merely rendered differently: bindgen gives one C++ type
+    /// more than one spelling - `uint32_t` renders as `u32` where `unsigned
+    /// int` renders as `c_uint` - so unequal renderings do not say the
+    /// sibling's reference cannot bind the map the wrapper builds, and a
+    /// sibling whose equality is merely uncertain stays capture-capable.
+    /// What counts as proof is
+    /// [`map_params::ErasedMapShape::provably_differs`]: a different map
+    /// template, or key or value atoms which name different C++ types on
+    /// every supported platform.
+    ///
+    /// Only a one-argument call can land in a one-parameter, non-variadic
+    /// sibling, so the shapes are compared only where the judged constructor
+    /// takes exactly one parameter -
+    /// [`map_params::MapSpellings::presented_map_argument`] names its
+    /// argument category. The rvalue row deliberately does not split the
+    /// sibling's reference kind: a mutable `M&` sibling cannot bind the
+    /// by-value case's rvalue, but refusing it beside `const M&` and `M&&`
+    /// is a loud no where telling them apart buys one rarely-declared
+    /// pairing. The const-lvalue rows do split it, because folding them
+    /// would cost the pairing that pays: a `const M&` constructor bound
+    /// beside its own `M&&` overload.
     ///
     /// A map parameter on a constructor is then refused - by
-    /// [`Self::map_refusal`] - where its class has any entry here beyond the
-    /// constructor's own rendering, or where
+    /// [`Self::map_refusal`] - where its class has any capturing entry here
+    /// beyond the constructor's own rendering, or where
     /// [`Self::classes_with_inherited_constructors`] or a public constructor
     /// template says the candidate set cannot be known at all.
     fn build_constructor_capture_candidates(
         apis: &ApiVec<PodPhase>,
-    ) -> HashMap<QualifiedName, Vec<String>> {
-        let mut candidates: HashMap<QualifiedName, Vec<String>> = HashMap::new();
+        map_spellings: &map_params::MapSpellings,
+    ) -> HashMap<QualifiedName, Vec<ConstructorCapture>> {
+        let mut candidates: HashMap<QualifiedName, Vec<ConstructorCapture>> = HashMap::new();
         for api in apis.iter() {
             let Api::Function { fun, .. } = api else {
                 continue;
@@ -857,15 +914,17 @@ impl<'a> FnAnalyzer<'a> {
             if params.is_empty() && !fun.variadic {
                 continue;
             }
-            if let [only] = params.as_slice() {
-                if !fun.variadic && map_params::parameter_is_map_reference(only) {
-                    continue;
-                }
-            }
+            let lone_map_reference = match params.as_slice() {
+                [only] if !fun.variadic => map_spellings.map_reference_parameter(only),
+                _ => None,
+            };
             candidates
                 .entry(self_ty.clone())
                 .or_default()
-                .push(input_types_key(fun));
+                .push(ConstructorCapture {
+                    rendering: map_spellings.input_types_key(fun),
+                    lone_map_reference,
+                });
         }
         candidates
     }
@@ -893,6 +952,13 @@ impl<'a> FnAnalyzer<'a> {
             .collect()
     }
 
+    /// The member functions bindgen reported for each class template which
+    /// some concrete instantiation here instantiates.
+    ///
+    /// Collected from the instantiations rather than from the class templates,
+    /// because an instantiation is the only thing which is going to ask: a
+    /// class template's own members are never bound - see
+    /// `ConvertErrorFromCpp::MethodOfGenericType`.
     fn build_template_member_functions(
         apis: &ApiVec<PodPhase>,
         parse_callback_results: &ParseCallbackResults,
@@ -2657,39 +2723,40 @@ impl<'a> FnAnalyzer<'a> {
         // Now let's analyze all the parameters.
         // See if any have annotations which our fork of bindgen has craftily inserted...
         //
-        // A map parameter needs two things the parameter itself cannot say:
-        // whether it has to be refused because another declaration of this
-        // name looks exactly like this one, and which names the function's
-        // other parameters already hold, so that the two the map becomes do
-        // not collide with any of them.
-        let taken_param_names = parameter_names(fun);
-        let map_context = map_params::MapContext {
-            refusal: self.map_refusal(ns, fun),
-            taken_param_names: &taken_param_names,
-        };
+        // A map parameter is the C++ type it says it is - the generated type
+        // standing for that one instantiation - so nothing here rewrites it.
+        // What the parameter itself cannot say is whether another declaration
+        // of this name would capture the call, which is the one thing a map
+        // needs of the function around it. See [`Self::map_refusal`].
+        let map_refusal = self.map_refusal(ns, fun);
         let (param_details, bads): (Vec<_>, Vec<_>) = fun
             .inputs
             .iter()
             .map(|i| {
-                self.convert_fn_args(
-                    i,
-                    ns,
-                    &diagnostic_name,
-                    &fun.synthesized_this_type,
-                    sophistication,
-                    &map_context,
-                )
+                match &map_refusal {
+                    Some(refusal) if self.map_spellings.parameter_mentions_map(i) => {
+                        Err(refusal.clone())
+                    }
+                    _ => self.convert_fn_arg(
+                        i,
+                        ns,
+                        &diagnostic_name,
+                        &fun.synthesized_this_type,
+                        true,
+                        false,
+                        None,
+                        sophistication,
+                        false,
+                    ),
+                }
                 .map_err(|err| ConvertErrorFromCpp::Argument {
                     arg: describe_arg(i),
                     err: Box::new(err),
                 })
             })
             .partition(Result::is_ok);
-        // Flattened, because one C++ parameter does not always make one of
-        // ours: a `const std::map<K, V>&` becomes the two lists the C++ wrapper
-        // builds the map out of. See `map_params`.
         let (mut params, mut param_details): (Punctuated<_, Comma>, Vec<_>) =
-            param_details.into_iter().flat_map(Result::unwrap).unzip();
+            param_details.into_iter().map(Result::unwrap).unzip();
 
         let params_deps: HashSet<_> = param_details
             .iter()
@@ -3641,12 +3708,16 @@ impl<'a> FnAnalyzer<'a> {
                 // to repeat.
                 ref_qualifier: CppRefQualifier::None,
                 // Whereas the method it calls may be `&`-qualified, and a
-                // map-building wrapper's member pointer has to repeat that -
+                // map-taking wrapper's member pointer has to repeat that -
                 // as its cast has to repeat any top-level cv-qualifier the
                 // return type carried, which the conversion cannot know.
                 target_ref_qualifier: fun.ref_qualifier,
                 target_return_toplevel_const: ret_type_was_const,
                 target_return_toplevel_volatile: ret_type_was_volatile,
+                takes_a_map: fun
+                    .inputs
+                    .iter()
+                    .any(|arg| self.map_spellings.parameter_mentions_map(arg)),
                 exception_specification: CppExceptionSpecification::None,
                 is_virtual_override: false,
                 calls_deprecated: fun.deprecation.is_some(),
@@ -3698,11 +3769,6 @@ impl<'a> FnAnalyzer<'a> {
             set_ignore_reason(ConvertErrorFromCpp::FunctionBlocked);
         }
 
-        // Said on the binding rather than left to the header, because the
-        // signature no longer looks like the C++ one: two parameters where the
-        // declaration has a map, and no map anywhere in sight.
-        let extra_doc_attrs = map_params::doc_attrs(&param_details);
-
         let analysis = FnAnalysis {
             cxxbridge_name: cxxbridge_name.clone(),
             rust_name: rust_name.clone(),
@@ -3722,7 +3788,6 @@ impl<'a> FnAnalyzer<'a> {
             rust_wrapper_needed,
             may_throw,
             rename_doc,
-            extra_doc_attrs,
         };
         // For everything other than functions, the API name is immutable.
         // It would be nice to get to that point with functions, but at present
@@ -3992,7 +4057,7 @@ impl<'a> FnAnalyzer<'a> {
         // which of the two a call was meant to reach.
         if self
             .indistinguishable_map_overloads
-            .contains(&map_overload_key(ns, fun))
+            .contains(&self.map_spellings.map_overload_key(ns, fun))
         {
             return Some(ConvertErrorFromCpp::UnsupportedMap);
         }
@@ -4104,14 +4169,57 @@ impl<'a> FnAnalyzer<'a> {
                 // an unjudged refusal is the sound direction.
                 return Some(ConvertErrorFromCpp::MapInOverloadableConstructor);
             };
-            let own_rendering = input_types_key(fun);
+            let own_rendering = self.map_spellings.input_types_key(fun);
+            // The one argument this constructor's own binding would present,
+            // where a lone reference-to-map sibling could bind it: only a
+            // one-argument call lands in a one-parameter sibling, and which
+            // reference kinds bind which category is the census table's
+            // whole rule.
+            let params: Vec<_> = fun
+                .inputs
+                .iter()
+                .filter(|arg| !is_receiver_arg(arg))
+                .collect();
+            let presented_map = match params.as_slice() {
+                [only] => self.map_spellings.presented_map_argument(only),
+                _ => None,
+            };
             let sibling_reachable =
                 self.constructor_capture_candidates
                     .get(class)
-                    .is_some_and(|renderings| {
-                        renderings
-                            .iter()
-                            .any(|rendering| *rendering != own_rendering)
+                    .is_some_and(|siblings| {
+                        siblings.iter().any(|sibling| {
+                            if sibling.rendering == own_rendering {
+                                return false;
+                            }
+                            let Some(reference) = &sibling.lone_map_reference else {
+                                return true;
+                            };
+                            match &presented_map {
+                                // Nothing any reference sibling binds is
+                                // presented.
+                                None => false,
+                                // Some reference kind binds either, so the
+                                // sibling captures unless the shapes
+                                // provably differ: unequal renderings can
+                                // be one C++ type - bindgen writes
+                                // `uint32_t` as `u32` and `unsigned int`
+                                // as `c_uint`.
+                                Some(map_params::PresentedMapArgument::RvalueOrMutableLvalue(
+                                    own,
+                                )) => !own.provably_differs(&reference.shape),
+                                // Only a `const M&` sibling binds a const
+                                // lvalue, and an equal-rendering one was
+                                // refused as indistinguishable first; a
+                                // differently-rendered one can still be
+                                // the same C++ type, so it captures unless
+                                // the shapes provably differ.
+                                Some(map_params::PresentedMapArgument::ConstLvalue(own)) => {
+                                    reference.binds_const_lvalues
+                                        && !own.provably_differs(&reference.shape)
+                                }
+                            }
+                        })
                     });
             let constructor_template = self
                 .member_function_templates
@@ -4130,152 +4238,6 @@ impl<'a> FnAnalyzer<'a> {
             }
         }
         None
-    }
-
-    /// What one C++ parameter becomes, which is usually one parameter of ours
-    /// and is two for a map.
-    ///
-    /// A `const std::map<K, V>&` has no cxx spelling, so what crosses in its
-    /// place is two lists - the keys and the values - which the C++ wrapper
-    /// pairs up into the map the real function is called with. See
-    /// [`map_params`], which decides whether a parameter is that shape.
-    fn convert_fn_args(
-        &mut self,
-        arg: &FnArg,
-        ns: &Namespace,
-        diagnostic_name: &QualifiedName,
-        virtual_this: &Option<QualifiedName>,
-        sophistication: TypeConversionSophistication,
-        map_context: &map_params::MapContext,
-    ) -> Result<Vec<(FnArg, ArgumentAnalysis)>, ConvertErrorFromCpp> {
-        if let Some((name, map)) = map_params::recognise_arg(arg) {
-            if let Some(refusal) = &map_context.refusal {
-                return Err(refusal.clone());
-            }
-            return self.convert_map_fn_arg(
-                &name,
-                &map,
-                ns,
-                diagnostic_name,
-                sophistication,
-                map_context,
-            );
-        }
-        Ok(vec![self.convert_fn_arg(
-            arg,
-            ns,
-            diagnostic_name,
-            virtual_this,
-            true,
-            false,
-            None,
-            sophistication,
-            false,
-        )?])
-    }
-
-    /// The two list parameters which stand for one map parameter.
-    ///
-    /// Each starts out converted as though the header had declared a
-    /// `const std::vector<K>&` of its own, so that the key and value types
-    /// reach Rust as whatever an ordinary vector of them would - the `c_int`
-    /// newtype for an `int`, `CxxString` for a `std::string` - and bring with
-    /// them the dependencies which make the bridge declare those. A
-    /// `std::string` half is then turned into a `&Vec<String>`, because a
-    /// `CxxVector<CxxString>` is one Rust cannot fill; see
-    /// [`MapHalf::RustStringVec`]. What is put on last is the conversion: the
-    /// C++ wrapper builds the map out of the pair, and the Rust wrapper
-    /// requires the two to be the same length.
-    ///
-    /// Anything the lists themselves cannot be is reported as the map being
-    /// unsupported, which is what it is: a key or value type cxx will not put
-    /// in a vector is one autocxx cannot pass this way, and saying so about a
-    /// vector would describe a parameter the header does not have.
-    fn convert_map_fn_arg(
-        &mut self,
-        name: &Ident,
-        map: &map_params::MapParam,
-        ns: &Namespace,
-        diagnostic_name: &QualifiedName,
-        sophistication: TypeConversionSophistication,
-        map_context: &map_params::MapContext,
-    ) -> Result<Vec<(FnArg, ArgumentAnalysis)>, ConvertErrorFromCpp> {
-        let (keys_name, values_name) = map_params::half_names(name, map_context.taken_param_names);
-        let mut halves = Vec::new();
-        for (half_name, element) in [(&keys_name, &map.key), (&values_name, &map.value)] {
-            let arg: FnArg = parse_quote! {
-                #half_name : __bindgen_marker_Reference<
-                    *const __bindgen_marker_Const<root::std::vector<#element>>
-                >
-            };
-            let (mut arg, mut analysis) = self
-                .convert_fn_arg(
-                    &arg,
-                    ns,
-                    diagnostic_name,
-                    &None,
-                    true,
-                    false,
-                    None,
-                    sophistication,
-                    false,
-                )
-                .map_err(|_| ConvertErrorFromCpp::UnsupportedMap)?;
-            let element = vector_element(&analysis.conversion.cxxbridge_type())
-                .ok_or(ConvertErrorFromCpp::UnsupportedMap)?;
-            // cxx will put a good deal more than an atom in a `std::vector` -
-            // an opaque C++ class among them - and Rust has no way to fill a
-            // vector of one of those, so a map whose values were classes would
-            // get a binding nobody could call. The key and the value are held
-            // to the atoms instead: the integers, the character types and
-            // `std::string`.
-            let element_name = match &element {
-                Type::Path(path) => QualifiedName::from_type_path(path),
-                _ => return Err(ConvertErrorFromCpp::UnsupportedMap),
-            };
-            if !known_types().is_known_type(&element_name)
-                || !known_types().permissible_within_vector(&element_name)
-            {
-                return Err(ConvertErrorFromCpp::UnsupportedMap);
-            }
-            // And a `std::string` half crosses as a Rust list instead, which is
-            // a change of the parameter's whole type rather than of its
-            // conversion.
-            let half = if known_types().is_cxx_string(&element_name) {
-                let ty: Type = parse_quote! { &Vec<String> };
-                if let syn::FnArg::Typed(pt) = &mut arg.0 {
-                    *pt.ty = ty.clone();
-                }
-                analysis.conversion = TypeConversionPolicy::new_unconverted(ty);
-                MapHalf::RustStringVec
-            } else {
-                MapHalf::CppVector
-            };
-            halves.push((arg, analysis, element, half));
-        }
-        let (values_arg, mut values_analysis, value_element, values_half) =
-            halves.pop().expect("two halves were pushed");
-        let (keys_arg, mut keys_analysis, key_element, keys_half) =
-            halves.pop().expect("two halves were pushed");
-        keys_analysis.conversion = TypeConversionPolicy::whole(
-            keys_analysis.conversion.cxxbridge_type(),
-            WholeCppConversion::FromVectorsToMap(Box::new(MapBuild {
-                map: map.map.clone(),
-                key: key_element.into(),
-                value: value_element.into(),
-                list: keys_half,
-            })),
-            WholeRustConversion::MapKeysPairedWith(values_name),
-        );
-        values_analysis.conversion = TypeConversionPolicy::whole(
-            values_analysis.conversion.cxxbridge_type(),
-            WholeCppConversion::IgnoredMapValuesParameter(values_half),
-            WholeRustConversion::None,
-        );
-        Ok(vec![
-            (keys_arg, keys_analysis),
-            (values_arg, values_analysis),
-        ])
     }
 
     #[allow(clippy::too_many_arguments)] // currently reasonably clear
@@ -5961,7 +5923,7 @@ enum StringViewParameter<'a> {
     /// which binds to the wrapper's temporary. Carries the `string_view` type
     /// itself, which is what the wrapper's call has to be spelt in terms of,
     /// and which of the two spellings C++ wrote, which is what the exact type
-    /// a map-building wrapper casts to has to repeat.
+    /// a map-taking wrapper casts to has to repeat.
     Buildable(&'a Type, StringViewSpelling),
     /// A mutable `std::string_view&`, which is an out-parameter.
     Mutable,
@@ -6128,59 +6090,6 @@ impl FnAnalyzer<'_> {
     }
 }
 
-/// What a `&cxx::CxxVector<T>` is a vector of, out of the type the bridge
-/// carries for a `const std::vector<T>&` parameter.
-///
-/// `None` for anything else, which is how a map whose key or value type the
-/// converter made something other than a vector reference out of - a typedef
-/// resolving to one, above all - reaches the refusal rather than a wrapper
-/// naming a type that is not there.
-fn vector_element(ty: &Type) -> Option<Type> {
-    let Type::Reference(reference) = ty else {
-        return None;
-    };
-    let Type::Path(path) = &*reference.elem else {
-        return None;
-    };
-    let last = path.path.segments.last()?;
-    if last.ident != "CxxVector" {
-        return None;
-    }
-    let syn::PathArguments::AngleBracketed(ab) = &last.arguments else {
-        return None;
-    };
-    match ab.args.iter().exactly_one() {
-        Ok(syn::GenericArgument::Type(ty)) => Some(ty.clone()),
-        _ => None,
-    }
-}
-
-/// The key under which map-taking declarations of one C++ name are compared:
-/// the overload set's identity - namespace, receiver type and the name C++
-/// sees - plus the parameter types as bindgen rendered them. Two declarations
-/// sharing a key are ones autocxx cannot tell apart by any means it has.
-///
-/// Types, not whole arguments: C++ does not overload on parameter names, so
-/// two declarations whose rendered types match are indistinguishable whatever
-/// each calls its parameters. The inputs carry the receiver too, so a `const`
-/// method and its non-`const` twin never share a key; the output is left out
-/// because C++ cannot overload on it.
-fn map_overload_key(ns: &Namespace, fun: &FuncToConvert) -> String {
-    let cpp_name = cpp_declared_name(fun);
-    let self_ty = fun
-        .self_ty
-        .as_ref()
-        .map(|t| t.to_cpp_name())
-        .unwrap_or_default();
-    format!(
-        "{}|{}|{}|{}",
-        ns.iter().join("::"),
-        self_ty,
-        cpp_name,
-        input_types_key(fun)
-    )
-}
-
 /// The name C++ declared this function under: the reported original name
 /// where bindgen renamed it, and the identifier itself otherwise. This is the
 /// name overload resolution looks up, so it is what the map machinery
@@ -6193,38 +6102,11 @@ fn cpp_declared_name(fun: &FuncToConvert) -> String {
         .unwrap_or_else(|| fun.ident.to_string())
 }
 
-/// The types of a function's inputs, rendered as one string with the
-/// parameter names left out - what C++ overloads on, and nothing it does not.
-fn input_types_key(fun: &FuncToConvert) -> String {
-    fun.inputs
-        .iter()
-        .map(|arg| match &arg.0 {
-            syn::FnArg::Typed(pt) => pt.ty.to_token_stream().to_string(),
-            other => other.to_token_stream().to_string(),
-        })
-        .join(",")
-}
-
 /// Whether this is the receiver bindgen writes first on a method - `this` -
 /// which every constructor of a class carries alike and no argument fills.
 fn is_receiver_arg(arg: &FnArg) -> bool {
     matches!(&arg.0, syn::FnArg::Typed(pt)
         if matches!(&*pt.pat, syn::Pat::Ident(id) if id.ident == "this"))
-}
-
-/// The names a function's own parameters hold, which the two names a map
-/// parameter turns into must stay clear of.
-fn parameter_names(fun: &FuncToConvert) -> HashSet<String> {
-    fun.inputs
-        .iter()
-        .filter_map(|arg| match &arg.0 {
-            syn::FnArg::Typed(pt) => match &*pt.pat {
-                syn::Pat::Ident(id) => Some(id.ident.to_string()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
 }
 
 /// Stringify a function argument for diagnostics

@@ -364,7 +364,7 @@ impl<'a> TypeConverter<'a> {
             instantiations_on_incomplete_types: Self::find_instantiations_on_incomplete_types(apis),
             concrete_definitions: Self::find_concrete_definitions(apis),
             classes_we_may_not_destroy: HashMap::new(),
-            alias_targets: Self::find_alias_targets(apis),
+            alias_targets: alias_targets(apis),
             inner_types_required: Self::find_inner_types_required(apis),
             ignored_types: Self::find_ignored_types(apis),
             deferred_surfaces: HashMap::new(),
@@ -1248,16 +1248,32 @@ impl<'a> TypeConverter<'a> {
                 ResolvedTypedef::Converted(annotated) => return Ok(*annotated),
             };
 
-        // Rust has no type which is a C++ map, so converting one can produce
-        // nothing: the single shape autocxx serves is a `const` reference
-        // parameter, which `fun::map_params` recognises and replaces with two
-        // vectors before conversion is ever asked about the map. Whatever
-        // reaches here is one of the shapes that carve-out leaves out.
+        // cxx has no map type, so nothing standing for every possible
+        // `std::map` could be declared in a crate the generated code does not
+        // own: a trait carrying the glue would have to be implemented for
+        // foreign key and value pairs, which the orphan rule forbids anywhere
+        // but in the crate declaring one of them. So each instantiation the
+        // headers actually use becomes its own generated opaque type, exactly
+        // as any other template instantiation autocxx meets does, and the
+        // shims written beside it are the whole of what Rust can do with one.
+        // See [`HolderSurface::Map`].
         //
-        // Said before substitution, which would otherwise put the stand-in's
-        // Rust name - a name no crate declares - into the bindings.
+        // Done before substitution, because it is the C++ spelling of the map
+        // - not the stand-in's Rust name, which no crate declares - that the
+        // generated typedef has to name.
         if known_types().is_map(&tn) {
-            return Err(ConvertErrorFromCpp::UnsupportedMap);
+            let Some(map) = recognise_map(&tn, &typ) else {
+                return Err(ConvertErrorFromCpp::UnsupportedMap);
+            };
+            let mut extra_apis = ApiVec::new();
+            let surface = self.map_surface(&map, ns, &mut extra_apis)?;
+            return self.lower_to_holder(
+                map.stripped,
+                Some(surface),
+                deps,
+                extra_apis,
+                target.is_const,
+            );
         }
 
         // A cxx smart pointer whose payload C++ qualified `const` -
@@ -2046,6 +2062,75 @@ impl<'a> TypeConverter<'a> {
         })
     }
 
+    /// The accessors a lowered map gets, and what its key and value reach Rust
+    /// as.
+    ///
+    /// Each is converted as though the header had declared a value of that
+    /// type on its own, so an `int` key arrives as the `c_int` newtype and a
+    /// `std::string` value as `CxxString`, and brings with it the dependencies
+    /// which make the bridge declare those.
+    ///
+    /// Both are then held to the types cxx will put in a `std::vector`, which
+    /// is a narrower question than what can cross the bridge at all:
+    /// [`MapShim::Keys`] and [`MapShim::Values`] hand back
+    /// `UniquePtr<CxxVector<_>>` snapshots, so a key or value with no
+    /// `CxxVector` is one those two could not return. That leaves the integer
+    /// and character atoms and `std::string` - the same set the map parameters
+    /// of the previous patch take - and a map of anything else is refused
+    /// whole rather than given a type two of its eight methods could not be
+    /// written for. Opaque values, which `get` could hand back by reference
+    /// and the snapshots could not copy, are a separate piece of work.
+    ///
+    /// A floating-point *key* is refused as well, whichever map it is.
+    /// `std::map` orders by `std::less<K>`, which owes it a strict weak
+    /// ordering, and NaN gives it none; safe Rust must not be able to hand a
+    /// C++ container an argument outside its contract. Floats are fine as
+    /// values.
+    fn map_surface(
+        &mut self,
+        map: &RecognisedMap,
+        ns: &Namespace,
+        extra_apis: &mut ApiVec<NullPhase>,
+    ) -> Result<HolderSurface, ConvertErrorFromCpp> {
+        let mut converted = Vec::new();
+        for (half, is_key) in [(&map.key, true), (&map.value, false)] {
+            let mut half = self
+                .convert_type(half.clone(), ns, &TypeConversionContext::WithinContainer)
+                .map_err(|_| ConvertErrorFromCpp::UnsupportedMap)?;
+            extra_apis.append(&mut half.extra_apis);
+            // A `const` a typedef carried: the direct marker was refused at
+            // recognition, but an alias resolving to `const int` only says so
+            // here. The shims assign to the value and vector both halves, so
+            // a cv-qualified one is generated-invalid C++, not a shape.
+            if half.is_const {
+                return Err(ConvertErrorFromCpp::UnsupportedMap);
+            }
+            let Type::Path(path) = &half.ty else {
+                return Err(ConvertErrorFromCpp::UnsupportedMap);
+            };
+            let name = QualifiedName::from_type_path(path);
+            if !known_types().is_known_type(&name)
+                || !known_types().permissible_within_vector(&name)
+                || (is_key && known_types().is_floating_point(&name))
+            {
+                return Err(ConvertErrorFromCpp::UnsupportedMap);
+            }
+            converted.push((half, known_types().is_cxx_string(&name)));
+        }
+        let (value, value_is_string) = converted.pop().expect("two halves were pushed");
+        let (key, key_is_string) = converted.pop().expect("two halves were pushed");
+        let mut deps = key.types_encountered;
+        deps.extend(value.types_encountered);
+        Ok(HolderSurface::Map {
+            key: Box::new(key.ty.into()),
+            value: Box::new(value.ty.into()),
+            key_is_string,
+            value_is_string,
+            ordered: map.ordered,
+            deps,
+        })
+    }
+
     /// Divert a template instantiation cxx cannot spell to the opaque C++
     /// holder autocxx already manufactures for such things, with `surface`
     /// saying which accessors the holder gets.
@@ -2424,24 +2509,6 @@ impl<'a> TypeConverter<'a> {
             .collect()
     }
 
-    /// What every alias in `apis` was written as pointing at, as bindgen wrote
-    /// it. See the field of the same name.
-    fn find_alias_targets<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashMap<QualifiedName, Type> {
-        apis.iter()
-            .filter_map(|api| match api {
-                Api::Typedef {
-                    item: TypedefKind::Type(ity),
-                    ..
-                } => Some((api.name().clone(), (*ity.ty).clone())),
-                Api::Typedef {
-                    item: TypedefKind::Use(ty),
-                    ..
-                } => Some((api.name().clone(), (**ty).clone().into())),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// What each generic type bindgen emitted requires of its template
     /// parameters, read off the bound bindgen put on each. See the field of the
     /// same name.
@@ -2627,6 +2694,72 @@ fn direct_generic_args(typ: &TypePath) -> Vec<Type> {
         .collect()
 }
 
+/// A `std::map` or `std::unordered_map` written with the default comparator,
+/// hash and allocator, taken apart into what lowering it to a generated type
+/// needs.
+pub(crate) struct RecognisedMap {
+    /// The key as bindgen wrote it, which is what gets converted to whatever
+    /// the bridge would spell an ordinary value of that type.
+    key: Type,
+    /// The value, likewise.
+    value: Type,
+    /// Whether entries come out in key order - true for `std::map`.
+    ordered: bool,
+    /// The instantiation with the default arguments dropped, which is what the
+    /// generated typedef names. bindgen renders `std::less<K>` as the bare
+    /// `std::less`, and `std::map<K, V, std::less, std::allocator>` is not
+    /// C++ at all, `std::less` being a template rather than a type, so the two
+    /// arguments autocxx checked are the defaults have to come off before
+    /// anything writes the instantiation out.
+    stripped: TypePath,
+}
+
+/// Whether `typ` is a map in that shape, `tn` being the name which already
+/// answered [`TypeDatabase::is_map`].
+///
+/// `None` refuses the map rather than describing it: a map which fixes its
+/// comparator, hash or allocator to something other than the default is a
+/// different C++ type from the one the generated typedef would name, and
+/// autocxx has no way to name that one - bindgen discards the arguments of
+/// `std::less` itself, so the stand-in cannot carry what it was given.
+fn recognise_map(tn: &QualifiedName, typ: &TypePath) -> Option<RecognisedMap> {
+    let defaults = known_types().map_default_extra_arguments(tn)?;
+    let args = direct_generic_args(typ);
+    if args.len() != 2 + defaults.len() {
+        return None;
+    }
+    for (arg, expected) in args[2..].iter().zip(defaults) {
+        let Type::Path(arg) = arg else { return None };
+        if QualifiedName::from_type_path(arg).to_cpp_name() != *expected {
+            return None;
+        }
+    }
+    // A cv-qualified key or value is refused: the shims assign to the value
+    // and copy both into `std::vector`s, and neither is C++ over a `const` or
+    // `volatile` element, so the header's valid signature would become
+    // invalid generated code. One a typedef carries instead is caught by the
+    // `is_const` check in `map_surface`.
+    for arg in &args[..2] {
+        if let Type::Path(arg) = arg {
+            if unwrap_const(arg).is_some() || unwrap_volatile(arg).is_some() {
+                return None;
+            }
+        }
+    }
+    let mut stripped = typ.clone();
+    let PathArguments::AngleBracketed(ab) = &mut stripped.path.segments.last_mut()?.arguments
+    else {
+        return None;
+    };
+    ab.args = ab.args.iter().take(2).cloned().collect();
+    Some(RecognisedMap {
+        key: args[0].clone(),
+        value: args[1].clone(),
+        ordered: known_types().is_ordered_map(tn),
+        stripped,
+    })
+}
+
 fn sole_pointer_generic_arg(typ: &TypePath) -> Option<Type> {
     let PathArguments::AngleBracketed(args) = &typ.path.segments.last()?.arguments else {
         return None;
@@ -2755,6 +2888,26 @@ impl TypedefTarget for TypedefAnalysis {
             is_std_array: self.target_is_std_array,
         })
     }
+}
+
+/// What every alias in `apis` was written as pointing at, as bindgen wrote
+/// it. See [`TypeConverter::alias_targets`]; the map refusals resolve through
+/// the same targets, so that a map behind a typedef is judged as the map the
+/// type conversion will make of it.
+pub(crate) fn alias_targets<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashMap<QualifiedName, Type> {
+    apis.iter()
+        .filter_map(|api| match api {
+            Api::Typedef {
+                item: TypedefKind::Type(ity),
+                ..
+            } => Some((api.name().clone(), (*ity.ty).clone())),
+            Api::Typedef {
+                item: TypedefKind::Use(ty),
+                ..
+            } => Some((api.name().clone(), (**ty).clone().into())),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn find_types<A: AnalysisPhase>(apis: &ApiVec<A>) -> HashSet<QualifiedName> {

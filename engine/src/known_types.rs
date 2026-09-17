@@ -1029,6 +1029,23 @@ impl TypeDatabase {
         self.get(ty).map(|td| td.behavior.is_map()).unwrap_or(false)
     }
 
+    /// Whether this is `std::map`, whose entries come out in key order, as
+    /// against `std::unordered_map`, whose order is unspecified.
+    pub(crate) fn is_ordered_map(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|td| matches!(td.behavior, Behavior::CxxOrderedMap))
+            .unwrap_or(false)
+    }
+
+    /// Whether this is `float` or `double`, which cannot be a map key: NaN
+    /// compares false against everything including itself, so `std::less` on
+    /// one is not the strict weak ordering `std::map` requires.
+    pub(crate) fn is_floating_point(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|td| matches!(td.cpp_name.as_str(), "float" | "double"))
+            .unwrap_or(false)
+    }
+
     /// The parameters C++ declares after the key and the value for this map,
     /// each as the template whose specialization is that parameter's default:
     /// `std::less` and `std::allocator` for `std::map`. `None` for anything
