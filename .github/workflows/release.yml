@@ -44,7 +44,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Showing the tag is on main needs main's history, not the tagged
           # commit alone.
@@ -153,7 +153,7 @@ jobs:
       # script, so no dependency's code executes while the claim is reachable.
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # The submodule is deliberately not initialised: `include` ships
       # `third_party/bindgen-src`, and `build.rs` is never run here.
@@ -196,7 +196,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}
