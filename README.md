@@ -56,7 +56,7 @@ cxx = "1.0"
 
 [build-dependencies]
 autocxx-build = "0.30"
-miette = { version = "5", features = ["fancy"] }
+miette = { version = "7", features = ["fancy"] }
 ```
 
 `build.rs`, which generates the bindings and compiles the C++ side:

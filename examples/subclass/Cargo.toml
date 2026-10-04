@@ -29,4 +29,4 @@ uwuify = "0.2.2"
 [build-dependencies]
 autocxx-build = { path = "../../gen/build", version = "0.30.0" }
 regex = "1.5.4"
-miette = { version = "5", features = ["fancy"] }
+miette = { version = "7", features = ["fancy"] }
