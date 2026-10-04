@@ -157,7 +157,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # The submodule is deliberately not initialised: `include` ships
       # `third_party/bindgen-src`, and `build.rs` is never run here.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bindgen-src
           path: engine/third_party/bindgen-src
