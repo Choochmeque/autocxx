@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod borrow_source;
 mod config;
 mod cpp_names;
 mod derives;
@@ -19,11 +20,13 @@ mod path;
 mod stable_hash;
 mod subclass_attrs;
 
+pub use borrow_source::BorrowSource;
 pub use config::{
-    name_matches_directive, AllowlistEntry, ConfigHash, DirectiveList, ExternCppType,
-    IncludeCppConfig, RustFun, Subclass, UnmatchedDirective, UnsafePolicy,
+    name_matches_directive, AllowlistEntry, BorrowSourceMatch, ConfigHash, DirectiveList,
+    ExternCppType, IncludeCppConfig, RustFun, Subclass, UnmatchedDirective, UnsafePolicy,
 };
 pub use derives::DeriveMap;
+pub use directives::RETURNS_BORROW_FROM;
 pub use enum_style::EnumStyle;
 use file_locations::FileLocationStrategy;
 pub use multi_bindings::{ConflictingBindingsErr, MultiBindings, MultiBindingsErr};

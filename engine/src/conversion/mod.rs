@@ -27,7 +27,9 @@ mod utilities;
 pub(crate) use super::parse_callbacks::CppOriginalName;
 use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use analysis::fun::FnAnalyzer;
-use autocxx_parser::{name_matches_directive, IncludeCppConfig, UnmatchedDirective};
+use autocxx_parser::{
+    name_matches_directive, IncludeCppConfig, UnmatchedDirective, RETURNS_BORROW_FROM,
+};
 pub(crate) use codegen_cpp::CppCodeGenerator;
 pub(crate) use convert_error::ConvertError;
 use convert_error::{ConvertErrorFromCpp, ConvertErrorWithContext, ErrorContext};
@@ -554,10 +556,19 @@ fn confirm_smart_pointer_directives_obeyed(
 /// `designation_can_be_honoured`, counts as matched here. It named something
 /// real; that autocxx cannot honour it is a separate fact deserving a separate
 /// diagnostic, and saying "matched nothing" about it would be untrue.
+///
+/// `returns_borrow_from!` gets its own wording, because it is asked only of a
+/// function which really does return a reference: a directive naming one which
+/// returns anything else lands here, and the shared message's list of things
+/// to check would send the reader hunting for a misspelling which is not
+/// there.
 fn confirm_name_matching_directives_matched(
     config: &IncludeCppConfig,
 ) -> Result<(), ConvertErrorFromCpp> {
     match config.unmatched_directives().into_iter().next() {
+        Some(UnmatchedDirective { directive, request }) if directive == RETURNS_BORROW_FROM => Err(
+            ConvertErrorFromCpp::BorrowSourceDirectiveMatchedNothing(request),
+        ),
         Some(UnmatchedDirective { directive, request }) => {
             Err(ConvertErrorFromCpp::DirectiveMatchedNothing { directive, request })
         }

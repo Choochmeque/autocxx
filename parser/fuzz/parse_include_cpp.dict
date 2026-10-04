@@ -37,6 +37,14 @@ extern_cpp_opaque_type="extern_cpp_opaque_type!(\""
 # further string literals.
 derive="derive!(\""
 
+# The directive taking a string literal, a comma, and then a second string
+# literal naming a parameter, plus every spelling `BorrowSource::parse`
+# accepts for one.
+returns_borrow_from="returns_borrow_from!(\""
+borrow_from_self="\", \"self\")"
+borrow_from_this="\", \"this\")"
+borrow_from_position="\", \"#0\")"
+
 # The directive taking an identifier, a comma, and then one or more string
 # literals, plus every style `EnumStyle::parse` accepts.
 enum_style="enum_style!("

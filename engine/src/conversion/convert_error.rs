@@ -64,6 +64,26 @@ pub enum ConvertErrorFromCpp {
     NoMutableInputReference(String),
     #[error("Function {0} has a mutable reference return value, but >1 input mutable reference parameters, so the lifetime of the output reference cannot be deduced.")]
     MultipleMutableInputReferences(String),
+    #[error("The 'returns_borrow_from' directive for {function} names the parameter '{parameter}', and this declaration of the function has none by that name, so autocxx still cannot tell which input the returned reference borrows from. A directive claims the whole overload set of a name, and this overload is one it does not cover. Name the parameter as C++ declares it, 'self' for the object a member function is called on, or '#0' for the first declared parameter by position.")]
+    BorrowSourceNotAParameter { function: String, parameter: String },
+    #[error("The 'returns_borrow_from' directive for {function} says the returned reference borrows from '{parameter}', and this declaration has no object to be called on: it is a free function or a static member function. Name one of its parameters instead.")]
+    BorrowSourceHasNoReceiver { function: String, parameter: String },
+    #[error("The 'returns_borrow_from' directive for {function} names the parameter '{parameter}', which autocxx passes as {rust_type} rather than as a Rust reference. A reference can only borrow from a reference, so this parameter has no lifetime for the returned one to take. A parameter passed by value, as a pointer, or as an rvalue reference is none of them.")]
+    BorrowSourceNotAReference {
+        function: String,
+        parameter: String,
+        rust_type: String,
+    },
+    #[error("The 'returns_borrow_from' directive for {function} says the mutable reference it returns borrows from '{parameter}', which is a const reference. Rust will not hand out a '&mut' derived from a '&', and C++ reaching a mutable reference out of a const one needs a const_cast, so this promise cannot be kept as written. If the C++ really does return a mutable reference into that parameter, declare the parameter as a mutable reference too.")]
+    BorrowSourceIsConst { function: String, parameter: String },
+    #[error("The 'returns_borrow_from' directive for {function} names the parameter '{parameter}', and what C++ receives there is a temporary the generated wrapper builds from the caller's argument, not the caller's own reference - a 'const std::string_view&' parameter, say, arrives as anything viewable as bytes and C++ is lent a view built over them for the call. That temporary is gone when the call returns, so the returned reference cannot take a lifetime from it.")]
+    BorrowSourceIsConverted { function: String, parameter: String },
+    #[error("Two 'returns_borrow_from' directives reach {function} and disagree about which parameter it borrows from: one says '{first}' and the other '{second}'. A name a directive is written with claims every function answering to it, so one of these reaches further than it was meant to.")]
+    ConflictingBorrowSources {
+        function: String,
+        first: String,
+        second: String,
+    },
     #[error("Encountered type not yet supported by autocxx: {0}")]
     UnsupportedType(String),
     #[error("Encountered type not yet known by autocxx: {0}")]
@@ -122,6 +142,8 @@ pub enum ConvertErrorFromCpp {
     DeriveDirectiveMatchedNothing(String),
     #[error("The 'smart_pointer' directive for '{0}' matched no template instantiation. Name the class template - 'smart_pointer!(\"MyPtr\")', not 'MyPtr<Widget>' - and check that something autocxx generates uses an instantiation of it; a directive which matches nothing would leave you without the accessor you asked for.")]
     SmartPointerDirectiveMatchedNothing(String),
+    #[error("The 'returns_borrow_from' directive for '{0}' reached no function which returns a reference, so it promised nothing about anything. Perhaps it was mis-spelled, or written without the namespace or the class which declares the function, or names something no 'generate' directive brings in - or names a function which returns something other than a reference, which has no lifetime for a directive to be about.")]
+    BorrowSourceDirectiveMatchedNothing(String),
     #[error("The '{directive}' directive for '{request}' matched nothing autocxx saw, so it did nothing. Perhaps it was mis-spelled, or written without the namespace which declares the item, or names something no 'generate' directive brings in?")]
     DirectiveMatchedNothing {
         /// The directive as written in `include_cpp!`, without its `!`.
