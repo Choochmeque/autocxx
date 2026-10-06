@@ -33,7 +33,7 @@ syn = "3"
 quote = "1.0"
 cxx-gen = "0.7.161"
 regex = "1.5"
-indexmap = "1.8"
+indexmap = "2.14"
 
 [dev-dependencies]
 assert_cmd = "2"

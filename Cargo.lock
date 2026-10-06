@@ -98,12 +98,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "autocfg"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
-
-[[package]]
 name = "autocxx"
 version = "0.30.0"
 dependencies = [
@@ -119,7 +113,7 @@ version = "0.30.0"
 dependencies = [
  "autocxx-engine",
  "env_logger",
- "indexmap 1.9.3",
+ "indexmap",
  "syn 3.0.6",
  "tempfile",
 ]
@@ -145,7 +139,7 @@ dependencies = [
  "clang-sys",
  "cxx-gen",
  "diffy",
- "indexmap 1.9.3",
+ "indexmap",
  "indoc",
  "itertools",
  "log",
@@ -190,7 +184,7 @@ dependencies = [
  "clap",
  "cxx",
  "env_logger",
- "indexmap 1.9.3",
+ "indexmap",
  "itertools",
  "miette",
  "pathdiff",
@@ -257,7 +251,7 @@ dependencies = [
 name = "autocxx-parser"
 version = "0.30.0"
 dependencies = [
- "indexmap 1.9.3",
+ "indexmap",
  "itertools",
  "once_cell",
  "proc-macro2",
@@ -285,7 +279,7 @@ dependencies = [
  "autocxx-parser",
  "clap",
  "cxx-gen",
- "indexmap 1.9.3",
+ "indexmap",
  "indoc",
  "itertools",
  "proc-macro2",
@@ -476,7 +470,7 @@ checksum = "4fde53ca86b9704a943fef0f1e1d836239a6aedca5de3c65fa9f97ec0bd46d39"
 dependencies = [
  "cc",
  "codespan-reporting",
- "indexmap 2.14.1",
+ "indexmap",
  "proc-macro2",
  "quote",
  "scratch",
@@ -490,7 +484,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5010d4044b4ac8b18aca2341f3a6227aaf332ec8f5e38fcb93cba53451f2dc92"
 dependencies = [
  "codespan-reporting",
- "indexmap 2.14.1",
+ "indexmap",
  "proc-macro2",
  "quote",
  "syn 3.0.6",
@@ -504,7 +498,7 @@ checksum = "07bae89236c811fd4d08ed3441759ac4ac98d752cbfd3de341315ba16ad20ec3"
 dependencies = [
  "clap",
  "codespan-reporting",
- "indexmap 2.14.1",
+ "indexmap",
  "proc-macro2",
  "quote",
  "syn 3.0.6",
@@ -522,7 +516,7 @@ version = "1.0.202"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b181252e2e3d3b5d183afbdc033a3958b445eb3e1a0ae65fc3d4f5259f5da6fd"
 dependencies = [
- "indexmap 2.14.1",
+ "indexmap",
  "proc-macro2",
  "quote",
  "syn 3.0.6",
@@ -540,7 +534,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e3dc2f773b6aaa63b1a7684b8589f670a8a0146a510b74d23a401c882364b49"
 dependencies = [
- "hashbrown 0.17.1",
+ "hashbrown",
 ]
 
 [[package]]
@@ -664,12 +658,6 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "hashbrown"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
-
-[[package]]
-name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -772,23 +760,14 @@ checksum = "ae293c039020f9ec10710af98d29ce6aa2051486638b49c9a6409f3b4a9e98ad"
 
 [[package]]
 name = "indexmap"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
-dependencies = [
- "autocfg",
- "hashbrown 0.12.3",
- "serde",
-]
-
-[[package]]
-name = "indexmap"
 version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -1455,7 +1434,7 @@ version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
- "indexmap 2.14.1",
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
