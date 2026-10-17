@@ -206,3 +206,48 @@ for parsing your headers and once for compiling the code it generates — so
 remember to set it in both places, e.g. `cc::Build::std("c++17")` beside
 `extra_clang_args(["-std=c++17"])`. Generated code which needs C++17 and does
 not get it says so by name.
+
+## Maps
+
+`cxx` has [`CxxVector`](https://docs.rs/cxx/latest/cxx/struct.CxxVector.html)
+and [`CxxString`](https://docs.rs/cxx/latest/cxx/struct.CxxString.html) and
+nothing associative, so `autocxx` adds
+[`CxxMap<K, V>`](https://docs.rs/autocxx/latest/autocxx/struct.CxxMap.html) for
+a `std::map<K, V>`. It behaves like `CxxVector` does: an opaque type you reach
+through a `UniquePtr<CxxMap<K, V>>`, a `&CxxMap<K, V>` or a
+`Pin<&mut CxxMap<K, V>>`, never by value.
+
+```rust,ignore
+use autocxx::{c_int, CxxMap};
+
+let mut map = CxxMap::<c_int, c_int>::new();
+map.pin_mut().insert(&c_int(1), &c_int(10));
+assert_eq!(map.get(&c_int(1)), Some(&c_int(10)));
+```
+
+`insert` is `std::map::insert`, so the first value stored under a key is the one
+that stays; `insert_or_assign` is the one which overwrites. Both take the key
+and the value by reference and the map stores copies, which is what lets a
+`std::string` key or value cross at all. `erase` reports whether there was an
+entry to remove, and `keys` and `values` hand back a `UniquePtr<CxxVector<_>>`
+snapshot in key order, so the two line up entry by entry.
+
+`V` may be any of the integer, character and floating-point types on this page
+plus `CxxString`, and `K` any of those except `f32` and `f64` — NaN would break
+the ordering a `std::map` key must give. The glue is compiled per pair, and the
+pairs compiled are listed on
+[`MapPair`](https://docs.rs/autocxx/latest/autocxx/trait.MapPair.html). That is
+a cross product, so it is a lot of C++ and the `cxx-maps` feature which carries
+it is off by default:
+
+```toml
+autocxx = { version = "0.30", features = ["cxx-maps"] }
+```
+
+Today the type is for a bridge you write yourself — a `cxx::bridge` or a shim
+which hands you back a `std::map`. The C++ side of such a bridge needs the
+typedefs these pairs go by, which ship as
+[`CXX_MAP_HEADER`](https://docs.rs/autocxx/latest/autocxx/static.CXX_MAP_HEADER.html):
+a string your build script writes to a header your C++ includes, the way
+`cxx_gen::HEADER` carries `cxx.h`. `include_cpp!` does not yet produce a
+`CxxMap` for a `std::map` it finds in your header; that is coming.
