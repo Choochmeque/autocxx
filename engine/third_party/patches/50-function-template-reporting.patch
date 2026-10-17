@@ -1,0 +1,346 @@
+Subject: Report namespace-scope function templates through `ParseCallbacks`
+
+bindgen makes nothing of a function template declared at namespace scope, and
+says nothing about it either. libclang reports one as a
+`CXCursor_FunctionTemplate`; `FunctionSig::from_ty` declines that cursor, so
+`Item::parse` falls through to the arm which files it among the cursor kinds
+knowingly left unhandled. No item is made, no callback fires, and nothing in
+the output distinguishes a scope which declares one from a scope which
+declares none.
+
+Generating nothing for one is right - a template has no monomorphization to
+emit - but the silence costs a consumer which writes C++ of its own. A
+function template participates in address-of overload resolution alongside
+the ordinary functions of its name: `static_cast<int (*)(const M&)>(&pick)`
+is legally satisfied by `template <class T> int pick(const T&)`, the
+specialization deduced from the target type. A consumer which takes a
+function's address that way - to pin a call to one declaration of an
+overloaded name - has to know the name is also templated, because whether the
+cast can quietly select the template instead turns on a declaration bindgen
+never mentioned. `--report-member-function-templates` covers a class's
+members; nothing covered the same declaration at namespace scope.
+
+`--report-function-templates` reports each one through
+`denote_function_template`: the name as C++ spells it, and how many template
+parameters the declaration carries, counted as C++ declared them - deduction
+and default template arguments may supply them, and a parameter pack counts
+as the one parameter it is, libclang exposing no test for a pack. The report
+is keyed by the module of the scope which declares the template, resolved
+the way the parent of every item codegen announces is resolved, because a
+consumer lines the two up by that id. That resolution has two steps neither
+of which is the point of traversal. The scope is the semantic one, so an
+out-of-line definition - `template <class T> int a::pick(const T&) { ... }`
+after `a` has closed - reports under `a`, where C++ resolves the name, not
+under the scope the file happens to write it in. And an inline namespace is
+flattened to the nearest enclosing namespace which is not inline, as
+codegen's announcements flatten everything an inline namespace holds: its
+declarations shadow the enclosing scope's names, and its own module id is
+one no announcement ever names.
+
+The report is made during parsing, because there is nowhere later: no item
+exists for codegen to walk. It is made before `Item::parse`'s redeclaration
+shortcut rather than at the unhandled-kind arm, because a declaration whose
+definition is out of line exits through that shortcut and never reaches the
+arm. Two consequences a consumer must hold. Every declaration libclang
+visits is reported, so a template declared and then defined arrives twice,
+under the same module - and no allowlist has filtered anything: codegen's
+module announcements, by contrast, cover only the modules the allowlist
+keeps, so a report may name a module id nothing ever announces. Both are the
+nature of a parse-time report rather than defects in it; deduplication is
+one hash lookup on the consumer's side, and a scope which interests the
+consumer is a scope whose module its other items already caused to be
+announced.
+
+`clang_getTemplateCursorKind` filters the cursor before it is reported: only
+a template whose declaration would otherwise have been a plain function -
+`CXCursor_FunctionDecl` - is one, which keeps a deduction guide out of the
+report. A member function template never arrives here through a class's
+body, `CompInfo::from_ty` visiting those children rather than `Item::parse`;
+one defined out of line does arrive, and the same filter drops it, libclang
+calling it a method template rather than a function template - the
+declaration inside the class stays the member report's to make. A friend
+function template is not reported either, hanging under a
+`CXCursor_FriendDecl` nothing descends into.
+
+No signature is reported, for the reason the member report gives: a function
+template's signature may name the template's own parameters, which nothing
+outside the template can write, and reporting the signatures which name none
+of them would be a feature of its own.
+
+What the report cannot see is a using-declaration: `using other::pick;` at
+namespace scope is a `CXCursor_UsingDeclaration`, a different unhandled kind,
+and the template it pulls into the scope is reported only in the namespace
+which declares it. A consumer wanting the names visible in a scope, rather
+than the names declared in it, has that much assembly left to do - and for
+the part a using-declaration hides, no report to assemble it from.
+
+Opt-in because keeping these is not free - a header which uses the standard
+library declares a great many - and because a report made unconditionally
+would be a new one for every consumer which already implements
+`ParseCallbacks`. With the option off nothing changes at all.
+
+--- a/callbacks.rs
++++ b/callbacks.rs
+@@ -488,6 +488,48 @@
+     ) {
+     }
+ 
++    /// Report one function template declared at namespace scope, which bindgen
++    /// otherwise passes over without a trace.
++    ///
++    /// libclang reports one as a `CXCursor_FunctionTemplate`, which
++    /// `FunctionSig::from_ty` declines, so `Item::parse` files the cursor among
++    /// the kinds it knowingly leaves unhandled: no item, no other callback, and
++    /// nothing in the output distinguishes a scope which declares one from a
++    /// scope which declares none. A consumer taking a function's address in C++
++    /// it writes itself cannot afford that silence - a function template of the
++    /// same name participates in address-of overload resolution, so what the
++    /// cast selects turns on a declaration bindgen never mentioned.
++    ///
++    /// Called during parsing, once per declaration libclang visits: a template
++    /// declared and then defined is reported twice, under the same `module`.
++    /// `module` is the id of the module for the scope which declares the
++    /// template - its semantic scope, so an out-of-line definition reports
++    /// under the namespace which declared it, wherever the definition
++    /// lexically stands - with an inline namespace flattened to the nearest
++    /// enclosing namespace which is not inline, the same resolution the
++    /// parent of every announced item gets. It is the same id
++    /// [`DiscoveredItem::Mod`] announces if that module reaches codegen -
++    /// which it may not, this being a parse-time report and codegen
++    /// announcing only what the allowlist keeps.
++    ///
++    /// A member function template is not reported here - a class's children are
++    /// [`ParseCallbacks::denote_member_function_template`]'s to report, and an
++    /// out-of-line definition of one, which does pass this way, is kept out by
++    /// the function-kind filter: libclang calls it a method template rather
++    /// than a function template - and a friend function template is not
++    /// reported at all, hanging under a `CXCursor_FriendDecl` which
++    /// `CompInfo::from_ty` does not descend into.
++    ///
++    /// No signature is reported, for the reason the member report gives: a
++    /// function template's signature may name its own template parameters,
++    /// which nothing outside the template can write.
++    fn denote_function_template(
++        &self,
++        _module: DiscoveredItemId,
++        _function: FunctionTemplateInfo<'_>,
++    ) {
++    }
++
+     /// Report one conversion function of a class, which bindgen does not parse
+     /// as a member of that class at all.
+     ///
+@@ -965,6 +1007,23 @@
+     pub template_parameters: usize,
+ }
+ 
++/// What [`ParseCallbacks::denote_function_template`] reports about one
++/// namespace-scope function template.
++#[derive(Debug, Clone, Copy)]
++#[non_exhaustive]
++pub struct FunctionTemplateInfo<'a> {
++    /// The template's name as C++ spells it. There is no rename to undo:
++    /// bindgen makes no item for a function template, so
++    /// [`ParseCallbacks::generated_name_override`] is never asked about one.
++    pub name: &'a str,
++
++    /// How many template parameters the template declares. Not how many a
++    /// caller must write: deduction and default template arguments may supply
++    /// them. A parameter pack counts as the one parameter C++ declared it as,
++    /// whatever number of arguments it goes on to take.
++    pub template_parameters: usize,
++}
++
+ /// What [`ParseCallbacks::denote_conversion_function`] reports about one
+ /// conversion function.
+ #[derive(Debug, Clone, Copy)]
+--- a/ir/item.rs
++++ b/ir/item.rs
+@@ -18,7 +18,7 @@
+ use super::template::{AsTemplateParam, TemplateParameters};
+ use super::traversal::{EdgeKind, Trace, Tracer};
+ use super::ty::{Type, TypeKind};
+-use crate::callbacks::ItemInfo;
++use crate::callbacks::{DiscoveredItemId, FunctionTemplateInfo, ItemInfo};
+ use crate::clang;
+ use crate::parse::{ClangSubItemParser, ParseError, ParseResult};
+ 
+@@ -1366,7 +1366,69 @@
+             CXChildVisit_Continue
+         }
+         Err(ParseError::Continue) => CXChildVisit_Continue,
++    }
++}
++
++/// The module a `--report-function-templates` report is keyed by: the scope
++/// C++ declares the template in, resolved the way the parent of every item
++/// codegen announces is resolved. `None` for a cursor which is not a
++/// namespace-scope function template after all.
++///
++/// The semantic parent rather than the point of traversal, because the two
++/// part ways for an out-of-line definition: `template <class T> int
++/// a::pick(const T&) { ... }` stands lexically wherever the file put it and
++/// belongs to `a` all the same, so keying by traversal would misfile it twice
++/// over - `a`'s own report lost, a same-named function at the file's scope
++/// wrongly shadowed. A linkage specification is transparent to name lookup
++/// and is stepped over. A record is not expected here at all - a member
++/// function template's out-of-line definition is the cursor which would have
++/// one, and `clang_getTemplateCursorKind` calls that a method rather than a
++/// function, so the caller's filter already dropped it - but a scope this
++/// walk does not recognise answers `None` and reports nothing, rather than
++/// filing a name under a namespace it does not belong to.
++///
++/// An inline namespace is then flattened to the nearest enclosing namespace
++/// which is not inline, exactly as `find_reportable_parent_mod` does for
++/// everything codegen announces: an inline namespace's contents are announced
++/// under that enclosing module, and a report keyed by the inline module's own
++/// id would name a module the consumer never hears of - while the namespace's
++/// declarations, an inline namespace being transparent to name lookup, shadow
++/// the enclosing scope's names all the same. The walk terminates because the
++/// root module is not inline.
++fn function_template_module(
++    cursor: &clang::Cursor,
++    ctx: &mut BindgenContext,
++) -> Option<DiscoveredItemId> {
++    use clang_sys::*;
++    let mut scope = cursor.fallible_semantic_parent();
++    let mut module_id: ItemId = loop {
++        let Some(parent) = scope else {
++            break ctx.root_module().into();
++        };
++        // The translation unit is recognised by identity rather than by
++        // kind: libclang renumbered `CXCursor_TranslationUnit` in
++        // libclang 15, so the constant matches the running library only
++        // when clang-sys was built for the right side of that line, and
++        // the rest of this crate accordingly never consults it.
++        if parent == ctx.translation_unit().cursor() {
++            break ctx.root_module().into();
++        }
++        match parent.kind() {
++            CXCursor_Namespace => break ctx.module(parent).into(),
++            CXCursor_LinkageSpec | CXCursor_UnexposedDecl => {
++                scope = parent.fallible_semantic_parent();
++            }
++            _ => return None,
++        }
++    };
++    while ctx
++        .resolve_item(module_id)
++        .as_module()
++        .is_some_and(Module::is_inline)
++    {
++        module_id = ctx.resolve_item(module_id).parent_id();
+     }
++    Some(DiscoveredItemId::new(module_id.as_usize()))
+ }
+ 
+ impl Item {
+@@ -1467,6 +1529,42 @@
+         try_parse!(Function);
+         try_parse!(Var);
+ 
++        // A namespace-scope function template, which nothing here makes an
++        // item of: `FunctionSig::from_ty` declines the cursor, and it ends
++        // among the kinds knowingly left unhandled below.
++        // `--report-function-templates` keeps the fact that the scope
++        // declares one - the template participates in address-of overload
++        // resolution against any same-named function a consumer takes the
++        // address of in C++ it writes itself, so the silence would misreport
++        // the scope as template-free. Reported here rather than at the
++        // unhandled arm because a declaration whose definition is out of
++        // line never reaches that arm, leaving through the redeclaration
++        // shortcut just below; `template_kind` keeps declarations which are
++        // not functions - a deduction guide - out of the report.
++        if ctx.options().report_function_templates &&
++            cursor.kind() == CXCursor_FunctionTemplate &&
++            cursor.template_kind() == CXCursor_FunctionDecl
++        {
++            if let Some(module) = function_template_module(&cursor, ctx) {
++                let name = cursor.spelling();
++                let info = FunctionTemplateInfo {
++                    name: &name,
++                    // The parameters the template declares, a pack counting
++                    // as the one parameter it is: libclang exposes no test
++                    // for a pack, and the count is of what C++ declared
++                    // rather than of what a call supplies.
++                    template_parameters: cursor
++                        .collect_children()
++                        .iter()
++                        .filter(|child| child.is_template_parameter())
++                        .count(),
++                };
++                for cb in &ctx.options().parse_callbacks {
++                    cb.denote_function_template(module, info);
++                }
++            }
++        }
++
+         // Types are sort of special, so to avoid parsing template classes
+         // twice, handle them separately.
+         {
+--- a/options/cli.rs
++++ b/options/cli.rs
+@@ -487,6 +487,9 @@
+     /// Report the call operators of a class through `ParseCallbacks`.
+     #[arg(long)]
+     report_call_operators: bool,
++    /// Report namespace-scope function templates through `ParseCallbacks`.
++    #[arg(long)]
++    report_function_templates: bool,
+     /// Always be specific about the 'receiver' of a virtual function.
+     #[arg(long)]
+     use_specific_virtual_function_receiver: bool,
+@@ -736,6 +739,7 @@
+         report_member_function_templates,
+         report_conversion_functions,
+         report_call_operators,
++        report_function_templates,
+         use_specific_virtual_function_receiver,
+         use_distinct_char16_t,
+         use_distinct_wchar_t,
+@@ -1057,6 +1061,7 @@
+             report_member_function_templates,
+             report_conversion_functions,
+             report_call_operators,
++            report_function_templates,
+             use_specific_virtual_function_receiver,
+             use_distinct_char16_t,
+             use_distinct_wchar_t,
+--- a/options/mod.rs
++++ b/options/mod.rs
+@@ -305,6 +305,35 @@
+         as_args: "--report-call-operators",
+     },
+ 
++    /// Report namespace-scope function templates through
++    /// [`ParseCallbacks::denote_function_template`], which bindgen otherwise
++    /// passes over without a trace: libclang reports one as a
++    /// `CXCursor_FunctionTemplate`, which `Item::parse` files among the cursor
++    /// kinds it knowingly leaves unhandled, so nothing in the output says the
++    /// scope declares one.
++    ///
++    /// Nothing is generated for them with the option on either - a template
++    /// has no monomorphization to generate - and no signature is reported, a
++    /// function template's signature being free to name its own template
++    /// parameters. What a consumer gets is that the name is declared and is
++    /// templated, which matters to one taking a function's address in C++ it
++    /// writes itself: the template participates in address-of overload
++    /// resolution against any same-named function in its scope.
++    ///
++    /// [`ParseCallbacks::denote_function_template`]:
++    ///     callbacks::ParseCallbacks::denote_function_template
++    report_function_templates: bool {
++        methods: {
++            /// If this is true, report namespace-scope function templates
++            /// through `ParseCallbacks` rather than passing over them.
++            pub fn report_function_templates(mut self, doit: bool) -> Builder {
++                self.options.report_function_templates = doit;
++                self
++            }
++        },
++        as_args: "--report-function-templates",
++    },
++
+     /// Use a newtype wrapper to denote types which are `const` in their own
+     /// right, as opposed to pointing at something `const`. Rust has no
+     /// spelling for that - `const int` and `int` are both `c_int`, and

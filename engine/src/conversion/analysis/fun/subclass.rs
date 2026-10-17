@@ -272,6 +272,12 @@ pub(super) fn create_subclass_function(
                 // not to throw, this one must promise the same or C++ rejects
                 // it.
                 ref_qualifier,
+                // Read only by map-building wrappers, which a subclass
+                // override never is: map conversions have no inverse. The
+                // return cv fields are read by the same wrappers alone.
+                target_ref_qualifier: CppRefQualifier::None,
+                target_return_toplevel_const: false,
+                target_return_toplevel_volatile: false,
                 exception_specification,
                 is_virtual_override: true,
                 // The override's own body calls into Rust and names the
@@ -320,6 +326,12 @@ pub(super) fn create_subclass_constructor(
             &cpp.to_cpp_name(),
         ),
         ref_qualifier: CppRefQualifier::None,
+        // A constructor has no ref-qualifier to repeat either, and no exact
+        // signature is ever spelt for this wrapper, so the next three are
+        // never read.
+        target_ref_qualifier: CppRefQualifier::None,
+        target_return_toplevel_const: false,
+        target_return_toplevel_volatile: false,
         // A constructor overrides nothing.
         exception_specification: CppExceptionSpecification::None,
         is_virtual_override: false,

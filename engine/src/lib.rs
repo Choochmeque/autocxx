@@ -609,7 +609,15 @@ impl IncludeCppEngine {
             // what this buys is the note which says the member is there, in
             // place of a class which reads as having no such thing.
             .report_conversion_functions(true)
-            .report_call_operators(true);
+            .report_call_operators(true)
+            // The function templates each namespace declares, which bindgen
+            // otherwise passes over without a trace. A function template
+            // participates in address-of overload resolution beside the
+            // ordinary functions of its name, so the exact-typed cast a map
+            // wrapper calls through could quietly select one; the map census
+            // refuses that shape, and this report is what lets it see the
+            // competitor at all.
+            .report_function_templates(true);
 
         // 3. Passes allowlist and other options to the bindgen::Builder equivalent
         //    to --output-style=cxx --allowlist=<as passed in>

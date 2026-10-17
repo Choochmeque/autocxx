@@ -7,6 +7,7 @@
 // except according to those terms.
 
 mod function_wrapper_cpp;
+mod map_prelude;
 mod move_or_copy_prelude;
 mod new_and_delete_prelude;
 mod string_view_prelude;
@@ -28,13 +29,15 @@ use type_to_cpp::CppNameMap;
 use crate::conversion::analysis::fun::ReceiverMutability;
 use crate::conversion::array_witness::{array_element_witnesses, witness_name};
 use crate::conversion::layout_assertions::layout_assertions;
+use crate::conversion::type_helpers::extract_pinned_mutable_reference_type;
 use crate::minisyn::Ident;
 
 use super::{
     analysis::{
         fun::{
             function_wrapper::{
-                CppExceptionSpecification, CppFunction, CppFunctionBody, RECEIVER_ARG_NAME,
+                CppExceptionSpecification, CppFunction, CppFunctionBody, TypeConversionPolicy,
+                RECEIVER_ARG_NAME,
             },
             FnPhase, PodAndDepAnalysis, SubclassAnalysis,
         },
@@ -100,6 +103,7 @@ enum Header {
     NewDeletePrelude,
     MoveOrCopyPrelude,
     StringViewPrelude,
+    MapPrelude,
 }
 
 impl Header {
@@ -125,6 +129,7 @@ impl Header {
             Header::NewDeletePrelude => new_and_delete_prelude::NEW_AND_DELETE_PRELUDE.to_string(),
             Header::MoveOrCopyPrelude => move_or_copy_prelude::MOVE_OR_COPY_PRELUDE.to_string(),
             Header::StringViewPrelude => string_view_prelude::STRING_VIEW_PRELUDE.to_string(),
+            Header::MapPrelude => map_prelude::MAP_PRELUDE.to_string(),
         }
     }
 
@@ -565,6 +570,36 @@ impl<'a> CppCodeGenerator<'a> {
         })
     }
 
+    /// The C++ type of the class whose method a map-building wrapper calls
+    /// through a member pointer: what the receiver conversion in first
+    /// position refers to. The receiver arrives in one of the shapes the
+    /// bridge gives it - a `&T`, a `Pin<&mut T>`, or the raw pointer some
+    /// conversions carry instead - and anything else is an autocxx bug,
+    /// answered like the rest of the exact-signature machinery rather than
+    /// guessed around.
+    fn receiver_class_type(
+        &self,
+        details: &CppFunction,
+    ) -> Result<(String, bool), ConvertErrorFromCpp> {
+        match details.argument_conversion.first() {
+            Some(TypeConversionPolicy::Pointer { pointer, .. }) => Ok((
+                self.original_name_map.type_to_cpp(pointer.pointee())?,
+                !pointer.is_mut(),
+            )),
+            Some(TypeConversionPolicy::Whole { ty, .. }) => match &**ty {
+                syn::Type::Reference(reference) => Ok((
+                    self.original_name_map.type_to_cpp(&reference.elem)?,
+                    reference.mutability.is_none(),
+                )),
+                syn::Type::Path(path) => extract_pinned_mutable_reference_type(path)
+                    .ok_or(ConvertErrorFromCpp::MapTargetSignatureUnknown)
+                    .and_then(|inner| Ok((self.original_name_map.type_to_cpp(inner)?, false))),
+                _ => Err(ConvertErrorFromCpp::MapTargetSignatureUnknown),
+            },
+            None => Err(ConvertErrorFromCpp::MapTargetSignatureUnknown),
+        }
+    }
+
     fn generate_cpp_function(&mut self, details: &CppFunction) -> Result<(), ConvertErrorFromCpp> {
         self.additional_functions
             .push(self.generate_cpp_function_inner(
@@ -720,17 +755,32 @@ impl<'a> CppCodeGenerator<'a> {
             .argument_conversion
             .iter()
             .enumerate()
-            .map(|(counter, conv)| match conversion_direction {
-                ConversionDirection::RustCallsCpp => {
-                    conv.cpp_conversion(&get_arg_name(counter), &self.original_name_map, false)
+            .map(|(counter, conv)| {
+                // What the parameter after this one is called, for the single
+                // conversion which reads two of them - see `cpp_conversion`.
+                let following = (counter + 1 < details.argument_conversion.len())
+                    .then(|| get_arg_name(counter + 1));
+                let following = following.as_deref();
+                match conversion_direction {
+                    ConversionDirection::RustCallsCpp => conv.cpp_conversion(
+                        &get_arg_name(counter),
+                        following,
+                        &self.original_name_map,
+                        false,
+                    ),
+                    ConversionDirection::CppCallsCpp => Ok(Some(get_arg_name(counter))),
+                    ConversionDirection::CppCallsRust => conv
+                        .inverse()
+                        .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)
+                        .and_then(|conv| {
+                            conv.cpp_conversion(
+                                &get_arg_name(counter),
+                                following,
+                                &self.original_name_map,
+                                false,
+                            )
+                        }),
                 }
-                ConversionDirection::CppCallsCpp => Ok(Some(get_arg_name(counter))),
-                ConversionDirection::CppCallsRust => conv
-                    .inverse()
-                    .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)
-                    .and_then(|conv| {
-                        conv.cpp_conversion(&get_arg_name(counter), &self.original_name_map, false)
-                    }),
             })
             .collect();
         let mut arg_list = arg_list?.into_iter().flatten();
@@ -748,6 +798,71 @@ impl<'a> CppCodeGenerator<'a> {
         // Whether we emit a global placement new, and therefore need <new> for
         // its declaration.
         let mut need_placement_new = false;
+        // The exact C++ type of the function this wrapper calls, computed only
+        // for a wrapper which builds a map. Such a wrapper makes its call
+        // through a pointer of this type rather than by name: the map it
+        // builds is always of the default-comparator, default-allocator kind,
+        // and a call by name would let overload resolution weigh that map
+        // against every declaration sharing the name - so a binding built from
+        // `f(const std::map<K, V, std::less<>>&)`, whose comparator bindgen's
+        // rendering cannot distinguish from the default, would quietly call a
+        // sibling `f(const std::map<K, V>&)`, or convert its way into any
+        // other viable overload. Taking the address through
+        // `static_cast<Ret (*)(Params)>(&f)` instead resolves against the
+        // declared *types*: the call can only ever reach a function of exactly
+        // the built map's signature, and where the one declaration is not that
+        // - the lone transparent-comparator overload - the cast fails to
+        // compile rather than calling anything else.
+        let exact_signature = if matches!(conversion_direction, ConversionDirection::RustCallsCpp)
+            && details
+                .argument_conversion
+                .iter()
+                .any(|conv| conv.builds_a_map().is_some())
+        {
+            let mut params = Vec::new();
+            for (counter, conv) in details.argument_conversion.iter().enumerate() {
+                if is_a_method && counter == 0 {
+                    continue;
+                }
+                if let Some(param) = conv.target_parameter_type(&self.original_name_map)? {
+                    params.push(param);
+                }
+            }
+            let ret = match &details.return_conversion {
+                // With the top-level cv-qualifiers the declaration carried put
+                // back: they are part of the function's type, which this cast
+                // has to repeat exactly, even though the wrapper's own return
+                // is unqualified. Recorded on the CppFunction because the
+                // conversion cannot know them - see `target_return_type`.
+                Some(ret) => format!(
+                    "{}{}{}",
+                    if details.target_return_toplevel_const {
+                        "const "
+                    } else {
+                        ""
+                    },
+                    if details.target_return_toplevel_volatile {
+                        "volatile "
+                    } else {
+                        ""
+                    },
+                    ret.target_return_type(&self.original_name_map)?
+                ),
+                None => "void".to_string(),
+            };
+            Some((ret, params.join(", ")))
+        } else {
+            None
+        };
+        // The ref-qualifier a member-pointer type for that call has to repeat
+        // from the method's own declaration. The `const` half is decided per
+        // call shape below: the receiver's own type says it for an ordinary
+        // method, and the receiver cast's mutability for a base-class one.
+        let target_ref_qualifier = match details.target_ref_qualifier {
+            CppRefQualifier::None => "",
+            CppRefQualifier::LValue => " &",
+            CppRefQualifier::RValue => " &&",
+        };
         let (mut underlying_function_call, field_assignments, need_allocators) = match &details
             .payload
         {
@@ -799,14 +914,27 @@ impl<'a> CppCodeGenerator<'a> {
                 (destructor_call, "".to_string(), false)
             }
             CppFunctionBody::FunctionCall(ns, id) => match receiver {
-                Some(receiver) => (
-                    format!(
-                        "{receiver}.{}({arg_list})",
-                        id.to_string_for_cpp_generation()
-                    ),
-                    "".to_string(),
-                    false,
-                ),
+                Some(receiver) => {
+                    let call = match &exact_signature {
+                        // Through a member pointer of the method's exact type,
+                        // for the reasons on `exact_signature`. The pointer
+                        // dispatches virtually, exactly as the call by name
+                        // did.
+                        Some((ret, params)) => {
+                            let (klass, receiver_is_const) = self.receiver_class_type(details)?;
+                            let constness = if receiver_is_const { " const" } else { "" };
+                            format!(
+                                "({receiver}.*static_cast<{ret} ({klass}::*)({params}){constness}{target_ref_qualifier}>(&{klass}::{}))({arg_list})",
+                                id.to_string_for_cpp_generation()
+                            )
+                        }
+                        None => format!(
+                            "{receiver}.{}({arg_list})",
+                            id.to_string_for_cpp_generation()
+                        ),
+                    };
+                    (call, "".to_string(), false)
+                }
                 None => {
                     let underlying_function_call = ns
                         .into_iter()
@@ -815,11 +943,13 @@ impl<'a> CppCodeGenerator<'a> {
                             id.to_string_for_cpp_generation().to_string(),
                         ))
                         .join("::");
-                    (
-                        format!("{underlying_function_call}({arg_list})"),
-                        "".to_string(),
-                        false,
-                    )
+                    let call = match &exact_signature {
+                        Some((ret, params)) => format!(
+                            "(*static_cast<{ret} (*)({params})>(&{underlying_function_call}))({arg_list})"
+                        ),
+                        None => format!("{underlying_function_call}({arg_list})"),
+                    };
+                    (call, "".to_string(), false)
                 }
             },
             CppFunctionBody::BaseClassMethodCall {
@@ -843,14 +973,26 @@ impl<'a> CppCodeGenerator<'a> {
                     ReceiverMutability::Const => "const ",
                     ReceiverMutability::Mutable => "",
                 };
-                (
-                    format!(
+                let call = match &exact_signature {
+                    // As for `FunctionCall`: a member pointer of the exact
+                    // type, on the base whose member this wrapper was built
+                    // from. Still virtual, exactly as the call by name is.
+                    Some((ret, params)) => {
+                        let member_constness = match receiver_mutability {
+                            ReceiverMutability::Const => " const",
+                            ReceiverMutability::Mutable => "",
+                        };
+                        format!(
+                            "(static_cast<{constness}{base}&>({receiver}).*static_cast<{ret} ({base}::*)({params}){member_constness}{target_ref_qualifier}>(&{base}::{}))({arg_list})",
+                            id.to_string_for_cpp_generation()
+                        )
+                    }
+                    None => format!(
                         "static_cast<{constness}{base}&>({receiver}).{}({arg_list})",
                         id.to_string_for_cpp_generation()
                     ),
-                    "".to_string(),
-                    false,
-                )
+                };
+                (call, "".to_string(), false)
             }
             // The receiver has already been converted to whatever C++ needs to
             // read a member off it, which for the `const T&` an accessor takes
@@ -878,11 +1020,16 @@ impl<'a> CppCodeGenerator<'a> {
                     self.namespaced_name(&ty_name),
                     fn_id.to_string_for_cpp_generation()
                 );
-                (
-                    format!("{underlying_function_call}({arg_list})"),
-                    "".to_string(),
-                    false,
-                )
+                let call = match &exact_signature {
+                    // A static member is called through an ordinary function
+                    // pointer, and the cast also settles which member the
+                    // name means where an instance method shares it.
+                    Some((ret, params)) => format!(
+                        "(*static_cast<{ret} (*)({params})>(&{underlying_function_call}))({arg_list})"
+                    ),
+                    None => format!("{underlying_function_call}({arg_list})"),
+                };
+                (call, "".to_string(), false)
             }
             CppFunctionBody::ConstructSuperclass(_) => ("".to_string(), arg_list, false),
             // Named from the global namespace, or the type's own namespaces
@@ -907,14 +1054,22 @@ impl<'a> CppCodeGenerator<'a> {
         };
         if let Some(ret) = &details.return_conversion {
             let call_itself = match conversion_direction {
-                ConversionDirection::RustCallsCpp => {
-                    ret.cpp_conversion(&underlying_function_call, &self.original_name_map, true)?
-                }
+                ConversionDirection::RustCallsCpp => ret.cpp_conversion(
+                    &underlying_function_call,
+                    None,
+                    &self.original_name_map,
+                    true,
+                )?,
                 ConversionDirection::CppCallsCpp => Some(underlying_function_call),
                 ConversionDirection::CppCallsRust => ret
                     .inverse()
                     .ok_or(ConvertErrorFromCpp::NonInvertibleConversion)?
-                    .cpp_conversion(&underlying_function_call, &self.original_name_map, true)?,
+                    .cpp_conversion(
+                        &underlying_function_call,
+                        None,
+                        &self.original_name_map,
+                        true,
+                    )?,
             }
             .expect(
                 "Expected some conversion type for return value which resulted in a parameter name",
@@ -1008,6 +1163,30 @@ impl<'a> CppCodeGenerator<'a> {
         {
             headers.push(Header::System("cstdint"));
             headers.push(Header::StringViewPrelude);
+        }
+        // Likewise of the arguments only: a map is served in parameter position
+        // and refused everywhere else. `<vector>` for the two parameters the
+        // helper takes, and the header which declares whichever map it builds.
+        let maps: Vec<_> = details
+            .argument_conversion
+            .iter()
+            .filter_map(|conv| conv.builds_a_map())
+            .collect();
+        if !maps.is_empty() {
+            // `<vector>` and `<string>` for the lists and for the elements the
+            // helper converts, `cxx.h` for the `rust::String` it converts one
+            // of them from, and the header which declares whichever map is
+            // being built.
+            headers.push(Header::System("string"));
+            headers.push(Header::System("vector"));
+            headers.push(Header::CxxH);
+            for map in maps {
+                headers.push(Header::System(match map.get_final_item() {
+                    "unordered_map" => "unordered_map",
+                    _ => "map",
+                }));
+            }
+            headers.push(Header::MapPrelude);
         }
         Ok(ExtraCpp {
             declaration,

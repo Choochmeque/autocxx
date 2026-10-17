@@ -258,7 +258,76 @@ pub(crate) enum WholeCppConversion {
     ///
     /// [`ConvertErrorFromCpp::StringViewOutOfCpp`]:
     ///     crate::conversion::ConvertErrorFromCpp::StringViewOutOfCpp
-    FromRustBytesToStringView,
+    FromRustBytesToStringView(StringViewSpelling),
+    /// Build the `std::map` - or `std::unordered_map` - a `const` reference
+    /// parameter asked for, out of the two lists which took its place in the
+    /// bridge: this parameter, which carries the keys, and the one immediately
+    /// after it, which carries the values.
+    ///
+    /// The map is a temporary of the wrapper's own, so it can only ever be the
+    /// argument of the call the wrapper makes, which is why nothing but a
+    /// `const` reference parameter is served this way. See [`super::map_params`].
+    ///
+    FromVectorsToMap(Box<MapBuild>),
+    /// The values half of that pair: a parameter of the wrapper, read by the
+    /// conversion on the keys parameter, and not an argument of the call.
+    IgnoredMapValuesParameter(MapHalf),
+}
+
+/// How C++ declared a `std::string_view` parameter the wrapper builds a view
+/// for: by value, or by `const` reference.
+///
+/// The two are the same everywhere but in the function's own type, which a
+/// map-building wrapper has to spell exactly - see
+/// [`TypeConversionPolicy::target_parameter_type`] in `function_wrapper_cpp` -
+/// so the analysis records which one it read rather than leaving codegen to
+/// guess.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StringViewSpelling {
+    ByValue,
+    ByConstReference,
+}
+
+/// What the C++ wrapper for a map parameter has to name, out of what the
+/// parameter's two halves cannot tell it.
+///
+/// Boxed where it is used: everything else a conversion carries is a word or
+/// two, and an enum sized for this one would be paid for by every parameter of
+/// every function.
+#[derive(Clone, Debug)]
+pub(crate) struct MapBuild {
+    /// `std::map` or `std::unordered_map`.
+    pub(crate) map: QualifiedName,
+    /// The map's key type, which is not the keys list's element as cxx spells
+    /// it: a `std::vector<c_int>` element is the typedef autocxx emits, and the
+    /// map has to be named as C++ declared it or the call resolves to nothing.
+    pub(crate) key: crate::minisyn::Type,
+    /// The map's value type, likewise.
+    pub(crate) value: crate::minisyn::Type,
+    /// Which list the keys parameter is. The values parameter carries its own;
+    /// the two need not be the same, a `std::map<int, std::string>` having one
+    /// of each.
+    pub(crate) list: MapHalf,
+}
+
+/// Which list one half of a map parameter - the keys, or the values - crosses
+/// as.
+///
+/// The two halves are lists of the same length paired up by index; which list
+/// each is depends on what Rust can actually fill.
+#[derive(Clone, Debug)]
+pub(crate) enum MapHalf {
+    /// A `const std::vector<T>&`, which cxx spells `&CxxVector<T>`.
+    CppVector,
+    /// A `const rust::Vec<rust::String>&`, which cxx spells `&Vec<String>`.
+    ///
+    /// This is what a `std::string` key or value gets, because cxx gives Rust
+    /// no way to *put* a string into a `std::vector<std::string>`:
+    /// `CxxVector::push` takes a trivially relocatable element and `CxxString`
+    /// is not one. A binding taking `&CxxVector<CxxString>` would be one nobody
+    /// could call without first finding a C++ function to build the vector,
+    /// which is the position this whole feature exists to get out of.
+    RustStringVec,
 }
 
 impl WholeCppConversion {
@@ -297,7 +366,16 @@ impl WholeCppConversion {
             // subclass whose override takes a `std::string_view` is therefore
             // turned down rather than given one, by the same reasoning which
             // refuses a `string_view` return.
-            Self::FromRustBytesToStringView => return Option::None,
+            Self::FromRustBytesToStringView(_) => return Option::None,
+            // The way back would have to take a map apart into two vectors and
+            // hand those to Rust, and a subclass peer's override has nowhere to
+            // keep them: what it would be given is a borrow of storage the
+            // wrapper destroys on return. A subclass whose override takes a map
+            // parameter is turned down instead, for the same reason as the
+            // `string_view` above.
+            Self::FromVectorsToMap { .. } | Self::IgnoredMapValuesParameter(_) => {
+                return Option::None
+            }
         })
     }
 }
@@ -313,7 +391,19 @@ pub(crate) enum WholeRustConversion {
     FromBytes,
     ToBoxedUpHolder(SubclassName),
     FromValueParamToPtr,
-    FromRValueParamToPtr,
+    /// A `T&&` parameter, which C++ may also have written `const T&&`.
+    /// `const_referent` records which, because the C++-side conversion is the
+    /// same `FromPtrToValue` either way and the exact type a map-building
+    /// wrapper spells for this parameter has to repeat the qualifier.
+    FromRValueParamToPtr {
+        const_referent: bool,
+    },
+    /// The keys vector of a map parameter, paired by index with the values
+    /// vector this names. Nothing about the value changes; what this conversion
+    /// is for is the check that the two are the same length, which is the one
+    /// thing about the pairing a caller can get wrong. Pairs with
+    /// [`WholeCppConversion::FromVectorsToMap`].
+    MapKeysPairedWith(Ident),
 }
 
 /// The pointer standing for a C++ reference which a function returns, out of
@@ -537,7 +627,7 @@ impl TypeConversionPolicy {
             } => unique_ptr_of(ty),
             // The bridge carries the bytes, not the view built from them.
             Self::Whole {
-                cpp: WholeCppConversion::FromRustBytesToStringView,
+                cpp: WholeCppConversion::FromRustBytesToStringView(_),
                 ..
             } => parse_quote! { &[u8] },
             Self::Whole {
@@ -594,7 +684,7 @@ impl TypeConversionPolicy {
             Self::Whole { rust, .. } => matches!(
                 rust,
                 WholeRustConversion::FromValueParamToPtr
-                    | WholeRustConversion::FromRValueParamToPtr
+                    | WholeRustConversion::FromRValueParamToPtr { .. }
             ),
         }
     }
@@ -784,6 +874,22 @@ pub(crate) struct CppFunction {
     /// [`CppRefQualifier::None`] in every other case; autocxx never introduces
     /// a ref-qualifier which wasn't in the original C++.
     pub(crate) ref_qualifier: CppRefQualifier,
+    /// The ref-qualifier of the method this wrapper *calls*, as distinct from
+    /// the wrapper's own above. Read only where a map-building wrapper spells
+    /// the method's exact type in a member pointer, which has to repeat the
+    /// qualifier or name a member the class does not have. Always
+    /// [`CppRefQualifier::None`] or [`CppRefQualifier::LValue`]: an
+    /// `&&`-qualified method is refused before any wrapper is built for it.
+    pub(crate) target_ref_qualifier: CppRefQualifier,
+    /// Whether the function this wrapper calls declares a top-level `const`
+    /// on its return type, and likewise `volatile`. Part of the function's
+    /// type, so the exact signature a map-building wrapper casts to has to
+    /// repeat them; the wrapper's own return stays unqualified, the value
+    /// having been copied out of C++ by the time it returns. The conversion
+    /// policy cannot carry these - the converted type is the same either way -
+    /// so the analysis records them here, from the marker bindgen wrote.
+    pub(crate) target_return_toplevel_const: bool,
+    pub(crate) target_return_toplevel_volatile: bool,
     /// Whether the body names a C++ declaration marked `[[deprecated]]`, so
     /// that the generated function is bracketed by a pragma which silences
     /// `-Wdeprecated-declarations` for it alone. The signal is not lost: the
@@ -973,7 +1079,9 @@ mod tests {
             TypeConversionPolicy::whole(
                 ty("Bob"),
                 WholeCppConversion::FromPtrToValue,
-                WholeRustConversion::FromRValueParamToPtr,
+                WholeRustConversion::FromRValueParamToPtr {
+                    const_referent: false,
+                },
             ),
             // A non-POD return, and the inverses of the two above.
             TypeConversionPolicy::new_to_unique_ptr(ty("Bob")),
@@ -987,7 +1095,7 @@ mod tests {
             // A std::string_view parameter, built in C++ over bytes Rust lends.
             TypeConversionPolicy::whole(
                 ty("autocxx::CppStringView"),
-                WholeCppConversion::FromRustBytesToStringView,
+                WholeCppConversion::FromRustBytesToStringView(StringViewSpelling::ByValue),
                 WholeRustConversion::FromBytes,
             ),
         ]
@@ -1098,7 +1206,7 @@ mod tests {
                 "FromPtrToMove",
                 "IgnoredPlacementPtrParameter",
                 "FromReturnValueToPlacementPtr",
-                "FromRustBytesToStringView",
+                "FromRustBytesToStringView(ByValue)",
             ]
         );
     }

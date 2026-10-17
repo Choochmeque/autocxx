@@ -27716,11 +27716,14 @@ fn test_user_type_named_like_known_type_in_namespace() {
     );
 }
 
-/// A type of the user's in the global namespace named after one of the types
-/// we substitute is a genuine collision: `bindgen` puts its replacement for
-/// `std::string` in the root mod under that same name, so there is nothing
-/// left to tell the two apart by. All we can do is say so rather than
-/// generating bindings for the wrong one.
+/// A type of the user's in the global namespace named `string` is a genuine
+/// collision: the stand-in `bindgen` writes for `std::string` is a plain
+/// struct too, and in a build with no standard header it lands in the root of
+/// the bindings under that same name, with nothing left to tell the two apart
+/// by. All we can do is say so rather than generating bindings for the wrong
+/// one. Only the untemplated stand-ins cost this - a global `struct map` or
+/// `struct vector` binds, their stand-ins keeping their type parameters
+/// wherever they land; see `test_global_struct_map_is_generated`.
 #[test]
 fn test_global_type_named_like_known_type_is_rejected() {
     let hdr = indoc! {"
@@ -42957,4 +42960,1303 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
         assert_eq!(cell, 7);
     };
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
+}
+
+/// A function taking `const std::map<K, V>&` is callable, the map being built
+/// in C++ out of two lists Rust passes.
+///
+/// cxx has no map type, so there is nothing for a map to cross the boundary as.
+/// What crosses instead is the keys and the values, paired by index, and the
+/// C++ wrapper assembles the map for the duration of the call. The C++ here
+/// reads what it was given back out, so the assertion is about the map the
+/// function received and not merely about the call having happened.
+///
+/// A `std::string` key or value is a Rust `Vec<String>`, because cxx gives Rust
+/// no way to put a string into a `std::vector<std::string>`.
+#[test]
+fn test_map_parameter_of_strings() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline uint32_t describe(const std::map<std::string, std::string>& m) {
+            if (m.size() != 2) return 0;
+            if (m.at(\"alpha\") != \"one\") return 1;
+            if (m.at(\"beta\") != \"two\") return 2;
+            return 3;
+        }
+    "};
+    let rs = quote! {
+        let keys = vec!["alpha".to_string(), "beta".to_string()];
+        let values = vec!["one".to_string(), "two".to_string()];
+        assert_eq!(ffi::describe(&keys, &values), 3);
+    };
+    run_test("", hdr, rs, &["describe"], &[]);
+}
+
+/// The same for a map whose key and value are C++ integers of the widths only
+/// the target knows.
+///
+/// `int` and `long` reach Rust as the `autocxx::c_int` and `autocxx::c_long`
+/// newtypes, and a `std::vector` of one of those is what `autocxx::c_type_vectors`
+/// exists to make cxx accept - see google/autocxx#422. This is that path end to
+/// end.
+#[test]
+fn test_map_parameter_of_c_integers() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t total(const std::map<int, long>& m) {
+            long sum = 0;
+            for (const auto& entry : m) sum += entry.first * entry.second;
+            return static_cast<uint32_t>(sum) * 10 + m.size();
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(2));
+        keys.pin_mut().push(autocxx::c_int(3));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_long(5));
+        values.pin_mut().push(autocxx::c_long(7));
+        assert_eq!(ffi::total(&keys, &values), 312);
+    };
+    run_test("", hdr, rs, &["total"], &[]);
+}
+
+/// `std::unordered_map` is served the same way, as a method as well as a free
+/// function, and a single signature may take more than one map.
+#[test]
+fn test_map_parameter_shapes() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <unordered_map>
+        #include <string>
+        #include <cstdint>
+        struct Registry {
+            uint32_t lookup(const std::unordered_map<std::string, uint32_t>& m) const {
+                return m.size() * 10 + m.at(\"k\");
+            }
+        };
+        inline uint32_t both(const std::map<int, std::string>& a,
+                             const std::unordered_map<std::string, int>& b) {
+            if (a.at(1) != \"x\") return 0;
+            if (b.at(\"y\") != 2) return 0;
+            return a.size() * 10 + b.size();
+        }
+    "};
+    let rs = quote! {
+        let registry = ffi::Registry::new().within_unique_ptr();
+        let keys = vec!["k".to_string()];
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(7u32);
+        assert_eq!(registry.lookup(&keys, &values), 17);
+
+        let mut a_keys = cxx::CxxVector::new();
+        a_keys.pin_mut().push(autocxx::c_int(1));
+        let a_values = vec!["x".to_string()];
+        let b_keys = vec!["y".to_string()];
+        let mut b_values = cxx::CxxVector::new();
+        b_values.pin_mut().push(autocxx::c_int(2));
+        assert_eq!(ffi::both(&a_keys, &a_values, &b_keys, &b_values), 11);
+    };
+    run_test("", hdr, rs, &["both", "Registry"], &[]);
+}
+
+/// Two empty lists make an empty map, which is a map and not a failure: a
+/// dictionary with nothing in it is a thing a caller means.
+#[test]
+fn test_map_parameter_empty() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline uint32_t count(const std::map<std::string, std::string>& m) {
+            return m.empty() ? 42 : 0;
+        }
+    "};
+    let rs = quote! {
+        let keys: Vec<String> = Vec::new();
+        let values: Vec<String> = Vec::new();
+        assert_eq!(ffi::count(&keys, &values), 42);
+    };
+    run_test("", hdr, rs, &["count"], &[]);
+}
+
+/// Lists of different lengths are a caller's mistake, and the binding says so
+/// rather than building a map out of the part which lines up.
+///
+/// The C++ helper pairs up to the shorter of the two - it has to do something
+/// total - so this is the check which keeps that from ever being what a caller
+/// gets. The panic names both parameters, since neither is on its own wrong.
+#[test]
+fn test_map_parameter_length_mismatch_panics() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline uint32_t size_of(const std::map<std::string, std::string>& m) {
+            return m.size();
+        }
+    "};
+    let rs = quote! {
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let values = vec!["one".to_string()];
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ffi::size_of(&keys, &values)
+        }))
+        .expect_err("a length mismatch should have panicked");
+        let message = err
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default());
+        assert!(message.contains("m_keys"), "{message}");
+        assert!(message.contains("m_values"), "{message}");
+        assert!(message.contains("same length"), "{message}");
+        // The equal-length call still works after it.
+        let values = vec!["one".to_string(), "two".to_string()];
+        assert_eq!(ffi::size_of(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["size_of"], &[]);
+}
+
+/// A map anywhere but in a `const` reference parameter is refused, and says so.
+///
+/// Returning one is the shape a caller most often wants next and the one
+/// nothing here does: the map the wrapper builds lives only for the call, and
+/// Rust has no type to be handed an owned one as.
+#[test]
+fn test_map_return_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        inline std::map<std::string, std::string> settings() {
+            return std::map<std::string, std::string>();
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["settings"],
+        &[],
+        "Rust has no type which is one",
+    );
+}
+
+/// A map parameter is refused unless both the key and the value are types cxx
+/// will put in a `std::vector`. A class value is not one: Rust could not fill
+/// the list, so the binding would be one nobody could call.
+#[test]
+fn test_map_parameter_of_classes_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        struct Entry { uint32_t a; };
+        inline uint32_t take(const std::map<std::string, Entry>& m) { return m.size(); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take", "Entry"],
+        &[],
+        "Rust has no type which is one",
+    );
+}
+
+/// So is a map which fixes its comparator to something other than the default:
+/// the wrapper builds a `std::map<K, V>`, and one ordered by anything else is a
+/// different C++ type.
+#[test]
+fn test_map_parameter_with_custom_comparator_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        struct Backwards {
+            bool operator()(const std::string& a, const std::string& b) const {
+                return b < a;
+            }
+        };
+        inline uint32_t take(const std::map<std::string, std::string, Backwards>& m) {
+            return m.size();
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["take", "Backwards"],
+        &[],
+        "Rust has no type which is one",
+    );
+}
+
+/// A mutable reference to a map is refused too: the map the wrapper builds is a
+/// temporary, so anything the function wrote through the reference would be
+/// written to storage destroyed when the call returned.
+#[test]
+fn test_mutable_map_reference_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        inline void fill(std::map<std::string, std::string>& m) { m.clear(); }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["fill"],
+        &[],
+        "Rust has no type which is one",
+    );
+}
+
+/// The binding says in its own documentation what its signature cannot: that
+/// two of its parameters were one of the C++ function's.
+#[test]
+fn test_map_parameter_is_documented() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        inline uint32_t describe(const std::map<std::string, std::string>& m) {
+            return m.size();
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["describe"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["m_keys", "m_values", "paired by index"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// A `subclass!` whose superclass has a virtual method taking a map is turned
+/// down, rather than given an override which pairs two lists back into one.
+///
+/// Calling such a method from Rust works; overriding it does not. The way in
+/// builds the map out of what the caller lends for the call, and the way out
+/// would have to hand Rust two lists over storage the wrapper destroys on
+/// return - the same bargain a `std::string_view` parameter is refused on.
+#[test]
+fn test_map_parameter_in_subclass_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        class Observer {
+        public:
+            Observer() {}
+            virtual uint32_t note(const std::map<std::string, std::string>& m) const = 0;
+            virtual ~Observer() {}
+        };
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            subclass!("Observer", MyObserver)
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                fn note(&self, _m_keys: &Vec<String>, _m_values: &Vec<String>) -> u32 { 0 }
+            }
+        }),
+        &["one of this function's has no opposite"],
+    );
+}
+
+/// A map argument cannot pick the wrong member of an overload set: the wrapper
+/// calls the function through a pointer of its exact declared type. Here the
+/// rvalue-reference overload would win a call by name - the built map starts
+/// out a prvalue - and the typed pointer reaches the `const` reference one the
+/// binding was built from.
+#[test]
+fn test_map_parameter_ignores_rvalue_overload() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t pick(std::map<int, int>&& m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::pick(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["pick"], &[]);
+}
+
+/// The same through the member-pointer and static-member forms of that call.
+#[test]
+fn test_map_parameter_ignores_rvalue_overload_on_methods() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Registry {
+            uint32_t look(const std::map<int, int>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            uint32_t look(std::map<int, int>&& m) const {
+                return static_cast<uint32_t>(m.size()) + 100;
+            }
+            static uint32_t slook(const std::map<int, int>& m) {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            static uint32_t slook(std::map<int, int>&& m) {
+                return static_cast<uint32_t>(m.size()) + 100;
+            }
+        };
+    "};
+    let rs = quote! {
+        let registry = ffi::Registry::new().within_unique_ptr();
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(registry.look(&keys, &values), 2);
+        assert_eq!(ffi::Registry::slook(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["Registry"], &[]);
+}
+
+/// A constructor is the one call C++ gives no pointer for, so its map is bound
+/// to a `const` lvalue before the constructor is chosen, and the
+/// rvalue-reference constructor cannot outcompete the one the binding was
+/// built from. The siblings here are exactly the ones the reachability rule
+/// permits: a zero-argument constructor, which one argument can never reach,
+/// and a constructor taking only the map by rvalue reference, which no map of
+/// another type converts to.
+#[test]
+fn test_map_parameter_ignores_rvalue_overload_on_constructors() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Holder {
+        public:
+            Holder(const std::map<int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            Holder(std::map<int, int>&& m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            Holder() : which_(0) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        let holder = ffi::Holder::new(&keys, &values).within_unique_ptr();
+        assert_eq!(holder.which(), 2);
+    };
+    run_test("", hdr, rs, &["Holder"], &[]);
+}
+
+/// Two declarations of one name which differ only in a way bindgen's rendering
+/// discards - std::less<> against the implicit std::less<K> - are refused
+/// together. autocxx would build the same std::map<K, V> for both bindings, so
+/// whichever declaration that type resolves to, one of the two bindings would
+/// silently call the other's function; there is no way to know which one a
+/// call was meant to reach.
+#[test]
+fn test_map_parameter_indistinguishable_overloads_are_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t which(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t which(const std::map<int, int, std::less<>>& m) {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["which"],
+        &[],
+        "cannot know which of them a call was meant to reach",
+    );
+}
+
+/// The same two declarations with different parameter names. C++ does not
+/// overload on a parameter's name, so this pair is exactly as
+/// indistinguishable as the one above and is refused the same way: the key
+/// the refusal compares is built from the parameter types alone.
+#[test]
+fn test_map_parameter_indistinguishable_overloads_with_different_names_are_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t which(const std::map<int, int>& ordinary) {
+            return static_cast<uint32_t>(ordinary.size()) + 1;
+        }
+        inline uint32_t which(const std::map<int, int, std::less<>>& transparent) {
+            return static_cast<uint32_t>(transparent.size()) + 100;
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["which"],
+        &[],
+        "cannot know which of them a call was meant to reach",
+    );
+}
+
+/// A function template of the same name in the same namespace defeats even the
+/// exact-typed cast: address-of overload resolution deduces a specialization
+/// from the cast's target type, and prefers the plain declaration only where
+/// it matches that target exactly. This declaration does not - bindgen erased
+/// its transparent std::less<> - so the cast would compile and quietly call
+/// the template, which returns 100 here. bindgen parses no item for a function
+/// template, so the indistinguishable-overload census cannot see the
+/// competitor; the parse-time template report is what sees it, and the name is
+/// refused. Before that report existed, this exact shape built and returned
+/// the template's 100.
+#[test]
+fn test_map_parameter_shadowed_by_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int, std::less<>>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        template <class T> uint32_t pick(const T&) { return 100; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["pick"],
+        &[],
+        "function template of this name",
+    );
+}
+
+/// The faithfully-declared twin of the case above is refused too, because
+/// autocxx cannot tell the two apart: bindgen renders std::less<> and the
+/// default comparator identically, so whether the template would win the cast
+/// is exactly the fact autocxx cannot see.
+#[test]
+fn test_map_parameter_with_default_comparator_beside_a_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        template <class T> uint32_t pick(const T&) { return 100; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["pick"],
+        &[],
+        "function template of this name",
+    );
+}
+
+/// The same refusal inside a named namespace, which resolves through a
+/// bindgen module rather than the root: the report is keyed by the scope
+/// which declares the template, and here that scope is the function's own.
+#[test]
+fn test_map_parameter_shadowed_by_function_template_in_a_namespace_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        namespace depot {
+            inline uint32_t pick(const std::map<int, int, std::less<>>& m) {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            template <class T> uint32_t pick(const T&) { return 100; }
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["depot::pick"],
+        &[],
+        "function template of this name",
+    );
+}
+
+/// The namespaced refusal again, with the template *defined out of line*:
+/// `depot::pick`'s definition stands at file scope after the namespace has
+/// closed, and libclang hands the in-namespace declaration to bindgen through
+/// a different door - a redeclaration shortcut the self-contained shape never
+/// takes. The report must still land under `depot`, the scope C++ resolves
+/// the name in, or this shadow escapes refusal.
+#[test]
+fn test_map_parameter_shadowed_by_an_out_of_line_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        namespace depot {
+            template <class T> uint32_t pick(const T&);
+            inline uint32_t pick(const std::map<int, int, std::less<>>& m) {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+        }
+        template <class T> uint32_t depot::pick(const T&) { return 100; }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["depot::pick"],
+        &[],
+        "function template of this name",
+    );
+}
+
+/// The flip side of the out-of-line case: the definition of `depot::pick`
+/// stands lexically at the root and belongs to `depot` all the same. A report
+/// keyed by where the definition stands rather than by the scope which
+/// declared it would poison the root's own `pick`, which shares nothing with
+/// the template but its spelling.
+#[test]
+fn test_map_parameter_beside_an_out_of_line_template_of_another_namespace() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        namespace depot {
+            template <class T> uint32_t pick(const T&);
+        }
+        template <class T> uint32_t depot::pick(const T&) { return 100; }
+        inline uint32_t pick(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(1));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(2));
+        assert_eq!(ffi::pick(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["pick"], &[]);
+}
+
+/// An out-of-line definition of a *member* function template stands at file
+/// scope too, but never joins the namespace-scope report: libclang calls it
+/// a method template rather than a function template, the report's
+/// function-only filter drops it, and the declaration inside the class stays
+/// patch 39's to report. Nothing is filed under the root, so a free function
+/// sharing the spelling keeps its binding.
+#[test]
+fn test_map_parameter_beside_a_member_templates_out_of_line_definition() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Chooser {
+            template <class T> uint32_t pick(const T&) const;
+        };
+        template <class T> uint32_t Chooser::pick(const T&) const { return 100; }
+        inline uint32_t pick(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(1));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(2));
+        assert_eq!(ffi::pick(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["pick", "Chooser"], &[]);
+}
+
+/// An inline namespace is transparent to name lookup: both these declarations
+/// are visible at the root, where the wrapper's cast resolves `&pick`, and
+/// bindgen flattens the namespace away, so the function binds as root-level
+/// `pick`. The template's report flattens to the same scope - keyed by the
+/// inline namespace's own module it would name a module nothing announces,
+/// and the shadow would vanish as unannounced noise while the binding
+/// survived.
+#[test]
+fn test_map_parameter_shadowed_by_a_function_template_in_an_inline_namespace_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline namespace lib {
+            inline uint32_t pick(const std::map<int, int, std::less<>>& m) {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            template <class T> uint32_t pick(const T&) { return 100; }
+        }
+    "};
+    run_test_expect_fail_with_error(
+        "",
+        hdr,
+        quote! {},
+        &["pick"],
+        &[],
+        "function template of this name",
+    );
+}
+
+/// A function template under a *different* name changes nothing: the refusal
+/// is per name, not per scope, because only a same-named template joins the
+/// cast's overload set.
+#[test]
+fn test_map_parameter_beside_a_differently_named_function_template() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        template <class T> uint32_t other(const T&) { return 100; }
+        inline uint32_t take(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(1));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(2));
+        assert_eq!(ffi::take(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["take"], &[]);
+}
+
+/// Nor does a same-named template in another namespace: qualified lookup of
+/// `&::pick` never sees `elsewhere::pick`, and the census keys its report by
+/// scope, so an unrelated namespace's template poisons nothing.
+#[test]
+fn test_map_parameter_beside_a_function_template_in_another_namespace() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        namespace elsewhere {
+            template <class T> uint32_t pick(const T&) { return 100; }
+        }
+        inline uint32_t pick(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(1));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(2));
+        assert_eq!(ffi::pick(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["pick"], &[]);
+}
+
+/// The member-pointer cast a method call goes through is captured the same
+/// way by a member function template of the method's name, which bindgen
+/// reports (patch 39) without parsing as a member. The method is refused - the
+/// note on its stub says why - while the class itself still binds.
+#[test]
+fn test_map_parameter_shadowed_by_member_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Chooser {
+            uint32_t pick(const std::map<int, int, std::less<>>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            template <class T> uint32_t pick(const T&) const { return 100; }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Chooser"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["function template of this name"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// A `using Base::pick;` puts the base's member templates into the very
+/// overload set the derived class's own cast resolves in, so a map method
+/// whose name a using-declaration imports from a template-declaring base is
+/// refused too.
+#[test]
+fn test_map_parameter_shadowed_by_an_imported_member_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Base {
+            template <class T> uint32_t pick(const T&) const { return 100; }
+        };
+        struct Derived : public Base {
+            using Base::pick;
+            uint32_t pick(const std::map<int, int, std::less<>>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Base", "Derived"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["function template of this name"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// Plain inheritance imports a base's members too, through a shim which casts
+/// the receiver to the base and resolves `&Base::pick` there - in the very
+/// scope the base's member function template shadows. The import pass never
+/// gets that far: the base's own `pick` is refused by the member-template
+/// check above, and a member refused for a reason of its own is not imported.
+/// What this pins is that the derived class ends up with no `pick` binding at
+/// all - refusal, not a shim which would resolve against the template - and
+/// the belt-and-braces check on the shim's base scope stands behind it in
+/// `map_refusal` should the import gate ever widen.
+#[test]
+fn test_map_parameter_shadowed_by_an_inherited_member_function_template_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Base {
+            uint32_t pick(const std::map<int, int, std::less<>>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+            template <class T> uint32_t pick(const T&) const { return 100; }
+        };
+        struct Derived : public Base {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Derived"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![
+            // No `fn pick (` anywhere - the trailing `(` keeps bindgen's raw
+            // `fn pick_bindgen_original...` item, which autocxx never exposes,
+            // from matching - and no imported `Derived_pick` shim either.
+            make_string_absence_finder(
+                ["fn pick (", "Derived_pick"]
+                    .map(|s| s.to_string())
+                    .to_vec(),
+            ),
+        ])),
+        None,
+    );
+}
+
+/// A `using` from a base autocxx cannot audit - here a template
+/// instantiation, which bindgen reports no declarations for - may be pulling
+/// in exactly the function template the refusal exists to fence out, so the
+/// map method beside it is refused unjudged rather than bound on hope.
+#[test]
+fn test_map_parameter_beside_an_unauditable_using_declaration_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        template <class T> struct Mixin {
+            uint32_t pick(const T&) const { return 100; }
+        };
+        struct Derived : public Mixin<int> {
+            using Mixin<int>::pick;
+            uint32_t pick(const std::map<int, int, std::less<>>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Derived"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["function template of this name"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// A using-chain imports transitively: `using Relay::pick;` puts into Sink
+/// whatever Relay's own `using Source::pick;` put into Relay, so a template
+/// declared two links up joins Sink's overload set as surely as a direct
+/// import would. The audit walks the same chain; stopping at Relay - which
+/// declares no template of its own, only the next link - would accept
+/// exactly the shadow being fenced out.
+#[test]
+fn test_map_parameter_shadowed_through_a_chain_of_using_declarations_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Source {
+            template <class T> uint32_t pick(const T&) const { return 100; }
+        };
+        struct Relay : public Source {
+            using Source::pick;
+        };
+        struct Sink : public Relay {
+            using Relay::pick;
+            uint32_t pick(const std::map<int, int, std::less<>>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Source", "Relay", "Sink"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["function template of this name"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// The same two-hop chain with no template anywhere on it still binds: every
+/// link is audited and every link is clean, so the transitive walk refuses
+/// nothing an ordinary chain of imported methods declares.
+#[test]
+fn test_map_parameter_with_a_template_free_chain_of_using_declarations() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Source {
+            uint32_t pick(uint32_t x) const { return x + 50; }
+        };
+        struct Relay : public Source {
+            using Source::pick;
+        };
+        struct Sink : public Relay {
+            using Relay::pick;
+            uint32_t pick(const std::map<int, int>& m) const {
+                return static_cast<uint32_t>(m.size()) + 1;
+            }
+        };
+    "};
+    let rs = quote! {
+        let sink = ffi::Sink::new().within_unique_ptr();
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(1));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(2));
+        assert_eq!(sink.pick(&keys, &values), 2);
+    };
+    run_test("", hdr, rs, &["Source", "Relay", "Sink"], &[]);
+}
+
+/// A lone transparent-comparator declaration passes the default-shape check -
+/// bindgen writes std::less<> and std::less<K> identically - so a binding is
+/// generated which builds a std::map<K, V>. That is a different C++ type from
+/// the function's, and the typed-pointer call fails to compile rather than
+/// resolving to anything else. A loud build error, not a refusal: autocxx
+/// cannot see the difference, and this is where it surfaces.
+#[test]
+fn test_map_parameter_transparent_comparator_alone_fails_loudly() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t take(const std::map<int, int, std::less<>>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+    "};
+    run_test_expect_fail("", hdr, quote! {}, &["take"], &[]);
+}
+
+/// The typed pointer also closes the conversion door: with no overload taking
+/// exactly the built map, a call by name would convert its way into `lure(Bait)`
+/// through Bait's constructor and silently call the wrong function. The cast
+/// has nothing of the exact type to resolve to, so the generated C++ fails to
+/// compile instead.
+#[test]
+fn test_map_parameter_cannot_be_lured_into_a_conversion() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Bait {
+            Bait(const std::map<int, int>&) {}
+        };
+        inline uint32_t lure(const std::map<int, int, std::less<>>& m) {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t lure(Bait) { return 100; }
+    "};
+    run_test_expect_fail("", hdr, quote! {}, &["lure", "Bait"], &[]);
+}
+
+/// A constructor has no typed pointer to close that door with - C++ has no
+/// syntax naming one constructor exactly - so where the class declares any
+/// other constructor an argument could reach, the map parameter is refused
+/// outright. Here `Holder(Bait)` is reachable: had the map constructor been
+/// bound, a transparent-comparator declaration would have made the built map
+/// a different type, and direct-initialization would have quietly built a
+/// `Bait` from it and called the wrong constructor.
+#[test]
+fn test_map_parameter_in_constructor_with_a_reachable_sibling_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct Bait {
+            Bait(const std::map<int, int>&) {}
+        };
+        class Holder {
+        public:
+            Holder(const std::map<int, int, std::less<>>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            Holder(Bait) : which_(100) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Holder", "Bait"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["another constructor which an argument list could also reach"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// The boundary of the sibling exemption: a constructor taking a map by
+/// *reference* is harmless beside the map constructor, but one taking a map
+/// by *value* is an exact match for the map the wrapper builds, and would
+/// capture the call silently were the declared reference secretly
+/// transparent. It counts as reachable, so the map constructor is refused.
+#[test]
+fn test_map_parameter_in_constructor_with_a_by_value_map_sibling_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Holder {
+        public:
+            Holder(const std::map<int, int>& m)
+                : which_(static_cast<uint32_t>(m.size()) + 1) {}
+            Holder(std::map<int, int> m)
+                : which_(static_cast<uint32_t>(m.size()) + 100) {}
+            uint32_t which() const { return which_; }
+        private:
+            uint32_t which_;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        directives_from_lists(&["Holder"], &[], None),
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["another constructor which an argument list could also reach"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        None,
+    );
+}
+
+/// The exact-type call under C++17, where noexcept is part of the function's
+/// type: the standard lets a noexcept function initialize a pointer without
+/// it, so the typed call still reaches the right overload.
+#[test]
+fn test_map_parameter_exact_call_with_noexcept_cpp17() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int>& m) noexcept {
+            return static_cast<uint32_t>(m.size()) + 1;
+        }
+        inline uint32_t pick(std::map<int, int>&& m) noexcept {
+            return static_cast<uint32_t>(m.size()) + 100;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::pick(&keys, &values), 2);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["pick"], &[], None),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// A `std::string_view` beside the map, in both of the spellings the wrapper
+/// can build a view for. The exact-type cast has to repeat whichever C++
+/// wrote - the value spelling and the `const&` one are different function
+/// types - so each binding reaches its own declaration, never the sibling's.
+#[test]
+fn test_map_parameter_beside_a_string_view_reference() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string_view>
+        #include <cstdint>
+        inline uint32_t pick(const std::map<int, int>& m, std::string_view v) {
+            return static_cast<uint32_t>(m.size() + v.size()) + 1;
+        }
+        inline uint32_t pick(const std::map<int, int>& m, const std::string_view& v) {
+            return static_cast<uint32_t>(m.size() + v.size()) + 100;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::pick(&keys, &values, "ab"), 4);
+        assert_eq!(ffi::pick1(&keys, &values, "ab"), 103);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(&["pick"], &[], None),
+        make_cpp17_adder(),
+        None,
+        None,
+    );
+}
+
+/// An rvalue reference beside the map, `const` and not. The two are different
+/// function types, and the conversion records which one C++ wrote - the
+/// pointer's own constness is the last thing that says so - so each binding's
+/// cast reaches its own declaration.
+#[test]
+fn test_map_parameter_beside_a_const_rvalue_reference() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <string>
+        #include <cstdint>
+        struct Freight {
+            std::string cargo;
+        };
+        inline uint32_t grade(const std::map<int, int>& m, Freight&& f) {
+            return static_cast<uint32_t>(m.size() + f.cargo.size()) + 1;
+        }
+        inline uint32_t grade(const std::map<int, int>& m, const Freight&& f) {
+            return static_cast<uint32_t>(m.size() + f.cargo.size()) + 100;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        let freight = ffi::Freight::new().within_unique_ptr();
+        assert_eq!(ffi::grade(&keys, &values, freight), 2);
+        let freight = ffi::Freight::new().within_unique_ptr();
+        assert_eq!(ffi::grade1(&keys, &values, freight), 101);
+    };
+    run_test("", hdr, rs, &["grade", "Freight"], &[]);
+}
+
+/// A top-level cv-qualifier on the return type is part of the function's
+/// type, so the exact-type cast has to repeat it even though the wrapper's
+/// own return - a value copied out of C++ - is unqualified.
+#[test]
+fn test_map_parameter_with_cv_qualified_return() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline const uint32_t csized(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+        inline volatile uint32_t vsized(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::csized(&keys, &values), 1);
+        assert_eq!(ffi::vsized(&keys, &values), 1);
+    };
+    run_test("", hdr, rs, &["csized", "vsized"], &[]);
+}
+
+/// A real parameter already named like a synthesized half moves the pair to
+/// the first numbered names clear of everything, both halves together. The
+/// panic message follows the names.
+#[test]
+fn test_map_parameter_beside_a_colliding_name() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        inline uint32_t clash(const std::map<int, int>& m, uint32_t m_keys) {
+            return static_cast<uint32_t>(m.size()) * 10 + m_keys;
+        }
+    "};
+    let rs = quote! {
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::clash(&keys, &values, 7), 17);
+        let empty = cxx::CxxVector::new();
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ffi::clash(&keys, &empty, 7)
+        }))
+        .expect_err("a length mismatch should have panicked");
+        let message = err
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default());
+        assert!(message.contains("m_keys1"), "{message}");
+        assert!(message.contains("m_values1"), "{message}");
+    };
+    run_test("", hdr, rs, &["clash"], &[]);
+}
+
+/// A superclass constructor taking a map cannot serve a subclass!: the peer's
+/// own constructor passes its parameters on to the superclass's verbatim, and
+/// two lists are not the map it wants. Refused, with the map explanation, and
+/// the peer class gets no such constructor rather than one which does the
+/// wrong thing.
+#[test]
+fn test_map_parameter_in_subclass_constructor_is_refused() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        class Base {
+        public:
+            Base(const std::map<int, int>& m)
+                : total_(static_cast<uint32_t>(m.size())) {}
+            virtual uint32_t total() const { return total_; }
+            virtual ~Base() {}
+        private:
+            uint32_t total_;
+        };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("Base")
+            subclass!("Base", MySub)
+        },
+        None,
+        Some(make_checks_without_building(vec![make_string_finder(
+            ["cannot know which", "subclass! peer"]
+                .map(|s| s.to_string())
+                .to_vec(),
+        )])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            #[autocxx::subclass::subclass]
+            pub struct MySub {}
+        }),
+    );
+}
+
+/// A global struct of the user's named `map` is the user's, STL or no STL in
+/// the same headers: the stand-in autocxx hands bindgen for std::map never
+/// takes the name `map` in the root of the bindings as a plain struct.
+#[test]
+fn test_global_struct_map_is_generated() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        struct map { uint32_t x; };
+        inline uint32_t use_map(const map& m) { return m.x; }
+        inline uint32_t real_map(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+    "};
+    let rs = quote! {
+        let m = ffi::map { x: 42 };
+        assert_eq!(ffi::use_map(&m), 42);
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::real_map(&keys, &values), 1);
+    };
+    run_test("", hdr, rs, &["use_map", "real_map"], &["map"]);
+}
+
+/// A global class template of the user's named `map` is the user's too. The
+/// stand-in for std::map is always a four-parameter generic - bindgen keeps
+/// every parameter the prelude class writes - so a one-parameter template of
+/// that name cannot be it, and dropping it would take its instantiations'
+/// bindings down with it. The template itself is not bindable, exactly like
+/// any other user template; what has to survive is the instantiation.
+#[test]
+fn test_global_template_named_map_is_generated() {
+    let hdr = indoc! {"
+        #include <map>
+        #include <cstdint>
+        template <typename T> struct map { T value; };
+        inline map<uint32_t> make_m() {
+            map<uint32_t> m;
+            m.value = 42;
+            return m;
+        }
+        inline uint32_t unwrap(const map<uint32_t>& m) { return m.value; }
+        inline uint32_t real_map(const std::map<int, int>& m) {
+            return static_cast<uint32_t>(m.size());
+        }
+    "};
+    let rs = quote! {
+        let m = ffi::make_m();
+        assert_eq!(ffi::unwrap(m.as_ref().unwrap()), 42);
+        let mut keys = cxx::CxxVector::new();
+        keys.pin_mut().push(autocxx::c_int(4));
+        let mut values = cxx::CxxVector::new();
+        values.pin_mut().push(autocxx::c_int(5));
+        assert_eq!(ffi::real_map(&keys, &values), 1);
+    };
+    run_test("", hdr, rs, &["make_m", "unwrap", "real_map"], &[]);
 }
