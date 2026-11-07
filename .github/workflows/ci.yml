@@ -146,7 +146,7 @@ jobs:
   # and guards against future libclang behavior changes.
   test-libclang:
     name: Test libclang ${{matrix.libclang}}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # apt.llvm.org has no repository for Ubuntu 26.04 yet, which ubuntu-latest resolves to since 2026-11
     strategy:
       fail-fast: false
       matrix:
