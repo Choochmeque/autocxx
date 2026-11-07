@@ -21353,7 +21353,8 @@ fn test_issue_1366_reference_field_still_has_no_default_ctor() {
         &[],
         &[
             "E0599",
-            "no associated function or constant named `new` found",
+            // rustc 1.101 nightly says "no method named" where older compilers say "no associated function or constant named".
+            "named `new` found",
         ],
     );
 }
@@ -32049,7 +32050,8 @@ fn test_pure_virtual_destructor_no_make_unique() {
         &[],
         &[
             "E0599",
-            "no associated function or constant named `new` found",
+            // rustc 1.101 nightly says "no method named" where older compilers say "no associated function or constant named".
+            "named `new` found",
             "PureDtorNoNew",
         ],
     );
