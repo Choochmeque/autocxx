@@ -377,8 +377,10 @@ impl<'a> CppCodeGenerator<'a> {
                     superclass_destructor_visibility,
                     *superclass_destructor_virtual,
                     name,
-                    constructors_by_subclass.remove(name).unwrap_or_default(),
-                    methods_by_subclass.remove(name).unwrap_or_default(),
+                    constructors_by_subclass
+                        .swap_remove(name)
+                        .unwrap_or_default(),
+                    methods_by_subclass.swap_remove(name).unwrap_or_default(),
                 )?,
                 _ => panic!("Unexpected deferred API"),
             }
