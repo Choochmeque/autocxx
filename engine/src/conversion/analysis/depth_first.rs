@@ -50,7 +50,7 @@ impl<'a, T: HasFieldsAndBases + Debug> Iterator for DepthFirstIter<'a, T> {
                 .field_and_base_deps()
                 .any(|d| self.yet_to_do.contains(&d))
             {
-                self.yet_to_do.remove(candidate.name());
+                self.yet_to_do.swap_remove(candidate.name());
                 return Some(candidate);
             }
             self.queue.push_back(candidate);
