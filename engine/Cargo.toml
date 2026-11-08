@@ -91,7 +91,7 @@ miette = "7"
 thiserror = "2"
 regex = "1.5.3" # the floor the vendored bindgen asks for
 regex_static = "0.1"
-indexmap = "1.8"
+indexmap = "2.14"
 prettyplease = { version = "0.3", features = ["verbatim"] }
 rustversion = "1.0"
 
