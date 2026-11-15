@@ -13,8 +13,8 @@ use crate::vendored_bindgen::callbacks::Virtualness;
 use crate::vendored_bindgen::callbacks::{
     BaseClassInfo, BaseKind, CallOperatorInfo, ConversionFunctionInfo, DataMemberInfo, Deprecation,
     DiscoveredItem, DiscoveredItemId, ExceptionSpecification, ExceptionSpecifications,
-    Explicitness, MemberFunctionTemplateInfo, MethodKind, RefQualifier, SpecialMemberKind,
-    TemplateMemberFunctionInfo, TypeLayout, UsingDeclarationInfo, Visibility,
+    Explicitness, FunctionTemplateInfo, MemberFunctionTemplateInfo, MethodKind, RefQualifier,
+    SpecialMemberKind, TemplateMemberFunctionInfo, TypeLayout, UsingDeclarationInfo, Visibility,
 };
 use crate::vendored_bindgen::callbacks::{ItemInfo, ItemKind, ParseCallbacks, SourceLocation};
 use crate::{conversion::CppEffectiveName, types::QualifiedName, RebuildDependencyRecorder};
@@ -442,6 +442,11 @@ pub(crate) struct UnindexedParseCallbackResults {
     conversion_functions: HashMap<DiscoveredItemId, Vec<ConversionFunction>>,
     call_operators: HashMap<DiscoveredItemId, Vec<CallOperator>>,
     layouts: HashMap<DiscoveredItemId, TypeLayout>,
+    /// The names of the function templates each module declares at namespace
+    /// scope. A set, not a list: the report is made per declaration libclang
+    /// visits, and what matters here is only whether a scope declares the
+    /// name at all.
+    function_templates: HashMap<DiscoveredItemId, HashSet<String>>,
 }
 
 impl UnindexedParseCallbackResults {
@@ -559,6 +564,36 @@ impl UnindexedParseCallbackResults {
             .filter_map(|(id, operators)| Some((self.qualified_name(*id)?, operators.clone())))
             .collect();
 
+        // Keyed by the namespace rather than the module id, and merged rather
+        // than inserted: bindgen may make a fresh module for a reopened
+        // namespace, and both halves of `namespace a {} namespace a {}` are
+        // the one scope C++ resolves names in. The reports arrive with their
+        // module already resolved the way every announced item's parent is -
+        // an out-of-line definition under the namespace which declared it, an
+        // inline namespace flattened to the nearest enclosing namespace which
+        // is not inline - so a module which resolves to no name here is one
+        // codegen never announced because the allowlist kept nothing of that
+        // scope, and it is dropped; nothing in such a scope can shadow a
+        // binding, because a binding's own scope is always announced, under
+        // the same resolution.
+        let mut function_templates: HashMap<Namespace, HashSet<String>> = HashMap::new();
+        for (module, names) in &self.function_templates {
+            let ns = if Some(*module) == self.root_mod {
+                Namespace::new()
+            } else {
+                let Some(module_name) = self.qualified_name(*module) else {
+                    continue;
+                };
+                module_name
+                    .get_namespace()
+                    .push(module_name.get_final_item().to_string())
+            };
+            function_templates
+                .entry(ns)
+                .or_default()
+                .extend(names.iter().cloned());
+        }
+
         ParseCallbackResults {
             results: self,
             exception_specifications_are_part_of_the_type,
@@ -569,6 +604,7 @@ impl UnindexedParseCallbackResults {
             member_function_templates,
             conversion_functions,
             call_operators,
+            function_templates,
         }
     }
 
@@ -641,6 +677,9 @@ pub(crate) struct ParseCallbackResults {
     member_function_templates: HashMap<QualifiedName, Vec<MemberFunctionTemplate>>,
     conversion_functions: HashMap<QualifiedName, Vec<ConversionFunction>>,
     call_operators: HashMap<QualifiedName, Vec<CallOperator>>,
+    /// The names of the function templates each namespace declares, from the
+    /// parse-time report bindgen makes of what it otherwise passes over.
+    function_templates: HashMap<Namespace, HashSet<String>>,
 }
 
 impl ParseCallbackResults {
@@ -870,6 +909,20 @@ impl ParseCallbackResults {
             .get(name)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    /// The names of the namespace-scope function templates bindgen reported,
+    /// by namespace. A function template participates in address-of overload
+    /// resolution beside the ordinary functions of its name, so a caller
+    /// pinning a call to one declaration with an exact-typed cast has to know
+    /// whether its scope also templates the name; bindgen otherwise says
+    /// nothing about one at all.
+    ///
+    /// What C++ *declared* in each namespace, not what is visible there: a
+    /// `using other::pick;` pulls a template into a scope without declaring
+    /// anything this can see, so absence here is not proof of absence.
+    pub(crate) fn free_function_templates(&self) -> &HashMap<Namespace, HashSet<String>> {
+        &self.function_templates
     }
 
     /// The conversion functions bindgen reported for a class, in declaration
@@ -1162,6 +1215,20 @@ impl ParseCallbacks for AutocxxParseCallbacks {
                 visibility: member.visibility,
                 template_parameters: member.template_parameters,
             });
+    }
+
+    fn denote_function_template(&self, module: DiscoveredItemId, function: FunctionTemplateInfo) {
+        self.results
+            .borrow_mut()
+            .function_templates
+            .entry(module)
+            .or_default()
+            // The name alone; the reported parameter count is not kept,
+            // because the one question autocxx asks of these is whether a
+            // scope templates a name at all. However many parameters the
+            // template declares, deduction from an address-of target can
+            // supply them.
+            .insert(function.name.to_string());
     }
 
     fn denote_conversion_function(

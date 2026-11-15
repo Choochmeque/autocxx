@@ -1248,6 +1248,18 @@ impl<'a> TypeConverter<'a> {
                 ResolvedTypedef::Converted(annotated) => return Ok(*annotated),
             };
 
+        // Rust has no type which is a C++ map, so converting one can produce
+        // nothing: the single shape autocxx serves is a `const` reference
+        // parameter, which `fun::map_params` recognises and replaces with two
+        // vectors before conversion is ever asked about the map. Whatever
+        // reaches here is one of the shapes that carve-out leaves out.
+        //
+        // Said before substitution, which would otherwise put the stand-in's
+        // Rust name - a name no crate declares - into the bindings.
+        if known_types().is_map(&tn) {
+            return Err(ConvertErrorFromCpp::UnsupportedMap);
+        }
+
         // A cxx smart pointer whose payload C++ qualified `const` -
         // `std::shared_ptr<const T>` - has no cxx spelling: `SharedPtr<T>`
         // drops the qualifier, and the C++ typecheck shim cxx then writes

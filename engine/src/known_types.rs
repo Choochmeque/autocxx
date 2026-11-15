@@ -76,9 +76,58 @@ enum Behavior {
     /// typedef naming it.
     CCharacter,
     RustContainerByValueSafe,
+    /// `std::map`. cxx has no map type, so Rust never holds one and every
+    /// position which would hand one over is refused - see
+    /// [`ConvertErrorFromCpp::UnsupportedMap`].
+    ///
+    /// It is in this database for two reasons. One is the prelude entry, which
+    /// is what makes bindgen write the template arguments at all: bindgen
+    /// otherwise discards them, and every signature mentioning a map is then
+    /// refused for a reason which says nothing about maps. The other is that
+    /// having the arguments is what lets autocxx *build* a map, in the C++
+    /// wrapper for a function which takes `const std::map<K, V>&`, out of two
+    /// parallel vectors Rust passes.
+    ///
+    /// The comparator and the allocator are parameters of the stand-in too, so
+    /// that a map which fixes either to something other than the default is
+    /// recognised and refused rather than quietly rebuilt with the defaults.
+    /// Both are rendered as the bare template - bindgen discards `std::less`'s
+    /// own parameter - so what the check compares is the template's name.
+    ///
+    /// [`ConvertErrorFromCpp::UnsupportedMap`]:
+    ///     crate::conversion::ConvertErrorFromCpp::UnsupportedMap
+    CxxOrderedMap,
+    /// `std::unordered_map`, whose stand-in takes the key and the value and
+    /// nothing else.
+    ///
+    /// The hash, the equality predicate and the allocator are left off, which
+    /// the ordered map's comparator and allocator are not, because the hash of
+    /// a `std::string` key is a *specialization* - `std::hash<std::string>` -
+    /// and bindgen abandons the whole instantiation when it cannot render one
+    /// of the arguments, leaving the parameter an opaque blob. A stand-in
+    /// which asked for it therefore lost the commonest unordered map there is.
+    ///
+    /// The cost is that a non-default hash, predicate or allocator is
+    /// invisible here, so such a map is recognised as an ordinary one and the
+    /// wrapper builds `std::unordered_map<K, V>` for it. That is a different
+    /// C++ type from the one the function takes, and the wrapper calls the
+    /// function through a pointer of exactly the built type's signature, so
+    /// the generated C++ fails to compile - loudly, and naming the wrapper,
+    /// but without the refusal an ordered map with a custom comparator gets.
+    /// Where the same name also has a declaration the built type *does*
+    /// match, the two declarations are indistinguishable here, and both are
+    /// refused rather than one binding calling the other's function - see
+    /// `FnAnalyzer::build_indistinguishable_map_overloads`.
+    CxxUnorderedMap,
 }
 
 impl Behavior {
+    /// Whether this is one of the two maps, which autocxx treats alike
+    /// everywhere but in the stand-in it hands bindgen.
+    fn is_map(&self) -> bool {
+        matches!(self, Behavior::CxxOrderedMap | Behavior::CxxUnorderedMap)
+    }
+
     /// Whether destroying a value of a type which behaves this way does
     /// nothing at all, so that C++ calls the destructor of a class holding one
     /// trivial. Note this is a stricter question than
@@ -105,7 +154,10 @@ impl Behavior {
             | Behavior::CxxContainerSharedPtr
             | Behavior::CxxContainerVector
             | Behavior::RustString
-            | Behavior::RustContainerByValueSafe => false,
+            | Behavior::RustContainerByValueSafe
+            // A map owns its nodes.
+            | Behavior::CxxOrderedMap
+            | Behavior::CxxUnorderedMap => false,
         }
     }
 
@@ -163,6 +215,10 @@ impl Behavior {
             | Behavior::RustContainerByValueSafe => &[],
             // `rust::Str` and `rust::String` declare iterators and nothing else.
             Behavior::RustStr | Behavior::RustString => &[],
+            // A map's `key_type` and `mapped_type` are its parameters, and the
+            // rest follow the allocator. Nothing projects a name through a map
+            // anyway: no position which mentions one is generated.
+            Behavior::CxxOrderedMap | Behavior::CxxUnorderedMap => &[],
             // No prelude class, so nowhere to put one.
             Behavior::RustByValue
             | Behavior::CByValue
@@ -190,7 +246,9 @@ impl Behavior {
             | Behavior::CxxContainerUniquePtr
             | Behavior::CxxContainerSharedPtr
             | Behavior::CxxContainerVector
-            | Behavior::RustContainerByValueSafe => true,
+            | Behavior::RustContainerByValueSafe
+            | Behavior::CxxOrderedMap
+            | Behavior::CxxUnorderedMap => true,
             Behavior::CByValue
             | Behavior::CChar
             | Behavior::CByValueVecSafe
@@ -198,6 +256,40 @@ impl Behavior {
             | Behavior::CCharacter
             | Behavior::CVoid
             | Behavior::RustByValue => false,
+        }
+    }
+
+    /// The template header and the members of the stand-in class autocxx hands
+    /// bindgen for this type, or `None` where the stand-in takes no parameters.
+    ///
+    /// The members are what makes bindgen keep the parameters: it writes only
+    /// the ones it found a definition using, so a stand-in which mentions none
+    /// of them is a stand-in whose arguments are discarded again.
+    ///
+    /// One pointer wide, whatever the parameter count, which is why the maps
+    /// spell their members as a function pointer rather than one pointer
+    /// apiece. A class holding a substituted member is padded out to the layout
+    /// clang measured for the real type, and padding cannot shrink: a four
+    /// pointer stand-in for a `std::map` is wider than libc++'s three, and the
+    /// class holding one came out wider in Rust than in C++. See
+    /// `test_member_bindgen_could_not_render_does_not_shrink_its_class`.
+    fn prelude_template(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Behavior::CxxContainerUniquePtr
+            | Behavior::CxxContainerSharedPtr
+            | Behavior::CxxContainerVector
+            | Behavior::RustContainerByValueSafe => Some(("template<typename T> ", "T* ptr")),
+            // Every parameter C++ declares, comparator and allocator included,
+            // so that a map which fixes either is told from one which does not.
+            Behavior::CxxOrderedMap => Some((
+                "template<typename K, typename V, typename C, typename A> ",
+                "K* (*ptr)(V*, C*, A*)",
+            )),
+            // The key and the value alone - see [`Behavior::CxxUnorderedMap`].
+            Behavior::CxxUnorderedMap => {
+                Some(("template<typename K, typename V> ", "K* (*ptr)(V*)"))
+            }
+            _ => None,
         }
     }
 }
@@ -281,13 +373,10 @@ impl TypeDetails {
         }
         let tn = QualifiedName::new_from_cpp_name(&self.rs_name);
         let cxx_name = tn.get_final_item();
-        let (templating, payload) = match self.behavior {
-            Behavior::CxxContainerUniquePtr
-            | Behavior::CxxContainerSharedPtr
-            | Behavior::CxxContainerVector
-            | Behavior::RustContainerByValueSafe => ("template<typename T> ", "T* ptr"),
-            _ => ("", "char* ptr"),
-        };
+        let (templating, payload) = self
+            .behavior
+            .prelude_template()
+            .unwrap_or(("", "char* ptr"));
         // A `class`, so the payload stays private; the inner types have to be
         // public for a member naming one through a template parameter to reach
         // it.
@@ -320,7 +409,7 @@ impl TypeDetails {
     ///
     /// bindgen renames a prelude class to the final segment of the C++ name the
     /// class says it replaces, so the stand-in for `rust::Str` is `Str` and the
-    /// one for `std::string` is `string`. Those nine names are all a bindings
+    /// one for `std::string` is `string`. Those names are all a bindings
     /// dump contains for this database - checked, because it is the substitute's
     /// name and not the prelude class's.
     fn substitute_name(&self) -> Option<&str> {
@@ -329,6 +418,25 @@ impl TypeDetails {
                 .rsplit("::")
                 .next()
                 .expect("a name has a final segment")
+        })
+    }
+
+    /// How many type parameters the stand-in for this type declares, or
+    /// `None` where there is no stand-in at all.
+    ///
+    /// This is the one recorded fact about a stand-in's shape in the
+    /// bindings: bindgen keeps exactly the parameters the prelude class
+    /// wrote, every one of them being used in the payload, so the stand-in
+    /// for `std::map` is always a four-parameter generic, `vector`'s always a
+    /// one-parameter one, and `string`'s always a plain struct. A root item
+    /// whose parameter count differs cannot be that stand-in, whatever its
+    /// name says - see [`TypeDatabase::is_known_substitute_type`].
+    fn substitute_generic_arity(&self) -> Option<usize> {
+        self.behavior.has_prelude_entry().then(|| {
+            self.behavior
+                .prelude_template()
+                .map(|(templating, _)| templating.matches("typename").count())
+                .unwrap_or(0)
         })
     }
 
@@ -465,6 +573,10 @@ impl TypeDatabase {
                         Behavior::CxxString
                         | Behavior::CxxStringView
                         | Behavior::CxxContainerVector
+                        // Rust has no map type either, and no position which
+                        // would give it one is generated.
+                        | Behavior::CxxOrderedMap
+                        | Behavior::CxxUnorderedMap
                         | Behavior::CVoid => false,
                     },
                 )
@@ -562,33 +674,45 @@ impl TypeDatabase {
     /// replaces="std::string">`) distinguishes the two, and relying on a doc
     /// comment surviving would be a good deal more fragile than this.
     /// Namespaced types are unaffected - `mine::string` is nobody's
-    /// substitute. See `test_global_type_named_like_known_type_is_rejected`.
+    /// substitute.
     ///
-    /// The price is paid only by the names `bindgen` actually substitutes
-    /// something for, which is the nine with a prelude entry - and not by the
-    /// rest of the database, which is every C++ type autocxx can spell. Asking
-    /// about all of them made the user's own `c_u32`, `c_int`, `c_wchar_t` and
-    /// the rest of the `autocxx::c_*` family unbindable, none of which
-    /// `bindgen` replaces anything with. See
+    /// The price is paid only where the mistake is possible, and what decides
+    /// that is the one recorded fact about each stand-in's shape: its type
+    /// parameter count, which bindgen preserves exactly wherever it puts the
+    /// item - see [`TypeDetails::substitute_generic_arity`]. A root item is
+    /// discarded only where its own parameter count matches a stand-in of its
+    /// name. So a *plain* struct named `map`, `vector` or `unique_ptr` is the
+    /// user's and binds - see `test_global_struct_map_is_generated` - and so
+    /// does a user's own global *template* of such a name whose parameter
+    /// count differs, `template<typename T> struct map` against the
+    /// four-parameter stand-in: the template itself is not bindable, but its
+    /// concrete instantiations are, and they keep their dependency on it -
+    /// see `test_global_template_named_map_is_generated`. A user template
+    /// with the stand-in's exact name *and* count is still discarded, there
+    /// being nothing left to tell the two apart by. The untemplated
+    /// stand-ins - `string`, `string_view`, `Str`, `String` - are plain
+    /// structs themselves, and in a build with no standard header the `std` two land
+    /// in the root exactly where a user's global `struct string` would, so a
+    /// plain struct under those four names keeps the discard:
+    /// `test_global_type_named_like_known_type_is_rejected` pins what that
+    /// still costs. The namespaced stand-ins are dropped a few lines later in
+    /// [`crate::conversion::parse::parse_bindgen`] by
+    /// [`Self::is_known_type`], which recognises `root::std::map` and the
+    /// rest by their own names.
+    /// Asking about the whole database rather than the stand-ins made the
+    /// user's own `c_u32`, `c_int`, `c_wchar_t` and the rest of the
+    /// `autocxx::c_*` family unbindable, none of which `bindgen` replaces
+    /// anything with. See
     /// `test_global_type_named_like_a_ctype_wrapper_is_generated`.
     ///
     /// The names in this database which have no namespace of their own -
     /// `usize`, `bool`, `str`, `uint32_t` - are a separate matter and are
-    /// declined still, a few lines later in
-    /// [`crate::conversion::parse::parse_bindgen`], by [`Self::is_known_type`]:
+    /// declined still, by that same [`Self::is_known_type`] check:
     /// they *are* the names bindgen writes for those types, so a struct
     /// arriving under one has to be examined rather than assumed to be the
     /// user's. A C++ class named `u32` does not even arrive under that name -
     /// bindgen escapes it to `u32_`, which is the name a `generate!` directive
     /// then has to use.
-    ///
-    /// Measured: of those nine substitutes, `bindgen` puts `Str`, `String` and
-    /// `Box` in the root mod and the six `std` ones in `root::std`, so the
-    /// namespace test below leaves the latter to
-    /// [`Self::is_known_type`], which recognises them by their own names. A
-    /// global `struct string` is therefore nobody's substitute either, and is
-    /// declined here all the same; untangling that is a behaviour change which
-    /// the test named above pins as it stands.
     ///
     /// One combination is refused rather than bound, and was refused before
     /// this narrowed too: a header with a global type named after one of the
@@ -602,13 +726,16 @@ impl TypeDatabase {
     /// should. Serving both would take the generated typedefs out of the
     /// user's global namespace, which is a change to every generated header.
     /// `test_ctype_wrapper_name_collision_is_refused` pins the refusal.
-    pub(crate) fn is_known_substitute_type(&self, ty: &QualifiedName) -> bool {
-        ty.get_namespace().is_empty()
-            && self
-                .by_rs_name
-                .values()
-                .filter_map(|td| td.substitute_name())
-                .any(|substitute| substitute == ty.get_final_item())
+    pub(crate) fn is_known_substitute_type(&self, ty: &QualifiedName, num_generics: usize) -> bool {
+        if !ty.get_namespace().is_empty() {
+            return false;
+        }
+        self.by_rs_name.values().any(|td| {
+            td.substitute_generic_arity() == Some(num_generics)
+                && td
+                    .substitute_name()
+                    .is_some_and(|substitute| substitute == ty.get_final_item())
+        })
     }
 
     /// Whether the prelude class standing in for this type declares the named
@@ -874,11 +1001,65 @@ impl TypeDatabase {
                     // A `string_view` has no Rust spelling at all, so there is
                     // nothing for placement storage to be a storage *of*. Every
                     // position which would need one is refused, and this keeps
-                    // the database from saying otherwise in the meantime.
-                    Behavior::CxxString | Behavior::CxxStringView | Behavior::CxxContainerVector
+                    // the database from saying otherwise in the meantime. The
+                    // two maps are in the same position.
+                    Behavior::CxxString
+                        | Behavior::CxxStringView
+                        | Behavior::CxxContainerVector
+                        | Behavior::CxxOrderedMap
+                        | Behavior::CxxUnorderedMap
                 )
             })
             .cloned()
+    }
+
+    /// Whether this is `std::string`, which Rust holds only as a
+    /// `cxx::CxxString` it borrows or a `cxx::UniquePtr` to one - never by
+    /// value, and never as the element of a container it fills itself.
+    pub(crate) fn is_cxx_string(&self, ty: &QualifiedName) -> bool {
+        self.get(ty)
+            .map(|td| matches!(td.behavior, Behavior::CxxString))
+            .unwrap_or(false)
+    }
+
+    /// Whether this is `std::map` or `std::unordered_map`, which autocxx knows
+    /// the shape of and can build in C++ but has no Rust spelling for. See
+    /// [`Behavior::CxxOrderedMap`].
+    pub(crate) fn is_map(&self, ty: &QualifiedName) -> bool {
+        self.get(ty).map(|td| td.behavior.is_map()).unwrap_or(false)
+    }
+
+    /// The parameters C++ declares after the key and the value for this map,
+    /// each as the template whose specialization is that parameter's default:
+    /// `std::less` and `std::allocator` for `std::map`. `None` for anything
+    /// which is not a map.
+    ///
+    /// autocxx builds a map of the default kind or none at all, so a map which
+    /// fixes any of these to something else has to be told apart from one which
+    /// leaves them alone, and these are the names that check is against. What
+    /// the check cannot see is the *argument* each was given - bindgen discards
+    /// the parameters of `std::less` itself, writing the bare `std::less` for
+    /// `std::less<K>` and `std::less<>` alike - so `std::map<K, V, std::less<>>`
+    /// passes it and is then built as `std::map<K, V>`. That is a different C++
+    /// type, and the wrapper calls its function through a pointer of exactly
+    /// the built type's signature, so the lone transparent-comparator overload
+    /// fails to compile in the generated wrapper rather than resolving to
+    /// anything else; a transparent-comparator overload *beside* the default
+    /// one is indistinguishable from it here and both are refused - see
+    /// `FnAnalyzer::build_indistinguishable_map_overloads`.
+    ///
+    /// Empty for `std::unordered_map`, whose stand-in takes no such parameters
+    /// for the same reason it cannot check them - see
+    /// [`Behavior::CxxUnorderedMap`].
+    pub(crate) fn map_default_extra_arguments(
+        &self,
+        ty: &QualifiedName,
+    ) -> Option<&'static [&'static str]> {
+        self.get(ty).and_then(|td| match td.behavior {
+            Behavior::CxxOrderedMap => Some(&["std::less", "std::allocator"][..]),
+            Behavior::CxxUnorderedMap => Some(&[][..]),
+            _ => None,
+        })
     }
 }
 
@@ -900,6 +1081,32 @@ fn create_type_database() -> TypeDatabase {
         false,
         true,
     ));
+    // The two maps. Rust never holds one, so the names here name nothing in
+    // any crate, exactly as `autocxx::CppStringView` does: what the entries
+    // are for is the stand-in handed to bindgen, which is the only way the
+    // key and value types survive at all. See [`Behavior::CxxOrderedMap`].
+    db.insert(
+        TypeDetails::new(
+            "autocxx::CppMap",
+            "std::map",
+            Behavior::CxxOrderedMap,
+            None,
+            true,
+            true,
+        )
+        .without_container_glue(),
+    );
+    db.insert(
+        TypeDetails::new(
+            "autocxx::CppUnorderedMap",
+            "std::unordered_map",
+            Behavior::CxxUnorderedMap,
+            None,
+            true,
+            true,
+        )
+        .without_container_glue(),
+    );
     db.insert(TypeDetails::new(
         "cxx::SharedPtr",
         "std::shared_ptr",
