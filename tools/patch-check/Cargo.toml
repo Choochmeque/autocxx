@@ -8,7 +8,7 @@
 
 [package]
 name = "autocxx-patch-check"
-version = "0.30.0"
+version = "0.31.0"
 authors = ["Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
 # CI plumbing for this repository, not something to release.

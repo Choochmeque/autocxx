@@ -8,7 +8,7 @@
 
 [package]
 name = "autocxx-reduce"
-version = "0.30.0"
+version = "0.31.0"
 authors = ["adetaylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
 # Holds no crates.io name, and would have one created for it by a publish
@@ -18,8 +18,8 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-autocxx-engine = { version = "=0.30.0", path = "../../engine" }
-autocxx-parser = { version = "=0.30.0", path = "../../parser", features = [
+autocxx-engine = { version = "=0.31.0", path = "../../engine" }
+autocxx-parser = { version = "=0.31.0", path = "../../parser", features = [
     "reproduction_case",
 ] }
 clap = { version = "4", features = ["cargo", "string"] }

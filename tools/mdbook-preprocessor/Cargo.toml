@@ -8,7 +8,7 @@
 
 [package]
 name = "autocxx-mdbook-preprocessor"
-version = "0.30.0"
+version = "0.31.0"
 authors = ["adetaylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
 # Holds no crates.io name, and would have one created for it by a publish
@@ -21,7 +21,7 @@ serde_json = "1"
 itertools = "0.15"
 anyhow = "1"
 regex = "1"
-autocxx-integration-tests = { path = "../../integration-tests", version = "=0.30.0" }
+autocxx-integration-tests = { path = "../../integration-tests", version = "=0.31.0" }
 rayon = "1.5"
 gag = "1.0"
 env_logger = "0.11"

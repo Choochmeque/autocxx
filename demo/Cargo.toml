@@ -8,7 +8,7 @@
 
 [package]
 name = "autocxx-demo"
-version = "0.30.0"
+version = "0.31.0"
 authors = ["Adrian Taylor <adetaylor@chromium.org>", "Vladimir Pankratov <sollex.uz@gmail.com>"]
 edition = "2021"
 # Holds no crates.io name, and would have one created for it by a publish
@@ -17,8 +17,8 @@ publish = false
 
 [dependencies]
 cxx = "1.0.161"
-autocxx = { path = "..", version = "0.30.0" }
+autocxx = { path = "..", version = "0.31.0" }
 
 [build-dependencies]
-autocxx-build = { path = "../gen/build", version = "0.30.0" }
+autocxx-build = { path = "../gen/build", version = "0.31.0" }
 miette = { version = "7", features = ["fancy"] }

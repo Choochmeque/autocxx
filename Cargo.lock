@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx-macro",
  "cxx",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-build"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx-engine",
  "env_logger",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-demo"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx",
  "autocxx-build",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-engine"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx-parser",
  "bitflags 2.13.2",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-fixture-deps"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx",
  "cxx",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-gen"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "assert_cmd",
  "autocxx",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-integration-tests"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx",
  "autocxx-engine",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-macro"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "autocxx-parser",
  "proc-macro2",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-mdbook-preprocessor"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "autocxx-integration-tests",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "autocxx-parser"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "indexmap",
  "itertools",
@@ -265,14 +265,14 @@ dependencies = [
 
 [[package]]
 name = "autocxx-patch-check"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "diffy",
 ]
 
 [[package]]
 name = "autocxx-reduce"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "assert_cmd",
  "autocxx-engine",
