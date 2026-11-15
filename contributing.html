@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b6971dc3.js";
+            window.path_to_searchindex_js = "searchindex-cfc2d36d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -315,6 +315,14 @@ token is minted from is reachable by every step of the job that holds it, build
 scripts included. <code>github-release</code> creates the release with generated notes.</p>
 <p><code>publish</code> runs in a github environment named <code>release</code>, which is where required
 reviewers go if you want a manual gate between the tag and the upload.</p>
+<p>The workflow can also be started by hand, from Actions → Release → Run
+workflow, on any branch or tag. That is the dry run alone: it flattens the
+bindgen sources and packages and builds all seven crates from their packaged
+form, and nothing else. The release checks - tag on main, versions equal the
+tag, published set equals the workspace’s - and the <code>publish</code> and
+<code>github-release</code> jobs run only on a tag push, whatever ref a manual run
+chooses. Use it on a version-bump branch before merging, or on main before
+tagging.</p>
 <h3 id="cratesio-setup-once-per-crate"><a class="header" href="#cratesio-setup-once-per-crate">crates.io setup, once per crate</a></h3>
 <p>The workflow cannot publish anything until this is done, and it is done in the
 crates.io UI rather than here. For each of the seven crates, under Settings →
