@@ -185,7 +185,7 @@ mod tests {
         };
         assert_eq!(
             witness_name(&config, &QualifiedName::new_from_cpp_name("a::b::Elem")),
-            "Elem_autocxx_array_element_d99fd6cbbb04d53e_0x1bf4745a948d615a"
+            "Elem_autocxx_array_element_d99fd6cbbb04d53e_0xdeb8238f44416b7b"
         );
     }
 }

@@ -712,6 +712,108 @@ macro_rules! throws {
     ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
 }
 
+/// Promise that the reference a C++ function returns points into one named
+/// parameter, so that the Rust binding can give the returned reference that
+/// parameter's lifetime.
+///
+/// The syntax is:
+/// `returns_borrow_from!("ns::Settings::set", "self")`
+///
+/// autocxx binds a function which returns a C++ reference only where it can
+/// tell which input the reference points into, and the only case it can tell
+/// is one input reference and no more. The receiver is one, so the chainable
+/// setter - `Settings& set(const Key&, const Value&)`, returning `*this` - has
+/// three and gets no binding at all. Nothing in the declaration says which of
+/// the three the result comes out of. Whoever reads the header knows; this is
+/// how they say so.
+///
+/// ```ignore
+/// returns_borrow_from!("ns::Settings::set", "self")
+/// ```
+///
+/// gives the setter this Rust signature, and with it the whole builder idiom:
+///
+/// ```ignore
+/// pub fn set<'a>(self: Pin<&'a mut Settings>, key: &Key, value: &Value)
+///     -> Pin<&'a mut Settings>;
+/// ```
+///
+/// The key and the value are lent for the call alone. Only the receiver's
+/// lifetime comes back out, so a chain may be written over temporaries, and the
+/// reference it ends with cannot outlive the object it came from.
+///
+/// # This is an unchecked promise
+///
+/// autocxx cannot read the C++ body, so this is your word about what it does,
+/// exactly as [`safety`]`!(unsafe_ffi)` is your word about the API as a whole -
+/// and it costs the same if it is wrong. Name the parameter the reference does
+/// *not* come out of and safe Rust is handed a reference which may dangle, with
+/// no `unsafe` block anywhere near the call. Write it only for a function you
+/// have read, or whose documentation says where the reference points.
+///
+/// What autocxx does check is that the promise is expressible at all. Each of
+/// these is refused rather than written down as a signature which lies: a
+/// parameter passed by value, as a pointer or as an rvalue reference, none of
+/// which has a lifetime to give away; a parameter autocxx rebuilds for the
+/// call - a `const std::string_view&`, which arrives as anything viewable as
+/// bytes and lends C++ a temporary view that dies with the call - whose
+/// borrow never outlives the wrapper; and a mutable reference promised out of
+/// a `const` parameter, which is a `&mut` derived from a `&`.
+///
+/// # Naming the function and the parameter
+///
+/// The function is named as [`block_functions`] names one: a member function
+/// with the class which declares it in front, a free function by its namespaces
+/// alone, and the namespaces may be left off either way at the usual cost - a
+/// name written short claims every function answering to it. The class may not
+/// be left off, so `returns_borrow_from!("ns::set", "self")` names a free
+/// function in `ns` and never a method of some class in `ns`.
+///
+/// The parameter is named one of three ways:
+///
+/// * `"self"`, or `"this"`, for the object a member function was called on;
+/// * the name C++ gives the parameter, as in `returns_borrow_from!("ns::at",
+///   "container")`;
+/// * `"#0"`, `"#1"`, ... for a parameter by position, counting the declared
+///   parameters from zero and not counting the receiver.
+///
+/// The position is there for the parameter C++ declared without a name. Such a
+/// parameter does reach Rust under a name - `arg1`, `arg2` - but those count
+/// the *unnamed* parameters rather than the declared ones, so in
+/// `f(const A&, int b, const C&)` the first parameter is `arg1` and the third
+/// is `arg2`. Writing `"#0"` and `"#2"` says what was meant.
+///
+/// The whole overload set of the name is claimed, as it is for
+/// `block_functions!`: C++ overload resolution is not something a directive
+/// naming one name could select within. The claim is monotone, though: an
+/// overload with no parameter answering to the name is analysed exactly as if
+/// the directive were not written, so one which bound on its own still binds,
+/// and one still declined gets a stub saying the directive did not cover it.
+/// `"self"` resolves on nothing a static member overload has, so such an
+/// overload is likewise left alone - but naming `"self"` for a free function
+/// is refused outright, no overload of one ever having a receiver. An
+/// overload which returns something other than a reference has no lifetime
+/// for the directive to be about, and is bound as it would have been without
+/// one.
+///
+/// A directive which reaches no function returning a reference at all is a
+/// build error, whether because the name matched nothing or because nothing it
+/// matched returns a reference: either way it promised nothing about anything.
+/// A function named by [`block_functions`] is gone whatever this says about it.
+///
+/// Under [`safety`]`!(unsafe_references_wrapped)` the directive does nothing.
+/// That mode hands a returned reference back as a `CppLtRef` with a lifetime of
+/// its own and passes reference parameters as the lifetime-free `CppRef`, so
+/// there is no parameter lifetime for a promise to name, and the functions that
+/// mode declines stay declined.
+///
+/// A directive to be included inside
+/// [include_cpp] - see [include_cpp] for general information.
+#[macro_export]
+macro_rules! returns_borrow_from {
+    ($($tt:tt)*) => { $crate::usage!{$($tt)*} };
+}
+
 /// Chooses how a C++ `enum` is rendered in Rust.
 ///
 /// By default every C++ enum becomes a native Rust `enum`, which is ideal
