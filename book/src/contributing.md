@@ -174,6 +174,15 @@ scripts included. `github-release` creates the release with generated notes.
 `publish` runs in a github environment named `release`, which is where required
 reviewers go if you want a manual gate between the tag and the upload.
 
+The workflow can also be started by hand, from Actions → Release → Run
+workflow, on any branch or tag. That is the dry run alone: it flattens the
+bindgen sources and packages and builds all seven crates from their packaged
+form, and nothing else. The release checks - tag on main, versions equal the
+tag, published set equals the workspace's - and the `publish` and
+`github-release` jobs run only on a tag push, whatever ref a manual run
+chooses. Use it on a version-bump branch before merging, or on main before
+tagging.
+
 ### crates.io setup, once per crate
 
 The workflow cannot publish anything until this is done, and it is done in the
