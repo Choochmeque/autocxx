@@ -26,6 +26,18 @@ sixteen bytes on an LP64 target against C++'s thirty-two, because the string a
 one; laying `Box` out with the substitute as `T` gives eight, and the class is
 padded out around it.
 
+A member reaches a parameter through an array and through an instantiation of
+another template as well as directly, and each is written as what stands in for
+it: `T a[2]` is two of the argument, `Inner<T>` is `Inner` laid out with that
+argument. clang measured neither - what it measured is this definition's
+instantiation, and what the IR holds for the member is the dependent type the
+definition was written with - so without following them a class holding an
+`Arr<std::string>` came to twenty-four bytes against C++'s fifty-six. An
+argument whose own width nothing establishes leaves the instantiation with none
+either: the member is written as the parameter, so what the instantiation holds
+there is whatever codegen writes for the argument, and that is the width nothing
+established. The field holding it is then a blob like any other.
+
 Where the definition cannot be laid out, what happens next turns on whether it
 is the definition clang instantiated. Two shapes say it is not, and for those
 there is no measurement to fall back on: a `replaces=` annotation stands another
@@ -50,9 +62,14 @@ that way is the one clang instantiated after all.
 A base class is written as a field of the base's own type and takes every route
 to a substitution a member takes, so it reaches the same blob by the same walk.
 Inside a packed class the blob is asked for at the alignment that class gives
-its members, which is never more than the class's own: `blob` asks for
-`repr(align(N))` above four-byte alignment, and a packed struct may not
-transitively hold such a type at all.
+its members, which is never more than the class's own. Where even that is more
+than `blob` writes a type for without `repr(align)` no blob is written at all,
+and the field is left as its own type, short as it was before any of this: a
+packed struct may not transitively hold a `repr(align)` type, a lower alignment
+would leave the struct less aligned than the class, `repr(align)` beside
+`repr(packed)` to make that up is an error of its own, and a blob at byte
+alignment would lay the rest of the fields out somewhere else. There is no Rust
+struct which is that class.
 
 Then the runs of bytes no field covers. A packed class got no padding field
 written for one at all, on the grounds that its fields are contiguous - which is
@@ -62,11 +79,19 @@ comes by one is a field written narrower than the member C++ declared:
 `#pragma pack(1) struct P { std::string m[3]; int n; };` counted the forty-eight
 bytes between the emitted array and `n`, wrote no field for them, and came out
 twenty-eight bytes wide against the target's seventy-six. Write that run out, in
-bytes, where the class is packed to a single byte - which is where the offset it
-is measured from is the offset the emitted struct has. `#pragma pack(N)` for a
-wider `N` still aligns each field to the smaller of its own alignment and `N`,
-which this tracker does not model, so there the run stays where Rust's own
-alignment has always closed it.
+bytes: a packed class does not align its fields, so the run need not be a whole
+number of anything.
+
+The run is measured from the offset the tracker has reached, which is the
+emitted struct's offset only while nothing has been counted that the emitted
+struct has not got. `#[repr(packed(N))]` aligns each field to the smaller of the
+field's own alignment and `N`, which this tracker does not apply to a packed
+class - it adds each field's size and no more - and a run it declines to write
+is bytes it counted and nothing emitted. So it tracks whether its offset is
+still the emitted one, and writes the run while it is and while the field after
+the run lands where the target put the member rather than past it. Anywhere else
+the run stays where Rust's own alignment has always closed it: pushing every
+field after it along is a worse answer than the short one.
 
 And every run of bytes is now written at whatever alignment makes the field the
 run: `blob` hands back a whole number of units of the alignment it is asked for,
@@ -82,7 +107,7 @@ tracker counting one counts. Only an `aligned` attribute reaches such a layout;
 anything C++ laid out is already a whole number of its alignment.
 --- a/codegen/mod.rs
 +++ b/codegen/mod.rs
-@@ -1738,125 +1738,306 @@
+@@ -1738,124 +1738,488 @@
      item
  }
  
@@ -365,11 +390,15 @@ anything C++ laid out is already a whole number of its alignment.
 +        .collect();
 +    match template_pattern_layout(ctx, written, pattern, &arguments, measuring)
      {
-+        Some(layout) => WrittenWidth::OfItsOwn(layout),
-+        None if substituted || !takes_an_argument => {
++        MemberWidth::Of(layout) => WrittenWidth::OfItsOwn(layout),
++        // A member of no established width leaves the struct holding it
++        // without one either, whichever definition this is: what is written
++        // there is narrower than the member and nothing said by how much.
++        MemberWidth::Unestablished => WrittenWidth::Unestablished,
++        MemberWidth::Unknown if substituted || !takes_an_argument => {
 +            WrittenWidth::Unestablished
 +        }
-+        None => WrittenWidth::AsMeasured,
++        MemberWidth::Unknown => WrittenWidth::AsMeasured,
 +    }
 +}
 +
@@ -378,11 +407,18 @@ anything C++ laid out is already a whole number of its alignment.
 +/// A packed class aligns each of its members to the smaller of the member's own
 +/// alignment and the class's, so a member of one is never more strictly aligned
 +/// than the class is, and a blob written for one is asked for at that
-+/// alignment. Where even that is more than `blob` can write without
-+/// `repr(align)`, no blob can be written here at all: a packed struct may not
-+/// transitively hold such a type and rustc rejects the whole struct. The field
-+/// is left as its own type there, short of the object C++ builds in it as it
-+/// was before any of this.
++/// alignment.
++///
++/// Where even that is more than `blob` writes a type for without `repr(align)`,
++/// no blob can be written here at all, and the field is left as its own type -
++/// short of the object C++ builds in it, as it was before any of this. Rust has
++/// no rendering of such a class to write instead: a packed struct may not
++/// transitively hold a `repr(align)` type, a lower alignment leaves the struct
++/// less aligned than the class and `repr(align)` on a packed struct is an error
++/// of its own, and a blob at byte alignment lays the rest of the fields out
++/// somewhere else. What says so is the layout assertion autocxx writes for the
++/// class, which fails the build naming the type rather than letting C++
++/// construct one past the end of Rust's storage for it.
 +///
 +/// A field which was not going to be a blob keeps the layout it was measured
 +/// at, which is the one the tracker has always been told.
@@ -410,6 +446,182 @@ anything C++ laid out is already a whole number of its alignment.
 +        layout: Layout::new(written.layout.size, align),
 +        ..written
 +    }
++}
++
++/// How wide the Rust type written for a member of a class template's
++/// definition is.
++enum MemberWidth {
++    /// That wide.
++    Of(Layout),
++    /// What is written there has no established width, so neither has the
++    /// struct holding it. See [`WrittenWidth::Unestablished`].
++    Unestablished,
++    /// Nothing here worked out how wide it is.
++    Unknown,
++}
++
++/// How wide the Rust type written for a member of a class template's
++/// definition is, with the instantiation's arguments standing in for the
++/// definition's parameters.
++///
++/// A member declared with one of the parameters is written as whatever the
++/// argument standing in for it is written as, which is the whole of why an
++/// instantiation's width follows its arguments. The parameter is reached
++/// through an array and through an instantiation of another template as well
++/// as on its own - `T a[2]` is two of the argument, `Inner<T>` is `Inner` laid
++/// out with it - and clang measured none of those: what it measured is this
++/// definition's instantiation, and what the IR holds for the member is the
++/// dependent type the definition was written with.
++///
++/// A member declared with a concrete type is a field of the struct bindgen
++/// writes for the definition like any other, and is as wide as that field -
++/// the blob written for one whose own type is written narrower included.
++fn substituted_member_width(
++    ctx: &BindgenContext,
++    ty: TypeId,
++    arguments: &[(TypeId, TypeId)],
++    measuring: &mut HashSet<ItemId>,
++) -> MemberWidth {
++    let item = field_representation(ctx, ty);
++    let Some(member) = item.as_type() else {
++        return MemberWidth::Unknown;
++    };
++    match *member.kind() {
++        TypeKind::TypeParam => {
++            match substituted_argument(ctx, ty, arguments) {
++                Some(argument) => argument_width(
++                    ctx,
++                    field_representation(ctx, argument),
++                    measuring,
++                ),
++                None => MemberWidth::Unknown,
++            }
++        }
++        TypeKind::Array(element, len) => {
++            let element = match substituted_member_width(
++                ctx, element, arguments, measuring,
++            ) {
++                MemberWidth::Of(layout) => layout,
++                width => return width,
++            };
++            // A product no `usize` holds is not a size, and a substitute wider
++            // than what it stands in for can reach one from a declaration
++            // clang accepted.
++            let Some(stride) = checked_align_to(element.size, element.align)
++            else {
++                return MemberWidth::Unknown;
++            };
++            match stride.checked_mul(len) {
++                Some(size) => {
++                    MemberWidth::Of(Layout::new(size, element.align))
++                }
++                None => MemberWidth::Unknown,
++            }
++        }
++        TypeKind::TemplateInstantiation(ref inst) => {
++            nested_instantiation_width(ctx, item, inst, arguments, measuring)
++        }
++        // A vector is written as the array of its elements, whose alignment is
++        // the element's and not the vector's, so the layout clang reported for
++        // it is not the one the emitted member has.
++        TypeKind::Vector(..) => MemberWidth::Unknown,
++        _ => match representation_layout(ctx, item, measuring) {
++            Some(layout) => MemberWidth::Of(layout),
++            None => MemberWidth::Unknown,
++        },
++    }
++}
++
++/// How wide what is written where a member declared with one of the
++/// definition's parameters is given `argument` is.
++///
++/// The member is written as the parameter, so the instantiation holds whatever
++/// codegen writes for the argument there - never the blob a *field* of that
++/// type is given, which is decided where that field is written and this is not
++/// that field. An argument of no established width therefore leaves this
++/// instantiation with none.
++fn argument_width(
++    ctx: &BindgenContext,
++    item: &Item,
++    measuring: &mut HashSet<ItemId>,
++) -> MemberWidth {
++    match written_width(ctx, item, measuring) {
++        WrittenWidth::OfItsOwn(layout) => MemberWidth::Of(layout),
++        WrittenWidth::Unestablished => MemberWidth::Unestablished,
++        WrittenWidth::AsMeasured => {
++            match item.as_type().and_then(|ty| ty.layout(ctx)) {
++                Some(layout) => MemberWidth::Of(layout),
++                None => MemberWidth::Unknown,
++            }
++        }
++    }
++}
++
++/// How wide the Rust type written for an instantiation one of the definition's
++/// members declares is, with the arguments standing in for whichever of that
++/// instantiation's own arguments are the definition's parameters.
++///
++/// `Inner<T>` in `template <class T> struct Outer { Inner<T> i; }` is written
++/// as `Inner` given the argument, which is this same question one level down.
++/// Nothing measured that: clang measured `Outer<argument>`, and what the IR
++/// holds for the member is the dependent `Inner<T>`.
++///
++/// Where none of its arguments is one of the definition's parameters, it is an
++/// instantiation clang did lay out, and is measured the way any other member
++/// declared with a concrete type is.
++///
++/// A definition already on the way down stops this. C++ has no type which
++/// contains itself, but `replaces=` declarations that are each fine on their
++/// own can build one between them, and a walk with no memory would not come
++/// back.
++fn nested_instantiation_width(
++    ctx: &BindgenContext,
++    item: &Item,
++    inst: &TemplateInstantiation,
++    arguments: &[(TypeId, TypeId)],
++    measuring: &mut HashSet<ItemId>,
++) -> MemberWidth {
++    let written = inst
++        .template_definition()
++        .into_resolver()
++        .through_type_refs()
++        .resolve(ctx);
++    let mut substituted = false;
++    let inner: Vec<(TypeId, TypeId)> = written
++        .self_template_params(ctx)
++        .iter()
++        .copied()
++        .zip(inst.template_arguments().iter().map(|argument| {
++            match substituted_argument(ctx, *argument, arguments) {
++                Some(argument) => {
++                    substituted = true;
++                    argument
++                }
++                None => *argument,
++            }
++        }))
++        .collect();
++    if !substituted {
++        return match representation_layout(ctx, item, measuring) {
++            Some(layout) => MemberWidth::Of(layout),
++            None => MemberWidth::Unknown,
++        };
++    }
++    // A blob of the layout clang measured is what codegen writes for either of
++    // these, and clang measured nothing here.
++    if item.is_opaque(ctx, &()) || written.is_opaque(ctx, &()) {
++        return MemberWidth::Unknown;
++    }
++    let Some(pattern) = written.as_type() else {
++        return MemberWidth::Unknown;
++    };
++    if !measuring.insert(written.id()) {
++        return MemberWidth::Unknown;
++    }
++    let width =
++        template_pattern_layout(ctx, written, pattern, &inner, measuring);
++    measuring.remove(&written.id());
++    width
 +}
 +
 +/// The argument standing in for `ty`, where `ty` is one of the parameters
@@ -449,18 +661,13 @@ anything C++ laid out is already a whole number of its alignment.
 +/// the header declares to be given to Rust in place of the name its annotation
 +/// points at, or a definition whose instantiations are all written as one
 +/// struct. Where clang did measure one, codegen pads the struct out to that
-+/// measurement and it is the answer. Otherwise the members are, a member
-+/// declared with one of the definition's own parameters being laid out as the
-+/// argument standing in for it and one with no layout at all stopping this.
++/// measurement and it is the answer. Otherwise the members are, each as wide
++/// as `substituted_member_width` says the emitted member is, and a member
++/// whose width that does not work out stops this.
  ///
-+/// A member declared with one of the definition's own template parameters is
-+/// laid out as the argument standing in for it, which is what codegen writes
-+/// there and the whole of why an instantiation's width follows its arguments.
-+///
  /// So lay the members out the way `repr(C)` will, guarded on the members being
  /// the whole of what the struct holds. A base class, a vtable pointer, a
- /// bitfield allocation unit and the address byte an empty class is given are
-@@ -1871,10 +2052,16 @@
+@@ -1871,20 +2235,26 @@
  /// A union is declined before the layout question is even asked, because
  /// `CompInfo::layout` answers it for one by taking the widest member without
  /// rounding up to the alignment, which is not the size Rust gives it.
@@ -475,20 +682,78 @@ anything C++ laid out is already a whole number of its alignment.
      ty: &Type,
 +    arguments: &[(TypeId, TypeId)],
      measuring: &mut HashSet<ItemId>,
- ) -> Option<Layout> {
+-) -> Option<Layout> {
++) -> MemberWidth {
      let TypeKind::Comp(ref comp) = *ty.kind() else {
-@@ -1901,7 +2088,9 @@
+-        return None;
++        return MemberWidth::Unknown;
+     };
+     if comp.kind() != CompKind::Struct {
+-        return None;
++        return MemberWidth::Unknown;
+     }
+     if let Some(layout) = ty.layout(ctx) {
+-        return Some(layout);
++        return MemberWidth::Of(layout);
+     }
+     if comp.fields().is_empty() ||
+         comp.is_packed(ctx, None) ||
+@@ -1893,32 +2263,40 @@
+         (ctx.options().flexarray_dst &&
+             comp.flex_array_member(ctx).is_some())
+     {
+-        return None;
++        return MemberWidth::Unknown;
+     }
+     let mut size: usize = 0;
+     let mut align: usize = 1;
+     for field in comp.fields() {
          let Field::DataMember(field) = field else {
-             return None;
+-            return None;
++            return MemberWidth::Unknown;
          };
 -        let field = field_representation(ctx, field.ty());
-+        let field = substituted_argument(ctx, field.ty(), arguments)
-+            .unwrap_or_else(|| field.ty());
-+        let field = field_representation(ctx, field);
-         // A vector is written as the array of its elements, whose alignment is
-         // the element's and not the vector's, so the layout clang reported for
-         // it is not the one the emitted member has.
-@@ -1956,10 +2145,22 @@
+-        // A vector is written as the array of its elements, whose alignment is
+-        // the element's and not the vector's, so the layout clang reported for
+-        // it is not the one the emitted member has.
+-        if matches!(*field.as_type()?.kind(), TypeKind::Vector(..)) {
+-            return None;
+-        }
+-        let layout = representation_layout(ctx, field, measuring)?;
++        let layout = match substituted_member_width(
++            ctx,
++            field.ty(),
++            arguments,
++            measuring,
++        ) {
++            MemberWidth::Of(layout) => layout,
++            width => return width,
++        };
+         if layout.align == 0 ||
+             layout.align > struct_layout::MAX_GUARANTEED_ALIGN
+         {
+-            return None;
++            return MemberWidth::Unknown;
+         }
+-        size =
+-            checked_align_to(size, layout.align)?.checked_add(layout.size)?;
++        let Some(next) = checked_align_to(size, layout.align)
++            .and_then(|size| size.checked_add(layout.size))
++        else {
++            return MemberWidth::Unknown;
++        };
++        size = next;
+         align = align.max(layout.align);
+     }
+-    Some(Layout::new(checked_align_to(size, align)?, align))
++    match checked_align_to(size, align) {
++        Some(size) => MemberWidth::Of(Layout::new(size, align)),
++        None => MemberWidth::Unknown,
++    }
+ }
+ 
+ /// `struct_layout::align_to`, declining the wrap it does not check for.
+@@ -1956,10 +2334,22 @@
          let field_item =
              self.ty().into_resolver().through_type_refs().resolve(ctx);
          let field_ty = field_item.expect_type();
@@ -515,7 +780,7 @@ anything C++ laid out is already a whole number of its alignment.
  
          // NB: If supported, we use proper `union` types.
          let ty = if parent.is_union() {
-@@ -2030,12 +2231,15 @@
+@@ -2030,12 +2420,15 @@
          let field_name = field_name.as_str();
          let field_ident = ctx.rust_ident_raw(field_name);
  
@@ -537,7 +802,7 @@ anything C++ laid out is already a whole number of its alignment.
          }
  
          let visibility = compute_visibility(
-@@ -2943,13 +3147,13 @@
+@@ -2943,13 +3336,13 @@
              // them. The difference is a run
              // of bytes no field covers, and it is written out where the bases
              // end rather than left to the member after them. `saw_field` does
@@ -556,7 +821,7 @@ anything C++ laid out is already a whole number of its alignment.
              let bases_padding = if opaque_bases.is_none() &&
                  bases_end < declared_bases_end
              {
-@@ -2997,12 +3201,29 @@
+@@ -2997,12 +3390,29 @@
                  }
  
                  let inner_item = ctx.resolve_item(base.ty);
@@ -592,7 +857,15 @@ anything C++ laid out is already a whole number of its alignment.
                      base.is_public(),
 --- a/codegen/struct_layout.rs
 +++ b/codegen/struct_layout.rs
-@@ -43,7 +43,9 @@
+@@ -30,6 +30,7 @@
+     last_field_was_bitfield: bool,
+     visibility: FieldVisibilityKind,
+     last_field_was_flexible_array: bool,
++    offset_is_emitted: bool,
+ }
+ 
+ /// Returns a size aligned to a given value.
+@@ -43,7 +44,9 @@
          return size;
      }
  
@@ -603,7 +876,23 @@ anything C++ laid out is already a whole number of its alignment.
  }
  
  #[test]
-@@ -115,12 +117,13 @@
+@@ -82,6 +85,7 @@
+             max_field_align: 0,
+             last_field_was_bitfield: false,
+             last_field_was_flexible_array: false,
++            offset_is_emitted: true,
+         }
+     }
+ 
+@@ -107,6 +111,7 @@
+         debug!("saw vtable for {}", self.name);
+ 
+         let ptr_size = self.ctx.target_pointer_size();
++        self.note_where_it_lands(Layout::new(ptr_size, ptr_size));
+         self.latest_offset += ptr_size;
+         self.latest_field_layout = Some(Layout::new(ptr_size, ptr_size));
+         self.max_field_align = ptr_size;
+@@ -115,12 +120,13 @@
      /// The bytes the field written for a base class takes up, which is the
      /// size of the type that field is *written* as: the substitute, where a
      /// `replaces=` annotation stood one in for the type the class was declared
@@ -620,7 +909,23 @@ anything C++ laid out is already a whole number of its alignment.
          }
      }
  
-@@ -168,20 +171,18 @@
+@@ -128,6 +134,7 @@
+     pub(crate) fn saw_base_with_layout(&mut self, layout: Layout) {
+         debug!("saw base for {}", self.name);
+         self.align_to_latest_field(layout);
++        self.note_where_it_lands(layout);
+ 
+         // A packed struct does not align its bases any more than it aligns
+         // its fields, which is what `align_to_latest_field` returns early
+@@ -152,6 +159,7 @@
+         debug!("saw bitfield unit for {}: {layout:?}", self.name);
+ 
+         self.align_to_latest_field(layout);
++        self.note_where_it_lands(layout);
+ 
+         self.latest_offset += layout.size;
+ 
+@@ -168,20 +176,18 @@
  
      /// Returns a padding field if necessary for a given new field _before_
      /// adding that field.
@@ -647,7 +952,7 @@ anything C++ laid out is already a whole number of its alignment.
              TypeKind::Array(..)
          ) && field_layout.align > MAX_GUARANTEED_ALIGN
          {
-@@ -206,11 +207,13 @@
+@@ -206,11 +212,13 @@
          let will_merge_with_bitfield = self.align_to_latest_field(field_layout);
  
          let is_union = self.comp.is_union();
@@ -664,7 +969,7 @@ anything C++ laid out is already a whole number of its alignment.
                  if will_merge_with_bitfield ||
                      field_layout.align == 0 ||
                      is_union
-@@ -225,14 +228,37 @@
+@@ -225,14 +233,36 @@
                      self.padding_bytes(l)
                  } else {
                      0
@@ -689,23 +994,22 @@ anything C++ laid out is already a whole number of its alignment.
 +            // one out, in bytes: a packed class does not align its fields, so
 +            // the run need not be a whole number of anything.
 +            //
-+            // Only where the class is packed to a single byte, which is where
-+            // the offset this is measured from is the offset the emitted struct
-+            // has. `#pragma pack(N)` for a wider `N` still aligns each field to
-+            // the smaller of its own alignment and `N`, and this tracker does
-+            // not model that - it skips aligning a packed class's fields and
-+            // bases at all - so the offset it has reached can be behind the one
-+            // Rust lays the field out at, and a run written from the difference
-+            // would push every field after it along. There, Rust's own
-+            // alignment closes the gap as it did before this.
++            // The run is measured from the offset this tracker has reached, so
++            // it is the run the emitted struct has only while that offset is
++            // the emitted one - and only where the field after it then lands
++            // where the target put the member rather than past it. Otherwise
++            // every field after the run moves along, which is a worse answer
++            // than the short one; there Rust's own alignment closes the gap as
++            // it did before this.
 +            (from_the_offset &&
 +                padding_bytes != 0 &&
-+                self.known_type_layout.is_none_or(|l| l.align == 1))
++                self.offset_is_emitted &&
++                self.lands_where_it_is_counted(field_layout))
 +            .then(|| Layout::new(padding_bytes, 1))
          } else {
              let force_padding = self.ctx.options().force_explicit_padding;
  
-@@ -258,6 +284,17 @@
+@@ -258,6 +288,17 @@
              } else {
                  cmp::min(field_layout.align, MAX_GUARANTEED_ALIGN)
              };
@@ -723,7 +1027,22 @@ anything C++ laid out is already a whole number of its alignment.
  
              if need_padding && padding_bytes != 0 {
                  Some(Layout::new(padding_bytes, padding_align))
-@@ -364,13 +401,11 @@
+@@ -266,6 +307,14 @@
+             }
+         };
+ 
++        // Bytes this counted which the emitted struct has not got: a run
++        // nothing was written for, and the field itself wherever the emitted
++        // struct does not put it here. Either leaves the offset below no
++        // longer the emitted one.
++        self.offset_is_emitted &= (padding_bytes == 0 ||
++            padding_layout.is_some()) &&
++            self.lands_where_it_is_counted(field_layout);
++
+         if is_union {
+             self.latest_offset =
+                 cmp::max(self.latest_offset, field_layout.size);
+@@ -364,13 +413,11 @@
              } else if padding_bytes % layout.align == 0 {
                  Layout::new(padding_bytes, layout.align)
              } else {
@@ -742,6 +1061,39 @@ anything C++ laid out is already a whole number of its alignment.
                  // field's.
                  Layout::new(padding_bytes, 1)
              };
+@@ -407,6 +454,32 @@
+         align_to(self.latest_offset, layout.align) - self.latest_offset
+     }
+ 
++    /// Whether the emitted struct puts a field of `layout` exactly where this
++    /// tracker counts it: starting at `latest_offset`, `layout.size` bytes
++    /// wide.
++    ///
++    /// A packed class is the case this is asked about. `#[repr(packed(N))]`
++    /// aligns each field to the smaller of the field's own alignment and `N`,
++    /// which this tracker does not apply to one - it adds each field's size and
++    /// no more - and a Rust type is a whole number of its own alignment wide
++    /// even where the layout it was written from is not, which an `aligned`
++    /// attribute makes it. The two agree until one of those moves a field, and
++    /// a run of bytes measured from this offset is the emitted struct's run
++    /// only while they do.
++    fn lands_where_it_is_counted(&self, layout: Layout) -> bool {
++        let align = cmp::max(layout.align, 1);
++        let pack =
++            cmp::max(self.known_type_layout.map_or(1, |l| l.align), 1);
++        self.latest_offset % cmp::min(align, pack) == 0 &&
++            align_to(layout.size, align) == layout.size
++    }
++
++    /// Record whether what is about to be added lands where it is counted, for
++    /// the callers which add to `latest_offset` themselves.
++    fn note_where_it_lands(&mut self, layout: Layout) {
++        self.offset_is_emitted &= self.lands_where_it_is_counted(layout);
++    }
++
+     fn padding_field(&mut self, layout: Layout) -> proc_macro2::TokenStream {
+         let ty = helpers::blob(self.ctx, layout, false);
+         let padding_count = self.padding_count;
 --- a/codegen/helpers.rs
 +++ b/codegen/helpers.rs
 @@ -95,17 +95,28 @@
