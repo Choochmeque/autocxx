@@ -112,6 +112,12 @@ jobs:
         id: testsuite
         shell: bash
       - run: cargo test --workspace ${{steps.testsuite.outputs.exclude}}
+      # `cxx-maps` is off by default - it compiles a `std::map` instantiation
+      # per supported key/value pair, which is not a bill to hand someone who
+      # never asks for a map - so the run above builds none of it. Its own
+      # step, on every leg of the matrix, because the glue is C++ and the
+      # compilers differ.
+      - run: cargo test -p autocxx --features cxx-maps
 
   # Every other job runs on nightly, beta or stable, so nothing checks that we
   # still build on the version `rust-version` in Cargo.toml promises. Compile
@@ -292,7 +298,12 @@ jobs:
           # reading as a leak - fixed years ago when std moved to gimli.
           ASAN_OPTIONS: "detect_stack_use_after_return=1:detect_leaks=1"
           RUST_BACKTRACE: "1"
-        run: cargo -Z build-std test --workspace --target x86_64-unknown-linux-gnu --exclude autocxx-macro
+        # `cxx-maps` on, for the leak detection above: `CxxMap` owns its C++
+        # map and the vectors `keys` and `values` hand back, and dropping one
+        # of those on the floor is the bug class this job is watching for. The
+        # C++ in `src/cxx_map.cc` is no more instrumented than the rest of the
+        # C++ here, so what this checks is the Rust side of that ownership.
+        run: cargo -Z build-std test --workspace --features autocxx/cxx-maps --target x86_64-unknown-linux-gnu --exclude autocxx-macro
 
   force-wrapper-generation:
     name: Test forcing wrapper generation
@@ -322,6 +333,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --tests -- -Dclippy::all
+      # As with the test job: nothing above compiles the `std::map` glue,
+      # because `cxx-maps` is not a default feature.
+      - run: cargo clippy -p autocxx --all-targets --features cxx-maps -- -Dclippy::all
 
   # Mention outdated dependencies
   outdated:

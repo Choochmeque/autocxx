@@ -102,6 +102,7 @@ name = "autocxx"
 version = "0.30.0"
 dependencies = [
  "autocxx-macro",
+ "cc",
  "cxx",
  "cxx-build",
  "moveit",

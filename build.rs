@@ -16,6 +16,7 @@ fn main() {
         }
     }
     build_c_type_vector_glue();
+    build_cxx_map_glue();
 }
 
 /// Compile the C++ half of the `std::vector`, `std::unique_ptr`,
@@ -75,6 +76,32 @@ fn expected_wchar_t_size() -> &'static str {
 /// `cxx-build`.
 #[cfg(not(feature = "c-type-vectors"))]
 fn build_c_type_vector_glue() {}
+
+/// Compile the `std::map` shims which `src/cxx_map.rs` declares for every
+/// key/value pair `autocxx::CxxMap` supports.
+///
+/// Its own static library rather than a file added to the bridge above, so
+/// that a consumer who links none of these maps links none of this object
+/// code: there is a lot of it, one `std::map` instantiation per pair. Plain
+/// C++ with no cxx bridge in it, so `cc` alone builds it.
+///
+/// Uninstrumented by the `AUTOCXX_ASAN` mode for the reason given above.
+#[cfg(feature = "cxx-maps")]
+fn build_cxx_map_glue() {
+    println!("cargo:rerun-if-changed=src/cxx_map.cc");
+    println!("cargo:rerun-if-changed=src/cxx_map.h");
+    cc::Build::new()
+        .cpp(true)
+        .file("src/cxx_map.cc")
+        .include("src")
+        .std("c++14")
+        .define("AUTOCXX_WCHAR_T_SIZE", expected_wchar_t_size())
+        .compile("autocxx-cxx-map");
+}
+
+/// Without the feature there is no `CxxMap` to have glue for.
+#[cfg(not(feature = "cxx-maps"))]
+fn build_cxx_map_glue() {}
 
 fn rustc_version() -> Option<String> {
     let rustc = std::env::var_os("RUSTC")?;
