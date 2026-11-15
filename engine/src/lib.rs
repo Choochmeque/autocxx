@@ -494,7 +494,8 @@ impl IncludeCppEngine {
             .map(|t| {
                 // `Default` because we ask bindgen to derive it for the
                 // structs it generates, so that a struct containing bitfields
-                // can be built in Rust at all (see google/autocxx#1478), and
+                // can be built in Rust without naming each field bindgen
+                // added to it (see google/autocxx#1478), and
                 // bindgen assumes these types of ours are as default-able as
                 // anything else it emits - which they are, whenever what they
                 // wrap is. It has to be the `derive`, not a hand-written impl:

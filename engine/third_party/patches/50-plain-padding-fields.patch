@@ -1,0 +1,46 @@
+Subject: Write padding fields as plain blobs rather than opaque-marked ones
+
+With `use_opaque_newtype_wrapper` on, `helpers::blob` wraps the blob it builds
+in `__bindgen_marker_Opaque<...>`, which tells a downstream tool that the field
+holds a value of some type bindgen could not describe and that its contents are
+to be kept out of reach. That is right for an opaque type or an opaque base. It
+is not right for padding: the bytes between and after the fields hold no value
+at all and any bit pattern is fine in them. Behind the marker, Rust code which
+builds such a struct by hand can only fill the padding with the marker's
+`Default` and can never read or write it as the bytes it is, and a tool reading
+the bindings is told the struct holds opaque data it does not.
+
+Write the padding the struct layout tracker inserts (between fields and at the
+tail) and the run between a struct's bases and its first field as the plain
+blob `helpers::blob_inner` builds: an integer or an array of them for alignment
+up to four, an `__BindgenOpaqueArray` for an array longer than the derive limit
+or for alignment above four. Opaque types, opaque bases and union storage keep
+the marker.
+
+Based on adetaylor/rust-bindgen#15 by tchebb.
+
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -3266,7 +3266,8 @@
+                     padding_layout,
+                     None,
+                 );
+-                let ty = helpers::blob(ctx, padding_layout, false);
++                // Padding, not an opaque value: written as the plain blob.
++                let ty = helpers::blob_inner(ctx, padding_layout, false);
+                 let access_spec = access_specifier(visibility);
+                 fields.push(quote! {
+                     #access_spec __bindgen_padding_bases: #ty,
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -443,7 +443,9 @@
+     }
+ 
+     fn padding_field(&mut self, layout: Layout) -> proc_macro2::TokenStream {
+-        let ty = helpers::blob(self.ctx, layout, false);
++        // Padding holds no value of the type's, so it is written as the plain
++        // blob, never wrapped as opaque: it can be named and filled by hand.
++        let ty = helpers::blob_inner(self.ctx, layout, false);
+         let padding_count = self.padding_count;
+ 
+         self.padding_count += 1;

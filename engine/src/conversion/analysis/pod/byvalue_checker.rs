@@ -570,10 +570,8 @@ impl ByValueChecker {
                 // Bytes bindgen inserted to reproduce the C++ layout. They
                 // hold nothing, so they neither block POD-ness nor depend on
                 // any type we'd have to settle first. Say so by name rather
-                // than by type: what the field is for does not depend on which
-                // shape bindgen chose to write the padding out in, and it has
-                // written it as a blob and as a plain byte array at different
-                // times.
+                // than by type: long or over-aligned padding is written as an
+                // `__BindgenOpaqueArray`, which this walk cannot settle.
                 continue;
             }
             // `T arr[N]` holds N of `T` by value, so `T` decides whether the
@@ -1291,5 +1289,34 @@ mod tests {
         bvc.ingest_struct(&t, &Namespace::new());
         bvc.satisfy_requests(vec![t_id.clone()]).unwrap();
         assert!(bvc.is_pod(&t_id));
+    }
+
+    /// Every shape bindgen writes padding in leaves the struct POD.
+    #[test]
+    fn test_padding_shapes_are_pod() {
+        use quote::ToTokens;
+        use syn::Type;
+        let shapes: [Type; 5] = [
+            parse_quote! { __bindgen_marker_Opaque<u16> },
+            parse_quote! { u16 },
+            parse_quote! { [u8; 3usize] },
+            parse_quote! { root::__BindgenOpaqueArray<[u8; 40usize]> },
+            parse_quote! { root::__BindgenOpaqueArray8<[u8; 8usize]> },
+        ];
+        for shape in shapes {
+            let mut bvc = ByValueChecker::new();
+            let t: ItemStruct = parse_quote! {
+                struct Foo {
+                    a: u8,
+                    __bindgen_padding_0: #shape,
+                    b: u64,
+                    __bindgen_padding_1: #shape,
+                }
+            };
+            let t_id = ty_from_ident(&t.ident);
+            bvc.ingest_struct(&t, &Namespace::new());
+            bvc.satisfy_requests(vec![t_id.clone()]).unwrap();
+            assert!(bvc.is_pod(&t_id), "{}", shape.to_token_stream());
+        }
     }
 }
