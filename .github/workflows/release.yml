@@ -212,6 +212,22 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+      - name: Create the release
+        # An annotated tag's message is the hand-written part of the notes and
+        # goes first; the generated pull request list, shaped by
+        # .github/release.yml, follows it. A lightweight tag has no message, and
+        # `%(contents)` of one would be the commit's, so it gets the list alone.
+        # Subject and body rather than `%(contents)`, which on a signed tag
+        # carries the signature too.
+        run: |
+          notes=
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag ]; then
+            notes=$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$GITHUB_REF_NAME")
+          fi
+          if [ -n "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag --notes "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
         env:
           GH_TOKEN: ${{ github.token }}

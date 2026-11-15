@@ -159,8 +159,11 @@ To make a new release:
   ordinary pull request; the workflow never edits a manifest, and refuses a tag
   which disagrees with one.
 * Merge that pull request.
-* Tag the merged commit `vNEW` and push the tag. The workflow refuses a tag
-  pointing anywhere but main.
+* Tag the merged commit `vNEW` with an annotated tag, `git tag -a vNEW`, and
+  push the tag. The workflow refuses a tag pointing anywhere but main. The
+  tag's message is the hand-written opening of the release notes: what the
+  release is about, and anything the pull request list below it cannot say,
+  such as upstream work pulled in by a merge rather than a pull request.
 
 The workflow runs three jobs. `gate` holds no publishing credential: it checks
 the tag's commit and versions, then packages and builds all seven crates from
@@ -169,7 +172,10 @@ hands on the flattened bindgen sources it built, so that what reaches crates.io
 is what it checked. `publish` mints a crates.io token, valid for thirty minutes,
 as its last step before uploading; it compiles nothing, because the OIDC claim a
 token is minted from is reachable by every step of the job that holds it, build
-scripts included. `github-release` creates the release with generated notes.
+scripts included. `github-release` creates the release: the tag's message
+first, then the list of pull requests merged since the previous release, which
+`.github/release.yml` shapes - it leaves dependabot's bumps out. A lightweight
+tag gets the list alone.
 
 `publish` runs in a github environment named `release`, which is where required
 reviewers go if you want a manual gate between the tag and the upload.
