@@ -17451,13 +17451,20 @@ fn test_bitfield_after_a_substituted_base_is_not_placed_early() {
         rs,
         directives_from_lists(&["fx_Bits", "fx_bits_sizeof", "fx_bits_alignof"], &[], None),
         None,
-        // How many bytes the run is depends on the ABI - nine on Itanium,
-        // sixteen where a base lends no tail padding - so what is read here is
-        // that it is written, and written where the base field ends.
-        Some(make_rust_code_finder(vec![quote! {
-            pub _base: root::fx_BitTail,
-            pub __bindgen_padding_bases:
-        }])),
+        // The run ends where the members start, which depends on the ABI - at
+        // nine on Itanium, sixteen where a base lends no tail padding - and its
+        // type follows its length (`u8` for one byte, `[u8; N]` above). So what
+        // is read here is that it is written, where the base field ends, and
+        // not behind the opaque marker.
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                pub _base: root::fx_BitTail,
+                pub __bindgen_padding_bases:
+            }]),
+            make_string_absence_finder(vec![
+                "__bindgen_padding_bases : __bindgen_marker_Opaque".to_string()
+            ]),
+        ])),
         None,
     );
 }
@@ -30655,6 +30662,69 @@ fn test_no_zero_filled_default_for_enum_field() {
 }
 
 #[test]
+/// A POD struct with padding can be built from Rust with a struct literal
+/// which writes the padding as the bytes it is.
+///
+/// The enum field has no zero discriminant, so the struct has no `Default` and
+/// Rust builds one by naming every field. The bitfield leaves three bytes of
+/// tail padding, which bindgen writes as a field of its own; the absence check
+/// pins that it is not written behind the opaque marker, whose field is private.
+fn test_pod_struct_with_padding_built_by_literal() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum fx_Mode : uint8_t { fx_A = 1, fx_B = 2 };
+        struct fx_Padded {
+            fx_Mode m;
+            uint32_t a;
+            uint8_t flag : 3;
+        };
+        inline bool fx_check_padded(fx_Padded p) {
+            return p.m == fx_B && p.a == 0x01020304u && p.flag == 5;
+        }
+        inline fx_Padded fx_make_padded() {
+            fx_Padded p = {fx_A, 7u, 3};
+            return p;
+        }
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::fx_Padded: Default);
+        let p = ffi::fx_Padded {
+            m: ffi::fx_Mode::fx_B,
+            a: 0x01020304,
+            _bitfield_1: ffi::fx_Padded::new_bitfield_1(5),
+            __bindgen_padding_0: [0u8; 3],
+        };
+        assert!(ffi::fx_check_padded(p));
+        let q = ffi::fx_make_padded();
+        assert!(matches!(q.m, ffi::fx_Mode::fx_A));
+        assert_eq!(q.a, 7);
+        assert_eq!(q.flag(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            enum_style!(RustifiedEnum, "fx_Mode")
+            generate_pod!("fx_Mode")
+            generate_pod!("fx_Padded")
+            generate!("fx_check_padded")
+            generate!("fx_make_padded")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                pub __bindgen_padding_0: [u8; 3usize],
+            }]),
+            make_string_absence_finder(vec![
+                "__bindgen_padding_0 : __bindgen_marker_Opaque".to_string()
+            ]),
+        ])),
+        None,
+    );
+}
+
+#[test]
 /// Turning on bindgen's `derive_default` must not put `Default` into an
 /// enum's derive list, which rustc rejects outright: E0665, because bindgen
 /// marks no variant `#[default]`.
@@ -30727,8 +30797,8 @@ fn test_take_bitfield() {
         // for the types that must *not* get one.
         static_assertions::assert_impl_all!(ffi::Bitfieldy: Default);
 
-        // `Default` gives us the bitfield allocation units and the padding
-        // bindgen inserted, none of which can be written by hand. The
+        // `Default` fills in the bitfield allocation units and the padding
+        // bindgen inserted, which a struct literal would have to name. The
         // functional-record-update form (`..Default::default()`) would be
         // tidier, but autocxx gives every type with a destructor a `Drop`
         // impl, and Rust won't move fields out of one of those.
