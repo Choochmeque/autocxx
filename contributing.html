@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-cfc2d36d.js";
+            window.path_to_searchindex_js = "searchindex-6e20fc0a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -302,8 +302,11 @@ working tree carrying anything the tag does not. The version bump is an
 ordinary pull request; the workflow never edits a manifest, and refuses a tag
 which disagrees with one.</li>
 <li>Merge that pull request.</li>
-<li>Tag the merged commit <code>vNEW</code> and push the tag. The workflow refuses a tag
-pointing anywhere but main.</li>
+<li>Tag the merged commit <code>vNEW</code> with an annotated tag, <code>git tag -a vNEW</code>, and
+push the tag. The workflow refuses a tag pointing anywhere but main. The
+tag’s message is the hand-written opening of the release notes: what the
+release is about, and anything the pull request list below it cannot say,
+such as upstream work pulled in by a merge rather than a pull request.</li>
 </ul>
 <p>The workflow runs three jobs. <code>gate</code> holds no publishing credential: it checks
 the tag’s commit and versions, then packages and builds all seven crates from
@@ -312,7 +315,10 @@ hands on the flattened bindgen sources it built, so that what reaches crates.io
 is what it checked. <code>publish</code> mints a crates.io token, valid for thirty minutes,
 as its last step before uploading; it compiles nothing, because the OIDC claim a
 token is minted from is reachable by every step of the job that holds it, build
-scripts included. <code>github-release</code> creates the release with generated notes.</p>
+scripts included. <code>github-release</code> creates the release: the tag’s message
+first, then the list of pull requests merged since the previous release, which
+<code>.github/release.yml</code> shapes - it leaves dependabot’s bumps out. A lightweight
+tag gets the list alone.</p>
 <p><code>publish</code> runs in a github environment named <code>release</code>, which is where required
 reviewers go if you want a manual gate between the tag and the upload.</p>
 <p>The workflow can also be started by hand, from Actions → Release → Run
