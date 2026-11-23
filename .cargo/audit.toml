@@ -5,12 +5,7 @@
 # directory gets whatever policy that finds instead.
 
 [advisories]
-# atty 0.2.14, in the graph only through clap 3 (autocxx-gen, autocxx-reduce
-# and the mdbook preprocessor): a Windows-only unaligned read which needs a
-# custom global allocator to bite. Parked with the clap 3 -> 4 migration, which
-# is what removes the crate. RUSTSEC-2024-0375, unmaintained against the same
-# crate, is left reported as a warning.
-ignore = ["RUSTSEC-2021-0145"]
+ignore = []
 
 [output]
 # cargo-audit files unsoundness as a warning, so an unconfigured run exits 0 on
