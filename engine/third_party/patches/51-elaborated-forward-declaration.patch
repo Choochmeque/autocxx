@@ -1,0 +1,44 @@
+Subject: Recognise a class declared only by an elaborated type specifier
+
+`struct b f();` declares `b` as well as `f`: where nothing else in the header
+mentions `b`, the elaborated type specifier in the return type is the only
+declaration it ever gets, and it is an incomplete type. bindgen emits it as
+`#[derive(Default)] pub struct b { pub _address: u8 }`, which is what it writes
+for an empty class that has a definition, where a class declared on a line of
+its own comes out `pub struct b { _unused: [u8; 0] }`. Nothing downstream can
+tell the first from `struct b {};`, so autocxx goes on to write C++ which
+allocates, moves and destroys a `b`, none of which compiles.
+
+`CompInfo::from_ty` decides `is_forward_declaration` from the cursor which led
+it to the type rather than from the type. A declaration cursor is asked whether
+it is the definition, a parameter is assumed to name something undefined, and
+every other kind - the function or method whose return type it is, a field, a
+variable, a typedef - is assumed to name something defined. That last guess is
+the one which is wrong here.
+
+For those other kinds, ask the type's own declaration whether clang has a
+definition for it anywhere in the translation unit. A class defined further
+down the header has one and is unaffected; the two existing arms are left as
+they are.
+
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -1730,7 +1730,17 @@
+                 CXCursor_ParmDecl => true,
+                 CXCursor_StructDecl | CXCursor_UnionDecl |
+                 CXCursor_ClassDecl => !cur.is_definition(),
+-                _ => false,
++                // Any other cursor is a use of the type, not a declaration of
++                // it, so its kind says nothing either way: the definition may
++                // be elsewhere in the header, or nowhere. Ask the declaration.
++                _ => {
++                    matches!(
++                        cursor.kind(),
++                        CXCursor_StructDecl |
++                            CXCursor_UnionDecl |
++                            CXCursor_ClassDecl
++                    ) && cursor.definition().is_none()
++                }
+             });
+ 
+         let mut maybe_anonymous_struct_field = None;
