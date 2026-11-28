@@ -110,8 +110,10 @@ pub enum ConvertErrorFromCpp {
     CppArrayInTemplateArgument(String),
     #[error("This function or method has a 'std::array' whose element cannot cross by value ({0}). cxx spells a Rust '[T; N]' as 'std::array<T, N>' and moves the array whole, so the element has to be a type which crosses by value itself: one of cxx's atoms; an integer whose width the platform chooses, which reaches Rust as an 'autocxx::c_*' newtype; or a class or enum autocxx passes by value, which for a class means one 'generate_pod!' accepts. A class autocxx can hold only behind a pointer is none of those - it is not known to be trivially relocatable, and moving an array of them is not moving their bytes.")]
     CppArrayElementNotSupported(String),
-    #[error("Pointer pointed to another pointer, which is not yet supported")]
-    InvalidPointerPointee,
+    #[error("This signature has an rvalue reference to a pointer (a 'T*&&'), which is not yet supported. autocxx passes an rvalue reference parameter as something safe Rust can build, and a pointer handed to C++ that way would be one nobody had promised was valid.")]
+    RValueReferenceToPointer,
+    #[error("This signature has a 'volatile' more than one pointer or reference deep - a 'volatile T**', say, or a 'volatile T*&'. The bridge has no way to write the qualifier, so the C++ autocxx generates declares the type without it and leaves C++ to convert between the two, and C++ will not: it refuses to turn a 'T**' into a 'volatile T**', and to turn a returned 'volatile T**' into anything less qualified. The one conversion it does make is for a parameter in which every level above the qualifier is 'const', as in 'volatile T* const*', and that is bound.")]
+    BuriedVolatile,
     #[error("Pointer pointed to something unsupported (autocxx only supports pointers to named types): {0}")]
     InvalidPointee(String),
     #[error("The 'generate' or 'generate_pod' directive for '{0}' did not result in any code being generated. Perhaps this was mis-spelled or you didn't qualify the name with any namespaces? Otherwise please report a bug.")]

@@ -14365,18 +14365,22 @@ fn test_vec_and_up_of_primitives() {
 
 #[test]
 fn test_pointer_to_pointer() {
-    // Just ensures the troublesome API is ignored
+    // The pointee's pointee is only forward-declared where the method is.
     let hdr = indoc! {"
         namespace operations_research {
         class a;
         class Solver {
         public:
-          struct b c(a **);
+          bool c(a **p) { return *p == nullptr; }
         };
         class a {};
         } // namespace operations_research
     "};
-    let rs = quote! {};
+    let rs = quote! {
+        let mut solver = ffi::operations_research::Solver::new().within_unique_ptr();
+        let mut p: *mut ffi::operations_research::a = std::ptr::null_mut();
+        assert!(unsafe { solver.pin_mut().c(&mut p) });
+    };
     run_test("", hdr, rs, &["operations_research::Solver"], &[]);
 }
 
@@ -14422,22 +14426,22 @@ fn test_pod_with_typedef_pointer_to_pointer_field() {
 #[test]
 fn test_typedef_pointer_to_pointer_in_signature() {
     // The alias survives its own definition - which the explicit `generate!`
-    // for it insists on, since a directive yielding nothing usable is an error,
-    // and which the Rust body then uses. A signature still can't take one, so
-    // the method goes, leaving behind the documented stub which says why. That
-    // reason is the point: before, the method went too, but for the second-hand
-    // reason that a type it mentioned had been ignored.
+    // for it insists on, since a directive yielding nothing usable is an error
+    // - and a signature takes it as the pointer to a pointer it names.
     // https://github.com/google/autocxx/issues/1278
     let hdr = indoc! {"
         typedef float** Matrix;
         class Bob {
         public:
-            void take_matrix(Matrix m);
+            float take_matrix(Matrix m) { return **m; }
         };
     "};
     let rs = quote! {
-        let m: ffi::Matrix = std::ptr::null_mut();
-        assert!(m.is_null());
+        let mut cell: f32 = 3.0;
+        let mut row: *mut f32 = &mut cell;
+        let m: ffi::Matrix = &mut row;
+        let mut bob = ffi::Bob::new().within_unique_ptr();
+        assert_eq!(unsafe { bob.pin_mut().take_matrix(m) }, 3.0);
     };
     run_test_ex(
         "",
@@ -14448,9 +14452,7 @@ fn test_typedef_pointer_to_pointer_in_signature() {
             generate!("Matrix")
         },
         None,
-        Some(make_string_finder(vec![
-            "Pointer pointed to another pointer".to_string(),
-        ])),
+        None,
         None,
     );
 }
@@ -14500,10 +14502,7 @@ fn test_pod_with_using_alias_pointer_to_pointer_field() {
 
 #[test]
 fn test_pod_with_typedef_triple_pointer_field() {
-    // One level of nesting and no more. The outer pointer of a typedef target
-    // is not judged where it is written, but its pointee is converted as
-    // though behind a reference, exactly as a struct field's is, so `Cube` is
-    // still refused with `InvalidPointerPointee` and `Bob` cannot be POD.
+    // Any depth: a pointer is data whatever it points at.
     // https://github.com/google/autocxx/issues/1278
     let hdr = indoc! {"
         #include <cstdint>
@@ -14513,37 +14512,34 @@ fn test_pod_with_typedef_triple_pointer_field() {
             Cube data;
         };
     "};
-    let rs = quote! {};
-    run_test_expect_fail_with_error(
-        "",
-        hdr,
-        rs,
-        &[],
-        &["Bob"],
-        "dependent type Cube isn't known",
-    );
+    let rs = quote! {
+        let mut cell: f32 = 3.0;
+        let mut row: *mut f32 = &mut cell;
+        let mut plane: *mut *mut f32 = &mut row;
+        let b = ffi::Bob { a: 12, data: &mut plane };
+        assert_eq!(b.a, 12);
+        assert_eq!(unsafe { ***b.data }, 3.0);
+    };
+    run_test("", hdr, rs, &[], &["Bob"]);
 }
 
 #[test]
 fn test_typedef_to_pointer_to_pointer_to_pointer_alias() {
-    // `Deep` is `float***` however it is spelled, and is refused as such.
-    //
-    // It used to depend on the spelling. While `Matrix` was thrown away at its
-    // own definition, `Deep` inherited the failure and became an opaque
-    // stand-in - and `take` generated against that, taking a reference to a
-    // type cxx knew nothing about but could pass along. The same C++ type
-    // written `typedef float*** Deep` got no such treatment: it was refused
-    // outright and `take` was dropped. Now that `Matrix` survives, `Deep`
-    // resolves through it and both spellings are refused alike, which is worth
-    // the one binding the inconsistency was handing out.
+    // `Deep` is `float***` however it is spelled, and is bound as such.
     // https://github.com/google/autocxx/issues/1278
     let hdr = indoc! {"
         typedef float** Matrix;
         typedef Matrix* Deep;
-        inline void take(const Deep& d) { (void)d; }
+        inline float take(const Deep& d) { return ***d; }
     "};
-    let rs = quote! {};
-    run_test_expect_fail_with_error("", hdr, rs, &["take"], &[], "InvalidPointerPointee");
+    let rs = quote! {
+        let mut cell: f32 = 3.0;
+        let mut row: *mut f32 = &mut cell;
+        let mut plane: *mut *mut f32 = &mut row;
+        let deep: *mut *mut *mut f32 = &mut plane;
+        assert_eq!(ffi::take(&deep), 3.0);
+    };
+    run_test("", hdr, rs, &["take"], &[]);
 }
 
 #[test]
@@ -34033,6 +34029,459 @@ fn test_static_method_with_pointer_to_const_pointer_to_const_pointer_argument() 
         &["fx_Deep"],
         &[],
     );
+}
+
+/// A pointer to a pointer with no `const` anywhere, which is the bridge's
+/// `*mut *mut T` and C++'s `T**`.
+#[test]
+fn test_pointer_to_pointer_argument() {
+    let hdr = indoc! {"
+        inline int fx_sum_through(int** items, int n) {
+            int total = 0;
+            for (int i = 0; i < n; i++) total += *items[i];
+            return total;
+        }
+        struct fx_PtrSummer {
+            static int sum(int** items, int n) { return fx_sum_through(items, n); }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(3);
+            let mut b = autocxx::c_int(4);
+            let mut items = [std::ptr::addr_of_mut!(a), std::ptr::addr_of_mut!(b)];
+            assert_eq!(
+                unsafe { ffi::fx_sum_through(items.as_mut_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(7)
+            );
+            assert_eq!(
+                unsafe { ffi::fx_PtrSummer::sum(items.as_mut_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(7)
+            );
+        },
+        &["fx_sum_through", "fx_PtrSummer"],
+        &[],
+    );
+}
+
+/// The same parameter on a virtual member function of a class Rust holds
+/// behind a pointer.
+#[test]
+fn test_method_with_pointer_to_pointer_argument() {
+    let hdr = indoc! {"
+        class fx_PtrOffset {
+        public:
+            fx_PtrOffset(int base) : base(base) {}
+            virtual ~fx_PtrOffset() {}
+            virtual int sum(int** items, int n) const {
+                int total = base;
+                for (int i = 0; i < n; i++) total += *items[i];
+                return total;
+            }
+        private:
+            int base;
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let offset = ffi::fx_PtrOffset::new(autocxx::c_int(10)).within_unique_ptr();
+            let mut a = autocxx::c_int(3);
+            let mut b = autocxx::c_int(4);
+            let mut items = [std::ptr::addr_of_mut!(a), std::ptr::addr_of_mut!(b)];
+            assert_eq!(
+                unsafe { offset.sum(items.as_mut_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(17)
+            );
+        },
+        &["fx_PtrOffset"],
+        &[],
+    );
+}
+
+/// A pointer to a pointer coming back, written through from Rust and read
+/// again in C++.
+#[test]
+fn test_function_returning_pointer_to_pointer() {
+    let hdr = indoc! {"
+        struct fx_PtrTable {
+            static int** slots() {
+                static int a = 5;
+                static int b = 6;
+                static int* table[2] = { &a, &b };
+                return table;
+            }
+            static int second() { return *slots()[1]; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let slots = ffi::fx_PtrTable::slots();
+            assert_eq!(unsafe { **slots }, autocxx::c_int(5));
+            unsafe { **slots.add(1) = autocxx::c_int(9) };
+            assert_eq!(ffi::fx_PtrTable::second(), autocxx::c_int(9));
+        },
+        &["fx_PtrTable"],
+        &[],
+    );
+}
+
+/// `const` at one level and not at another, in each of the places it can sit.
+#[test]
+fn test_pointer_to_pointer_argument_with_mixed_constness() {
+    let hdr = indoc! {"
+        struct fx_MixedConst {
+            static int innermost(const int** p) { return **p; }
+            static int outermost(int** const* p) { return ***p; }
+            static int middle(int* const** p) { return ***p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(9);
+            let mut to_const: *const autocxx::c_int = std::ptr::addr_of!(a);
+            assert_eq!(
+                unsafe { ffi::fx_MixedConst::innermost(std::ptr::addr_of_mut!(to_const)) },
+                autocxx::c_int(9)
+            );
+            let mut p = std::ptr::addr_of_mut!(a);
+            let pp = std::ptr::addr_of_mut!(p);
+            assert_eq!(
+                unsafe { ffi::fx_MixedConst::outermost(std::ptr::addr_of!(pp)) },
+                autocxx::c_int(9)
+            );
+            let mut pp_const: *const *mut autocxx::c_int = std::ptr::addr_of!(p);
+            assert_eq!(
+                unsafe { ffi::fx_MixedConst::middle(std::ptr::addr_of_mut!(pp_const)) },
+                autocxx::c_int(9)
+            );
+        },
+        &["fx_MixedConst"],
+        &[],
+    );
+}
+
+/// Three levels, which no position used to admit.
+#[test]
+fn test_pointer_to_pointer_to_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_ThreeDeep {
+            static void set(int*** p, int v) { ***p = v; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(1);
+            let mut p = std::ptr::addr_of_mut!(a);
+            let mut pp = std::ptr::addr_of_mut!(p);
+            unsafe { ffi::fx_ThreeDeep::set(std::ptr::addr_of_mut!(pp), autocxx::c_int(8)) };
+            assert_eq!(a, autocxx::c_int(8));
+        },
+        &["fx_ThreeDeep"],
+        &[],
+    );
+}
+
+/// `main`'s own signature, called with the pair `ArgvHolder` builds.
+#[test]
+fn test_argc_argv_argument() {
+    let hdr = indoc! {"
+        struct fx_Args {
+            static int total_length(int argc, char** argv) {
+                int total = 0;
+                for (int i = 0; i < argc; i++)
+                    for (const char* c = argv[i]; *c; c++) total++;
+                return argv[argc] == nullptr ? total : -1;
+            }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut args = autocxx::ArgvHolder::new(["engine", "--headless"]).unwrap();
+            assert_eq!(
+                unsafe {
+                    ffi::fx_Args::total_length(autocxx::c_int(args.argc()), args.argv())
+                },
+                autocxx::c_int(16)
+            );
+        },
+        &["fx_Args"],
+        &[],
+    );
+}
+
+/// A `void**` out-parameter.
+#[test]
+fn test_pointer_to_void_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_VoidOut {
+            static void lend(void** out) { static int x = 4; *out = &x; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut out: *mut autocxx::c_void = std::ptr::null_mut();
+            unsafe { ffi::fx_VoidOut::lend(std::ptr::addr_of_mut!(out)) };
+            assert_eq!(unsafe { *(out as *mut autocxx::c_int) }, autocxx::c_int(4));
+        },
+        &["fx_VoidOut"],
+        &[],
+    );
+}
+
+/// An out-parameter of class type: C++ allocates, and writes the address
+/// through the pointer Rust lent it.
+#[test]
+fn test_pointer_to_pointer_to_class_out_parameter() {
+    let hdr = indoc! {"
+        #include <string>
+        class fx_Widget {
+        public:
+            fx_Widget(int v) : v(v), name(\"widget\") {}
+            int get() const { return v; }
+            static void make(fx_Widget** out, int v) { *out = new fx_Widget(v); }
+            static void destroy(fx_Widget* w) { delete w; }
+        private:
+            int v;
+            std::string name;
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut widget: *mut ffi::fx_Widget = std::ptr::null_mut();
+            unsafe { ffi::fx_Widget::make(std::ptr::addr_of_mut!(widget), autocxx::c_int(11)) };
+            assert_eq!(unsafe { &*widget }.get(), autocxx::c_int(11));
+            unsafe { ffi::fx_Widget::destroy(widget) };
+        },
+        &["fx_Widget"],
+        &[],
+    );
+}
+
+/// A mutable reference to a pointer, which C++ uses to move the caller's
+/// pointer along.
+#[test]
+fn test_mutable_reference_to_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Cursor {
+            static void advance(int*& p) { ++p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut items = [autocxx::c_int(1), autocxx::c_int(2)];
+            let mut p = items.as_mut_ptr();
+            unsafe { ffi::fx_Cursor::advance(std::pin::Pin::new(&mut p)) };
+            assert_eq!(unsafe { *p }, autocxx::c_int(2));
+        },
+        &["fx_Cursor"],
+        &[],
+    );
+}
+
+/// The other direction: C++ calls a virtual function taking a pointer to a
+/// pointer, and a Rust subclass answers it.
+#[test]
+fn test_subclass_method_with_pointer_to_pointer_argument() {
+    let hdr = indoc! {"
+        class fx_PtrObserver {
+        public:
+            fx_PtrObserver() {}
+            virtual ~fx_PtrObserver() {}
+            virtual int total(int** items, int n) const {
+                int sum = 0;
+                for (int i = 0; i < n; i++) sum += *items[i];
+                return sum;
+            }
+        };
+        inline int fx_ask_total(const fx_PtrObserver& o) {
+            int a = 3;
+            int b = 4;
+            int* items[2] = { &a, &b };
+            return o.total(items, 2);
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let o = FxObserver::new_rust_owned(FxObserver { extra: 100, cpp_peer: Default::default() });
+            assert_eq!(ffi::fx_ask_total(o.borrow().as_ref()), autocxx::c_int(107));
+        },
+        quote! {
+            generate!("fx_ask_total")
+            subclass!("fx_PtrObserver",FxObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::fx_PtrObserver_methods;
+            #[autocxx::subclass::subclass]
+            pub struct FxObserver {
+                extra: i32
+            }
+            impl fx_PtrObserver_methods for FxObserver {
+                unsafe fn total(&self, items: *mut *mut autocxx::c_int, n: autocxx::c_int) -> autocxx::c_int {
+                    use ffi::fx_PtrObserver_supers;
+                    autocxx::c_int(self.extra + self.total_super(items, n).0)
+                }
+            }
+        }),
+    );
+}
+
+/// A `std::vector` whose elements are pointers to pointers, read through the
+/// holder a vector of pointers is lowered to.
+#[test]
+fn test_vector_of_pointers_to_pointers() {
+    let hdr = indoc! {"
+        #include <vector>
+        struct fx_Rows {
+            static std::vector<int**> make() {
+                static int a = 5;
+                static int* row = &a;
+                return { &row, nullptr };
+            }
+            static int first(const std::vector<int**>& rows) { return **rows[0]; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let rows = ffi::fx_Rows::make();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(unsafe { **rows.get(0).unwrap() }, autocxx::c_int(5));
+            assert!(rows.get(1).unwrap().is_null());
+            assert_eq!(ffi::fx_Rows::first(&rows), autocxx::c_int(5));
+        },
+        &["fx_Rows"],
+        &[],
+    );
+}
+
+/// An rvalue reference to a pointer is the one pointee still turned down. It
+/// would be a safe function, the argument being an `impl RValueParam`, handing
+/// C++ a pointer nobody vouched for. Neither a qualifier on the pointer nor an
+/// alias gets it past.
+#[test]
+fn test_rvalue_reference_to_pointer_is_refused() {
+    for declaration in [
+        "static int read(int*&& p) { return *p; }",
+        "static int read(int* const&& p) { return *p; }",
+        "static int read(int* volatile&& p) { return *p; }",
+        "static int read(int* const volatile&& p) { return *p; }",
+        "typedef int*&& Slot; static int read(Slot p) { return *p; }",
+        "typedef int* const&& Slot; static int read(Slot p) { return *p; }",
+        "typedef int* volatile&& Slot; static int read(Slot p) { return *p; }",
+    ] {
+        let hdr = format!("struct fx_Taker {{ {declaration} }};");
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {},
+            quote! { generate!("fx_Taker") },
+            None,
+            Some(make_string_finder(vec![
+                "rvalue reference to a pointer".to_string()
+            ])),
+            None,
+        );
+    }
+}
+
+/// A `volatile` more than one level in is bound where C++ will convert the
+/// unqualified type the wrapper takes into the one the function declared,
+/// which is where every level above the qualifier is `const`.
+#[test]
+fn test_volatile_beneath_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Buried {
+            static int read(volatile int* const* p) { return **p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(4);
+            let p = std::ptr::addr_of_mut!(a);
+            assert_eq!(
+                unsafe { ffi::fx_Buried::read(std::ptr::addr_of!(p)) },
+                autocxx::c_int(4)
+            );
+        },
+        &["fx_Buried"],
+        &[],
+    );
+}
+
+/// A field is exempt at any depth: it is data, and nothing converts it.
+#[test]
+fn test_pod_with_volatile_beneath_pointer_field() {
+    let hdr = indoc! {"
+        struct fx_Registers {
+            volatile int** bank;
+            volatile int*** banks;
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let r = ffi::fx_Registers { bank: std::ptr::null_mut(), banks: std::ptr::null_mut() };
+            assert!(r.bank.is_null());
+            assert!(r.banks.is_null());
+        },
+        &[],
+        &["fx_Registers"],
+    );
+}
+
+/// And refused where C++ will not: beneath a level which is not `const`, in a
+/// return, and whichever of those an alias was hiding.
+#[test]
+fn test_volatile_beneath_pointer_is_refused() {
+    for declaration in [
+        "static int read(volatile int** p) { return **p; }",
+        "static int read(int* volatile** p) { return ***p; }",
+        "static int read(volatile int*& p) { return *p; }",
+        "static volatile int** lend() { return nullptr; }",
+        "static volatile int* const* lend() { return nullptr; }",
+        "typedef volatile int* Reg; static int read(Reg* p) { return **p; }",
+        "typedef volatile int** Regs; static int read(Regs p) { return **p; }",
+    ] {
+        let hdr = format!("struct fx_Buried {{ {declaration} }};");
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {},
+            quote! { generate!("fx_Buried") },
+            None,
+            Some(make_string_finder(vec![
+                "more than one pointer or reference deep".to_string(),
+            ])),
+            None,
+        );
+    }
 }
 
 /// `std::unique_ptr<const T>` is lowered to the same opaque holder the shared

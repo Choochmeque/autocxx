@@ -16,11 +16,11 @@ use crate::{
         codegen_cpp::type_to_cpp::CppNameMap,
         inner_type_traits::inner_types_required_of_params,
         type_helpers::{
-            extract_pinned_mutable_reference_type, is_volatile_qualified, mentions_cpp_array,
-            mentions_float128, mentions_long_double, mentions_volatile, ptr_is_mut,
-            unqualified_array_element_type, unwrap_bitfield, unwrap_const, unwrap_float128,
-            unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double, unwrap_reference,
-            unwrap_std_array, unwrap_volatile,
+            extract_pinned_mutable_reference_type, is_pointer, is_volatile_qualified,
+            mentions_cpp_array, mentions_float128, mentions_long_double, mentions_volatile,
+            ptr_is_mut, unqualified_array_element_type, unwrap_bitfield, unwrap_const,
+            unwrap_float128, unwrap_function_pointer, unwrap_has_opaque, unwrap_long_double,
+            unwrap_reference, unwrap_std_array, unwrap_volatile,
         },
         ConvertErrorFromCpp,
     },
@@ -74,6 +74,24 @@ pub(crate) struct TypedefTargetInfo {
     /// Same reason again: the converted type is a bare `[T; N]`, which is what
     /// a C array is written as too.
     is_std_array: bool,
+    /// Any `volatile` the target points at. Same reason again.
+    unwritten_volatile: UnwrittenVolatile,
+}
+
+/// A `volatile` inside a pointer or reference which nothing else about its
+/// conversion records. The bridge cannot spell the qualifier, so the C++
+/// autocxx generates names the type without it, and whether C++ will convert
+/// that back to the type the function declared depends on how deep the
+/// qualifier is. See [`TypeConverter::bury_volatile`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UnwrittenVolatile {
+    #[default]
+    Nowhere,
+    /// On the pointee, where [`Annotated::has_volatile_pointee`] would have
+    /// said so had an alias not been in the way: `typedef volatile T* P`.
+    Pointee,
+    /// Further in than the pointee: `volatile T**`.
+    Deeper,
 }
 
 /// What a typedef's target was, beyond what its converted type can say.
@@ -108,6 +126,9 @@ pub(crate) struct Annotated<T> {
     /// and there is no Rust pointer type which carries the other qualifier, so
     /// conversion is where the fact would otherwise be lost for good.
     pub(crate) has_volatile_pointee: bool,
+    /// Any `volatile` C++ wrote inside this type which `has_volatile_pointee`
+    /// does not report.
+    pub(crate) unwritten_volatile: UnwrittenVolatile,
     /// Whether this type is the array a C++ `std::array<T, N>` was lowered to.
     /// Kept beside the type for the reason [`Self::is_const`] is: `ty` is the
     /// bare `[T; N]`, and bindgen writes the C array `T[N]` as that too, so the
@@ -131,6 +152,7 @@ impl<T> Annotated<T> {
             kind,
             is_const: false,
             has_volatile_pointee: false,
+            unwritten_volatile: UnwrittenVolatile::Nowhere,
             is_std_array: false,
         }
     }
@@ -140,6 +162,16 @@ impl<T> Annotated<T> {
     fn marked_volatile_pointee_if(mut self, has_volatile_pointee: bool) -> Self {
         self.has_volatile_pointee = has_volatile_pointee;
         self
+    }
+
+    /// Every `volatile` this type points at which its converted form does not
+    /// show, for a typedef to remember on behalf of its uses.
+    pub(crate) fn volatile_lost_to_an_alias(&self) -> UnwrittenVolatile {
+        if self.has_volatile_pointee {
+            UnwrittenVolatile::Pointee
+        } else {
+            self.unwritten_volatile
+        }
     }
 
     /// Records that C++ qualified this `const`. See [`Self::is_const`].
@@ -190,6 +222,7 @@ impl<T> Annotated<T> {
             // re-box - the lvalue reference below - overwrites it with the
             // answer for the type it built.
             has_volatile_pointee: self.has_volatile_pointee,
+            unwritten_volatile: self.unwritten_volatile,
             is_std_array: self.is_std_array,
         }
     }
@@ -224,12 +257,13 @@ pub(crate) enum TypeConversionContext {
     /// gave when it stood in for this. Those are not a by-value parameter's
     /// answers, which differ in one place: a typedef may name a type only
     /// forward-declared, where an `OuterType` may not. The single change is
-    /// that the one thing which can go wrong with a pointer target and depends
-    /// on where it is - the target being a pointer to a pointer - is not
-    /// decided here, but wherever the alias is converted, where it can be. The
-    /// rest of what makes a pointee valid still is decided here. See
-    /// `ensure_pointee_is_valid` and the `Type::Ptr` arm of
-    /// `convert_type_path_which_is_not_a_reference`.
+    /// that the things which can go wrong with a pointer target and depend on
+    /// where it is - an rvalue reference to a pointer, and a `volatile` buried
+    /// under a pointer which is not `const` - are not decided here, but
+    /// wherever the alias is converted, where they can be. The rest of what
+    /// makes a pointee valid still is decided here. See
+    /// `ensure_rvalue_referent_is_valid`, `bury_volatile` and the `Type::Ptr`
+    /// arm of `convert_type_path_which_is_not_a_reference`.
     WithinTypedef,
     OuterType,
 }
@@ -237,6 +271,14 @@ pub(crate) enum TypeConversionContext {
 impl TypeConversionContext {
     fn allow_instantiation_of_forward_declaration(&self) -> bool {
         matches!(self, Self::WithinReference { .. } | Self::WithinTypedef)
+    }
+
+    /// Whether a pointer here is data whose pointee nothing has to hand over
+    /// the bridge yet: a struct field or something inside one, which Rust only
+    /// ever sees as a raw pointer, or a typedef target, which has no place of
+    /// use so far.
+    fn pointee_is_only_data(&self) -> bool {
+        self.within_struct_field() || matches!(self, Self::WithinTypedef)
     }
 
     /// Whether the type being converted is a struct field, or sits inside one
@@ -815,6 +857,7 @@ impl<'a> TypeConverter<'a> {
             Some(TypedefTargetInfo {
                 ty: Type::Ptr(resolved_tp),
                 kind,
+                unwritten_volatile,
                 ..
             }) => {
                 // The typedef resolves to a pointer. Its pointee may
@@ -825,7 +868,21 @@ impl<'a> TypeConverter<'a> {
                 // reaches cxx and generation fails with
                 // "unsupported type". See google/autocxx#1368.
                 let is_rvalue_reference = matches!(kind, TypeKind::RValueReference);
+                if is_rvalue_reference {
+                    Self::ensure_rvalue_referent_is_valid(resolved_tp, ctx)?;
+                }
+                // The stored target has been converted once already, which
+                // took any `volatile` out of it, so what `convert_ptr` would
+                // have asked about one buried in there is asked here.
+                let unwritten_volatile = *unwritten_volatile;
+                if unwritten_volatile == UnwrittenVolatile::Deeper {
+                    Self::ensure_buried_volatile_converts(
+                        ptr_is_mut(&resolved_tp.mutability),
+                        ctx,
+                    )?;
+                }
                 let mut annotated = self.convert_ptr(resolved_tp.clone(), ns, ctx)?;
+                annotated.unwritten_volatile = unwritten_volatile;
                 annotated.types_encountered.extend(std::mem::take(deps));
                 // A C++ rvalue reference converts to a pointer as well, so
                 // which of the two this alias names cannot be read back off
@@ -1006,6 +1063,7 @@ impl<'a> TypeConverter<'a> {
             return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
         }
         Self::check_array_referent(&elem, ctx)?;
+        let unwritten_volatile = Self::bury_volatile(&elem, mutable, ctx)?;
         let mut outer = elem.map(|elem| {
             if mutable {
                 Type::Path(parse_quote! {
@@ -1023,6 +1081,7 @@ impl<'a> TypeConverter<'a> {
             TypeKind::Reference
         };
         outer.has_volatile_pointee = referent_is_volatile;
+        outer.unwritten_volatile = unwritten_volatile;
         // A reference to a `std::array` is not itself one.
         outer.is_std_array = false;
         Ok(outer)
@@ -1070,18 +1129,22 @@ impl<'a> TypeConverter<'a> {
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // RValue reference
-        Self::ensure_pointee_is_valid(ptr, ctx)?;
+        Self::ensure_pointee_is_valid(ptr)?;
+        Self::ensure_rvalue_referent_is_valid(ptr, ctx)?;
         let pointee_is_volatile = is_volatile_qualified(&ptr.elem);
         let innerty = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
+        let unwritten_volatile = Self::bury_volatile(&innerty, ptr_is_mut(&ptr.mutability), ctx)?;
         let mut ptr = ptr.clone();
         ptr.elem = innerty.ty;
-        Ok(Annotated::new(
+        let mut annotated = Annotated::new(
             Type::Ptr(ptr),
             innerty.types_encountered,
             innerty.extra_apis,
             TypeKind::RValueReference,
         )
-        .marked_volatile_pointee_if(pointee_is_volatile))
+        .marked_volatile_pointee_if(pointee_is_volatile);
+        annotated.unwritten_volatile = unwritten_volatile;
+        Ok(annotated)
     }
 
     /// The plain-path case of [`Self::convert_type_path`].
@@ -1347,7 +1410,7 @@ impl<'a> TypeConverter<'a> {
             if let Some(element) = sole_pointer_generic_arg(&typ) {
                 // Conversion is what turns bindgen's spelling of the pointee
                 // into the bridge's, and what turns down a pointee the bridge
-                // could not name - a pointer to a pointer, above all.
+                // could not name.
                 //
                 // The names it met go onto the holder, for the reason the
                 // smart-pointer branch above gives: the accessors are what
@@ -1727,78 +1790,97 @@ impl<'a> TypeConverter<'a> {
         ns: &Namespace,
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
-        Self::ensure_pointee_is_valid(&ptr, ctx)?;
+        Self::ensure_pointee_is_valid(&ptr)?;
         // Read before conversion, which peels the marker off the pointee.
         let pointee_is_volatile = is_volatile_qualified(&ptr.elem);
+        let mutable = ptr_is_mut(&ptr.mutability);
         let innerty = self.convert_boxed_type(ptr.elem, ns, &ctx.behind_reference())?;
+        let unwritten_volatile = Self::bury_volatile(&innerty, mutable, ctx)?;
         ptr.elem = innerty.ty;
-        Ok(Annotated::new(
+        let mut annotated = Annotated::new(
             Type::Ptr(ptr),
             innerty.types_encountered,
             innerty.extra_apis,
             TypeKind::Pointer,
         )
-        .marked_volatile_pointee_if(pointee_is_volatile))
+        .marked_volatile_pointee_if(pointee_is_volatile);
+        annotated.unwritten_volatile = unwritten_volatile;
+        Ok(annotated)
     }
 
-    fn ensure_pointee_is_valid(
-        ptr: &TypePtr,
-        ctx: &TypeConversionContext,
-    ) -> Result<(), ConvertErrorFromCpp> {
+    /// A pointer may point at a named type or at another pointer, to any
+    /// depth: cxx passes `*mut *mut T` as the `T**` it is, and what each level
+    /// means is the caller's business, as it is for any raw pointer.
+    fn ensure_pointee_is_valid(ptr: &TypePtr) -> Result<(), ConvertErrorFromCpp> {
         match *ptr.elem {
-            Type::Path(..) => Ok(()),
+            Type::Path(..) | Type::Ptr(..) => Ok(()),
             Type::Array(..) => Err(ConvertErrorFromCpp::InvalidArrayPointee),
-            // A pointer to a pointer is refused nearly everywhere because
-            // there is no good way to hand one across the bridge: autocxx
-            // would have to decide what the outer pointer's referent means
-            // in Rust, and it has no way to know. Inside a struct field it
-            // never has to decide - the field is data whose layout we copy
-            // and whose contents Rust only ever sees as a raw pointer - so
-            // the rejection would only stop the whole struct being generated
-            // over a field nobody was going to dereference. See
-            // https://github.com/google/autocxx/issues/1278. This permits one
-            // level of nesting: the pointee is converted as
-            // `WithinReference`, so `float***` is still refused.
-            //
-            // A typedef target is let through for a different reason: the
-            // alias has no place of use yet, so there is nothing here to
-            // decide. Whether `typedef float** M` is usable depends on where
-            // `M` turns up, and every position which converts a type asks
-            // again when it does, because the typedef arm of
-            // `convert_type_path_which_is_not_a_reference` re-converts a
-            // pointer target against that position's own context. The readers
-            // which take the stored target without converting it want less
-            // than that: the by-value checker only asks whether the outermost
-            // thing is a pointer, dependency collection and
-            // `replace_hopeless_typedef_targets` read the names it mentions,
-            // and codegen emits a `pub use` of the alias. None of them puts the
-            // pointer type into the [cxx::bridge]: a typedef is not declared
-            // there, and the one route by which an alias reaches it - being
-            // replaced by an opaque type, when a name it depends on was ignored
-            // - carries the name and nothing of the target. Refusing it here
-            // would instead throw the alias away at its definition and take
-            // every use down with it, field or not.
-            //
-            // The other caller is the rvalue-reference arm of
-            // `convert_type_path`, so `typedef float*&& R` is now stored rather
-            // than refused. That is the same layout - one pointer to a `float*`
-            // - which a field written `float*&& x` already gets through the
-            // struct-field arm, and a use of the alias in a signature still
-            // goes through `convert_ptr` and is still turned down.
-            Type::Ptr(..)
-                if matches!(
-                    ctx,
-                    TypeConversionContext::WithinStructField { .. }
-                        | TypeConversionContext::WithinTypedef
-                ) =>
-            {
-                Ok(())
-            }
-            Type::Ptr(..) => Err(ConvertErrorFromCpp::InvalidPointerPointee),
             _ => Err(ConvertErrorFromCpp::InvalidPointee(
                 ptr.elem.to_token_stream().to_string(),
             )),
         }
+    }
+
+    /// Turn down an rvalue reference to a pointer, `T*&&`.
+    ///
+    /// An rvalue reference parameter is handed over as an
+    /// `impl RValueParam<T>`, which is something safe code can build, and the
+    /// function taking it is safe to call for that reason. With a pointer for
+    /// `T` that would be a safe function handing C++ an address nobody
+    /// vouched for.
+    ///
+    /// Not asked of a struct field or of a typedef target. A field is data
+    /// whose layout we copy; refusing it would only stop the whole struct
+    /// being generated. A typedef has no place of use yet, and every position
+    /// which converts the alias asks again: the typedef arm of
+    /// `convert_type_path_which_is_not_a_reference` re-converts a pointer
+    /// target against that position's own context. See
+    /// https://github.com/google/autocxx/issues/1278.
+    fn ensure_rvalue_referent_is_valid(
+        ptr: &TypePtr,
+        ctx: &TypeConversionContext,
+    ) -> Result<(), ConvertErrorFromCpp> {
+        if is_pointer(&ptr.elem) && !ctx.pointee_is_only_data() {
+            return Err(ConvertErrorFromCpp::RValueReferenceToPointer);
+        }
+        Ok(())
+    }
+
+    /// Whether the pointer or reference being built over `pointee` has a
+    /// `volatile` somewhere beneath its own pointee, and whether C++ will
+    /// still take it.
+    ///
+    /// The bridge cannot spell `volatile`, so the wrapper is declared without
+    /// it and C++ has to convert what it is handed to what the function
+    /// wants. Adding a qualifier that deep is a conversion C++ makes only
+    /// where every level above it is `const`: `T* const*` becomes
+    /// `volatile T* const*`, and `T**` does not become `volatile T**`. The
+    /// second is refused here, where the alternative is generated C++ which
+    /// does not compile. A return goes the other way, taking the qualifier
+    /// off, which C++ never does; `convert_return_type` refuses those.
+    ///
+    /// Not refused for a struct field or a typedef target, for the reasons
+    /// [`Self::ensure_rvalue_referent_is_valid`] gives.
+    fn bury_volatile(
+        pointee: &Annotated<Box<Type>>,
+        mutable: bool,
+        ctx: &TypeConversionContext,
+    ) -> Result<UnwrittenVolatile, ConvertErrorFromCpp> {
+        if pointee.volatile_lost_to_an_alias() == UnwrittenVolatile::Nowhere {
+            return Ok(UnwrittenVolatile::Nowhere);
+        }
+        Self::ensure_buried_volatile_converts(mutable, ctx)?;
+        Ok(UnwrittenVolatile::Deeper)
+    }
+
+    fn ensure_buried_volatile_converts(
+        mutable: bool,
+        ctx: &TypeConversionContext,
+    ) -> Result<(), ConvertErrorFromCpp> {
+        if mutable && !ctx.pointee_is_only_data() {
+            return Err(ConvertErrorFromCpp::BuriedVolatile);
+        }
+        Ok(())
     }
 
     /// Whether any of `typ`'s template arguments is `const`-qualified in its
@@ -2741,6 +2823,7 @@ impl TypedefTarget for TypedefAnalysis {
             kind: self.target_kind.clone(),
             is_const: self.target_is_const,
             is_std_array: self.target_is_std_array,
+            unwritten_volatile: self.target_unwritten_volatile,
         })
     }
 }

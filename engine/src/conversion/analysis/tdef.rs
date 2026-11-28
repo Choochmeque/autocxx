@@ -18,7 +18,7 @@ use crate::{
             fun::instantiated_template,
             type_converter::{
                 add_analysis, attach_deferred_holder_surfaces, Annotated, TypeConversionContext,
-                TypeConverter, TypeKind,
+                TypeConverter, TypeKind, UnwrittenVolatile,
             },
         },
         api::{
@@ -57,6 +57,11 @@ pub(crate) struct TypedefAnalysis {
     /// array `T[N]` as well, so a reference which later names this alias would
     /// otherwise have no way to tell the two C++ types apart.
     pub(crate) target_is_std_array: bool,
+    /// Any `volatile` the target points at. Kept for the same reason as
+    /// `target_is_const`: converting takes the qualifier out of the type, and
+    /// a pointer which later names this alias as its pointee would otherwise
+    /// never learn that C++ may not accept it without.
+    pub(crate) target_unwritten_volatile: UnwrittenVolatile,
     pub(crate) deps: HashSet<QualifiedName>,
 }
 
@@ -110,6 +115,7 @@ pub(crate) fn convert_typedef_targets(
                         target_kind: TypeKind::Regular,
                         target_is_const: false,
                         target_is_std_array: false,
+                        target_unwritten_volatile: UnwrittenVolatile::Nowhere,
                         deps: HashSet::new(),
                     },
                 },
@@ -249,6 +255,7 @@ fn get_replacement_typedef(
                 // not have recognised it.
                 target_is_const: false,
                 target_is_std_array: false,
+                target_unwritten_volatile: UnwrittenVolatile::Nowhere,
                 deps: HashSet::new(),
             },
         });
@@ -305,6 +312,7 @@ fn get_replacement_typedef(
             Some(ErrorContext::new_for_item(name.name.get_final_ident())),
         )),
         Ok(mut final_type) => {
+            let target_unwritten_volatile = final_type.volatile_lost_to_an_alias();
             converted_type.ty = Box::new(final_type.ty.clone());
             extra_apis.append(&mut final_type.extra_apis);
             Ok(Api::Typedef {
@@ -316,6 +324,7 @@ fn get_replacement_typedef(
                     target_kind: final_type.kind,
                     target_is_const: final_type.is_const,
                     target_is_std_array: final_type.is_std_array,
+                    target_unwritten_volatile,
                     deps: final_type.types_encountered,
                 },
             })
