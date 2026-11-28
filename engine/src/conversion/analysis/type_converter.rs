@@ -35,6 +35,7 @@ use indexmap::set::IndexSet as HashSet;
 use itertools::Itertools;
 use proc_macro2::Ident;
 use quote::ToTokens;
+use std::borrow::Borrow;
 use syn::{
     parse_quote, punctuated::Punctuated, token::Comma, GenericArgument, PathArguments, PathSegment,
     Type, TypePath, TypePtr,
@@ -796,17 +797,13 @@ impl<'a> TypeConverter<'a> {
                 }
                 // `Pin<&mut T>` is not a name to go looking for: it is what
                 // analysing the typedef already made of a C++ mutable
-                // reference, and it is finished. Read as a name it is the
-                // generic `core::pin::Pin`, which cxx knows nothing about, so
-                // autocxx would invent a concrete type for it and write
-                // `T&*` into the generated C++. See google/autocxx#1363.
-                if extract_pinned_mutable_reference_type(resolved_tp).is_some() {
-                    return Ok(ResolvedTypedef::Converted(Box::new(Annotated::new(
-                        Type::Path(resolved_tp.clone()),
-                        std::mem::take(deps),
-                        ApiVec::new(),
-                        TypeKind::MutableReference,
-                    ))));
+                // reference. Read as a name it is the generic
+                // `core::pin::Pin`, which cxx knows nothing about, so autocxx
+                // would invent a concrete type for it and write `T&*` into
+                // the generated C++. See google/autocxx#1363.
+                if let Some(referent) = extract_pinned_mutable_reference_type(resolved_tp) {
+                    let referent = referent.clone();
+                    return self.convert_reference_target(referent, true, target, ns, ctx, deps);
                 }
                 let resolved_tn = QualifiedName::from_type_path(resolved_tp);
                 deps.insert(resolved_tn.clone());
@@ -843,23 +840,28 @@ impl<'a> TypeConverter<'a> {
                 )));
             }
             Some(TypedefTargetInfo { ty: other, .. }) => {
-                // Anything else the typedef resolved to was converted when the
-                // typedef itself was analysed, so take it as it stands - but
-                // say what kind it is. A typedef to a C++ reference lands here
-                // as `&T`, and calling that `Regular` costs the caller the one
-                // fact it needs: whether the value borrows, which decides
-                // lifetimes on a returned reference and how a parameter
-                // crosses the bridge. Here the type says which it is, so read
-                // it; what the typedef recorded is only needed where two
-                // different C++ constructs converge on one Rust type, which is
-                // the pointer arm above. See google/autocxx#1363.
+                // A typedef to a C++ `const` reference lands here as `&T`,
+                // and calling that `Regular` costs the caller the one fact it
+                // needs: whether the value borrows, which decides lifetimes on
+                // a returned reference and how a parameter crosses the bridge.
+                // Here the type says which it is, so read it; what the typedef
+                // recorded is only needed where two different C++ constructs
+                // converge on one Rust type, which is the pointer arm above.
+                // See google/autocxx#1363.
                 let kind = match other {
-                    Type::Reference(reference) if reference.mutability.is_some() => {
-                        TypeKind::MutableReference
+                    Type::Reference(reference) if !Self::is_rust_str_reference(reference) => {
+                        let mutable = reference.mutability.is_some();
+                        let referent = (*reference.elem).clone();
+                        return self
+                            .convert_reference_target(referent, mutable, target, ns, ctx, deps);
                     }
+                    // `&str`, which is a `rust::Str` *value* and no reference
+                    // to anything C++ wrote.
                     Type::Reference(_) => TypeKind::Reference,
                     _ => TypeKind::Regular,
                 };
+                // Anything else the typedef resolved to was converted when the
+                // typedef itself was analysed, so take it as it stands.
                 return Ok(ResolvedTypedef::Converted(Box::new(
                     // `typedef std::array<T, N> A` lands here, the target
                     // having been converted to the bare `[T; N]` when the
@@ -872,6 +874,87 @@ impl<'a> TypeConverter<'a> {
             }
         };
         Ok(resolved)
+    }
+
+    /// A typedef whose target is an lvalue reference, with what it refers to
+    /// converted afresh at the alias's place of use.
+    ///
+    /// The target a typedef stores was converted while the typedefs were being
+    /// analysed, which is before any of them could be resolved: a referent
+    /// which is itself an alias - `typedef int* P; typedef P& R;` - is stored
+    /// under the alias's name, as `Pin<&mut P>`. cxx is never told about
+    /// aliases, so that name has to be gone by the time the type reaches the
+    /// bridge, and a use is the first point at which it can be. The pointer
+    /// arm of [`Self::resolve_typedef_target`] converts a pointee again for
+    /// the same reason.
+    ///
+    /// The reference is built again by [`Self::lvalue_reference_to`], which
+    /// is what builds one where it is written out, so that the alias and the
+    /// reference written in its place are one type and are turned down for
+    /// the same reasons.
+    fn convert_reference_target(
+        &mut self,
+        referent: Type,
+        mutable: bool,
+        target: TargetFacts,
+        ns: &Namespace,
+        ctx: &TypeConversionContext,
+        deps: &mut HashSet<QualifiedName>,
+    ) -> Result<ResolvedTypedef, ConvertErrorFromCpp> {
+        // An array which is stored as one - rather than under an alias's
+        // name - was a `std::array` when the typedef was analysed, or the
+        // reference would have been refused there. The marker which said so
+        // went when it was converted, so say it again.
+        let stored_as_array = matches!(referent, Type::Array(_));
+        let mut referent = self
+            .convert_type(referent, ns, &ctx.behind_reference())?
+            .marked_std_array_if(stored_as_array);
+        referent.types_encountered.extend(std::mem::take(deps));
+        Ok(ResolvedTypedef::Converted(Box::new(
+            self.lvalue_reference_to(referent, mutable, ctx)?
+                .marked_from(target),
+        )))
+    }
+
+    /// The Rust type for a C++ lvalue reference to `referent`: `&T`, or
+    /// `Pin<&mut T>` where C++ may write through it. Refuses the referents a
+    /// reference in this position may not have.
+    fn lvalue_reference_to<T: ToTokens + Borrow<Type>>(
+        &self,
+        referent: Annotated<T>,
+        mutable: bool,
+        ctx: &TypeConversionContext,
+    ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        // See `convert_lvalue_reference` for why a mutable `rust::Str&` is
+        // turned down, and where it is not.
+        if mutable
+            && !ctx.within_struct_field()
+            && Self::is_rust_str(referent.ty.borrow())
+            && !self.config.unsafe_policy.requires_cpprefs()
+        {
+            return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
+        }
+        Self::check_array_referent(&referent, ctx)?;
+        let mut outer = referent.map(|referent| {
+            if mutable {
+                Type::Path(parse_quote! {
+                    ::core::pin::Pin < & mut #referent >
+                })
+            } else {
+                Type::Reference(parse_quote! {
+                    & #referent
+                })
+            }
+        });
+        outer.kind = if mutable {
+            TypeKind::MutableReference
+        } else {
+            TypeKind::Reference
+        };
+        outer.has_volatile_pointee = false;
+        // A reference to a `std::array` is not itself one.
+        outer.is_std_array = false;
+        Ok(outer)
     }
 
     /// The `T&` arm of [`Self::convert_type`].
@@ -888,6 +971,18 @@ impl<'a> TypeConverter<'a> {
         ns: &Namespace,
         ctx: &TypeConversionContext,
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
+        // Only a type which has been converted already is written this way,
+        // and `&str` is what a `rust::Str` *value* converts to. There is no
+        // referent in it to convert again: `str` read as a C++ name is
+        // `rust::Str` itself, and would come back as a second `&`.
+        if Self::is_rust_str_reference(&r) {
+            return Ok(Annotated::new(
+                Type::Reference(r),
+                HashSet::new(),
+                ApiVec::new(),
+                TypeKind::Reference,
+            ));
+        }
         let innerty = self.convert_boxed_type(r.elem, ns, &ctx.behind_reference())?;
         // As for the reference bindgen writes with a marker; see
         // `check_array_referent`.
@@ -998,34 +1093,13 @@ impl<'a> TypeConverter<'a> {
         // fine, because the struct was going to be opaque either way.
         // `test_rust_str_reference_field_is_left_alone` covers the field
         // spelt both ways.
-        if mutable
-            && !ctx.within_struct_field()
-            && Self::is_rust_str(&elem.ty)
-            && !self.config.unsafe_policy.requires_cpprefs()
-        {
-            return Err(ConvertErrorFromCpp::MutableReferenceToRustStr);
-        }
-        Self::check_array_referent(&elem, ctx)?;
-        let mut outer = elem.map(|elem| {
-            if mutable {
-                Type::Path(parse_quote! {
-                    ::core::pin::Pin < & mut #elem >
-                })
-            } else {
-                Type::Reference(parse_quote! {
-                    & #elem
-                })
-            }
-        });
-        outer.kind = if mutable {
-            TypeKind::MutableReference
-        } else {
-            TypeKind::Reference
-        };
-        outer.has_volatile_pointee = referent_is_volatile;
-        // A reference to a `std::array` is not itself one.
-        outer.is_std_array = false;
-        Ok(outer)
+        //
+        // The check itself is in `lvalue_reference_to`, with the one on an
+        // array referent, so that a typedef to a reference meets both where
+        // it is used.
+        Ok(self
+            .lvalue_reference_to(elem, mutable, ctx)?
+            .marked_volatile_pointee_if(referent_is_volatile))
     }
 
     /// Turn down a reference to an array C++ wrote as `T[N]`.
@@ -1043,13 +1117,14 @@ impl<'a> TypeConverter<'a> {
     /// bytes nobody names - and refusing the field would instead lose autocxx
     /// the knowledge that the member is there, which is what tells it C++ has
     /// deleted the default constructor.
-    fn check_array_referent(
-        elem: &Annotated<Box<Type>>,
+    fn check_array_referent<T: Borrow<Type>>(
+        elem: &Annotated<T>,
         ctx: &TypeConversionContext,
     ) -> Result<(), ConvertErrorFromCpp> {
-        if matches!(*elem.ty, Type::Array(_)) && !elem.is_std_array && !ctx.within_struct_field() {
+        let ty = elem.ty.borrow();
+        if matches!(ty, Type::Array(_)) && !elem.is_std_array && !ctx.within_struct_field() {
             return Err(ConvertErrorFromCpp::CppArrayReferenceInSignature(
-                elem.ty.to_token_stream().to_string(),
+                ty.to_token_stream().to_string(),
             ));
         }
         Ok(())
@@ -1158,10 +1233,14 @@ impl<'a> TypeConverter<'a> {
     /// reference to a reference - so `&str` here means `rust::Str` and
     /// nothing else.
     fn is_rust_str(ty: &Type) -> bool {
-        matches!(ty, Type::Reference(r)
-            if r.mutability.is_none()
-                && matches!(&*r.elem, Type::Path(p)
-                    if p.qself.is_none() && p.path.is_ident("str")))
+        matches!(ty, Type::Reference(r) if Self::is_rust_str_reference(r))
+    }
+
+    /// [`Self::is_rust_str`], of a type already known to be a reference.
+    fn is_rust_str_reference(r: &syn::TypeReference) -> bool {
+        r.mutability.is_none()
+            && matches!(&*r.elem, Type::Path(p)
+                if p.qself.is_none() && p.path.is_ident("str"))
     }
 
     fn convert_type_path_which_is_not_a_reference(
