@@ -44123,6 +44123,326 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
 }
 
+/// Builds `rs` against `hdr` under `safety!(unsafe_ffi)` with `unused_unsafe`
+/// denied, so an `unsafe` block around a call only builds if the function
+/// called really is `unsafe`.
+fn run_test_denying_unused_unsafe(hdr: &str, rs: TokenStream, generate: &[&str]) {
+    do_run_test(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(generate, &[], None),
+        None,
+        None,
+        None,
+        "unsafe_ffi",
+        Some(quote! {
+            #![deny(unused_unsafe)]
+        }),
+    )
+    .unwrap()
+}
+
+/// The baseline the reference-to-pointer tests below are held to: under
+/// `safety!(unsafe_ffi)` a raw pointer parameter makes a free function, a
+/// static method, a method and a constructor `unsafe`.
+#[test]
+fn test_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+        inline int fx_read(int* p) { return *p; }
+        class Reader {
+        public:
+            Reader(int* p) : v(*p) {}
+            static int read_static(int* p) { return *p; }
+            int read(int* p) const { return *p; }
+            int get() const { return v; }
+        private:
+            int v;
+        };
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let p: *mut autocxx::c_int = &mut v;
+        assert_eq!(unsafe { ffi::fx_read(p) }, autocxx::c_int(7));
+        assert_eq!(unsafe { ffi::Reader::read_static(p) }, autocxx::c_int(7));
+        let r = unsafe { ffi::Reader::new(p) }.within_unique_ptr();
+        assert_eq!(r.get(), autocxx::c_int(7));
+        assert_eq!(unsafe { r.read(p) }, autocxx::c_int(7));
+    };
+    run_test_denying_unused_unsafe(hdr, rs, &["fx_read", "Reader"]);
+}
+
+/// `int*&` hands C++ a pointer it may dereference exactly as `int*` does, so
+/// the function is `unsafe` on the same terms.
+#[test]
+fn test_mut_reference_to_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+        inline int fx_read(int*& p) { return *p; }
+        inline int fx_read_const_pointee(const int*& p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut p: *mut autocxx::c_int = &mut v;
+        assert_eq!(
+            unsafe { ffi::fx_read(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+        let mut cp: *const autocxx::c_int = &v;
+        assert_eq!(
+            unsafe { ffi::fx_read_const_pointee(std::pin::Pin::new(&mut cp)) },
+            autocxx::c_int(7)
+        );
+    };
+    run_test_denying_unused_unsafe(hdr, rs, &["fx_read", "fx_read_const_pointee"]);
+}
+
+/// `int* const&`, where bindgen's `const` marker sits between the reference
+/// and the pointer.
+#[test]
+fn test_const_reference_to_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+        inline int fx_read(int* const& p) { return *p; }
+        inline int fx_read_const_pointee(const int* const& p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let p: *mut autocxx::c_int = &mut v;
+        assert_eq!(unsafe { ffi::fx_read(&p) }, autocxx::c_int(7));
+        let cp: *const autocxx::c_int = &v;
+        assert_eq!(
+            unsafe { ffi::fx_read_const_pointee(&cp) },
+            autocxx::c_int(7)
+        );
+    };
+    run_test_denying_unused_unsafe(hdr, rs, &["fx_read", "fx_read_const_pointee"]);
+}
+
+/// The pointer named through an alias.
+#[test]
+fn test_reference_to_typedefd_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+        typedef int* IntPtr;
+        using ConstIntPtr = const int*;
+        inline int fx_read_mut(IntPtr& p) { return *p; }
+        inline int fx_read_const(const IntPtr& p) { return *p; }
+        inline int fx_read_const_pointee(ConstIntPtr& p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut p: *mut autocxx::c_int = &mut v;
+        assert_eq!(
+            unsafe { ffi::fx_read_mut(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+        assert_eq!(unsafe { ffi::fx_read_const(&p) }, autocxx::c_int(7));
+        let mut cp: *const autocxx::c_int = &v;
+        assert_eq!(
+            unsafe { ffi::fx_read_const_pointee(std::pin::Pin::new(&mut cp)) },
+            autocxx::c_int(7)
+        );
+    };
+    run_test_denying_unused_unsafe(
+        hdr,
+        rs,
+        &["fx_read_mut", "fx_read_const", "fx_read_const_pointee"],
+    );
+}
+
+/// The reference itself named through an alias.
+#[test]
+fn test_typedefd_reference_to_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+        typedef int*& IntPtrRef;
+        typedef int* const& IntPtrConstRef;
+        inline int fx_read_mut(IntPtrRef p) { return *p; }
+        inline int fx_read_const(IntPtrConstRef p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut p: *mut autocxx::c_int = &mut v;
+        assert_eq!(
+            unsafe { ffi::fx_read_mut(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+        assert_eq!(unsafe { ffi::fx_read_const(&p) }, autocxx::c_int(7));
+    };
+    run_test_denying_unused_unsafe(hdr, rs, &["fx_read_mut", "fx_read_const"]);
+}
+
+/// `IntPtr&&`: what is moved from is still a pointer C++ may dereference.
+#[test]
+fn test_rvalue_reference_to_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+        typedef int* IntPtr;
+        inline int fx_read(IntPtr&& p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let p: *mut autocxx::c_int = &mut v;
+        assert_eq!(unsafe { ffi::fx_read(Box::pin(p)) }, autocxx::c_int(7));
+    };
+    run_test_denying_unused_unsafe(hdr, rs, &["fx_read"]);
+}
+
+/// The same for every kind of function, as
+/// [`test_pointer_param_is_unsafe`] has it for a plain pointer.
+#[test]
+fn test_reference_to_pointer_param_is_unsafe_on_methods() {
+    let hdr = indoc! {"
+        class Reader {
+        public:
+            Reader(int*& p) : v(*p) {}
+            static int read_static(int*& p) { return *p; }
+            int read(int*& p) const { return *p; }
+            int get() const { return v; }
+        private:
+            int v;
+        };
+        class ConstRefReader {
+        public:
+            ConstRefReader(int* const& p) : v(*p) {}
+            static int read_static(int* const& p) { return *p; }
+            int read(int* const& p) const { return *p; }
+            int read_const_pointee(const int* const& p) const { return *p; }
+            int get() const { return v; }
+        private:
+            int v;
+        };
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut p: *mut autocxx::c_int = &mut v;
+        assert_eq!(
+            unsafe { ffi::Reader::read_static(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+        let r = unsafe { ffi::Reader::new(std::pin::Pin::new(&mut p)) }.within_unique_ptr();
+        assert_eq!(r.get(), autocxx::c_int(7));
+        assert_eq!(
+            unsafe { r.read(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+
+        assert_eq!(
+            unsafe { ffi::ConstRefReader::read_static(&p) },
+            autocxx::c_int(7)
+        );
+        let r = unsafe { ffi::ConstRefReader::new(&p) }.within_unique_ptr();
+        assert_eq!(r.get(), autocxx::c_int(7));
+        assert_eq!(unsafe { r.read(&p) }, autocxx::c_int(7));
+        let cp: *const autocxx::c_int = p;
+        assert_eq!(unsafe { r.read_const_pointee(&cp) }, autocxx::c_int(7));
+    };
+    run_test_denying_unused_unsafe(hdr, rs, &["Reader", "ConstRefReader"]);
+}
+
+/// The other half of the tests above: safe Rust cannot make the call at all.
+#[test]
+fn test_reference_to_pointer_param_is_not_callable_from_safe_code() {
+    let hdr = indoc! {"
+        inline int fx_read(int* const& p) { return *p; }
+    "};
+    let rs = quote! {
+        let p: *mut autocxx::c_int = std::ptr::null_mut();
+        ffi::fx_read(&p);
+    };
+    run_test_expect_fail_with_error("", hdr, rs, &["fx_read"], &[], "E0133");
+}
+
+/// A virtual method taking a reference to a pointer is an `unsafe fn` in the
+/// subclass's trait, as one taking a pointer is - see
+/// `test_superclass_implements_its_own_methods_trait_unsafely`.
+#[test]
+fn test_subclass_method_with_reference_to_pointer_param_is_unsafe() {
+    let hdr = indoc! {"
+    class Observer {
+    public:
+        Observer() {}
+        virtual void foo(int*&) const {}
+        virtual void bar(int* const&) const {}
+        virtual ~Observer() {}
+    };
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            MyObserver::new_rust_owned(MyObserver { cpp_peer: Default::default() });
+        },
+        quote! {
+            subclass!("Observer",MyObserver)
+        },
+        None,
+        None,
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::Observer_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyObserver {}
+            impl Observer_methods for MyObserver {
+                unsafe fn foo(&self, _p: std::pin::Pin<&mut *mut autocxx::c_int>) {}
+                unsafe fn bar(&self, _p: &*mut autocxx::c_int) {}
+            }
+        }),
+    );
+}
+
+/// Without a `safety!` directive everything is `unsafe` already, and a
+/// reference to a pointer changes nothing about that.
+#[test]
+fn test_reference_to_pointer_param_no_safety() {
+    let hdr = indoc! {"
+        inline int fx_read(int* const& p) { return *p; }
+    "};
+    let hexathorpe = Token![#](Span::call_site());
+    let unexpanded_rust = quote! {
+        #![deny(unused_unsafe)]
+
+        use autocxx::prelude::*;
+
+        include_cpp!(
+            #hexathorpe include "input.h"
+            generate!("fx_read")
+        );
+
+        fn main() {
+            let mut v = autocxx::c_int(7);
+            let p: *mut autocxx::c_int = &mut v;
+            assert_eq!(unsafe { ffi::fx_read(&p) }, autocxx::c_int(7));
+        }
+    };
+    do_run_test_manual("", hdr, unexpanded_rust, None, None).unwrap();
+}
+
+/// Returning a reference to a pointer makes nothing `unsafe`, as returning a
+/// pointer does not: Rust receives the pointer, and dereferencing it is where
+/// the `unsafe` goes.
+#[test]
+fn test_reference_to_pointer_return_is_safe() {
+    let hdr = indoc! {"
+        class Holder {
+        public:
+            Holder() : value(7), slot(&value) {}
+            int* give() { return slot; }
+            int*& give_mut_ref() { return slot; }
+            int* const& give_const_ref() const { return slot; }
+        private:
+            int value;
+            int* slot;
+        };
+    "};
+    let rs = quote! {
+        let mut h = ffi::Holder::new().within_unique_ptr();
+        let p = h.pin_mut().give();
+        assert_eq!(unsafe { *p }, autocxx::c_int(7));
+        let p = *h.pin_mut().give_mut_ref();
+        assert_eq!(unsafe { *p }, autocxx::c_int(7));
+        let p = *h.give_const_ref();
+        assert_eq!(unsafe { *p }, autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["Holder"], &[]);
+}
+
 /// The two ways a header can leave a class incomplete: declaring it on a line
 /// of its own, and naming it with an elaborated type specifier - `struct T` -
 /// in the middle of some other declaration, which declares it just as well.

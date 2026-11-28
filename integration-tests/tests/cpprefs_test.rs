@@ -1368,3 +1368,54 @@ fn test_std_array_certificate_element_reference_cpprefs() {
     };
     run_cpprefs_test("", hdr, rs, &["fx_total"], &[]);
 }
+
+/// A reference to a pointer is a wrapper in this mode like any other
+/// reference, and what it wraps is still a pointer C++ may dereference: the
+/// function is `unsafe`, as it is with the pointer passed by value, and as
+/// `test_mut_reference_to_pointer_param_is_unsafe` has it in plain mode.
+/// `unused_unsafe` is denied so that each `unsafe` block is the assertion.
+#[test]
+fn test_reference_to_pointer_param_is_unsafe_cpprefs() {
+    if !arbitrary_self_types_supported() {
+        // "unsafe_references_wrapped" requires arbitrary_self_types, which requires nightly.
+        return;
+    }
+    let hdr = indoc! {"
+        inline int fx_read_ptr(int* p) { return *p; }
+        inline int fx_read_mut_ref(int*& p) { return *p; }
+        inline int fx_read_const_ref(int* const& p) { return *p; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let p: *mut autocxx::c_int = &mut v;
+        assert_eq!(unsafe { ffi::fx_read_ptr(p) }, autocxx::c_int(7));
+        let mut slot = CppPin::new(p);
+        assert_eq!(
+            unsafe { ffi::fx_read_mut_ref(slot.as_cpp_mut_ref()) },
+            autocxx::c_int(7)
+        );
+        assert_eq!(
+            unsafe { ffi::fx_read_const_ref(slot.as_cpp_ref()) },
+            autocxx::c_int(7)
+        );
+    };
+    do_run_test(
+        "",
+        hdr,
+        rs,
+        directives_from_lists(
+            &["fx_read_ptr", "fx_read_mut_ref", "fx_read_const_ref"],
+            &[],
+            None,
+        ),
+        None,
+        None,
+        None,
+        "unsafe_references_wrapped",
+        Some(quote! {
+            #![feature(arbitrary_self_types_pointers)]
+            #![deny(unused_unsafe)]
+        }),
+    )
+    .unwrap()
+}

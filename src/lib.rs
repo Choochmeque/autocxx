@@ -366,7 +366,8 @@ macro_rules! concrete {
 /// no badness can occur. Good luck.
 ///
 /// Generated C++ APIs which use raw pointers remain `unsafe`
-/// no matter what policy you choose.
+/// no matter what policy you choose. That includes a function
+/// taking a reference to a raw pointer, such as `T*&`.
 ///
 /// There's an additional possible experimental safety
 /// policy available here:
