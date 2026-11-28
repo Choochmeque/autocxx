@@ -811,7 +811,7 @@ macro_rules! throws {
 /// mode declines stay declined.
 ///
 /// The directive is not yet supported on a virtual method of a class named in
-/// [`subclass`]: such a method gets neither a binding nor an override, with a
+/// [`subclass!`]: such a method gets neither a binding nor an override, with a
 /// stub saying so, and a pure virtual one, which a Rust subclass has to
 /// override, is a build error.
 ///
