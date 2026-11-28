@@ -3843,25 +3843,17 @@ impl<'a> FnAnalyzer<'a> {
                     self_type.is_some(),
                     is_placement_return_destination,
                 )?;
+                let exposes_raw_pointer = annotated_type.exposes_raw_pointer_to_cpp();
                 let new_ty = annotated_type.ty;
                 pt.pat = Box::new(new_pat.clone());
                 pt.ty = new_ty;
-                let requires_unsafe =
-                    if (matches!(annotated_type.kind, type_converter::TypeKind::Pointer)
-                        || annotated_type.has_volatile_pointee)
-                        && !is_placement_return_destination
-                    {
-                        // A `volatile` referent joins the pointer case rather
-                        // than the reference one it arrived as: what the caller
-                        // hands over is an address, and C++ dereferences it. Its
-                        // validity is the caller's promise, exactly as for a raw
-                        // pointer parameter.
-                        UnsafetyNeeded::Always
-                    } else if conversion.bridge_unsafe_needed() || is_placement_return_destination {
-                        UnsafetyNeeded::JustBridge
-                    } else {
-                        UnsafetyNeeded::None
-                    };
+                let requires_unsafe = if exposes_raw_pointer && !is_placement_return_destination {
+                    UnsafetyNeeded::Always
+                } else if conversion.bridge_unsafe_needed() || is_placement_return_destination {
+                    UnsafetyNeeded::JustBridge
+                } else {
+                    UnsafetyNeeded::None
+                };
                 (
                     syn::FnArg::Typed(pt).into(),
                     ArgumentAnalysis {

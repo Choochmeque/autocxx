@@ -36,6 +36,11 @@ mutation, or it might have a lifetime that could disappear at any moment.
 As a human, you must promise that you understand the constraints around
 use of that pointer and that's what the `unsafe` keyword is for.
 
+A parameter which is a reference to a pointer - `T*&`, `T* const&` - counts
+as a pointer for this purpose: C++ can dereference the pointer it finds behind
+the reference exactly as it could one passed by value, so the function is
+`unsafe` to call.
+
 Exactly the same issues apply to C++ references _in theory_, but in practice,
 they usually don't. Therefore [`cxx`](https://cxx.rs) has taken the view that we can "trust"
 a C++ reference to a higher degree than a pointer, and autocxx follows that

@@ -195,6 +195,38 @@ impl<T> Annotated<T> {
     }
 }
 
+impl Annotated<Box<Type>> {
+    /// Whether an argument of this type puts a raw pointer in C++'s hands:
+    /// an address C++ may dereference, and whose validity nothing but the
+    /// caller's word stands behind. A function with such a parameter is
+    /// `unsafe` to call.
+    ///
+    /// A pointer is one. So is a reference to a pointer, of any of the three
+    /// kinds - `T*&`, `T* const&`, `T*&&`. The reference itself is as good as
+    /// any other, but all it guarantees is that a pointer is there to be
+    /// read, and safe Rust can make a dangling or a null one; C++ reads it
+    /// and dereferences it exactly as it would have had it been passed by
+    /// value. And so is a `volatile` referent, which is handed over as an
+    /// address whichever of these C++ wrote it as.
+    ///
+    /// Asked of the converted type, so that an alias for the pointer or for
+    /// the reference, and bindgen's `const` marker between the two, have all
+    /// been resolved by the time it looks. One level only: a pointer inside
+    /// a struct or a container which is passed by reference is not this.
+    pub(crate) fn exposes_raw_pointer_to_cpp(&self) -> bool {
+        let referent = match (&self.kind, self.ty.as_ref()) {
+            (TypeKind::Pointer, _) => return true,
+            (TypeKind::Reference, Type::Reference(r)) => Some(r.elem.as_ref()),
+            (TypeKind::MutableReference, Type::Path(typ)) => {
+                extract_pinned_mutable_reference_type(typ)
+            }
+            (TypeKind::RValueReference, Type::Ptr(ptr)) => Some(ptr.elem.as_ref()),
+            _ => None,
+        };
+        self.has_volatile_pointee || matches!(referent, Some(Type::Ptr(_)))
+    }
+}
+
 /// Options when converting a type.
 /// It's possible we could add more policies here in future.
 /// For example, Rust in general allows type names containing
