@@ -194,6 +194,25 @@ fn test_typedef_to_mutable_reference_parameter_cpprefs() {
     run_cpprefs_test("", hdr, rs, &["fx_fill"], &["fx_Sink"]);
 }
 
+/// The same where what the alias refers to is itself an alias. Plain mode
+/// covers it in `test_typedef_chain_to_reference_to_class_parameter`.
+#[test]
+fn test_typedef_chain_to_mutable_reference_parameter_cpprefs() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Sink3 { uint32_t a; };
+        typedef fx_Sink3 fx_Sink3Alias;
+        typedef fx_Sink3Alias& fx_Sink3Ref;
+        inline void fx_fill3(fx_Sink3Ref sink) { sink.a = 42; }
+    "};
+    let rs = quote! {
+        let mut sink = CppPin::new(ffi::fx_Sink3 { a: 0 });
+        ffi::fx_fill3(sink.as_cpp_mut_ref());
+        assert_eq!(unsafe { sink.as_ref() }.a, 42);
+    };
+    run_cpprefs_test("", hdr, rs, &["fx_fill3"], &["fx_Sink3"]);
+}
+
 /// The same header with the reference written out, so that the two spellings
 /// are pinned to agree in this mode as well as in the plain one. They agree on
 /// `CppMutRef`: every C++ reference which crosses the bridge in this mode is a

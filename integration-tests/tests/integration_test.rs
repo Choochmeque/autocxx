@@ -36854,6 +36854,492 @@ fn test_typedef_chain_to_rvalue_reference_parameter() {
     run_test("", hdr, rs, &["fx_Movable2", "fx_take2"], &[]);
 }
 
+/// A typedef to a reference whose referent is itself an alias, here for a
+/// pointer. The typedefs are analysed before any of them can be resolved, so
+/// the outer one is stored as a reference to the inner one's *name*, and that
+/// name used to reach cxx, which has never heard of it: the whole build
+/// stopped at `unsupported type: fx_IntPtr`. Covers `&` and `const&`, `using`
+/// as well as `typedef`, and an alias for the reference alias.
+#[test]
+fn test_typedef_chain_to_reference_to_pointer_parameter() {
+    let hdr = indoc! {"
+        typedef int* fx_IntPtr;
+        typedef fx_IntPtr& fx_IntPtrRef;
+        typedef const fx_IntPtr& fx_IntPtrConstRef;
+        using fx_UsingPtr = int*;
+        using fx_UsingPtrRef = fx_UsingPtr&;
+        typedef fx_IntPtrRef fx_IntPtrRefAgain;
+        inline int fx_read(fx_IntPtrRef p) { return *p; }
+        inline int fx_read_const(fx_IntPtrConstRef p) { return *p; }
+        inline int fx_read_using(fx_UsingPtrRef p) { return *p; }
+        inline void fx_clear(fx_IntPtrRefAgain p) { p = nullptr; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut p: *mut autocxx::c_int = &mut v;
+        assert_eq!(ffi::fx_read(std::pin::Pin::new(&mut p)), autocxx::c_int(7));
+        assert_eq!(ffi::fx_read_const(&p), autocxx::c_int(7));
+        assert_eq!(ffi::fx_read_using(std::pin::Pin::new(&mut p)), autocxx::c_int(7));
+        ffi::fx_clear(std::pin::Pin::new(&mut p));
+        assert!(p.is_null());
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_read", "fx_read_const", "fx_read_using", "fx_clear"],
+        &[],
+    );
+}
+
+/// The same with a built-in behind the inner alias, two aliases deep and
+/// three, and from inside a namespace.
+#[test]
+fn test_typedef_chain_to_reference_to_builtin_parameter() {
+    let hdr = indoc! {"
+        typedef int fx_Int;
+        typedef fx_Int& fx_IntRef;
+        typedef const fx_Int& fx_IntConstRef;
+        typedef fx_Int fx_Int2;
+        typedef fx_Int2& fx_Int2Ref;
+        inline void fx_set(fx_IntRef r) { r = 42; }
+        inline int fx_get(fx_IntConstRef r) { return r; }
+        inline void fx_set2(fx_Int2Ref r) { r = 43; }
+        namespace fx_ns {
+            namespace inner { typedef int Int; }
+            typedef inner::Int& IntRef;
+            inline void set(IntRef r) { r = 44; }
+        }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(0);
+        ffi::fx_set(std::pin::Pin::new(&mut v));
+        assert_eq!(v, autocxx::c_int(42));
+        assert_eq!(ffi::fx_get(&v), autocxx::c_int(42));
+        ffi::fx_set2(std::pin::Pin::new(&mut v));
+        assert_eq!(v, autocxx::c_int(43));
+        ffi::fx_ns::set(std::pin::Pin::new(&mut v));
+        assert_eq!(v, autocxx::c_int(44));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_set", "fx_get", "fx_set2", "fx_ns::set"],
+        &[],
+    );
+}
+
+/// The same with a class behind the inner alias - a POD one and one which is
+/// not - and with an enum.
+#[test]
+fn test_typedef_chain_to_reference_to_class_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        struct fx_Pod { uint32_t a; };
+        typedef fx_Pod fx_PodAlias;
+        typedef fx_PodAlias& fx_PodRef;
+        typedef fx_PodAlias fx_PodAlias2;
+        typedef const fx_PodAlias2& fx_PodConstRef;
+        struct fx_NonPod { std::string s; uint32_t a = 0; };
+        typedef fx_NonPod fx_NonPodAlias;
+        typedef fx_NonPodAlias& fx_NonPodRef;
+        typedef const fx_NonPodAlias& fx_NonPodConstRef;
+        enum class fx_Colour { Red, Green };
+        typedef fx_Colour fx_ColourAlias;
+        typedef const fx_ColourAlias& fx_ColourRef;
+        inline void fx_fill(fx_PodRef r) { r.a = 42; }
+        inline uint32_t fx_peek(fx_PodConstRef r) { return r.a; }
+        inline void fx_fill_non_pod(fx_NonPodRef r) { r.a = 43; }
+        inline uint32_t fx_peek_non_pod(fx_NonPodConstRef r) { return r.a; }
+        inline int fx_ordinal(fx_ColourRef c) { return static_cast<int>(c); }
+    "};
+    let rs = quote! {
+        let mut pod = ffi::fx_Pod { a: 0 };
+        ffi::fx_fill(std::pin::Pin::new(&mut pod));
+        assert_eq!(ffi::fx_peek(&pod), 42);
+        let mut non_pod = ffi::fx_NonPod::new().within_unique_ptr();
+        ffi::fx_fill_non_pod(non_pod.pin_mut());
+        assert_eq!(ffi::fx_peek_non_pod(&non_pod), 43);
+        assert_eq!(ffi::fx_ordinal(&ffi::fx_Colour::Green), autocxx::c_int(1));
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_fill",
+            "fx_peek",
+            "fx_NonPod",
+            "fx_fill_non_pod",
+            "fx_peek_non_pod",
+            "fx_Colour",
+            "fx_ordinal",
+        ],
+        &["fx_Pod"],
+    );
+}
+
+/// The same where the inner alias names a type cxx has its own spelling for,
+/// which the referent has to come out as however it is reached.
+#[test]
+fn test_typedef_chain_to_reference_to_cxx_type_parameter() {
+    let hdr = indoc! {"
+        #include <array>
+        #include <cstdint>
+        #include <memory>
+        #include <string>
+        #include <vector>
+        typedef std::string fx_String;
+        typedef const fx_String& fx_StringRef;
+        typedef std::vector<uint32_t> fx_Numbers;
+        typedef const fx_Numbers& fx_NumbersRef;
+        struct fx_Item { uint32_t a; };
+        typedef fx_Item fx_ItemAlias;
+        typedef std::unique_ptr<fx_ItemAlias> fx_ItemPtr;
+        typedef const fx_ItemPtr& fx_ItemPtrRef;
+        typedef std::array<uint8_t, 3> fx_Triple;
+        typedef const fx_Triple& fx_TripleRef;
+        inline std::vector<uint32_t> fx_numbers() { return {1, 2, 3}; }
+        inline std::unique_ptr<fx_Item> fx_item() { return std::unique_ptr<fx_Item>(new fx_Item{42}); }
+        inline size_t fx_length(fx_StringRef s) { return s.size(); }
+        inline size_t fx_count(fx_NumbersRef v) { return v.size(); }
+        inline uint32_t fx_item_value(fx_ItemPtrRef p) { return p->a; }
+        inline uint8_t fx_last(fx_TripleRef a) { return a[2]; }
+    "};
+    let rs = quote! {
+        cxx::let_cxx_string!(s = "abc");
+        assert_eq!(ffi::fx_length(&s), 3);
+        assert_eq!(ffi::fx_count(&ffi::fx_numbers()), 3);
+        assert_eq!(ffi::fx_item_value(&ffi::fx_item()), 42);
+        let triple = [1u8, 2, 42];
+        assert_eq!(ffi::fx_last(&triple), 42);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_numbers",
+            "fx_item",
+            "fx_length",
+            "fx_count",
+            "fx_item_value",
+            "fx_last",
+        ],
+        &["fx_Item"],
+    );
+}
+
+/// The same on a constructor, a static method and a method, which reach the
+/// function through a wrapper where a free function does not.
+#[test]
+fn test_typedef_chain_to_reference_method_parameter() {
+    let hdr = indoc! {"
+        typedef int fx_Int;
+        typedef const fx_Int& fx_IntConstRef;
+        typedef fx_Int& fx_IntRef;
+        class fx_Adder {
+        public:
+            fx_Adder(fx_IntConstRef r) : v(r) {}
+            static int fx_twice(fx_IntConstRef r) { return r * 2; }
+            int fx_add(fx_IntConstRef r) const { return v + r; }
+            void fx_store(fx_IntRef r) const { r = v; }
+        private:
+            int v;
+        };
+    "};
+    let rs = quote! {
+        let seven = autocxx::c_int(7);
+        assert_eq!(ffi::fx_Adder::fx_twice(&seven), autocxx::c_int(14));
+        let adder = ffi::fx_Adder::new(&seven).within_unique_ptr();
+        assert_eq!(adder.fx_add(&seven), autocxx::c_int(14));
+        let mut out = autocxx::c_int(0);
+        adder.fx_store(std::pin::Pin::new(&mut out));
+        assert_eq!(out, autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["fx_Adder"], &[]);
+}
+
+/// The same in return position, from a method and borrowed from a parameter
+/// spelled with the same alias.
+#[test]
+fn test_typedef_chain_to_reference_return() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Pod { uint32_t a; };
+        typedef fx_Pod fx_PodAlias;
+        typedef fx_PodAlias& fx_PodRef;
+        typedef int fx_Int;
+        typedef const fx_Int& fx_IntConstRef;
+        class fx_Holder {
+        public:
+            fx_Holder() : v(42) { pod.a = 43; }
+            fx_PodRef fx_pod() { return pod; }
+            fx_IntConstRef fx_value() const { return v; }
+        private:
+            fx_Pod pod;
+            int v;
+        };
+        inline fx_IntConstRef fx_same(fx_IntConstRef r) { return r; }
+    "};
+    let rs = quote! {
+        let mut h = ffi::fx_Holder::new().within_unique_ptr();
+        assert_eq!(h.pin_mut().fx_pod().a, 43);
+        assert_eq!(*h.fx_value(), autocxx::c_int(42));
+        assert_eq!(*ffi::fx_same(&autocxx::c_int(7)), autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["fx_Holder", "fx_same"], &["fx_Pod"]);
+}
+
+/// The same as a field, which always worked: a struct with a reference member
+/// is opaque, so nothing names the field's type. Here so that it stays so.
+#[test]
+fn test_typedef_chain_to_reference_field() {
+    let hdr = indoc! {"
+        typedef int fx_Int;
+        typedef const fx_Int& fx_IntConstRef;
+        struct fx_View {
+            fx_View(const int& i) : r(i) {}
+            fx_IntConstRef r;
+        };
+        inline int fx_look(const fx_View& v) { return v.r; }
+    "};
+    let rs = quote! {
+        let v = autocxx::c_int(42);
+        let view = ffi::fx_View::new(&v).within_unique_ptr();
+        assert_eq!(ffi::fx_look(&view), autocxx::c_int(42));
+    };
+    run_test("", hdr, rs, &["fx_View", "fx_look"], &[]);
+}
+
+/// The chains whose outer alias is a pointer or an rvalue reference, which
+/// always worked - a use of such an alias converts the pointee again. Here so
+/// that the two kinds of chain are pinned side by side.
+#[test]
+fn test_typedef_chain_to_pointer_and_rvalue_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        typedef int fx_Int;
+        typedef fx_Int* fx_IntPtr;
+        typedef fx_Int* const fx_IntConstPtr;
+        typedef fx_IntPtr* fx_IntPtrPtr;
+        struct fx_Pod { uint32_t a; };
+        typedef fx_Pod fx_PodAlias;
+        typedef fx_PodAlias* fx_PodPtr;
+        struct fx_NonPod { std::string s; uint32_t a = 42; };
+        typedef fx_NonPod fx_NonPodAlias;
+        typedef fx_NonPodAlias&& fx_NonPodRvalue;
+        inline int fx_read(fx_IntPtr p) { return *p; }
+        inline int fx_read_const(fx_IntConstPtr p) { return *p; }
+        inline int fx_read_twice(fx_IntPtrPtr p) { return **p; }
+        inline uint32_t fx_read_pod(fx_PodPtr p) { return p->a; }
+        inline uint32_t fx_take(fx_NonPodRvalue r) { return r.a; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut p: *mut autocxx::c_int = &mut v;
+        assert_eq!(unsafe { ffi::fx_read(p) }, autocxx::c_int(7));
+        assert_eq!(unsafe { ffi::fx_read_const(p) }, autocxx::c_int(7));
+        assert_eq!(unsafe { ffi::fx_read_twice(&mut p) }, autocxx::c_int(7));
+        let mut pod = ffi::fx_Pod { a: 42 };
+        assert_eq!(unsafe { ffi::fx_read_pod(&mut pod) }, 42);
+        assert_eq!(ffi::fx_take(ffi::fx_NonPod::new().within_unique_ptr()), 42);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &[
+            "fx_read",
+            "fx_read_const",
+            "fx_read_twice",
+            "fx_read_pod",
+            "fx_NonPod",
+            "fx_take",
+        ],
+        &["fx_Pod"],
+    );
+}
+
+/// A typedef to a reference to `rust::Str`, whose referent is the one
+/// converted type which is itself written as a reference: `rust::Str` is
+/// `&str`, so the alias is `&&str`, and converting the referent again where
+/// the alias is used has to leave it at that.
+#[test]
+fn test_typedef_to_const_rust_str_reference_parameter() {
+    let hdr = indoc! {"
+        #include <cxx.h>
+        #include <cstddef>
+        typedef const rust::Str& fx_StrRef;
+        inline size_t fx_len(fx_StrRef s) { return s.size(); }
+    "};
+    let rs = quote! {
+        assert_eq!(ffi::fx_len(&"abc"), 3);
+    };
+    run_test("", hdr, rs, &["fx_len"], &[]);
+}
+
+/// The same with a pointer to a pointer behind the inner alias.
+#[test]
+fn test_typedef_chain_to_reference_to_pointer_to_pointer_parameter() {
+    let hdr = indoc! {"
+        typedef int** fx_Rows;
+        typedef fx_Rows& fx_RowsRef;
+        typedef const fx_Rows& fx_RowsConstRef;
+        inline int fx_first(fx_RowsRef rows) { return **rows; }
+        inline int fx_first_const(fx_RowsConstRef rows) { return **rows; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut row: *mut autocxx::c_int = &mut v;
+        let mut rows: *mut *mut autocxx::c_int = &mut row;
+        assert_eq!(ffi::fx_first(std::pin::Pin::new(&mut rows)), autocxx::c_int(7));
+        assert_eq!(ffi::fx_first_const(&rows), autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["fx_first", "fx_first_const"], &[]);
+}
+
+/// A `volatile` beneath the referent is turned down through a reference
+/// alias as it is beneath a reference written out - see
+/// `test_volatile_beneath_pointer_is_refused` - whether an alias for the
+/// referent was hiding it or the reference alias holds it itself, and in a
+/// return as in a parameter.
+#[test]
+fn test_typedef_to_reference_over_buried_volatile_is_refused() {
+    for declaration in [
+        "typedef volatile int* Reg; typedef Reg& Slot; static int read(Slot p) { return *p; }",
+        "typedef volatile int*& Slot; static int read(Slot p) { return *p; }",
+        "typedef volatile int* Reg; typedef const Reg& Slot; static Slot lend(const int& anchor);",
+        "typedef volatile int* const& Slot; static Slot lend(const int& anchor);",
+    ] {
+        let hdr = format!("struct fx_Buried {{ {declaration} }};");
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {},
+            quote! { generate!("fx_Buried") },
+            None,
+            Some(make_string_finder(vec![
+                "more than one pointer or reference deep".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// And bound where C++ will add the qualifier, which is where the reference
+/// is a `const` one - see
+/// `test_volatile_beneath_pointer_to_const_pointer_argument`.
+#[test]
+fn test_typedef_to_const_reference_over_buried_volatile_argument() {
+    let hdr = indoc! {"
+        struct fx_Buried {
+            typedef volatile int* Reg;
+            typedef const Reg& Slot;
+            typedef volatile int* const& DirectSlot;
+            static int read(Slot p) { return *p; }
+            static int read_direct(DirectSlot p) { return *p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(4);
+            let p = std::ptr::addr_of_mut!(a);
+            assert_eq!(ffi::fx_Buried::read(&p), autocxx::c_int(4));
+            assert_eq!(ffi::fx_Buried::read_direct(&p), autocxx::c_int(4));
+        },
+        &["fx_Buried"],
+        &[],
+    );
+}
+
+/// An rvalue reference to a pointer is turned down where the pointer is
+/// behind an alias too, written out and through an alias for the reference:
+/// see `test_rvalue_reference_to_pointer_is_refused`.
+#[test]
+fn test_rvalue_reference_to_aliased_pointer_is_refused() {
+    for declaration in [
+        "typedef int* Ptr; static int read(Ptr&& p) { return *p; }",
+        "typedef int* Ptr; typedef Ptr&& Slot; static int read(Slot p) { return *p; }",
+        "typedef int* Ptr; typedef Ptr&& Slot; typedef Slot Again; static int read(Again p) { return *p; }",
+    ] {
+        let hdr = format!("struct fx_Taker {{ {declaration} }};");
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {},
+            quote! { generate!("fx_Taker") },
+            None,
+            Some(make_string_finder(vec![
+                "rvalue reference to a pointer".to_string()
+            ])),
+            None,
+        );
+    }
+}
+
+/// A reference alias is held to what a reference written out is held to,
+/// where what it refers to only turns out at the use to be something a
+/// reference may not have. Here a C array, reached through an alias for it:
+/// the reference alias was analysed before `fx_Row` could be resolved, so
+/// nothing was refused there, and the function taking it has to be - by name,
+/// with the rest of the bindings left standing.
+#[test]
+fn test_typedef_chain_to_reference_to_c_array_is_refused() {
+    let hdr = indoc! {"
+        typedef int fx_Row[3];
+        typedef const fx_Row& fx_RowRef;
+        inline int fx_first(fx_RowRef r) { return r[0]; }
+        inline int fx_three() { return 3; }
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_first", "fx_three"],
+        &[],
+        &["fx_first", "takes or returns a reference to a C array"],
+    );
+    // Not asked for by name, it is left out and nothing else is disturbed.
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            assert_eq!(ffi::fx_three(), autocxx::c_int(3));
+        },
+        quote! { generate_all!() },
+        None,
+        None,
+        None,
+    );
+}
+
+/// And a mutable reference to `rust::Str`, reached the same way. See
+/// `test_pass_rust_str_by_mut_ref_refused`.
+#[test]
+fn test_typedef_chain_to_mutable_rust_str_reference_is_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <cxx.h>
+        typedef rust::Str fx_Str;
+        typedef fx_Str& fx_StrRef;
+        uint32_t fx_measure(fx_StrRef z);
+    "};
+    run_test_expect_fail_with_errors(
+        "",
+        hdr,
+        quote! {},
+        &["fx_measure"],
+        &[],
+        &["fx_measure", "MutableReferenceToRustStr"],
+    );
+}
+
 /// A typedef to an rvalue reference in *return* position, which the refusal
 /// of `T&&` returns has to catch as surely as it catches one written out.
 /// Written out, the return reaches analysis as one of bindgen's markers and
