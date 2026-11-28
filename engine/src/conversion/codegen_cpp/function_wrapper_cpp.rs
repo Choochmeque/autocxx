@@ -394,11 +394,9 @@ fn pointee_type(
     cpp_name_map: &CppNameMap,
     suffix: &str,
 ) -> Result<String, ConvertErrorFromCpp> {
-    let const_string = if pointer.is_mut() { "" } else { "const " };
     Ok(format!(
-        "{}{}{}",
-        const_string,
-        cpp_name_map.type_to_cpp(pointer.pointee())?,
+        "{}{}",
+        cpp_name_map.pointee_to_cpp(pointer.pointee(), pointer.is_mut())?,
         suffix
     ))
 }
