@@ -59,33 +59,26 @@ impl std::error::Error for ArgvError {}
 /// later, so an `argv` freed at the end of the call would be a dangling one for
 /// the rest of the program.
 ///
-/// # autocxx will not generate the call for you
-///
-/// autocxx cannot bind a function whose parameter is `char**`. It turns down a
-/// pointer whose pointee is itself a pointer - "Pointer pointed to another
-/// pointer, which is not yet supported" - so such a function does not reach the
-/// generated `ffi` module at all. Nothing here changes that. What this type
-/// builds is the *argument*, for a call you declare yourself: through a
-/// hand-written `cxx::bridge`, through a plain `extern "C"` block, or by adding
-/// a C++ shim whose signature autocxx does understand (one taking a
-/// `rust::Slice<const rust::Str>`, say, and assembling the `char**` on the C++
-/// side).
-///
 /// # Example
 ///
-/// ```rust,ignore
-/// use autocxx::ArgvHolder;
-/// use std::os::raw::{c_char, c_int};
+/// autocxx binds a `char**` parameter as the `*mut *mut c_char` it is, so the
+/// pair goes straight into the generated function.
 ///
-/// // Declared by hand, because autocxx will not describe a `char**`.
-/// extern "C" {
-///     fn engine_init(argc: c_int, argv: *mut *mut c_char);
+/// ```rust,ignore
+/// use autocxx::prelude::*;
+/// use autocxx::ArgvHolder;
+///
+/// include_cpp! {
+///     // void engine_init(int argc, char** argv);
+///     #include "engine.h"
+///     safety!(unsafe_ffi)
+///     generate!("engine_init")
 /// }
 ///
 /// let mut args = ArgvHolder::new(["engine", "--headless"])?;
 /// // SAFETY: `argc` and `argv` describe each other, and `args` owns the
 /// // storage until it is dropped at the end of this scope.
-/// unsafe { engine_init(args.argc(), args.argv()) };
+/// unsafe { ffi::engine_init(c_int(args.argc()), args.argv()) };
 /// # Ok::<(), autocxx::ArgvError>(())
 /// ```
 ///

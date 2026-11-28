@@ -10,7 +10,7 @@ use crate::{
     conversion::{
         api::Api,
         apivec::ApiVec,
-        type_helpers::{ptr_is_mut, unwrap_const, unwrap_volatile},
+        type_helpers::{is_pointer, ptr_is_mut, unwrap_const, unwrap_volatile},
         AnalysisPhase, ConvertErrorFromCpp,
     },
     parse_callbacks::CppOriginalName,
@@ -400,17 +400,6 @@ fn unaliased_cpp_name(
             .join("::")
     } else {
         qual_name.to_cpp_name()
-    }
-}
-
-/// Whether this is a pointer once any qualifier markers on it are set aside.
-fn is_pointer(ty: &Type) -> bool {
-    match ty {
-        Type::Ptr(_) => true,
-        Type::Path(typ) => unwrap_const(typ)
-            .or_else(|| unwrap_volatile(typ))
-            .is_some_and(is_pointer),
-        _ => false,
     }
 }
 

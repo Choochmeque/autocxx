@@ -477,6 +477,17 @@ pub(crate) fn unwrap_function_pointer(ty: &TypePath) -> Option<&syn::TypeFnPtr> 
     }
 }
 
+/// Whether this is a pointer once any qualifier markers on it are set aside.
+pub(crate) fn is_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(_) => true,
+        Type::Path(typ) => unwrap_const(typ)
+            .or_else(|| unwrap_volatile(typ))
+            .is_some_and(is_pointer),
+        _ => false,
+    }
+}
+
 /// Whether `ty` is a pointer as far as copying it is concerned: one written
 /// out, or a C function pointer in the `Option<unsafe extern "C" fn(..)>`
 /// shape bindgen gives it. Either is trivially copyable whatever it points at.
