@@ -27,7 +27,9 @@ mod utilities;
 pub(crate) use super::parse_callbacks::CppOriginalName;
 use crate::vendored_bindgen::callbacks::Visibility as CppVisibility;
 use analysis::fun::FnAnalyzer;
-use autocxx_parser::{name_matches_directive, IncludeCppConfig, UnmatchedDirective};
+use autocxx_parser::{
+    name_matches_directive, IncludeCppConfig, UnmatchedDirective, RETURNS_BORROW_FROM,
+};
 pub(crate) use codegen_cpp::CppCodeGenerator;
 pub(crate) use convert_error::ConvertError;
 use convert_error::{ConvertErrorFromCpp, ConvertErrorWithContext, ErrorContext};
@@ -51,7 +53,7 @@ use self::{
         constructor_deps::decorate_types_with_constructor_deps,
         destructibility::remove_ownership_of_non_destructible_types,
         field_accessors::add_field_accessors,
-        fun::{instantiated_template, FnPhase},
+        fun::{instantiated_template, FnPhase, FnPrePhase3},
         gc::filter_apis_by_following_edges_from_allowlist,
         pod::analyze_pod_apis,
         remove_ignored::filter_apis_by_ignored_dependents,
@@ -200,6 +202,11 @@ impl<'a> BridgeConverter<'a> {
                     &parse_callback_results,
                     codegen_options.force_wrapper_gen,
                 );
+                // A pure virtual method a Rust subclass cannot be given an
+                // override for leaves no subclass to generate, so that is
+                // settled before anything is made of what was analyzed.
+                confirm_no_borrow_source_on_subclassed_pure_virtual(&analyzed_apis)
+                    .map_err(ConvertError::Cpp)?;
                 // If any of those functions turned out to be pure virtual, don't attempt
                 // to generate UniquePtr implementations for the type, since it can't
                 // be instantiated.
@@ -554,15 +561,50 @@ fn confirm_smart_pointer_directives_obeyed(
 /// `designation_can_be_honoured`, counts as matched here. It named something
 /// real; that autocxx cannot honour it is a separate fact deserving a separate
 /// diagnostic, and saying "matched nothing" about it would be untrue.
+///
+/// `returns_borrow_from!` gets its own wording, because it is asked only of a
+/// function which really does return a reference: a directive naming one which
+/// returns anything else lands here, and the shared message's list of things
+/// to check would send the reader hunting for a misspelling which is not
+/// there.
 fn confirm_name_matching_directives_matched(
     config: &IncludeCppConfig,
 ) -> Result<(), ConvertErrorFromCpp> {
     match config.unmatched_directives().into_iter().next() {
+        Some(UnmatchedDirective { directive, request }) if directive == RETURNS_BORROW_FROM => Err(
+            ConvertErrorFromCpp::BorrowSourceDirectiveMatchedNothing(request),
+        ),
         Some(UnmatchedDirective { directive, request }) => {
             Err(ConvertErrorFromCpp::DirectiveMatchedNothing { directive, request })
         }
         None => Ok(()),
     }
+}
+
+/// Refuse the build where a `returns_borrow_from!` directive covers a pure
+/// virtual method of a class named in `subclass!`.
+///
+/// The function analysis declines such a method and makes no override for it,
+/// exactly as it does for a virtual method with an implementation of its own.
+/// There the Rust subclass keeps the superclass's implementation and nothing
+/// else is lost. A pure virtual has none to keep: without the override the
+/// subclass's C++ peer is abstract, and what the user would be told is that
+/// the C++ compiler will not construct one. This says why instead.
+fn confirm_no_borrow_source_on_subclassed_pure_virtual(
+    apis: &ApiVec<FnPrePhase3>,
+) -> Result<(), ConvertErrorFromCpp> {
+    for api in apis.iter() {
+        if let Api::Function { analysis, .. } = api {
+            if let Err(ConvertErrorWithContext(
+                err @ ConvertErrorFromCpp::BorrowSourceOnSubclassPureVirtual { .. },
+                _,
+            )) = &analysis.ignore_reason
+            {
+                return Err(err.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Some attributes indicate we can never handle a given item. Check for those.

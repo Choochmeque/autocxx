@@ -7,7 +7,8 @@
 // except according to those terms.
 use crate::{
     conversion::analysis::fun::{
-        function_wrapper::TypeConversionPolicy, ArgumentAnalysis, ReceiverMutability,
+        function_wrapper::{TypeConversionPolicy, RECEIVER_ARG_NAME},
+        ArgumentAnalysis, ReceiverMutability,
     },
     minisyn::FnArg,
     types::QualifiedName,
@@ -17,13 +18,13 @@ use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use std::borrow::Cow;
 use syn::{
-    parse_quote, punctuated::Punctuated, token::Comma, GenericArgument, PatType, Path, PathSegment,
-    ReturnType, Type, TypePath, TypeReference,
+    parse_quote, punctuated::Punctuated, token::Comma, GenericArgument, Pat, PatType, Path,
+    PathSegment, ReturnType, Type, TypePath, TypeReference,
 };
 
 /// Function which can add explicit lifetime parameters to function signatures
 /// where necessary, based on analysis of parameters and return types.
-/// This is necessary in four cases:
+/// This is necessary in five cases:
 /// 1) where the parameter is a Pin<&mut T>
 ///    and the return type is some kind of reference - because lifetime elision
 ///    is not smart enough to see inside a Pin.
@@ -33,6 +34,18 @@ use syn::{
 /// 3) Any parameter is any form of reference, and we're returning an `impl New`
 ///    3a) an 'impl ValueParam' counts as a reference.
 /// 4) If we're using CppRef<'a, T> as a param or return type
+/// 5) a `returns_borrow_from!` directive named the parameter the return
+///    borrows from, which has to be written down: elision would otherwise pick
+///    the receiver, and pick it silently.
+///
+/// Case 5 is also the only one where a single parameter is annotated rather
+/// than all of them. Everywhere else every reference parameter gets `'a`, which
+/// is sound because such a function has exactly one of them (see
+/// `NoInputReference` and `MultipleInputReferences` in `analysis::fun`).
+/// A directive lifts that restriction, and giving `'a` to every parameter of a
+/// function which has several would tie the result's life to all of them: the
+/// chainable setter it exists for would keep every key and value it was ever
+/// handed borrowed for as long as the returned reference lived.
 pub(crate) fn add_explicit_lifetime_if_necessary<'r>(
     param_details: &[ArgumentAnalysis],
     mut params: Punctuated<FnArg, Comma>,
@@ -64,11 +77,22 @@ pub(crate) fn add_explicit_lifetime_if_necessary<'r>(
     let ret_type_pod = return_type_is_pod_or_known_type_reference(&ret_type, non_pod_types);
     let returning_impl_with_a_reference_param = return_type_is_impl && any_param_is_reference;
     let hits_1024_bug = non_pod_ref_param && ret_type_pod;
+    // The parameter a `returns_borrow_from!` directive named: its identifier,
+    // and whether it is the receiver, which goes into a signature under
+    // several spellings that `param_is_borrow_source` knows how to read.
+    let borrow_source = param_details
+        .iter()
+        .find(|pd| pd.is_borrow_source)
+        .map(|pd| BorrowSource {
+            name: pd.name.clone(),
+            is_receiver: pd.self_type.is_some(),
+        });
     if !(has_mutable_receiver
         || hits_1024_bug
         || returning_impl_with_a_reference_param
         || return_type_is_cppref
-        || any_param_is_cppref)
+        || any_param_is_cppref
+        || borrow_source.is_some())
     {
         return (None, params, ret_type);
     }
@@ -105,7 +129,23 @@ pub(crate) fn add_explicit_lifetime_if_necessary<'r>(
         }
         None => (None, params, ret_type),
         Some(new_return_type) => {
+            // How many times the directive's parameter was found in this
+            // signature and given `'a`. The return type above already carries
+            // `'a`, so a signature which annotates the source zero times
+            // promises a lifetime nothing constrains - a bridge or wrapper
+            // whose safe signature lies - and one which annotates it twice
+            // has matched a parameter it should not have.
+            let mut sources_annotated = 0usize;
             for param in params.iter_mut().map(|minifnarg| &mut minifnarg.0) {
+                // Where the user said which parameter the result borrows from,
+                // that one alone carries the lifetime; the rest keep the fresh
+                // elided lifetimes Rust gives them.
+                let is_the_source = borrow_source
+                    .as_ref()
+                    .is_some_and(|source| param_is_borrow_source(param, source));
+                if borrow_source.is_some() && !is_the_source {
+                    continue;
+                }
                 // A receiver written `&self` prints from its own tokens rather
                 // than from a type, so only the `self: T` spelling has one to
                 // qualify.
@@ -117,20 +157,74 @@ pub(crate) fn add_explicit_lifetime_if_necessary<'r>(
                     }) => ty,
                     syn::FnArg::Receiver(_) => continue,
                 };
-                match ty.as_mut() {
+                let annotated = match ty.as_mut() {
                     Type::Path(TypePath {
                         path: Path { segments, .. },
                         ..
-                    }) => add_lifetime_to_pinned_reference(segments).unwrap_or(()),
-                    Type::Reference(tyr) => add_lifetime_to_reference(tyr),
-                    Type::ImplTrait(tyit) => add_lifetime_to_impl_trait(tyit),
-                    _ => {}
+                    }) => add_lifetime_to_pinned_reference(segments).is_ok(),
+                    Type::Reference(tyr) => {
+                        add_lifetime_to_reference(tyr);
+                        true
+                    }
+                    Type::ImplTrait(tyit) => {
+                        add_lifetime_to_impl_trait(tyit);
+                        true
+                    }
+                    _ => false,
+                };
+                if is_the_source && annotated {
+                    sources_annotated += 1;
                 }
+            }
+            if borrow_source.is_some() {
+                // An autocxx bug, not a user error: the analysis promised this
+                // signature a borrow source, so exactly one parameter here has
+                // to carry `'a`. A rename of the receiver, a reordering, or a
+                // parameter shape none of the arms above annotate must break
+                // here, loudly, rather than ship the lying signature.
+                assert_eq!(
+                    sources_annotated,
+                    1,
+                    "returns_borrow_from: the parameter promised as the borrow \
+                     source was not annotated with 'a exactly once in `fn ({})`",
+                    params.to_token_stream()
+                );
             }
 
             (Some(quote! { <'a> }), params, Cow::Owned(new_return_type))
         }
     }
+}
+
+/// The identity of the parameter a `returns_borrow_from!` directive named, as
+/// the analysis knows it, for finding it again in a built signature.
+struct BorrowSource {
+    name: crate::minisyn::Pat,
+    is_receiver: bool,
+}
+
+/// Whether this parameter is the one the directive named.
+///
+/// The receiver arrives under three spellings depending on who built the
+/// signature: the plain `cxx::bridge` entry is assembled from bindgen's own
+/// parameters, where it is a typed parameter whose pattern is `self`; the
+/// bridge entry for a function given a C++ wrapper renames that parameter to
+/// [`RECEIVER_ARG_NAME`]; and a Rust wrapper's parameters are parsed from
+/// `self: T`, which syn reads as a receiver. The analysis calls it `self`
+/// whichever of the three a signature holds, which is why the receiver is
+/// matched as the receiver rather than by that name.
+fn param_is_borrow_source(param: &syn::FnArg, source: &BorrowSource) -> bool {
+    let pat = match param {
+        syn::FnArg::Receiver(_) => return source.is_receiver,
+        syn::FnArg::Typed(PatType { pat, .. }) => pat,
+    };
+    let Pat::Ident(found) = pat.as_ref() else {
+        return false;
+    };
+    if source.is_receiver {
+        return found.ident == "self" || found.ident == RECEIVER_ARG_NAME;
+    }
+    matches!(&source.name.0, Pat::Ident(wanted) if found.ident == wanted.ident)
 }
 
 fn reference_parameter_is_non_pod_reference(

@@ -18,6 +18,7 @@ use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use syn::parse::ParseStream;
 
+use crate::borrow_source::{BorrowSource, BorrowSourceError};
 use crate::config::AllowlistErr;
 
 #[cfg(feature = "reproduction_case")]
@@ -39,6 +40,12 @@ pub(crate) struct DirectivesMap {
 /// the parse table below and the confirmation table in [`crate::config`] - so
 /// it is a constant rather than two literals which could drift apart.
 pub(crate) const BLOCK_FUNCTIONS: &str = "block_functions";
+
+/// The name of the `returns_borrow_from!` directive, written down in the same
+/// two places as `BLOCK_FUNCTIONS` above and a constant for the same reason. Also
+/// read by the engine, which reports a `returns_borrow_from!` nothing answered
+/// to in its own words rather than the shared ones.
+pub const RETURNS_BORROW_FROM: &str = "returns_borrow_from";
 
 static DIRECTIVES: OnceCell<DirectivesMap> = OnceCell::new();
 
@@ -135,6 +142,10 @@ pub(crate) fn get_directives() -> &'static DirectivesMap {
                 |config| &mut config.prettify,
                 |config| &config.prettify,
             )),
+        );
+        need_exclamation.insert(
+            RETURNS_BORROW_FROM.into(),
+            Box::new(ReturnsBorrowFromDirective),
         );
         need_exclamation.insert("name".into(), Box::new(ModName));
         need_exclamation.insert("concrete".into(), Box::new(Concrete));
@@ -743,6 +754,73 @@ impl Directive for DeriveDirective {
                 .collect::<Vec<_>>();
             quote! {
                 #cpp_name, #(#traits),*
+            }
+        }))
+    }
+}
+
+/// `returns_borrow_from!("ns::C::set", "self")` - promise that the reference
+/// this C++ function returns points into the named parameter, so that autocxx
+/// can give the returned Rust reference that parameter's lifetime.
+struct ReturnsBorrowFromDirective;
+
+impl Directive for ReturnsBorrowFromDirective {
+    fn parse(
+        &self,
+        args: ParseStream,
+        config: &mut IncludeCppConfig,
+        _ident_span: &Span,
+    ) -> ParseResult<()> {
+        let function: syn::LitStr = args.parse()?;
+        args.parse::<syn::token::Comma>()?;
+        let source: syn::LitStr = args.parse()?;
+        // The parameter is read here, where the string the user wrote still
+        // has a span to point at.
+        let parsed = BorrowSource::parse(&source.value()).map_err(|err| {
+            syn::Error::new(
+                source.span(),
+                match err {
+                    BorrowSourceError::NotAParameter => format!(
+                        "{:?} is not a parameter; name the parameter as C++ declares it, \
+                         \"self\" for the object a method is called on, or \"#0\" for the \
+                         first declared parameter by position",
+                        source.value()
+                    ),
+                    BorrowSourceError::NotAPosition => format!(
+                        "{:?} is not a parameter position; a position counts from zero \
+                         across the declared parameters, so the first one is \"#0\"",
+                        source.value()
+                    ),
+                },
+            )
+        })?;
+        config
+            .returns_borrow_from
+            .push(function.value(), parsed)
+            .map_err(|previous| {
+                syn::Error::new(
+                    source.span(),
+                    format!(
+                        "{} was already promised to return a borrow from {}, so it \
+                         can't also borrow from {}",
+                        function.value(),
+                        previous,
+                        source.value()
+                    ),
+                )
+            })?;
+        Ok(())
+    }
+
+    #[cfg(feature = "reproduction_case")]
+    fn output<'a>(
+        &self,
+        config: &'a IncludeCppConfig,
+    ) -> Box<dyn Iterator<Item = TokenStream> + 'a> {
+        Box::new(config.returns_borrow_from.iter().map(|(function, source)| {
+            let source = source.to_string();
+            quote! {
+                #function, #source
             }
         }))
     }

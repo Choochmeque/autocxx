@@ -25,11 +25,12 @@ use syn::{
 use syn::{Ident, Result as ParseResult};
 use thiserror::Error;
 
+use crate::borrow_source::BorrowSource;
 use crate::derives::DeriveMap;
 use crate::enum_style::{EnumStyle, EnumStyleMap};
 use crate::stable_hash::stable_hash;
 use crate::{
-    directives::{get_directives, BLOCK_FUNCTIONS},
+    directives::{get_directives, BLOCK_FUNCTIONS, RETURNS_BORROW_FROM},
     RustPath,
 };
 
@@ -256,6 +257,24 @@ impl DirectiveList {
         matched_any
     }
 
+    /// The requests which match `is_match`, by position in this list,
+    /// recording each of them as matched.
+    ///
+    /// For a directive which carries something alongside the name, so the
+    /// caller needs to know *which* requests answered rather than only that
+    /// one did. Every request is tried, for the reason [`Self::matches`]
+    /// gives.
+    fn matching_indices(&self, mut is_match: impl FnMut(&str) -> bool) -> Vec<usize> {
+        let mut hits = Vec::new();
+        for (index, request) in self.0.iter().enumerate() {
+            if is_match(&request.text) {
+                request.matched.set(true);
+                hits.push(index);
+            }
+        }
+        hits
+    }
+
     fn clear_matches(&self) {
         for request in &self.0 {
             request.matched.set(false);
@@ -268,6 +287,101 @@ impl DirectiveList {
             .iter()
             .filter(|request| !request.matched.get())
             .map(|request| request.text.as_str())
+    }
+}
+
+/// The `returns_borrow_from!` requests, as function name and borrowed-from
+/// parameter.
+///
+/// The names are held in a [`DirectiveList`] rather than beside the sources,
+/// so that a `returns_borrow_from!` naming no function autocxx met is reported
+/// by the same machinery as every other name-matching directive; the sources
+/// sit alongside it, one per name, at the same index.
+#[derive(Debug, Default)]
+pub struct BorrowSourceList {
+    functions: DirectiveList,
+    sources: Vec<BorrowSource>,
+}
+
+impl Hash for BorrowSourceList {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.functions.hash(state);
+        self.sources.hash(state);
+    }
+}
+
+/// What the `returns_borrow_from!` directives say about one function.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BorrowSourceMatch {
+    /// No directive named this function.
+    None,
+    /// One parameter, which every directive naming this function agreed on.
+    One(BorrowSource),
+    /// Directives naming this function disagreed about which parameter it
+    /// borrows from, so there is no promise to act on. The two spellings which
+    /// disagree, in the order they were written.
+    Conflict(BorrowSource, BorrowSource),
+}
+
+impl BorrowSourceList {
+    /// Record that the reference `function` returns borrows from `source`, or
+    /// report the directive it contradicts.
+    ///
+    /// A contradiction is caught here only where the two directives name the
+    /// function identically; one written short - `"set"` against
+    /// `"ns::C::set"` - is a name whose reach nothing knows until the C++ has
+    /// been read, and is settled by [`Self::borrow_source`] instead.
+    pub(crate) fn push(
+        &mut self,
+        function: String,
+        source: BorrowSource,
+    ) -> Result<(), BorrowSource> {
+        if let Some(previous) = self
+            .functions
+            .iter()
+            .position(|request| request == function)
+            .map(|index| self.sources[index].clone())
+        {
+            if previous != source {
+                return Err(previous);
+            }
+        }
+        self.functions.push(function);
+        self.sources.push(source);
+        Ok(())
+    }
+
+    /// The parameter the reference returned by `cpp_name` borrows from.
+    ///
+    /// `cpp_name` is one of the names the function answers to, as
+    /// [`IncludeCppConfig::is_on_function_blocklist`] takes it, so a caller
+    /// asks about every one of them and each records its own match.
+    fn borrow_source(&self, cpp_name: &str) -> BorrowSourceMatch {
+        let hits = self
+            .functions
+            .matching_indices(|request| function_name_matches_directive(cpp_name, request));
+        let mut found: Option<&BorrowSource> = None;
+        for source in hits.into_iter().map(|index| &self.sources[index]) {
+            match found {
+                None => found = Some(source),
+                Some(first) if first != source => {
+                    return BorrowSourceMatch::Conflict(first.clone(), source.clone())
+                }
+                Some(_) => {}
+            }
+        }
+        match found {
+            None => BorrowSourceMatch::None,
+            Some(source) => BorrowSourceMatch::One(source.clone()),
+        }
+    }
+
+    /// Every request, as written. For a caller which hands the whole list
+    /// somewhere - a reproduction case - rather than asking it about a name;
+    /// see [`DirectiveList::iter`].
+    #[cfg(feature = "reproduction_case")]
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &BorrowSource)> {
+        self.functions.iter().zip(self.sources.iter())
     }
 }
 
@@ -426,6 +540,9 @@ pub struct IncludeCppConfig {
     pub externs: ExternCppTypeMap,
     pub(crate) opaquelist: DirectiveList,
     pub(crate) throws_list: DirectiveList,
+    /// What each `returns_borrow_from!` directive promises about the lifetime
+    /// of a reference a named C++ function returns.
+    pub(crate) returns_borrow_from: BorrowSourceList,
     pub(crate) enum_styles: EnumStyleMap,
     pub(crate) derives: DeriveMap,
 }
@@ -634,6 +751,16 @@ impl IncludeCppConfig {
             .any(|entry| name_matches_directive(cpp_name, entry))
     }
 
+    /// What a `returns_borrow_from!` directive promises the reference returned
+    /// by this function borrows from.
+    ///
+    /// `cpp_name` is one of the names the function answers to - a method is
+    /// asked about under each spelling of the class which declares it - so a
+    /// caller asks about every one of them and lets each record its own match.
+    pub fn borrow_source(&self, cpp_name: &str) -> BorrowSourceMatch {
+        self.returns_borrow_from.borrow_source(cpp_name)
+    }
+
     /// Whether a `throws!` directive designates this function.
     ///
     /// `cpp_name` is one of the names the function answers to, on the same
@@ -793,7 +920,7 @@ impl IncludeCppConfig {
     /// to be confirmed, and six of them reached this codebase unconfirmed,
     /// among them `throws!`, whose silence costs a `std::terminate` rather
     /// than a missing binding.
-    fn name_matching_directives(&self) -> [(&'static str, &DirectiveList); 5] {
+    fn name_matching_directives(&self) -> [(&'static str, &DirectiveList); 6] {
         let IncludeCppConfig {
             // Confirmed here, each against the query the conversion itself
             // asked. Three of these remove what they match, so this is the only
@@ -803,6 +930,7 @@ impl IncludeCppConfig {
             constructor_blocklist,
             function_blocklist,
             instantiable,
+            returns_borrow_from,
 
             // Confirmed elsewhere, and left alone here so that one directive
             // cannot draw two different complaints:
@@ -850,6 +978,7 @@ impl IncludeCppConfig {
             ("block_constructors", constructor_blocklist),
             (BLOCK_FUNCTIONS, function_blocklist),
             ("instantiable", instantiable),
+            (RETURNS_BORROW_FROM, &returns_borrow_from.functions),
         ]
     }
 
@@ -923,8 +1052,8 @@ impl ToTokens for IncludeCppConfig {
 
 #[cfg(test)]
 mod parse_tests {
-    use crate::config::UnsafePolicy;
-    use crate::{ConfigHash, EnumStyle, IncludeCppConfig};
+    use crate::config::{BorrowSourceMatch, UnsafePolicy};
+    use crate::{BorrowSource, ConfigHash, EnumStyle, IncludeCppConfig};
     use syn::parse_quote;
 
     #[test]
@@ -1212,6 +1341,148 @@ mod parse_tests {
         assert_eq!(unmatched[0].request, "Thing::mispelt");
     }
 
+    /// `returns_borrow_from!` names a function the way `block_functions!`
+    /// does, and carries the parameter alongside the name.
+    #[test]
+    fn test_returns_borrow_from_matching() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            returns_borrow_from!("ns::Thing::set", "self")
+            returns_borrow_from!("ns::Thing::find", "key")
+            returns_borrow_from!("free_fn", "#1")
+        };
+        assert_eq!(
+            config.borrow_source("ns::Thing::set"),
+            BorrowSourceMatch::One(BorrowSource::Receiver)
+        );
+        assert_eq!(
+            config.borrow_source("ns::Thing::find"),
+            BorrowSourceMatch::One(BorrowSource::Named("key".into()))
+        );
+        assert_eq!(
+            config.borrow_source("ns::deep::free_fn"),
+            BorrowSourceMatch::One(BorrowSource::Position(1))
+        );
+        assert_eq!(
+            config.borrow_source("ns::Thing::other"),
+            BorrowSourceMatch::None
+        );
+        assert_eq!(config.borrow_source("Thing::set"), BorrowSourceMatch::None);
+        assert!(config.unmatched_directives().is_empty());
+    }
+
+    /// Two directives reaching the same function under different spellings
+    /// cannot both be honoured, and picking one would be picking a lifetime at
+    /// random. The caller is told instead.
+    #[test]
+    fn test_conflicting_returns_borrow_from_reported() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            returns_borrow_from!("ns::Thing::set", "self")
+            returns_borrow_from!("set", "key")
+        };
+        assert_eq!(
+            config.borrow_source("ns::Thing::set"),
+            BorrowSourceMatch::Conflict(BorrowSource::Receiver, BorrowSource::Named("key".into()))
+        );
+    }
+
+    /// A `returns_borrow_from!` nothing answered to is reported, like every
+    /// other directive which matches by name.
+    #[test]
+    fn test_unmatched_returns_borrow_from_reported() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            returns_borrow_from!("Thing::mispelt", "self")
+        };
+        assert_eq!(config.borrow_source("Thing::set"), BorrowSourceMatch::None);
+        let unmatched = config.unmatched_directives();
+        assert_eq!(unmatched.len(), 1);
+        assert_eq!(unmatched[0].directive, "returns_borrow_from");
+        assert_eq!(unmatched[0].request, "Thing::mispelt");
+    }
+
+    fn returns_borrow_from_parse_error(directive: proc_macro2::TokenStream) -> String {
+        syn::parse2::<IncludeCppConfig>(directive)
+            .expect_err("expected the returns_borrow_from! directive to be rejected")
+            .to_string()
+    }
+
+    /// The parameter has to be something a C++ declaration could name, or a
+    /// position; anything else is a mistake worth catching where the user
+    /// wrote it.
+    #[test]
+    fn test_returns_borrow_from_unreadable_parameter_rejected() {
+        let err = returns_borrow_from_parse_error(quote::quote! {
+            returns_borrow_from!("Thing::set", "const K&")
+        });
+        assert!(err.contains("is not a parameter"), "unhelpful error: {err}");
+        let err = returns_borrow_from_parse_error(quote::quote! {
+            returns_borrow_from!("Thing::set", "#last")
+        });
+        assert!(
+            err.contains("is not a parameter position"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// Naming one function twice with two different parameters is a
+    /// contradiction, and honouring whichever came last would be honouring a
+    /// promise the user also contradicted.
+    #[test]
+    fn test_contradicting_returns_borrow_from_rejected() {
+        let err = returns_borrow_from_parse_error(quote::quote! {
+            returns_borrow_from!("Thing::set", "self")
+            returns_borrow_from!("Thing::set", "key")
+        });
+        assert!(
+            err.contains("Thing::set") && err.contains("already"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// The same directive written twice is a repetition, not a contradiction.
+    #[test]
+    fn test_repeated_returns_borrow_from_accepted() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            returns_borrow_from!("Thing::set", "self")
+            returns_borrow_from!("Thing::set", "self")
+        };
+        assert_eq!(
+            config.borrow_source("Thing::set"),
+            BorrowSourceMatch::One(BorrowSource::Receiver)
+        );
+        assert!(config.unmatched_directives().is_empty());
+    }
+
+    /// The reproduction case has to re-parse to the same promises, so each
+    /// parameter has to come back out in the spelling the directive reads.
+    #[cfg(feature = "reproduction_case")]
+    #[test]
+    fn test_returns_borrow_from_reproduction_case_round_trips() {
+        let config: IncludeCppConfig = parse_quote! {
+            generate_all!()
+            returns_borrow_from!("Thing::set", "self")
+            returns_borrow_from!("Thing::find", "key")
+            returns_borrow_from!("free_fn", "#2")
+        };
+        let reparsed: IncludeCppConfig =
+            syn::parse2(quote::ToTokens::to_token_stream(&config)).unwrap();
+        assert_eq!(
+            reparsed.borrow_source("Thing::set"),
+            BorrowSourceMatch::One(BorrowSource::Receiver)
+        );
+        assert_eq!(
+            reparsed.borrow_source("Thing::find"),
+            BorrowSourceMatch::One(BorrowSource::Named("key".into()))
+        );
+        assert_eq!(
+            reparsed.borrow_source("free_fn"),
+            BorrowSourceMatch::One(BorrowSource::Position(2))
+        );
+    }
+
     #[test]
     fn test_safety_unsafe() {
         let us: UnsafePolicy = parse_quote! {
@@ -1264,7 +1535,7 @@ mod parse_tests {
             #hexathorpe include "a.h"
             generate!("Foo")
         };
-        assert_eq!(plain.get_hash(), ConfigHash(0x1bf4745a948d615a));
+        assert_eq!(plain.get_hash(), ConfigHash(0xdeb8238f44416b7b));
 
         let with_syn_types: IncludeCppConfig = parse_quote! {
             #hexathorpe include "a.h"
@@ -1278,7 +1549,7 @@ mod parse_tests {
             derive!("Foo", "Clone")
             enum_style!(BitfieldEnum, "Flags")
         };
-        assert_eq!(with_syn_types.get_hash(), ConfigHash(0xd0a8bedde60cd260));
+        assert_eq!(with_syn_types.get_hash(), ConfigHash(0x2aa913dcb2295b51));
         // The point of the second config is the `syn` types, so it is worth
         // knowing they are in there rather than silently dropped.
         assert!(!with_syn_types.extern_rust_funs.is_empty());
@@ -1299,8 +1570,9 @@ mod parse_tests {
             instantiable!("Conc")
             smart_pointer!("MyPtr")
             opaque!("Blob")
+            returns_borrow_from!("Foo::set", "self")
         };
-        assert_eq!(directive_lists.get_hash(), ConfigHash(0x1ee0ec8a789f4e76));
+        assert_eq!(directive_lists.get_hash(), ConfigHash(0x390ede57956b7071));
     }
 
     /// The hash is an archive key for the block as written. What a conversion
