@@ -1081,6 +1081,52 @@ impl<'a> FnAnalyzer<'a> {
         found
     }
 
+    /// Why a `returns_borrow_from!` directive which resolves on this function
+    /// is refused all the same: it is a virtual method of a class some
+    /// `subclass!` directive names.
+    ///
+    /// Such a method is written out three more times - as the method of the
+    /// `_methods` trait a Rust subclass implements, as the trampoline C++
+    /// calls to reach that implementation, and as the `_super` helper - and
+    /// none of those is built from the parameters the promise was marked on,
+    /// so each would leave the returned reference's lifetime to elision: the
+    /// receiver's in the trait, whatever the directive said, and no lifetime
+    /// at all in the trampoline. Binding the method for callers while its
+    /// override said something else about the same reference would be two
+    /// answers to one question, so the method is refused whole and
+    /// [`Self::analyze_foreign_fn_and_subclasses`] makes none of those items
+    /// for it.
+    ///
+    /// A virtual method of a class nobody subclasses from Rust has no such
+    /// items and binds as any other method does.
+    fn borrow_source_on_subclassed_virtual(
+        &self,
+        kind: &FnKind,
+        function: &str,
+    ) -> Option<ConvertErrorFromCpp> {
+        let FnKind::Method {
+            impl_for,
+            method_kind,
+            ..
+        } = kind
+        else {
+            return None;
+        };
+        let is_pure = match method_kind {
+            MethodKind::Virtual(_) => false,
+            MethodKind::PureVirtual(_) => true,
+            _ => return None,
+        };
+        self.subclasses_by_superclass(impl_for).next()?;
+        let function = function.to_string();
+        let class = impl_for.to_cpp_name();
+        Some(if is_pure {
+            ConvertErrorFromCpp::BorrowSourceOnSubclassPureVirtual { function, class }
+        } else {
+            ConvertErrorFromCpp::BorrowSourceOnSubclassVirtual { function, class }
+        })
+    }
+
     #[allow(clippy::if_same_then_else)] // clippy bug doesn't notice the two
                                         // closures below are different.
     fn should_be_unsafe(
@@ -1244,7 +1290,10 @@ impl<'a> FnAnalyzer<'a> {
         // method a `block_functions!` directive names: the trait method a Rust
         // subclass would implement, and the `_super` helper which calls the
         // superclass's own implementation, are both ways of reaching the very
-        // function the user asked to have withheld.
+        // function the user asked to have withheld. Nor for one refused
+        // because a `returns_borrow_from!` directive covers it: those items
+        // are the ones which cannot carry the promise, see
+        // `Self::borrow_source_on_subclassed_virtual`.
         let subclass_source = match &analysis.kind {
             FnKind::Method {
                 impl_for: sup,
@@ -1255,7 +1304,9 @@ impl<'a> FnAnalyzer<'a> {
             } if !matches!(
                 analysis.ignore_reason,
                 Err(ConvertErrorWithContext(
-                    ConvertErrorFromCpp::FunctionBlocked,
+                    ConvertErrorFromCpp::FunctionBlocked
+                        | ConvertErrorFromCpp::BorrowSourceOnSubclassVirtual { .. }
+                        | ConvertErrorFromCpp::BorrowSourceOnSubclassPureVirtual { .. },
                     _
                 ))
             ) =>
@@ -3205,7 +3256,13 @@ impl<'a> FnAnalyzer<'a> {
                     &directive_name_for(&kind, &diagnostic_name),
                     return_analysis.was_mutable_reference,
                 ) {
-                    Ok(index) => param_details[index].is_borrow_source = true,
+                    Ok(index) => match self.borrow_source_on_subclassed_virtual(
+                        &kind,
+                        &directive_name_for(&kind, &diagnostic_name),
+                    ) {
+                        Some(err) => set_ignore_reason(err),
+                        None => param_details[index].is_borrow_source = true,
+                    },
                     // The named parameter does not resolve on this declaration,
                     // so the directive does not cover this overload. It is
                     // analysed exactly as if no directive had been written -

@@ -105,7 +105,9 @@ function does, and it carries the same weight as
 [`safety!(unsafe_ffi)`](safety.md): if the reference actually points into the
 *other* parameter, then safe Rust - with no `unsafe` block anywhere near the
 call - is holding a reference which may already dangle, and the compiler has
-been told that is fine.
+been told that is fine. Where the reference is mutable - `T& f(T& a, T& b)`
+promised out of `a` and really returning `b` - safe Rust can also end up
+holding two live mutable references to one object.
 
 So write it for a function you have read, or whose documentation says where the
 returned reference points. What `autocxx` does check is whether the promise is
@@ -140,6 +142,11 @@ hands a returned reference back as a `CppLtRef` with a lifetime of its own and
 passes reference parameters as the lifetime-free `CppRef`, so there is no
 parameter lifetime for a promise to name, and the functions that mode declines
 stay declined.
+
+The directive is not yet supported on a virtual method of a class named in
+`subclass!`: such a method gets neither a binding nor an override, with a stub
+saying so, and a pure virtual one, which a Rust subclass has to override, is a
+build error.
 
 ## [`cxx::UniquePtr`](https://docs.rs/cxx/latest/cxx/struct.UniquePtr.html)s tips
 

@@ -748,8 +748,11 @@ macro_rules! throws {
 /// exactly as [`safety`]`!(unsafe_ffi)` is your word about the API as a whole -
 /// and it costs the same if it is wrong. Name the parameter the reference does
 /// *not* come out of and safe Rust is handed a reference which may dangle, with
-/// no `unsafe` block anywhere near the call. Write it only for a function you
-/// have read, or whose documentation says where the reference points.
+/// no `unsafe` block anywhere near the call. Where the reference is mutable -
+/// `T& f(T& a, T& b)` promised out of `a` and really returning `b` - safe Rust
+/// can also end up holding two live mutable references to one object. Write it
+/// only for a function you have read, or whose documentation says where the
+/// reference points.
 ///
 /// What autocxx does check is that the promise is expressible at all. Each of
 /// these is refused rather than written down as a signature which lies: a
@@ -806,6 +809,11 @@ macro_rules! throws {
 /// its own and passes reference parameters as the lifetime-free `CppRef`, so
 /// there is no parameter lifetime for a promise to name, and the functions that
 /// mode declines stay declined.
+///
+/// The directive is not yet supported on a virtual method of a class named in
+/// [`subclass`]: such a method gets neither a binding nor an override, with a
+/// stub saying so, and a pure virtual one, which a Rust subclass has to
+/// override, is a build error.
 ///
 /// A directive to be included inside
 /// [include_cpp] - see [include_cpp] for general information.

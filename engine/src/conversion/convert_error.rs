@@ -84,6 +84,10 @@ pub enum ConvertErrorFromCpp {
         first: String,
         second: String,
     },
+    #[error("The 'returns_borrow_from' directive for {function} is not yet supported on a virtual method of a class named in 'subclass': the method a Rust subclass would implement to override it has nowhere to say which parameter its result borrows from. {class} is named in a 'subclass' directive, so this method gets neither a binding nor an override, and a Rust subclass keeps {class}'s own implementation of it. If Rust only needs to call it, declare a non-virtual C++ function which forwards to it and name that one in the directive instead.")]
+    BorrowSourceOnSubclassVirtual { function: String, class: String },
+    #[error("The 'returns_borrow_from' directive for {function} is not yet supported on a virtual method of a class named in 'subclass', and this one is pure virtual: a Rust subclass of {class} has to override it to exist at all, and the method it would implement has nowhere to say which parameter its result borrows from. Override it in a C++ class deriving from {class}, and name that class in 'subclass' instead.")]
+    BorrowSourceOnSubclassPureVirtual { function: String, class: String },
     #[error("Encountered type not yet supported by autocxx: {0}")]
     UnsupportedType(String),
     #[error("Encountered type not yet known by autocxx: {0}")]

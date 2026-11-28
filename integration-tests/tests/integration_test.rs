@@ -44250,3 +44250,224 @@ fn test_returns_borrow_from_self_through_a_wrapper() {
         None,
     );
 }
+
+/// A Rust subclass overrides a virtual method through a trait method and a
+/// trampoline C++ calls, and neither can carry the lifetime the directive
+/// promises yet. A *pure* virtual has to be overridden for the subclass to
+/// exist at all, so there is nothing to fall back to and the build says so.
+#[test]
+fn test_returns_borrow_from_on_a_subclassed_pure_virtual_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Chooser {
+            public:
+                Chooser() {}
+                virtual const uint32_t& choose(const uint32_t& a, const uint32_t& b) const = 0;
+                virtual ~Chooser() {}
+            };
+            inline uint32_t rbf_drive(const Chooser& c) {
+                uint32_t a = 1, b = 2;
+                return c.choose(a, b);
+            }
+        }
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("rbf_ns::rbf_drive")
+            subclass!("rbf_ns::Chooser", MyChooser)
+            returns_borrow_from!("rbf_ns::Chooser::choose", "a")
+        },
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::rbf_ns::Chooser_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyChooser {}
+            impl Chooser_methods for MyChooser {}
+        }),
+        &[
+            "returns_borrow_from",
+            "rbf_ns::Chooser::choose",
+            "pure virtual",
+            "subclass",
+        ],
+    );
+}
+
+/// The same on a virtual method which has an implementation of its own: the
+/// method gets neither a binding nor an override, the stub says why, and the
+/// rest of the subclass is untouched - its other virtual is overridden from
+/// Rust, and C++ calling the refused one reaches the superclass's own.
+///
+/// This is also a directive whose only match was refused. It named something
+/// real, so the refusal is the one thing said about it: the build does not
+/// also report it as having matched nothing.
+#[test]
+fn test_returns_borrow_from_on_a_subclassed_virtual_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Chooser {
+            public:
+                Chooser() {}
+                virtual const uint32_t& choose(const uint32_t& a, const uint32_t&) const {
+                    return a;
+                }
+                virtual uint32_t kept() const { return 2; }
+                virtual ~Chooser() {}
+            };
+            inline uint32_t rbf_drive(const Chooser& c) {
+                uint32_t a = 1, b = 2;
+                return c.choose(a, b);
+            }
+            inline uint32_t rbf_kept(const Chooser& c) { return c.kept(); }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let c = MyChooser::new_rust_owned(MyChooser { cpp_peer: Default::default() });
+            assert_eq!(ffi::rbf_ns::rbf_kept(c.borrow().as_ref()), 9);
+            assert_eq!(ffi::rbf_ns::rbf_drive(c.borrow().as_ref()), 1);
+        },
+        quote! {
+            generate!("rbf_ns::rbf_drive")
+            generate!("rbf_ns::rbf_kept")
+            subclass!("rbf_ns::Chooser", MyChooser)
+            returns_borrow_from!("rbf_ns::Chooser::choose", "a")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn choose(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec![
+                "is not yet supported on a virtual method of a class named in".into(),
+            ]),
+            make_string_absence_finder(vec!["choose_super".into(), "MyChooser_choose".into()]),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::rbf_ns::Chooser_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyChooser {}
+            impl Chooser_methods for MyChooser {
+                fn kept(&self) -> u32 {
+                    9
+                }
+            }
+        }),
+    );
+}
+
+/// Naming the receiver changes nothing about that: the trait method a
+/// subclass implements would have to say its result borrows from `self`
+/// rather than from the other reference, and it cannot yet say either.
+#[test]
+fn test_returns_borrow_from_self_on_a_subclassed_virtual_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Holder {
+            public:
+                Holder() {}
+                virtual const uint32_t& held(const uint32_t&) const { return held_; }
+                virtual uint32_t kept() const { return 2; }
+                virtual ~Holder() {}
+            private:
+                uint32_t held_ = 5;
+            };
+            inline uint32_t rbf_held(const Holder& h) {
+                uint32_t hint = 1;
+                return h.held(hint);
+            }
+            inline uint32_t rbf_kept(const Holder& h) { return h.kept(); }
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let h = MyHolder::new_rust_owned(MyHolder { cpp_peer: Default::default() });
+            assert_eq!(ffi::rbf_ns::rbf_kept(h.borrow().as_ref()), 9);
+            assert_eq!(ffi::rbf_ns::rbf_held(h.borrow().as_ref()), 5);
+        },
+        quote! {
+            generate!("rbf_ns::rbf_held")
+            generate!("rbf_ns::rbf_kept")
+            subclass!("rbf_ns::Holder", MyHolder)
+            returns_borrow_from!("rbf_ns::Holder::held", "self")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn held(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec![
+                "is not yet supported on a virtual method of a class named in".into(),
+            ]),
+            make_string_absence_finder(vec!["held_super".into(), "MyHolder_held".into()]),
+        ])),
+        Some(quote! {
+            use autocxx::subclass::CppSubclass;
+            use ffi::rbf_ns::Holder_methods;
+            #[autocxx::subclass::subclass]
+            pub struct MyHolder {}
+            impl Holder_methods for MyHolder {
+                fn kept(&self) -> u32 {
+                    9
+                }
+            }
+        }),
+    );
+}
+
+/// What is refused is the override, not virtual dispatch: a virtual method of
+/// a class no `subclass!` names has no trait method or trampoline to disagree
+/// with, and binds like any other.
+#[test]
+fn test_returns_borrow_from_on_a_virtual_nobody_subclasses() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Dial {
+            public:
+                virtual ~Dial() {}
+                virtual Dial& set(const uint32_t& coarse, const uint32_t& fine) {
+                    value_ = coarse + fine;
+                    return *this;
+                }
+                uint32_t value() const { return value_; }
+            private:
+                uint32_t value_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut d = ffi::rbf_ns::Dial::new().within_unique_ptr();
+            d.pin_mut().set(&1, &2).set(&3, &4);
+            assert_eq!(d.value(), 7);
+        },
+        quote! {
+            generate!("rbf_ns::Dial")
+            returns_borrow_from!("rbf_ns::Dial::set", "self")
+        },
+        None,
+        Some(make_rust_code_finder(vec![
+            quote! {
+                Pin<&'a mut Dial>, coarse: &u32, fine: &u32
+            },
+            quote! {
+                -> Pin<&'a mut Dial>
+            },
+        ])),
+        None,
+    );
+}
