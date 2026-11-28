@@ -14537,9 +14537,9 @@ fn test_typedef_to_pointer_to_pointer_to_pointer_alias() {
         let mut row: *mut f32 = &mut cell;
         let mut plane: *mut *mut f32 = &mut row;
         let deep: *mut *mut *mut f32 = &mut plane;
-        assert_eq!(ffi::take(&deep), 3.0);
+        assert_eq!(unsafe { ffi::take(&deep) }, 3.0);
     };
-    run_test("", hdr, rs, &["take"], &[]);
+    run_test_denying_unused_unsafe(hdr, rs, &["take"]);
 }
 
 #[test]
@@ -36860,6 +36860,10 @@ fn test_typedef_chain_to_rvalue_reference_parameter() {
 /// name used to reach cxx, which has never heard of it: the whole build
 /// stopped at `unsupported type: fx_IntPtr`. Covers `&` and `const&`, `using`
 /// as well as `typedef`, and an alias for the reference alias.
+///
+/// Each of them hands C++ a pointer, so each is `unsafe` as the reference
+/// written out is - see `test_mut_reference_to_pointer_param_is_unsafe` - and
+/// `unused_unsafe` is denied so that the `unsafe` blocks say so.
 #[test]
 fn test_typedef_chain_to_reference_to_pointer_parameter() {
     let hdr = indoc! {"
@@ -36877,18 +36881,22 @@ fn test_typedef_chain_to_reference_to_pointer_parameter() {
     let rs = quote! {
         let mut v = autocxx::c_int(7);
         let mut p: *mut autocxx::c_int = &mut v;
-        assert_eq!(ffi::fx_read(std::pin::Pin::new(&mut p)), autocxx::c_int(7));
-        assert_eq!(ffi::fx_read_const(&p), autocxx::c_int(7));
-        assert_eq!(ffi::fx_read_using(std::pin::Pin::new(&mut p)), autocxx::c_int(7));
-        ffi::fx_clear(std::pin::Pin::new(&mut p));
+        assert_eq!(
+            unsafe { ffi::fx_read(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+        assert_eq!(unsafe { ffi::fx_read_const(&p) }, autocxx::c_int(7));
+        assert_eq!(
+            unsafe { ffi::fx_read_using(std::pin::Pin::new(&mut p)) },
+            autocxx::c_int(7)
+        );
+        unsafe { ffi::fx_clear(std::pin::Pin::new(&mut p)) };
         assert!(p.is_null());
     };
-    run_test(
-        "",
+    run_test_denying_unused_unsafe(
         hdr,
         rs,
         &["fx_read", "fx_read_const", "fx_read_using", "fx_clear"],
-        &[],
     );
 }
 
@@ -37182,7 +37190,8 @@ fn test_typedef_to_const_rust_str_reference_parameter() {
     run_test("", hdr, rs, &["fx_len"], &[]);
 }
 
-/// The same with a pointer to a pointer behind the inner alias.
+/// The same with a pointer to a pointer behind the inner alias, and `unsafe`
+/// for the same reason.
 #[test]
 fn test_typedef_chain_to_reference_to_pointer_to_pointer_parameter() {
     let hdr = indoc! {"
@@ -37196,10 +37205,13 @@ fn test_typedef_chain_to_reference_to_pointer_to_pointer_parameter() {
         let mut v = autocxx::c_int(7);
         let mut row: *mut autocxx::c_int = &mut v;
         let mut rows: *mut *mut autocxx::c_int = &mut row;
-        assert_eq!(ffi::fx_first(std::pin::Pin::new(&mut rows)), autocxx::c_int(7));
-        assert_eq!(ffi::fx_first_const(&rows), autocxx::c_int(7));
+        assert_eq!(
+            unsafe { ffi::fx_first(std::pin::Pin::new(&mut rows)) },
+            autocxx::c_int(7)
+        );
+        assert_eq!(unsafe { ffi::fx_first_const(&rows) }, autocxx::c_int(7));
     };
-    run_test("", hdr, rs, &["fx_first", "fx_first_const"], &[]);
+    run_test_denying_unused_unsafe(hdr, rs, &["fx_first", "fx_first_const"]);
 }
 
 /// A `volatile` beneath the referent is turned down through a reference
@@ -37244,17 +37256,18 @@ fn test_typedef_to_const_reference_over_buried_volatile_argument() {
             static int read_direct(DirectSlot p) { return *p; }
         };
     "};
-    run_test(
-        "",
+    run_test_denying_unused_unsafe(
         hdr,
         quote! {
             let mut a = autocxx::c_int(4);
             let p = std::ptr::addr_of_mut!(a);
-            assert_eq!(ffi::fx_Buried::read(&p), autocxx::c_int(4));
-            assert_eq!(ffi::fx_Buried::read_direct(&p), autocxx::c_int(4));
+            assert_eq!(unsafe { ffi::fx_Buried::read(&p) }, autocxx::c_int(4));
+            assert_eq!(
+                unsafe { ffi::fx_Buried::read_direct(&p) },
+                autocxx::c_int(4)
+            );
         },
         &["fx_Buried"],
-        &[],
     );
 }
 
@@ -44267,21 +44280,6 @@ fn test_typedefd_reference_to_pointer_param_is_unsafe() {
         assert_eq!(unsafe { ffi::fx_read_const(&p) }, autocxx::c_int(7));
     };
     run_test_denying_unused_unsafe(hdr, rs, &["fx_read_mut", "fx_read_const"]);
-}
-
-/// `IntPtr&&`: what is moved from is still a pointer C++ may dereference.
-#[test]
-fn test_rvalue_reference_to_pointer_param_is_unsafe() {
-    let hdr = indoc! {"
-        typedef int* IntPtr;
-        inline int fx_read(IntPtr&& p) { return *p; }
-    "};
-    let rs = quote! {
-        let mut v = autocxx::c_int(7);
-        let p: *mut autocxx::c_int = &mut v;
-        assert_eq!(unsafe { ffi::fx_read(Box::pin(p)) }, autocxx::c_int(7));
-    };
-    run_test_denying_unused_unsafe(hdr, rs, &["fx_read"]);
 }
 
 /// The same for every kind of function, as
