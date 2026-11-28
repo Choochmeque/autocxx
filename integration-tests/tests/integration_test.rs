@@ -43187,3 +43187,260 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
     };
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
 }
+
+/// The two ways a header can leave a class incomplete: declaring it on a line
+/// of its own, and naming it with an elaborated type specifier - `struct T` -
+/// in the middle of some other declaration, which declares it just as well.
+/// `{DECL}` in a header below is where the first of those goes; the functions
+/// themselves always write `struct fx_Inc`, so that in the second spelling
+/// whichever of them comes first is the only declaration there is.
+const INCOMPLETE_TYPE_SPELLINGS: [&str; 2] = ["struct fx_Inc;", ""];
+
+/// A function returning by value a class this header only declares cannot be
+/// called from here: the wrapper would have to construct the result, and C++
+/// will not construct an incomplete type. So each one is left out, with a stub
+/// saying why, and the rest of the header binds.
+///
+/// A refused member function leaves a stub function behind and a refused free
+/// function a stub struct, which is why the two are looked for differently.
+///
+/// One header per kind of function, because where bindgen first meets the
+/// type is what used to decide whether it noticed there was no definition: it
+/// did on a declaration and on a parameter, and nowhere else. Named only in a
+/// return type, the class came out as an empty one, and autocxx wrote C++
+/// which allocated it.
+#[test]
+fn test_incomplete_type_returned_by_value() {
+    for (function, stub) in [
+        (
+            "class fx_Solver { public: struct fx_Inc fx_by_member(fx_Arg* p); };",
+            "fn fx_by_member (_uhoh : autocxx :: BindingGenerationFailure)",
+        ),
+        (
+            "class fx_Solver { public: static struct fx_Inc fx_by_static(fx_Arg* p); };",
+            "fn fx_by_static (_uhoh : autocxx :: BindingGenerationFailure)",
+        ),
+        (
+            "struct fx_Inc fx_by_free(fx_Arg* p);",
+            "pub struct fx_by_free ;",
+        ),
+    ] {
+        for decl in INCOMPLETE_TYPE_SPELLINGS {
+            let hdr = format!(
+                "#include <cstdint>\n\
+                 struct fx_Arg;\n\
+                 {decl}\n\
+                 {function}\n\
+                 inline uint32_t fx_ok() {{ return 3; }}\n"
+            );
+            run_test_ex(
+                "",
+                &hdr,
+                quote! {
+                    assert_eq!(ffi::fx_ok(), 3);
+                },
+                quote! { generate_all!() },
+                None,
+                Some(make_string_finder(vec![
+                    stub.to_string(),
+                    "forward declaration (fx_Inc)".to_string(),
+                ])),
+                None,
+            );
+        }
+    }
+}
+
+/// The same for a parameter: passing one by value means copying or moving it,
+/// which needs the definition just as much.
+#[test]
+fn test_incomplete_type_taken_by_value() {
+    for decl in INCOMPLETE_TYPE_SPELLINGS {
+        let hdr = format!(
+            "#include <cstdint>\n\
+             {decl}\n\
+             void fx_take_free(struct fx_Inc i);\n\
+             class fx_Solver {{\n\
+             public:\n\
+                 void fx_take_member(struct fx_Inc i);\n\
+                 static void fx_take_static(struct fx_Inc i);\n\
+             }};\n\
+             inline uint32_t fx_ok() {{ return 3; }}\n"
+        );
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {
+                assert_eq!(ffi::fx_ok(), 3);
+            },
+            quote! { generate_all!() },
+            None,
+            Some(make_string_finder(vec![
+                "pub struct fx_take_free ;".to_string(),
+                "fn fx_take_member (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+                "fn fx_take_static (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+                "forward declaration (fx_Inc)".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// What an incomplete type is good for is unchanged: a pointer or a reference
+/// to one is something C++ can pass around without the definition, so those
+/// functions bind and work. `std::unique_ptr` of one does not - cxx's glue
+/// for it destroys the pointee - and is refused like a by-value use.
+#[test]
+fn test_incomplete_type_by_pointer_and_reference() {
+    let cpp = indoc! {"
+        struct fx_Inc { uint32_t v; };
+        struct fx_Inc* fx_make() { return new fx_Inc{7}; }
+        const struct fx_Inc& fx_same(const struct fx_Inc& i) { return i; }
+        uint32_t fx_read(const struct fx_Inc& i) { return i.v; }
+        void fx_bump(struct fx_Inc& i) { i.v++; }
+        void fx_destroy(struct fx_Inc* p) { delete p; }
+        std::unique_ptr<fx_Inc> fx_Factory::fx_make_unique() { return std::make_unique<fx_Inc>(); }
+    "};
+    for decl in INCOMPLETE_TYPE_SPELLINGS {
+        let hdr = format!(
+            "#include <cstdint>\n\
+             #include <memory>\n\
+             {decl}\n\
+             struct fx_Inc* fx_make();\n\
+             const struct fx_Inc& fx_same(const struct fx_Inc& i);\n\
+             uint32_t fx_read(const struct fx_Inc& i);\n\
+             void fx_bump(struct fx_Inc& i);\n\
+             void fx_destroy(struct fx_Inc* p);\n\
+             class fx_Factory {{\n\
+             public:\n\
+                 static std::unique_ptr<fx_Inc> fx_make_unique();\n\
+             }};\n"
+        );
+        run_test_ex(
+            cpp,
+            &hdr,
+            quote! {
+                let p = ffi::fx_make();
+                assert_eq!(ffi::fx_read(ffi::fx_same(unsafe { p.as_ref().unwrap() })), 7);
+                ffi::fx_bump(unsafe { std::pin::Pin::new_unchecked(&mut *p) });
+                assert_eq!(ffi::fx_read(unsafe { p.as_ref().unwrap() }), 8);
+                unsafe { ffi::fx_destroy(p) };
+            },
+            directives_from_lists(
+                &[
+                    "fx_make",
+                    "fx_same",
+                    "fx_read",
+                    "fx_bump",
+                    "fx_destroy",
+                    "fx_Factory",
+                ],
+                &[],
+                None,
+            ),
+            None,
+            Some(make_string_finder(vec![
+                "fn fx_make_unique (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+                "forward declaration (fx_Inc)".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// A pointer member is the same use as a pointer parameter, and another place
+/// an elaborated type specifier can be the only declaration a class gets -
+/// where, as in a return type, the class used to come out as an empty one
+/// which autocxx then wrote the C++ to allocate and destroy.
+#[test]
+fn test_incomplete_type_behind_pointer_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Holder {
+            struct fx_Inc* p;
+            uint32_t n;
+        };
+        inline uint32_t fx_count(const fx_Holder& h) { return h.n; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_Holder { p: std::ptr::null_mut(), n: 4 };
+        assert_eq!(ffi::fx_count(&h), 4);
+    };
+    run_test("", hdr, rs, &["fx_count"], &["fx_Holder"]);
+}
+
+/// The contrast: the same signatures over a class the header defines bind,
+/// and are callable.
+#[test]
+fn test_complete_type_by_value_in_same_signatures() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Inc { uint32_t v; };
+        class fx_Solver {
+        public:
+            struct fx_Inc fx_by_member() const { return fx_Inc{1}; }
+            static struct fx_Inc fx_by_static() { return fx_Inc{2}; }
+            uint32_t fx_take_member(struct fx_Inc i) const { return i.v; }
+        };
+        inline struct fx_Inc fx_by_free() { return fx_Inc{3}; }
+        inline uint32_t fx_take_free(struct fx_Inc i) { return i.v; }
+    "};
+    let rs = quote! {
+        let s = ffi::fx_Solver::new().within_unique_ptr();
+        assert_eq!(s.fx_by_member().v, 1);
+        assert_eq!(ffi::fx_Solver::fx_by_static().v, 2);
+        assert_eq!(ffi::fx_by_free().v, 3);
+        assert_eq!(s.fx_take_member(ffi::fx_Inc { v: 4 }), 4);
+        assert_eq!(ffi::fx_take_free(ffi::fx_Inc { v: 5 }), 5);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_Solver", "fx_by_free", "fx_take_free"],
+        &["fx_Inc"],
+    );
+}
+
+/// Incomplete where the function is declared is not incomplete: a class
+/// defined further down the header is complete by the end of it, which is
+/// where the generated C++ is compiled. So these bind exactly as if the
+/// definition had come first.
+#[test]
+fn test_type_completed_later_in_header_by_value() {
+    for decl in INCOMPLETE_TYPE_SPELLINGS {
+        let hdr = format!(
+            "#include <cstdint>\n\
+             {decl}\n\
+             struct fx_Inc fx_by_free();\n\
+             uint32_t fx_take_free(struct fx_Inc i);\n\
+             class fx_Solver {{\n\
+             public:\n\
+                 struct fx_Inc fx_by_member() const;\n\
+                 static struct fx_Inc fx_by_static();\n\
+                 uint32_t fx_take_member(struct fx_Inc i) const;\n\
+             }};\n\
+             struct fx_Inc {{ uint32_t v; }};\n\
+             inline fx_Inc fx_Solver::fx_by_member() const {{ return fx_Inc{{1}}; }}\n\
+             inline fx_Inc fx_Solver::fx_by_static() {{ return fx_Inc{{2}}; }}\n\
+             inline uint32_t fx_Solver::fx_take_member(fx_Inc i) const {{ return i.v; }}\n\
+             inline fx_Inc fx_by_free() {{ return fx_Inc{{3}}; }}\n\
+             inline uint32_t fx_take_free(fx_Inc i) {{ return i.v; }}\n"
+        );
+        let rs = quote! {
+            let s = ffi::fx_Solver::new().within_unique_ptr();
+            assert_eq!(s.fx_by_member().v, 1);
+            assert_eq!(ffi::fx_Solver::fx_by_static().v, 2);
+            assert_eq!(ffi::fx_by_free().v, 3);
+            assert_eq!(s.fx_take_member(ffi::fx_Inc { v: 4 }), 4);
+            assert_eq!(ffi::fx_take_free(ffi::fx_Inc { v: 5 }), 5);
+        };
+        run_test(
+            "",
+            &hdr,
+            rs,
+            &["fx_Solver", "fx_by_free", "fx_take_free"],
+            &["fx_Inc"],
+        );
+    }
+}
