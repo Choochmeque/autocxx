@@ -1349,3 +1349,53 @@ fn test_std_array_certificate_element_reference_cpprefs() {
     };
     run_cpprefs_test("", hdr, rs, &["fx_total"], &[]);
 }
+
+/// `returns_borrow_from!` does nothing under `unsafe_references_wrapped`:
+/// reference parameters are lifetime-free `CppRef`s there, so no parameter has
+/// a lifetime for the promise to name. The chainable setter stays declined
+/// exactly as it is without the directive, and the directive counts as having
+/// named something, so the build does not report it as matching nothing.
+#[test]
+fn test_returns_borrow_from_is_inert_cpprefs() {
+    if !arbitrary_self_types_supported() {
+        // "unsafe_references_wrapped" requires arbitrary_self_types, which requires nightly.
+        return;
+    }
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Settings {
+            public:
+                Settings& set(const uint32_t& key, const uint32_t& value) {
+                    last_ = key + value;
+                    return *this;
+                }
+                uint32_t last() const { return last_; }
+            private:
+                uint32_t last_ = 0;
+            };
+        }
+    "};
+    do_run_test(
+        "",
+        hdr,
+        quote! {
+            let s = ffi::rbf_ns::Settings::new().within_unique_ptr();
+            assert_eq!(s.as_cpp_ref().last(), 0);
+        },
+        quote! {
+            generate!("rbf_ns::Settings")
+            returns_borrow_from!("rbf_ns::Settings::set", "self")
+        },
+        None,
+        Some(make_rust_code_finder(vec![quote! {
+            fn set(_uhoh: autocxx::BindingGenerationFailure)
+        }])),
+        None,
+        "unsafe_references_wrapped",
+        Some(quote! {
+            #![feature(arbitrary_self_types_pointers)]
+        }),
+    )
+    .unwrap()
+}

@@ -44471,3 +44471,370 @@ fn test_returns_borrow_from_on_a_virtual_nobody_subclasses() {
         None,
     );
 }
+
+/// Everything above lends `uint32_t`s. The same promises over the types a
+/// real setter takes: a class cxx knows only as opaque, and a `std::string`.
+#[test]
+fn test_returns_borrow_from_non_pod_parameters() {
+    let hdr = indoc! {"
+        #include <string>
+        namespace rbf_ns {
+            struct Key { std::string name; };
+            class Table {
+            public:
+                Table& set(const Key& key, const std::string& value) {
+                    (void)key;
+                    value_ = value;
+                    return *this;
+                }
+                const std::string& echo(const std::string& value) const { return value; }
+                const std::string& value() const { return value_; }
+            private:
+                std::string value_;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut t = ffi::rbf_ns::Table::new().within_unique_ptr();
+            let k = ffi::rbf_ns::Key::new().within_unique_ptr();
+            autocxx::cxx::let_cxx_string!(first = "first");
+            autocxx::cxx::let_cxx_string!(second = "second");
+            t.pin_mut().set(&k, &first).set(&k, &second);
+            assert_eq!(t.value().to_str().unwrap(), "second");
+            // The echoed string is the argument, not something of the table's,
+            // so it outlives the table.
+            let echoed = {
+                let scratch = ffi::rbf_ns::Table::new().within_unique_ptr();
+                scratch.echo(&first)
+            };
+            assert_eq!(echoed.to_str().unwrap(), "first");
+        },
+        quote! {
+            generate!("rbf_ns::Table")
+            generate!("rbf_ns::Key")
+            returns_borrow_from!("rbf_ns::Table::set", "self")
+            returns_borrow_from!("rbf_ns::Table::echo", "value")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// A const member function promised out of its receiver: a getter which takes
+/// its key by reference. The result outlives the key it was looked up with,
+/// which it could not if the key's lifetime had been tied in as well.
+#[test]
+fn test_returns_borrow_from_self_on_a_const_getter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Shelf {
+            public:
+                const uint32_t& get(const uint32_t& key) const { return slots_[key % 2]; }
+            private:
+                uint32_t slots_[2] = { 10, 11 };
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let s = ffi::rbf_ns::Shelf::new().within_unique_ptr();
+            let found = {
+                let key = 3u32;
+                s.get(&key)
+            };
+            assert_eq!(*found, 11);
+        },
+        quote! {
+            generate!("rbf_ns::Shelf")
+            returns_borrow_from!("rbf_ns::Shelf::get", "self")
+        },
+        None,
+        Some(make_rust_code_finder(vec![
+            quote! {
+                &'a Shelf, key: &u32
+            },
+            quote! {
+                -> &'a u32
+            },
+        ])),
+        None,
+    );
+}
+
+/// A static member function has no receiver, and its parameters are named as
+/// a free function's are. The result is tied to the one named and outlives the
+/// other.
+#[test]
+fn test_returns_borrow_from_static_method_parameter() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Picker {
+            public:
+                static const uint32_t& pick(const uint32_t& chosen, const uint32_t& other) {
+                    (void)other;
+                    return chosen;
+                }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let chosen = 5u32;
+            let picked = {
+                let other = 6u32;
+                ffi::rbf_ns::Picker::pick(&chosen, &other)
+            };
+            assert_eq!(*picked, 5);
+        },
+        quote! {
+            generate!("rbf_ns::Picker")
+            returns_borrow_from!("rbf_ns::Picker::pick", "chosen")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Reference parameters declared through a typedef are references all the
+/// same: they count towards the three which get the setter declined, and the
+/// directive settles it as it does when they are spelled out.
+#[test]
+fn test_returns_borrow_from_typedefd_reference_parameters() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            typedef const uint32_t& KeyRef;
+            class Aliased {
+            public:
+                Aliased& set(KeyRef key, KeyRef value) {
+                    last_ = key + value;
+                    return *this;
+                }
+                uint32_t last() const { return last_; }
+            private:
+                uint32_t last_ = 0;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let mut a = ffi::rbf_ns::Aliased::new().within_unique_ptr();
+            a.pin_mut().set(&1, &2).set(&3, &4);
+            assert_eq!(a.last(), 7);
+        },
+        quote! {
+            generate!("rbf_ns::Aliased")
+            returns_borrow_from!("rbf_ns::Aliased::set", "self")
+        },
+        None,
+        Some(make_rust_code_finder(vec![
+            quote! {
+                Pin<&'a mut Aliased>, key: &u32, value: &u32
+            },
+            quote! {
+                -> Pin<&'a mut Aliased>
+            },
+        ])),
+        None,
+    );
+}
+
+/// A position on a member function counts the parameters C++ declared and not
+/// the receiver, so `#0` is the first of them and `#1` the second. Each result
+/// here outlives everything but the parameter its position names - the
+/// receiver included - so a count which started at the receiver would tie it
+/// to something already gone and fail to build.
+#[test]
+fn test_returns_borrow_from_position_on_a_method_skips_the_receiver() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Sorter {
+            public:
+                const uint32_t& first(const uint32_t& kept, const uint32_t&) const {
+                    return kept;
+                }
+                const uint32_t& second(const uint32_t&, const uint32_t& kept) const {
+                    return kept;
+                }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let kept = 2u32;
+            let from_first = {
+                let s = ffi::rbf_ns::Sorter::new().within_unique_ptr();
+                let ignored = 1u32;
+                s.first(&kept, &ignored)
+            };
+            assert_eq!(*from_first, 2);
+            let from_second = {
+                let s = ffi::rbf_ns::Sorter::new().within_unique_ptr();
+                let ignored = 1u32;
+                s.second(&ignored, &kept)
+            };
+            assert_eq!(*from_second, 2);
+        },
+        quote! {
+            generate!("rbf_ns::Sorter")
+            returns_borrow_from!("rbf_ns::Sorter::first", "#0")
+            returns_borrow_from!("rbf_ns::Sorter::second", "#1")
+        },
+        None,
+        Some(make_rust_code_finder(vec![
+            quote! {
+                &Sorter, kept: &'a u32, arg1: &u32
+            },
+            quote! {
+                &Sorter, arg1: &u32, kept: &'a u32
+            },
+        ])),
+        None,
+    );
+}
+
+/// A pointer is not a reference: it reaches Rust as a raw pointer, which has
+/// no lifetime for the returned reference to take.
+#[test]
+fn test_returns_borrow_from_pointer_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Ptr {
+            public:
+                const uint32_t& through(const uint32_t* target) const { return *target; }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::rbf_ns::Ptr::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("rbf_ns::Ptr")
+            returns_borrow_from!("rbf_ns::Ptr::through", "target")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn through(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec![
+                "names the parameter 'target', which autocxx passes as * const u32".into(),
+                "rather than as a Rust reference".into(),
+            ]),
+        ])),
+        None,
+    );
+}
+
+/// Nor is an rvalue reference one Rust can borrow from: the caller gives the
+/// object up for the call, so nothing of it is left to hold a borrow of.
+#[test]
+fn test_returns_borrow_from_rvalue_reference_parameter_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        #include <string>
+        namespace rbf_ns {
+            class Rv {
+            public:
+                const std::string& keep(std::string&& given) {
+                    held_ = given;
+                    return held_;
+                }
+            private:
+                std::string held_;
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let _ = ffi::rbf_ns::Rv::new().within_unique_ptr();
+        },
+        quote! {
+            generate!("rbf_ns::Rv")
+            returns_borrow_from!("rbf_ns::Rv::keep", "given")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                fn keep(_uhoh: autocxx::BindingGenerationFailure)
+            }]),
+            make_string_finder(vec!["rather than as a Rust reference".into()]),
+        ])),
+        None,
+    );
+}
+
+/// A parameter C++ names with a Rust keyword does not reach Rust under that
+/// name - `type` arrives as `type_` - so the name C++ gives it resolves to
+/// nothing and the stub says so. Its position is the same whatever it is
+/// called.
+#[test]
+fn test_returns_borrow_from_keyword_named_parameter_by_position() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        namespace rbf_ns {
+            class Kw {
+            public:
+                const uint32_t& by_name(const uint32_t& type, const uint32_t&) const {
+                    return type;
+                }
+                const uint32_t& by_position(const uint32_t& type, const uint32_t&) const {
+                    return type;
+                }
+            };
+        }
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let k = ffi::rbf_ns::Kw::new().within_unique_ptr();
+            let wanted = 4u32;
+            let found = {
+                let ignored = 5u32;
+                k.by_position(&wanted, &ignored)
+            };
+            assert_eq!(*found, 4);
+        },
+        quote! {
+            generate!("rbf_ns::Kw")
+            returns_borrow_from!("rbf_ns::Kw::by_name", "type")
+            returns_borrow_from!("rbf_ns::Kw::by_position", "#0")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![
+                quote! {
+                    fn by_name(_uhoh: autocxx::BindingGenerationFailure)
+                },
+                quote! {
+                    &Kw, type_: &'a u32, arg1: &u32
+                },
+            ]),
+            make_string_finder(vec!["names the parameter 'type'".into()]),
+        ])),
+        None,
+    );
+}
