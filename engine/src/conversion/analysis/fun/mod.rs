@@ -4296,6 +4296,11 @@ impl<'a> FnAnalyzer<'a> {
                 let was_rvalue_reference_spelling = type_is_reference(boxed_type, true);
                 let annotated_type = self.convert_boxed_type(boxed_type.clone(), ns)?;
                 let pointee_was_volatile = annotated_type.has_volatile_pointee;
+                // One deeper than that has no wrapper to cast it away, and
+                // C++ will not drop the qualifier by itself.
+                if annotated_type.unwritten_volatile == type_converter::UnwrittenVolatile::Deeper {
+                    return Err(ConvertErrorFromCpp::BuriedVolatile);
+                }
                 let pointee_was_volatile_rvalue_reference =
                     pointee_was_volatile && was_rvalue_reference_spelling;
                 let was_const = annotated_type.is_const;
