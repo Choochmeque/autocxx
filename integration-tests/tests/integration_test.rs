@@ -33878,6 +33878,163 @@ fn test_template_class_with_const_pointer_argument() {
     );
 }
 
+/// A pointer to a `const` pointer in a function's own signature, rather than in
+/// a template argument. The bridge says `*const *mut T`, with the marker
+/// already spent, so the wrapper has to place the qualifier from that alone.
+#[test]
+fn test_static_method_with_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Summer {
+            static int sum(int* const* items, int n) {
+                int total = 0;
+                for (int i = 0; i < n; i++) total += *items[i];
+                return total;
+            }
+            static int first_chars(char const* const* strs, int n) {
+                int total = 0;
+                for (int i = 0; i < n; i++) total += strs[i][0];
+                return total;
+            }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(3);
+            let mut b = autocxx::c_int(4);
+            let items = [std::ptr::addr_of_mut!(a), std::ptr::addr_of_mut!(b)];
+            assert_eq!(
+                unsafe { ffi::fx_Summer::sum(items.as_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(7)
+            );
+            let strs = [
+                b"a\0".as_ptr() as *const std::os::raw::c_char,
+                b"b\0".as_ptr() as *const std::os::raw::c_char,
+            ];
+            assert_eq!(
+                unsafe { ffi::fx_Summer::first_chars(strs.as_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(195)
+            );
+        },
+        &["fx_Summer"],
+        &[],
+    );
+}
+
+/// The same parameter on a member function, which reaches the bridge with a
+/// receiver in front of it.
+#[test]
+fn test_method_with_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        class fx_Offset {
+        public:
+            fx_Offset(int base) : base(base) {}
+            virtual ~fx_Offset() {}
+            virtual int sum(int* const* items, int n) const {
+                int total = base;
+                for (int i = 0; i < n; i++) total += *items[i];
+                return total;
+            }
+        private:
+            int base;
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let offset = ffi::fx_Offset::new(autocxx::c_int(10)).within_unique_ptr();
+            let mut a = autocxx::c_int(3);
+            let mut b = autocxx::c_int(4);
+            let items = [std::ptr::addr_of_mut!(a), std::ptr::addr_of_mut!(b)];
+            assert_eq!(
+                unsafe { offset.sum(items.as_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(17)
+            );
+        },
+        &["fx_Offset"],
+        &[],
+    );
+}
+
+/// And as a return type, where the wrapper's own return type is what has to
+/// name it.
+#[test]
+fn test_static_method_returning_pointer_to_const_pointer() {
+    let hdr = indoc! {"
+        struct fx_Table {
+            static int* const* slots() {
+                static int a = 5;
+                static int b = 6;
+                static int* const table[2] = { &a, &b };
+                return table;
+            }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let slots = ffi::fx_Table::slots();
+            assert_eq!(unsafe { **slots }, autocxx::c_int(5));
+            assert_eq!(unsafe { **slots.add(1) }, autocxx::c_int(6));
+        },
+        &["fx_Table"],
+        &[],
+    );
+}
+
+/// A reference to a `const` pointer is the same qualifier one declarator out:
+/// `int* const&`, which `const int*&` is not.
+#[test]
+fn test_static_method_with_reference_to_const_pointer() {
+    let hdr = indoc! {"
+        struct fx_Reader {
+            static int read(int* const& p) { return *p; }
+            static int* const& same(int* const& p) { return p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(5);
+            let p = std::ptr::addr_of_mut!(a);
+            assert_eq!(unsafe { ffi::fx_Reader::read(&p) }, autocxx::c_int(5));
+            assert_eq!(unsafe { **ffi::fx_Reader::same(&p) }, autocxx::c_int(5));
+        },
+        &["fx_Reader"],
+        &[],
+    );
+}
+
+/// Two `const` pointers deep, so that the qualifier has to land on the right
+/// declarator at every level rather than only at the outermost.
+#[test]
+fn test_static_method_with_pointer_to_const_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Deep {
+            static int read(int* const* const* p) { return ***p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(9);
+            let p = std::ptr::addr_of_mut!(a);
+            let pp = std::ptr::addr_of!(p);
+            assert_eq!(
+                unsafe { ffi::fx_Deep::read(std::ptr::addr_of!(pp)) },
+                autocxx::c_int(9)
+            );
+        },
+        &["fx_Deep"],
+        &[],
+    );
+}
+
 /// `std::unique_ptr<const T>` is lowered to the same opaque holder the shared
 /// pointer gets, without the accessors - so a class payload, which used to be
 /// invisible, now round-trips through Rust and back into C++.
