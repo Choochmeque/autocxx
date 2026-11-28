@@ -43536,14 +43536,17 @@ fn test_returns_borrow_from_self_binds_a_chainable_setter() {
         None,
         // Only the receiver carries the lifetime: the key and the value are
         // lent for the call and are free the moment it returns, which is what
-        // lets a chain be written over temporaries.
-        Some(make_rust_code_finder(vec![quote! {
-            pub fn set<'a>(
-                self: Pin<&'a mut Settings>,
-                key: &u32,
-                value: &u32
-            ) -> Pin<&'a mut Settings>
-        }])),
+        // lets a chain be written over temporaries. The needles start after
+        // the receiver's name, which is `self` in a plain bridge entry and the
+        // wrapper's own name for it where a C++ wrapper is generated.
+        Some(make_rust_code_finder(vec![
+            quote! {
+                Pin<&'a mut Settings>, key: &u32, value: &u32
+            },
+            quote! {
+                -> Pin<&'a mut Settings>
+            },
+        ])),
         None,
     );
 }
@@ -43618,9 +43621,17 @@ fn test_returns_borrow_from_parameter_not_receiver() {
             returns_borrow_from!("rbf_ns::Echo::echo", "key")
         },
         None,
-        Some(make_rust_code_finder(vec![quote! {
-            pub fn echo<'a>(self: Pin<&mut Echo>, key: &'a u32) -> &'a u32
-        }])),
+        // The receiver is left elided and the key carries the lifetime. The
+        // needles start after the receiver's name, which differs where a C++
+        // wrapper is generated.
+        Some(make_rust_code_finder(vec![
+            quote! {
+                Pin<&mut Echo>, key: &'a u32
+            },
+            quote! {
+                -> &'a u32
+            },
+        ])),
         None,
     );
 }
@@ -43763,8 +43774,13 @@ fn test_returns_borrow_from_overload_the_directive_does_not_cover() {
         None,
         Some(make_checks(vec![
             make_rust_code_finder(vec![
+                // Past the receiver's name, which differs where a C++
+                // wrapper is generated.
                 quote! {
-                    pub fn fetch<'a>(self: Pin<&mut Split>, key: &'a u32) -> &'a u32
+                    Pin<&mut Split>, key: &'a u32
+                },
+                quote! {
+                    -> &'a u32
                 },
                 quote! {
                     fn fetch1(_uhoh: autocxx::BindingGenerationFailure)
