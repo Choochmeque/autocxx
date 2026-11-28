@@ -91,6 +91,10 @@ jobs:
         run: |
           brew install creduce
           echo AUTOCXX_RUN_REDUCTION_TESTS=1 >> "$GITHUB_ENV"
+      - name: Upgrade LLVM (Windows)
+        # MSVC 14.52's STL rejects clang older than 22; the runner image ships LLVM 20.
+        if: matrix.os == 'windows'
+        run: choco upgrade llvm -y --no-progress
       - name: Set LIBCLANG_PATH (Windows)
         # Windows github action doesn't set the path for clang, so set it
         # See https://github.com/rust-lang/rust-bindgen/issues/1797
@@ -213,6 +217,10 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with: { shared-key: fullBuild }
+      - name: Upgrade LLVM (Windows)
+        # MSVC 14.52's STL rejects clang older than 22; the runner image ships LLVM 20.
+        if: matrix.os == 'windows'
+        run: choco upgrade llvm -y --no-progress
       - name: Set LIBCLANG_PATH (Windows)
         # Windows github action doesn't set the path for clang, so set it
         # See https://github.com/rust-lang/rust-bindgen/issues/1797
