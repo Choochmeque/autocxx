@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-637da273.js";
+            window.path_to_searchindex_js = "searchindex-83772e06.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c0f61b2c.js"></script>
@@ -210,10 +210,6 @@ This is intentional: a pointer from C++ might be subject to concurrent
 mutation, or it might have a lifetime that could disappear at any moment.
 As a human, you must promise that you understand the constraints around
 use of that pointer and that’s what the <code>unsafe</code> keyword is for.</p>
-<p>A parameter which is a reference to a pointer - <code>T*&amp;</code>, <code>T* const&amp;</code> - counts
-as a pointer for this purpose: C++ can dereference the pointer it finds behind
-the reference exactly as it could one passed by value, so the function is
-<code>unsafe</code> to call.</p>
 <p>Exactly the same issues apply to C++ references <em>in theory</em>, but in practice,
 they usually don’t. Therefore <a href="https://cxx.rs"><code>cxx</code></a> has taken the view that we can “trust”
 a C++ reference to a higher degree than a pointer, and autocxx follows that
