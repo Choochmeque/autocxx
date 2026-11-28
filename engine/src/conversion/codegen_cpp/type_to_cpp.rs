@@ -221,18 +221,14 @@ impl CppNameMap {
                 //
                 // A marker *inside* a pointer - a C++ `int* const*` - arrives
                 // as a `*const` whose pointee carries the marker, which is one
-                // fact written twice: the `Type::Ptr` arm below says it once
-                // more, and drops its own `const` when the pointee has already
-                // said it. A plain template class reaches that shape, which is
-                // why it is handled rather than described -
+                // fact written twice: `pointee_to_cpp` drops the pointer's own
+                // `const` when the pointee has already said it. A plain
+                // template class reaches that shape, which is why it is
+                // handled rather than described -
                 // `test_template_class_with_const_pointer_argument`.
                 // See google/autocxx#799.
                 if let Some(inner) = unwrap_const(typ) {
-                    let inner_cpp = self.type_to_cpp(inner)?;
-                    return Ok(match inner {
-                        Type::Ptr(_) => format!("{inner_cpp} const"),
-                        _ => format!("const {inner_cpp}"),
-                    });
+                    return self.qualified("const", inner);
                 }
                 // The volatile marker is written back the same way and placed by
                 // the same rule. No path reaches this today: the one place a
@@ -242,11 +238,7 @@ impl CppNameMap {
                 // alternative, should a path ever reach it, is emitting
                 // `__bindgen_marker_Volatile` as if it were a C++ type name.
                 if let Some(inner) = unwrap_volatile(typ) {
-                    let inner_cpp = self.type_to_cpp(inner)?;
-                    return Ok(match inner {
-                        Type::Ptr(_) => format!("{inner_cpp} volatile"),
-                        _ => format!("volatile {inner_cpp}"),
-                    });
+                    return self.qualified("volatile", inner);
                 }
                 // If this is a std::unique_ptr we do need to pass
                 // its argument through.
@@ -285,31 +277,14 @@ impl CppNameMap {
             Type::Reference(typr) => match &*typr.elem {
                 Type::Path(typ) if typ.path.is_ident("str") => Ok("rust::Str".into()),
                 _ => Ok(format!(
-                    "{}{}&",
-                    get_mut_string(typr.mutability.is_some()),
-                    self.type_to_cpp(typr.elem.as_ref())?
+                    "{}&",
+                    self.pointee_to_cpp(&typr.elem, typr.mutability.is_some())?
                 )),
             },
-            Type::Ptr(typp) => {
-                // A `const` pointee reaches us twice when bindgen marked it:
-                // as `*const`, and as the marker on the pointee itself. They
-                // are one fact, so say it once, and say it where the marker
-                // puts it - after what it qualifies, which is the only place
-                // that stays right as pointers nest. For `Foo* const*` the
-                // pointee spells itself `Foo* const`, and a leading `const`
-                // here would qualify `Foo` rather than the pointer.
-                let pointee_says_const = matches!(&*typp.elem,
-                    Type::Path(inner) if unwrap_const(inner).is_some());
-                let qualifier = if pointee_says_const {
-                    ""
-                } else {
-                    get_mut_string(ptr_is_mut(&typp.mutability))
-                };
-                Ok(format!(
-                    "{qualifier}{}*",
-                    self.type_to_cpp(typp.elem.as_ref())?
-                ))
-            }
+            Type::Ptr(typp) => Ok(format!(
+                "{}*",
+                self.pointee_to_cpp(&typp.elem, ptr_is_mut(&typp.mutability))?
+            )),
             // A `std::array<T, N>`, which is the only array that reaches
             // here: `check_signature_array` turns down every other one, a C++
             // function cannot take or return a C array by value, and a
@@ -349,6 +324,37 @@ impl CppNameMap {
                 ty.to_token_stream().to_string(),
             )),
         }
+    }
+
+    /// What a pointer or reference refers to, `const` unless `is_mut`.
+    ///
+    /// A `const` pointee reaches us twice when bindgen marked it: as `*const`,
+    /// and as the marker on the pointee itself. They are one fact, so it is
+    /// said once.
+    pub(crate) fn pointee_to_cpp(
+        &self,
+        pointee: &Type,
+        is_mut: bool,
+    ) -> Result<String, ConvertErrorFromCpp> {
+        let says_const = matches!(pointee, Type::Path(typ) if unwrap_const(typ).is_some());
+        if is_mut || says_const {
+            self.type_to_cpp(pointee)
+        } else {
+            self.qualified("const", pointee)
+        }
+    }
+
+    /// `ty` with a cv-qualifier on it. The qualifier goes after a pointer,
+    /// because written before one it binds to what the pointer points at:
+    /// `Foo* const` is a constant pointer and `const Foo*` is a pointer to a
+    /// constant. Everything else takes the prefix.
+    fn qualified(&self, qualifier: &str, ty: &Type) -> Result<String, ConvertErrorFromCpp> {
+        let cpp = self.type_to_cpp(ty)?;
+        Ok(if is_pointer(ty) {
+            format!("{cpp} {qualifier}")
+        } else {
+            format!("{qualifier} {cpp}")
+        })
     }
 
     /// Check an individual item in the name map. Returns a thing if
@@ -397,10 +403,96 @@ fn unaliased_cpp_name(
     }
 }
 
-fn get_mut_string(mutable: bool) -> &'static str {
-    if mutable {
-        ""
-    } else {
-        "const "
+/// Whether this is a pointer once any qualifier markers on it are set aside.
+fn is_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(_) => true,
+        Type::Path(typ) => unwrap_const(typ)
+            .or_else(|| unwrap_volatile(typ))
+            .is_some_and(is_pointer),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CppNameMap;
+    use indexmap::map::IndexMap as HashMap;
+    use syn::{parse_quote, Type};
+
+    fn spell(ty: Type) -> String {
+        let map = CppNameMap {
+            original_names: HashMap::new(),
+            unshadowing_aliases: HashMap::new(),
+        };
+        map.type_to_cpp(&ty).unwrap()
+    }
+
+    #[test]
+    fn const_goes_before_a_pointee_which_is_not_a_pointer() {
+        assert_eq!(spell(parse_quote! { *const Foo }), "const Foo*");
+        assert_eq!(spell(parse_quote! { *mut Foo }), "Foo*");
+        assert_eq!(spell(parse_quote! { &Foo }), "const Foo&");
+        assert_eq!(spell(parse_quote! { &mut Foo }), "Foo&");
+        assert_eq!(spell(parse_quote! { *mut *const Foo }), "const Foo**");
+    }
+
+    #[test]
+    fn const_goes_after_a_pointee_which_is_a_pointer() {
+        assert_eq!(spell(parse_quote! { *const *mut Foo }), "Foo* const*");
+        assert_eq!(
+            spell(parse_quote! { *const *const Foo }),
+            "const Foo* const*"
+        );
+        assert_eq!(
+            spell(parse_quote! { *const *const *mut Foo }),
+            "Foo* const* const*"
+        );
+        assert_eq!(spell(parse_quote! { *mut *const *mut Foo }), "Foo* const**");
+        assert_eq!(spell(parse_quote! { &*mut Foo }), "Foo* const&");
+        assert_eq!(spell(parse_quote! { &*const Foo }), "const Foo* const&");
+        assert_eq!(spell(parse_quote! { &mut *const Foo }), "const Foo*&");
+    }
+
+    #[test]
+    fn const_marker_on_a_pointee_is_said_once() {
+        assert_eq!(
+            spell(parse_quote! { *const __bindgen_marker_Const<Foo> }),
+            "const Foo*"
+        );
+        assert_eq!(
+            spell(parse_quote! { *const __bindgen_marker_Const<*mut Foo> }),
+            "Foo* const*"
+        );
+        assert_eq!(
+            spell(parse_quote! { &__bindgen_marker_Const<*mut Foo> }),
+            "Foo* const&"
+        );
+        assert_eq!(
+            spell(parse_quote! {
+                *const __bindgen_marker_Const<*const __bindgen_marker_Const<*mut Foo>>
+            }),
+            "Foo* const* const*"
+        );
+    }
+
+    #[test]
+    fn qualifiers_on_a_volatile_pointer_stay_on_the_pointer() {
+        assert_eq!(
+            spell(parse_quote! { *const __bindgen_marker_Volatile<*mut Foo> }),
+            "Foo* volatile const*"
+        );
+        assert_eq!(
+            spell(parse_quote! {
+                __bindgen_marker_Const<__bindgen_marker_Volatile<*mut Foo>>
+            }),
+            "Foo* volatile const"
+        );
+        assert_eq!(
+            spell(parse_quote! {
+                __bindgen_marker_Const<__bindgen_marker_Volatile<Foo>>
+            }),
+            "const volatile Foo"
+        );
     }
 }
