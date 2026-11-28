@@ -380,6 +380,16 @@ pub(crate) struct UndestroyableMember {
     pub(crate) argument: QualifiedName,
 }
 
+/// What a typedef to an lvalue reference stored about the reference, beyond
+/// the type it refers to. See [`TypeConverter::convert_reference_target`].
+struct StoredReference {
+    /// Whether it was built as a reference C++ may write through.
+    mutable: bool,
+    /// Any `volatile` the first conversion took out of the referent.
+    unwritten_volatile: UnwrittenVolatile,
+    target: TargetFacts,
+}
+
 /// What resolving a typedef left [`TypeConverter::resolve_typedef_target`]
 /// with: the path to carry on converting, or a type it converted outright.
 enum ResolvedTypedef {
@@ -821,6 +831,7 @@ impl<'a> TypeConverter<'a> {
             None => ResolvedTypedef::Path(typ, original_tn),
             Some(TypedefTargetInfo {
                 ty: Type::Path(resolved_tp),
+                unwritten_volatile,
                 ..
             }) => {
                 // The typedef may resolve to a C function pointer - see
@@ -845,7 +856,12 @@ impl<'a> TypeConverter<'a> {
                 // the generated C++. See google/autocxx#1363.
                 if let Some(referent) = extract_pinned_mutable_reference_type(resolved_tp) {
                     let referent = referent.clone();
-                    return self.convert_reference_target(referent, true, target, ns, ctx, deps);
+                    let stored = StoredReference {
+                        mutable: true,
+                        unwritten_volatile: *unwritten_volatile,
+                        target,
+                    };
+                    return self.convert_reference_target(referent, stored, ns, ctx, deps);
                 }
                 let resolved_tn = QualifiedName::from_type_path(resolved_tp);
                 deps.insert(resolved_tn.clone());
@@ -865,9 +881,6 @@ impl<'a> TypeConverter<'a> {
                 // reaches cxx and generation fails with
                 // "unsupported type". See google/autocxx#1368.
                 let is_rvalue_reference = matches!(kind, TypeKind::RValueReference);
-                if is_rvalue_reference {
-                    Self::ensure_rvalue_referent_is_valid(resolved_tp, ctx)?;
-                }
                 // The stored target has been converted once already, which
                 // took any `volatile` out of it, so what `convert_ptr` would
                 // have asked about one buried in there is asked here.
@@ -881,6 +894,12 @@ impl<'a> TypeConverter<'a> {
                 let mut annotated = self.convert_ptr(resolved_tp.clone(), ns, ctx)?;
                 annotated.unwritten_volatile = unwritten_volatile;
                 annotated.types_encountered.extend(std::mem::take(deps));
+                // Asked once the referent has been converted, as it is where
+                // the reference is written out: only then is an alias for a
+                // pointer the pointer it names.
+                if let (true, Type::Ptr(converted)) = (is_rvalue_reference, &annotated.ty) {
+                    Self::ensure_rvalue_referent_is_valid(&converted.elem, ctx)?;
+                }
                 // A C++ rvalue reference converts to a pointer as well, so
                 // which of the two this alias names cannot be read back off
                 // the type; that is why the typedef's analysis recorded it.
@@ -896,7 +915,11 @@ impl<'a> TypeConverter<'a> {
                     annotated.marked_const_if(target.is_const),
                 )));
             }
-            Some(TypedefTargetInfo { ty: other, .. }) => {
+            Some(TypedefTargetInfo {
+                ty: other,
+                unwritten_volatile,
+                ..
+            }) => {
                 // A typedef to a C++ `const` reference lands here as `&T`,
                 // and calling that `Regular` costs the caller the one fact it
                 // needs: whether the value borrows, which decides lifetimes on
@@ -907,10 +930,13 @@ impl<'a> TypeConverter<'a> {
                 // See google/autocxx#1363.
                 let kind = match other {
                     Type::Reference(reference) if !Self::is_rust_str_reference(reference) => {
-                        let mutable = reference.mutability.is_some();
                         let referent = (*reference.elem).clone();
-                        return self
-                            .convert_reference_target(referent, mutable, target, ns, ctx, deps);
+                        let stored = StoredReference {
+                            mutable: reference.mutability.is_some(),
+                            unwritten_volatile: *unwritten_volatile,
+                            target,
+                        };
+                        return self.convert_reference_target(referent, stored, ns, ctx, deps);
                     }
                     // `&str`, which is a `rust::Str` *value* and no reference
                     // to anything C++ wrote.
@@ -949,11 +975,16 @@ impl<'a> TypeConverter<'a> {
     /// is what builds one where it is written out, so that the alias and the
     /// reference written in its place are one type and are turned down for
     /// the same reasons.
+    ///
+    /// What the first conversion found and the stored type cannot say is in
+    /// `stored`. A `volatile` is the one such fact a reference has: converting
+    /// took it out of the referent, so converting the referent again cannot
+    /// find it, and what [`Self::lvalue_reference_to`] would have asked about
+    /// one buried in there is asked here, as the pointer arm asks it.
     fn convert_reference_target(
         &mut self,
         referent: Type,
-        mutable: bool,
-        target: TargetFacts,
+        stored: StoredReference,
         ns: &Namespace,
         ctx: &TypeConversionContext,
         deps: &mut HashSet<QualifiedName>,
@@ -967,9 +998,18 @@ impl<'a> TypeConverter<'a> {
             .convert_type(referent, ns, &ctx.behind_reference())?
             .marked_std_array_if(stored_as_array);
         referent.types_encountered.extend(std::mem::take(deps));
+        if stored.unwritten_volatile == UnwrittenVolatile::Deeper {
+            Self::ensure_buried_volatile_converts(stored.mutable, ctx)?;
+        }
+        let mut reference = self.lvalue_reference_to(referent, stored.mutable, ctx)?;
+        // What this use found is a `volatile` an alias for the referent was
+        // hiding from the typedef's own analysis, and is always the deeper
+        // of the two when it is there at all.
+        if reference.unwritten_volatile == UnwrittenVolatile::Nowhere {
+            reference.unwritten_volatile = stored.unwritten_volatile;
+        }
         Ok(ResolvedTypedef::Converted(Box::new(
-            self.lvalue_reference_to(referent, mutable, ctx)?
-                .marked_from(target),
+            reference.marked_from(stored.target),
         )))
     }
 
@@ -1205,9 +1245,9 @@ impl<'a> TypeConverter<'a> {
     ) -> Result<Annotated<Type>, ConvertErrorFromCpp> {
         // RValue reference
         Self::ensure_pointee_is_valid(ptr)?;
-        Self::ensure_rvalue_referent_is_valid(ptr, ctx)?;
         let pointee_is_volatile = is_volatile_qualified(&ptr.elem);
         let innerty = self.convert_boxed_type(ptr.elem.clone(), ns, &ctx.behind_reference())?;
+        Self::ensure_rvalue_referent_is_valid(&innerty.ty, ctx)?;
         let unwritten_volatile = Self::bury_volatile(&innerty, ptr_is_mut(&ptr.mutability), ctx)?;
         let mut ptr = ptr.clone();
         ptr.elem = innerty.ty;
@@ -1915,11 +1955,14 @@ impl<'a> TypeConverter<'a> {
     /// `convert_type_path_which_is_not_a_reference` re-converts a pointer
     /// target against that position's own context. See
     /// https://github.com/google/autocxx/issues/1278.
+    ///
+    /// Asked of the referent as converted, so that a pointer behind an alias -
+    /// `typedef int* P; void f(P&&)` - is the pointer it names.
     fn ensure_rvalue_referent_is_valid(
-        ptr: &TypePtr,
+        referent: &Type,
         ctx: &TypeConversionContext,
     ) -> Result<(), ConvertErrorFromCpp> {
-        if is_pointer(&ptr.elem) && !ctx.pointee_is_only_data() {
+        if is_pointer(referent) && !ctx.pointee_is_only_data() {
             return Err(ConvertErrorFromCpp::RValueReferenceToPointer);
         }
         Ok(())

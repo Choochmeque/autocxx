@@ -37126,7 +37126,6 @@ fn test_typedef_chain_to_pointer_and_rvalue_reference_parameter() {
         typedef fx_Int* fx_IntPtr;
         typedef fx_Int* const fx_IntConstPtr;
         typedef fx_IntPtr* fx_IntPtrPtr;
-        typedef fx_IntPtr&& fx_IntPtrRvalue;
         struct fx_Pod { uint32_t a; };
         typedef fx_Pod fx_PodAlias;
         typedef fx_PodAlias* fx_PodPtr;
@@ -37136,7 +37135,6 @@ fn test_typedef_chain_to_pointer_and_rvalue_reference_parameter() {
         inline int fx_read(fx_IntPtr p) { return *p; }
         inline int fx_read_const(fx_IntConstPtr p) { return *p; }
         inline int fx_read_twice(fx_IntPtrPtr p) { return **p; }
-        inline int fx_read_rvalue(fx_IntPtrRvalue p) { return *p; }
         inline uint32_t fx_read_pod(fx_PodPtr p) { return p->a; }
         inline uint32_t fx_take(fx_NonPodRvalue r) { return r.a; }
     "};
@@ -37146,7 +37144,6 @@ fn test_typedef_chain_to_pointer_and_rvalue_reference_parameter() {
         assert_eq!(unsafe { ffi::fx_read(p) }, autocxx::c_int(7));
         assert_eq!(unsafe { ffi::fx_read_const(p) }, autocxx::c_int(7));
         assert_eq!(unsafe { ffi::fx_read_twice(&mut p) }, autocxx::c_int(7));
-        assert_eq!(ffi::fx_read_rvalue(Box::pin(p)), autocxx::c_int(7));
         let mut pod = ffi::fx_Pod { a: 42 };
         assert_eq!(unsafe { ffi::fx_read_pod(&mut pod) }, 42);
         assert_eq!(ffi::fx_take(ffi::fx_NonPod::new().within_unique_ptr()), 42);
@@ -37159,7 +37156,6 @@ fn test_typedef_chain_to_pointer_and_rvalue_reference_parameter() {
             "fx_read",
             "fx_read_const",
             "fx_read_twice",
-            "fx_read_rvalue",
             "fx_read_pod",
             "fx_NonPod",
             "fx_take",
@@ -37184,6 +37180,107 @@ fn test_typedef_to_const_rust_str_reference_parameter() {
         assert_eq!(ffi::fx_len(&"abc"), 3);
     };
     run_test("", hdr, rs, &["fx_len"], &[]);
+}
+
+/// The same with a pointer to a pointer behind the inner alias.
+#[test]
+fn test_typedef_chain_to_reference_to_pointer_to_pointer_parameter() {
+    let hdr = indoc! {"
+        typedef int** fx_Rows;
+        typedef fx_Rows& fx_RowsRef;
+        typedef const fx_Rows& fx_RowsConstRef;
+        inline int fx_first(fx_RowsRef rows) { return **rows; }
+        inline int fx_first_const(fx_RowsConstRef rows) { return **rows; }
+    "};
+    let rs = quote! {
+        let mut v = autocxx::c_int(7);
+        let mut row: *mut autocxx::c_int = &mut v;
+        let mut rows: *mut *mut autocxx::c_int = &mut row;
+        assert_eq!(ffi::fx_first(std::pin::Pin::new(&mut rows)), autocxx::c_int(7));
+        assert_eq!(ffi::fx_first_const(&rows), autocxx::c_int(7));
+    };
+    run_test("", hdr, rs, &["fx_first", "fx_first_const"], &[]);
+}
+
+/// A `volatile` beneath the referent is turned down through a reference
+/// alias as it is beneath a reference written out - see
+/// `test_volatile_beneath_pointer_is_refused` - whether an alias for the
+/// referent was hiding it or the reference alias holds it itself, and in a
+/// return as in a parameter.
+#[test]
+fn test_typedef_to_reference_over_buried_volatile_is_refused() {
+    for declaration in [
+        "typedef volatile int* Reg; typedef Reg& Slot; static int read(Slot p) { return *p; }",
+        "typedef volatile int*& Slot; static int read(Slot p) { return *p; }",
+        "typedef volatile int* Reg; typedef const Reg& Slot; static Slot lend(const int& anchor);",
+        "typedef volatile int* const& Slot; static Slot lend(const int& anchor);",
+    ] {
+        let hdr = format!("struct fx_Buried {{ {declaration} }};");
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {},
+            quote! { generate!("fx_Buried") },
+            None,
+            Some(make_string_finder(vec![
+                "more than one pointer or reference deep".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// And bound where C++ will add the qualifier, which is where the reference
+/// is a `const` one - see
+/// `test_volatile_beneath_pointer_to_const_pointer_argument`.
+#[test]
+fn test_typedef_to_const_reference_over_buried_volatile_argument() {
+    let hdr = indoc! {"
+        struct fx_Buried {
+            typedef volatile int* Reg;
+            typedef const Reg& Slot;
+            typedef volatile int* const& DirectSlot;
+            static int read(Slot p) { return *p; }
+            static int read_direct(DirectSlot p) { return *p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(4);
+            let p = std::ptr::addr_of_mut!(a);
+            assert_eq!(ffi::fx_Buried::read(&p), autocxx::c_int(4));
+            assert_eq!(ffi::fx_Buried::read_direct(&p), autocxx::c_int(4));
+        },
+        &["fx_Buried"],
+        &[],
+    );
+}
+
+/// An rvalue reference to a pointer is turned down where the pointer is
+/// behind an alias too, written out and through an alias for the reference:
+/// see `test_rvalue_reference_to_pointer_is_refused`.
+#[test]
+fn test_rvalue_reference_to_aliased_pointer_is_refused() {
+    for declaration in [
+        "typedef int* Ptr; static int read(Ptr&& p) { return *p; }",
+        "typedef int* Ptr; typedef Ptr&& Slot; static int read(Slot p) { return *p; }",
+        "typedef int* Ptr; typedef Ptr&& Slot; typedef Slot Again; static int read(Again p) { return *p; }",
+    ] {
+        let hdr = format!("struct fx_Taker {{ {declaration} }};");
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {},
+            quote! { generate!("fx_Taker") },
+            None,
+            Some(make_string_finder(vec![
+                "rvalue reference to a pointer".to_string()
+            ])),
+            None,
+        );
+    }
 }
 
 /// A reference alias is held to what a reference written out is held to,
