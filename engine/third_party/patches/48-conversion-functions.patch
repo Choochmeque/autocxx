@@ -290,10 +290,10 @@ changes at all.
                          "unhandled comp member `{}` (kind {:?}) in `{}` ({})",
 --- a/options/cli.rs
 +++ b/options/cli.rs
-@@ -475,6 +475,9 @@
-     /// Always output explicit padding fields.
+@@ -481,6 +481,9 @@
+     /// Report a class's member function templates through `ParseCallbacks`.
      #[arg(long)]
-     explicit_padding: bool,
+     report_member_function_templates: bool,
 +    /// Report the conversion functions of a class through `ParseCallbacks`.
 +    #[arg(long)]
 +    report_conversion_functions: bool,

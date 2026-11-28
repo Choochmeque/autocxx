@@ -82,8 +82,8 @@
 //! # Unwanted `Default`
 //!
 //! We ask bindgen to `derive_default`, because a struct containing
-//! bitfields cannot otherwise be built in Rust at all: neither the
-//! allocation unit nor the padding beside it can be written by hand.
+//! bitfields is otherwise built in Rust only by naming each allocation
+//! unit and padding field bindgen wrote for it.
 //! For a struct whose fields are all default-able that is exactly what
 //! we want - bindgen adds `#[derive(Default)]` and every field
 //! supplies its own default. It also has two consequences we don't

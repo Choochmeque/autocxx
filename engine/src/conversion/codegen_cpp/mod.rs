@@ -377,8 +377,10 @@ impl<'a> CppCodeGenerator<'a> {
                     superclass_destructor_visibility,
                     *superclass_destructor_virtual,
                     name,
-                    constructors_by_subclass.remove(name).unwrap_or_default(),
-                    methods_by_subclass.remove(name).unwrap_or_default(),
+                    constructors_by_subclass
+                        .swap_remove(name)
+                        .unwrap_or_default(),
+                    methods_by_subclass.swap_remove(name).unwrap_or_default(),
                 )?,
                 _ => panic!("Unexpected deferred API"),
             }
@@ -822,7 +824,12 @@ impl<'a> CppCodeGenerator<'a> {
                     )
                 }
             },
-            CppFunctionBody::BaseClassMethodCall(base, id, receiver_mutability) => {
+            CppFunctionBody::BaseClassMethodCall {
+                base_cpp_spelling: base,
+                method: id,
+                receiver_mutability,
+                ..
+            } => {
                 // On the receiver cast to the base, rather than on the
                 // receiver itself. `self.foo(args)` would let anything the
                 // receiver's own class declares under that name decide what is

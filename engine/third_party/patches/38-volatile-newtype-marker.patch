@@ -468,6 +468,16 @@ diff -u -r bench.orig/ir/ty.rs bench/ir/ty.rs
 diff -u -r bench.orig/options/cli.rs bench/options/cli.rs
 --- a/options/cli.rs
 +++ b/options/cli.rs
+@@ -505,6 +505,9 @@
+     /// Wrap const-qualified types in a newtype marker
+     #[arg(long)]
+     use_const_newtype_wrapper: bool,
++    /// Wrap volatile-qualified types in a newtype marker
++    #[arg(long)]
++    use_volatile_newtype_wrapper: bool,
+     /// Enables generation of vtable functions.
+     #[arg(long)]
+     vtable_generation: bool,
 @@ -715,6 +715,7 @@
          use_opaque_newtype_wrapper,
          use_reference_newtype_wrapper,

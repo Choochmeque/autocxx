@@ -1,0 +1,15 @@
+# Shapes the pull request list that `gh release create --generate-notes` writes
+# into a release, in the `github-release` job of release.yml. Dependabot's
+# bumps are left out: a dependency floor a release raises on purpose is an
+# ordinary pull request and stays in.
+changelog:
+  exclude:
+    labels:
+      - dependencies
+    authors:
+      - dependabot
+      - dependabot[bot]
+  categories:
+    - title: Changes
+      labels:
+        - "*"

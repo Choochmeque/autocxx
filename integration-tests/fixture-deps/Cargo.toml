@@ -8,7 +8,7 @@
 
 [package]
 name = "autocxx-fixture-deps"
-version = "0.30.0"
+version = "0.31.0"
 authors = ["Vladimir Pankratov <sollex.uz@gmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2021"
@@ -37,7 +37,7 @@ build = "build.rs"
 # Nothing else. Anything a fixture does not name costs every fixture build the
 # time to compile it.
 [dependencies]
-autocxx = { path = "../..", version = "=0.30.0" }
+autocxx = { path = "../..", version = "=0.31.0" }
 cxx = "1.0.161"
 moveit = { version = "0.6", features = ["cxx"] }
 link-cplusplus = "1.0"

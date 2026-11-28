@@ -9552,6 +9552,144 @@ fn test_inherited_method_honours_a_throws_designation_on_a_nested_base() {
     );
 }
 
+/// The same designation written with the spelling bindgen flattened the nested
+/// base into, which a nested class answers to everywhere else. The base is not
+/// generated here, so the member imported onto the deriving class is the only
+/// binding there is for the designation to reach.
+#[test]
+fn test_inherited_method_honours_a_flattened_throws_designation_on_a_nested_base() {
+    let cxx = indoc! {"
+        #include <stdexcept>
+        void inh_FlatOuter::inh_FlatBase::boom() const {
+            throw std::runtime_error(\"inherited error\");
+        }
+    "};
+    let hdr = indoc! {"
+        struct inh_FlatOuter {
+            struct inh_FlatBase {
+                void boom() const;
+            };
+        };
+        struct inh_FlatDerived : inh_FlatOuter::inh_FlatBase {
+            inh_FlatDerived() {}
+        };
+    "};
+    let rs = quote! {
+        let d = ffi::inh_FlatDerived::new().within_unique_ptr();
+        assert!(d.boom().is_err());
+    };
+    run_test_ex(
+        cxx,
+        hdr,
+        rs,
+        quote! {
+            generate!("inh_FlatDerived")
+            throws!("inh_FlatOuter_inh_FlatBase::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+/// Asking about a second spelling of the base must not make a designation
+/// which named nothing look as though it matched something. The member is
+/// spelled wrong here, under a base spelled right.
+#[test]
+fn test_throws_naming_no_member_of_a_nested_base_refused() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct inh_TypoOuter {
+            struct inh_TypoBase {
+                uint32_t boom() const { return 1; }
+            };
+        };
+        struct inh_TypoDerived : inh_TypoOuter::inh_TypoBase {};
+    "};
+    run_test_expect_fail_with_errors_ex(
+        "",
+        hdr,
+        quote! {},
+        quote! {
+            generate!("inh_TypoDerived")
+            throws!("inh_TypoOuter_inh_TypoBase::bom")
+        },
+        None,
+        &[
+            "DirectiveMatchedNothing",
+            "throws",
+            "inh_TypoOuter_inh_TypoBase::bom",
+        ],
+    );
+}
+
+const INHERITED_NESTED_BASE_CXX: &str = indoc! {"
+    #include <stdexcept>
+    void inh_BothOuter::inh_BothBase::boom() const {
+        throw std::runtime_error(\"inherited error\");
+    }
+"};
+
+const INHERITED_NESTED_BASE_HDR: &str = indoc! {"
+    struct inh_BothOuter {
+        struct inh_BothBase {
+            inh_BothBase() {}
+            void boom() const;
+        };
+    };
+    struct inh_BothDerived : inh_BothOuter::inh_BothBase {
+        inh_BothDerived() {}
+    };
+"};
+
+/// One C++ function, bound twice - on the nested base which declares it and on
+/// the class which inherits it - and one designation. Both bindings are the
+/// same function and are fallible together, whichever of the base's two
+/// spellings the designation was written with.
+#[test]
+fn test_throws_on_a_nested_base_reaches_both_bindings_in_the_cpp_spelling() {
+    run_test_ex(
+        INHERITED_NESTED_BASE_CXX,
+        INHERITED_NESTED_BASE_HDR,
+        quote! {
+            let b = ffi::inh_BothOuter_inh_BothBase::new().within_unique_ptr();
+            assert!(b.boom().is_err());
+            let d = ffi::inh_BothDerived::new().within_unique_ptr();
+            assert!(d.boom().is_err());
+        },
+        quote! {
+            generate!("inh_BothOuter::inh_BothBase")
+            generate!("inh_BothDerived")
+            throws!("inh_BothOuter::inh_BothBase::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+fn test_throws_on_a_nested_base_reaches_both_bindings_in_the_flattened_spelling() {
+    run_test_ex(
+        INHERITED_NESTED_BASE_CXX,
+        INHERITED_NESTED_BASE_HDR,
+        quote! {
+            let b = ffi::inh_BothOuter_inh_BothBase::new().within_unique_ptr();
+            assert!(b.boom().is_err());
+            let d = ffi::inh_BothDerived::new().within_unique_ptr();
+            assert!(d.boom().is_err());
+        },
+        quote! {
+            generate!("inh_BothOuter::inh_BothBase")
+            generate!("inh_BothDerived")
+            throws!("inh_BothOuter_inh_BothBase::boom")
+        },
+        None,
+        None,
+        None,
+    );
+}
+
 /// The base is a private nested class: its public members are callable on a
 /// derived object, but nothing outside `inh_Outer` may name the class, so the
 /// shim has no way to say which member it means.
@@ -17313,13 +17451,20 @@ fn test_bitfield_after_a_substituted_base_is_not_placed_early() {
         rs,
         directives_from_lists(&["fx_Bits", "fx_bits_sizeof", "fx_bits_alignof"], &[], None),
         None,
-        // How many bytes the run is depends on the ABI - nine on Itanium,
-        // sixteen where a base lends no tail padding - so what is read here is
-        // that it is written, and written where the base field ends.
-        Some(make_rust_code_finder(vec![quote! {
-            pub _base: root::fx_BitTail,
-            pub __bindgen_padding_bases:
-        }])),
+        // The run ends where the members start, which depends on the ABI - at
+        // nine on Itanium, sixteen where a base lends no tail padding - and its
+        // type follows its length (`u8` for one byte, `[u8; N]` above). So what
+        // is read here is that it is written, where the base field ends, and
+        // not behind the opaque marker.
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                pub _base: root::fx_BitTail,
+                pub __bindgen_padding_bases:
+            }]),
+            make_string_absence_finder(vec![
+                "__bindgen_padding_bases : __bindgen_marker_Opaque".to_string()
+            ]),
+        ])),
         None,
     );
 }
@@ -21215,7 +21360,8 @@ fn test_issue_1366_reference_field_still_has_no_default_ctor() {
         &[],
         &[
             "E0599",
-            "no associated function or constant named `new` found",
+            // rustc 1.101 nightly says "no method named" where older compilers say "no associated function or constant named".
+            "named `new` found",
         ],
     );
 }
@@ -30516,6 +30662,69 @@ fn test_no_zero_filled_default_for_enum_field() {
 }
 
 #[test]
+/// A POD struct with padding can be built from Rust with a struct literal
+/// which writes the padding as the bytes it is.
+///
+/// The enum field has no zero discriminant, so the struct has no `Default` and
+/// Rust builds one by naming every field. The bitfield leaves three bytes of
+/// tail padding, which bindgen writes as a field of its own; the absence check
+/// pins that it is not written behind the opaque marker, whose field is private.
+fn test_pod_struct_with_padding_built_by_literal() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        enum fx_Mode : uint8_t { fx_A = 1, fx_B = 2 };
+        struct fx_Padded {
+            fx_Mode m;
+            uint32_t a;
+            uint8_t flag : 3;
+        };
+        inline bool fx_check_padded(fx_Padded p) {
+            return p.m == fx_B && p.a == 0x01020304u && p.flag == 5;
+        }
+        inline fx_Padded fx_make_padded() {
+            fx_Padded p = {fx_A, 7u, 3};
+            return p;
+        }
+    "};
+    let rs = quote! {
+        static_assertions::assert_not_impl_any!(ffi::fx_Padded: Default);
+        let p = ffi::fx_Padded {
+            m: ffi::fx_Mode::fx_B,
+            a: 0x01020304,
+            _bitfield_1: ffi::fx_Padded::new_bitfield_1(5),
+            __bindgen_padding_0: [0u8; 3],
+        };
+        assert!(ffi::fx_check_padded(p));
+        let q = ffi::fx_make_padded();
+        assert!(matches!(q.m, ffi::fx_Mode::fx_A));
+        assert_eq!(q.a, 7);
+        assert_eq!(q.flag(), 3);
+    };
+    run_test_ex(
+        "",
+        hdr,
+        rs,
+        quote! {
+            enum_style!(RustifiedEnum, "fx_Mode")
+            generate_pod!("fx_Mode")
+            generate_pod!("fx_Padded")
+            generate!("fx_check_padded")
+            generate!("fx_make_padded")
+        },
+        None,
+        Some(make_checks(vec![
+            make_rust_code_finder(vec![quote! {
+                pub __bindgen_padding_0: [u8; 3usize],
+            }]),
+            make_string_absence_finder(vec![
+                "__bindgen_padding_0 : __bindgen_marker_Opaque".to_string()
+            ]),
+        ])),
+        None,
+    );
+}
+
+#[test]
 /// Turning on bindgen's `derive_default` must not put `Default` into an
 /// enum's derive list, which rustc rejects outright: E0665, because bindgen
 /// marks no variant `#[default]`.
@@ -30588,8 +30797,8 @@ fn test_take_bitfield() {
         // for the types that must *not* get one.
         static_assertions::assert_impl_all!(ffi::Bitfieldy: Default);
 
-        // `Default` gives us the bitfield allocation units and the padding
-        // bindgen inserted, none of which can be written by hand. The
+        // `Default` fills in the bitfield allocation units and the padding
+        // bindgen inserted, which a struct literal would have to name. The
         // functional-record-update form (`..Default::default()`) would be
         // tidier, but autocxx gives every type with a destructor a `Drop`
         // impl, and Rust won't move fields out of one of those.
@@ -31911,7 +32120,8 @@ fn test_pure_virtual_destructor_no_make_unique() {
         &[],
         &[
             "E0599",
-            "no associated function or constant named `new` found",
+            // rustc 1.101 nightly says "no method named" where older compilers say "no associated function or constant named".
+            "named `new` found",
             "PureDtorNoNew",
         ],
     );
@@ -33664,6 +33874,163 @@ fn test_template_class_with_const_pointer_argument() {
             "fx_read_both_consts",
             "fx_read_through_all",
         ],
+        &[],
+    );
+}
+
+/// A pointer to a `const` pointer in a function's own signature, rather than in
+/// a template argument. The bridge says `*const *mut T`, with the marker
+/// already spent, so the wrapper has to place the qualifier from that alone.
+#[test]
+fn test_static_method_with_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Summer {
+            static int sum(int* const* items, int n) {
+                int total = 0;
+                for (int i = 0; i < n; i++) total += *items[i];
+                return total;
+            }
+            static int first_chars(char const* const* strs, int n) {
+                int total = 0;
+                for (int i = 0; i < n; i++) total += strs[i][0];
+                return total;
+            }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(3);
+            let mut b = autocxx::c_int(4);
+            let items = [std::ptr::addr_of_mut!(a), std::ptr::addr_of_mut!(b)];
+            assert_eq!(
+                unsafe { ffi::fx_Summer::sum(items.as_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(7)
+            );
+            let strs = [
+                b"a\0".as_ptr() as *const std::os::raw::c_char,
+                b"b\0".as_ptr() as *const std::os::raw::c_char,
+            ];
+            assert_eq!(
+                unsafe { ffi::fx_Summer::first_chars(strs.as_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(195)
+            );
+        },
+        &["fx_Summer"],
+        &[],
+    );
+}
+
+/// The same parameter on a member function, which reaches the bridge with a
+/// receiver in front of it.
+#[test]
+fn test_method_with_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        class fx_Offset {
+        public:
+            fx_Offset(int base) : base(base) {}
+            virtual ~fx_Offset() {}
+            virtual int sum(int* const* items, int n) const {
+                int total = base;
+                for (int i = 0; i < n; i++) total += *items[i];
+                return total;
+            }
+        private:
+            int base;
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let offset = ffi::fx_Offset::new(autocxx::c_int(10)).within_unique_ptr();
+            let mut a = autocxx::c_int(3);
+            let mut b = autocxx::c_int(4);
+            let items = [std::ptr::addr_of_mut!(a), std::ptr::addr_of_mut!(b)];
+            assert_eq!(
+                unsafe { offset.sum(items.as_ptr(), autocxx::c_int(2)) },
+                autocxx::c_int(17)
+            );
+        },
+        &["fx_Offset"],
+        &[],
+    );
+}
+
+/// And as a return type, where the wrapper's own return type is what has to
+/// name it.
+#[test]
+fn test_static_method_returning_pointer_to_const_pointer() {
+    let hdr = indoc! {"
+        struct fx_Table {
+            static int* const* slots() {
+                static int a = 5;
+                static int b = 6;
+                static int* const table[2] = { &a, &b };
+                return table;
+            }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let slots = ffi::fx_Table::slots();
+            assert_eq!(unsafe { **slots }, autocxx::c_int(5));
+            assert_eq!(unsafe { **slots.add(1) }, autocxx::c_int(6));
+        },
+        &["fx_Table"],
+        &[],
+    );
+}
+
+/// A reference to a `const` pointer is the same qualifier one declarator out:
+/// `int* const&`, which `const int*&` is not.
+#[test]
+fn test_static_method_with_reference_to_const_pointer() {
+    let hdr = indoc! {"
+        struct fx_Reader {
+            static int read(int* const& p) { return *p; }
+            static int* const& same(int* const& p) { return p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(5);
+            let p = std::ptr::addr_of_mut!(a);
+            assert_eq!(unsafe { ffi::fx_Reader::read(&p) }, autocxx::c_int(5));
+            assert_eq!(unsafe { **ffi::fx_Reader::same(&p) }, autocxx::c_int(5));
+        },
+        &["fx_Reader"],
+        &[],
+    );
+}
+
+/// Two `const` pointers deep, so that the qualifier has to land on the right
+/// declarator at every level rather than only at the outermost.
+#[test]
+fn test_static_method_with_pointer_to_const_pointer_to_const_pointer_argument() {
+    let hdr = indoc! {"
+        struct fx_Deep {
+            static int read(int* const* const* p) { return ***p; }
+        };
+    "};
+    run_test(
+        "",
+        hdr,
+        quote! {
+            let mut a = autocxx::c_int(9);
+            let p = std::ptr::addr_of_mut!(a);
+            let pp = std::ptr::addr_of!(p);
+            assert_eq!(
+                unsafe { ffi::fx_Deep::read(std::ptr::addr_of!(pp)) },
+                autocxx::c_int(9)
+            );
+        },
+        &["fx_Deep"],
         &[],
     );
 }
@@ -42443,6 +42810,43 @@ fn test_block_functions_not_imported_onto_derived_class() {
     );
 }
 
+/// The base is nested, so it answers to two spellings, and a directive written
+/// with either withholds the member on the base itself - which is what stops
+/// the import.
+#[test]
+fn test_block_functions_on_a_nested_base_not_imported_in_either_spelling() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct BfNestOuter {
+            struct BfNestBase {
+                uint32_t gone_flat() const { return 1; }
+                uint32_t gone_nested() const { return 2; }
+                uint32_t kept() const { return 3; }
+            };
+        };
+        struct BfNestDerived : BfNestOuter::BfNestBase {};
+    "};
+    run_test_ex(
+        "",
+        hdr,
+        quote! {
+            let d = ffi::BfNestDerived::new().within_unique_ptr();
+            assert_eq!(d.kept(), 3);
+        },
+        quote! {
+            generate!("BfNestDerived")
+            block_functions!("BfNestOuter_BfNestBase::gone_flat")
+            block_functions!("BfNestOuter::BfNestBase::gone_nested")
+        },
+        None,
+        Some(Box::new(CppMatcher::new(
+            &["kept"],
+            &["gone_flat", "gone_nested"],
+        ))),
+        None,
+    );
+}
+
 /// A `using Base::foo;` re-exports a base's member under the importing class,
 /// which is the other way a blocked member could come back.
 #[test]
@@ -42782,6 +43186,263 @@ fn test_volatile_reference_to_unqualified_typedef_parameter() {
         assert_eq!(cell, 7);
     };
     run_test("", hdr, rs, &["fx_poke_u"], &[]);
+}
+
+/// The two ways a header can leave a class incomplete: declaring it on a line
+/// of its own, and naming it with an elaborated type specifier - `struct T` -
+/// in the middle of some other declaration, which declares it just as well.
+/// `{DECL}` in a header below is where the first of those goes; the functions
+/// themselves always write `struct fx_Inc`, so that in the second spelling
+/// whichever of them comes first is the only declaration there is.
+const INCOMPLETE_TYPE_SPELLINGS: [&str; 2] = ["struct fx_Inc;", ""];
+
+/// A function returning by value a class this header only declares cannot be
+/// called from here: the wrapper would have to construct the result, and C++
+/// will not construct an incomplete type. So each one is left out, with a stub
+/// saying why, and the rest of the header binds.
+///
+/// A refused member function leaves a stub function behind and a refused free
+/// function a stub struct, which is why the two are looked for differently.
+///
+/// One header per kind of function, because where bindgen first meets the
+/// type is what used to decide whether it noticed there was no definition: it
+/// did on a declaration and on a parameter, and nowhere else. Named only in a
+/// return type, the class came out as an empty one, and autocxx wrote C++
+/// which allocated it.
+#[test]
+fn test_incomplete_type_returned_by_value() {
+    for (function, stub) in [
+        (
+            "class fx_Solver { public: struct fx_Inc fx_by_member(fx_Arg* p); };",
+            "fn fx_by_member (_uhoh : autocxx :: BindingGenerationFailure)",
+        ),
+        (
+            "class fx_Solver { public: static struct fx_Inc fx_by_static(fx_Arg* p); };",
+            "fn fx_by_static (_uhoh : autocxx :: BindingGenerationFailure)",
+        ),
+        (
+            "struct fx_Inc fx_by_free(fx_Arg* p);",
+            "pub struct fx_by_free ;",
+        ),
+    ] {
+        for decl in INCOMPLETE_TYPE_SPELLINGS {
+            let hdr = format!(
+                "#include <cstdint>\n\
+                 struct fx_Arg;\n\
+                 {decl}\n\
+                 {function}\n\
+                 inline uint32_t fx_ok() {{ return 3; }}\n"
+            );
+            run_test_ex(
+                "",
+                &hdr,
+                quote! {
+                    assert_eq!(ffi::fx_ok(), 3);
+                },
+                quote! { generate_all!() },
+                None,
+                Some(make_string_finder(vec![
+                    stub.to_string(),
+                    "forward declaration (fx_Inc)".to_string(),
+                ])),
+                None,
+            );
+        }
+    }
+}
+
+/// The same for a parameter: passing one by value means copying or moving it,
+/// which needs the definition just as much.
+#[test]
+fn test_incomplete_type_taken_by_value() {
+    for decl in INCOMPLETE_TYPE_SPELLINGS {
+        let hdr = format!(
+            "#include <cstdint>\n\
+             {decl}\n\
+             void fx_take_free(struct fx_Inc i);\n\
+             class fx_Solver {{\n\
+             public:\n\
+                 void fx_take_member(struct fx_Inc i);\n\
+                 static void fx_take_static(struct fx_Inc i);\n\
+             }};\n\
+             inline uint32_t fx_ok() {{ return 3; }}\n"
+        );
+        run_test_ex(
+            "",
+            &hdr,
+            quote! {
+                assert_eq!(ffi::fx_ok(), 3);
+            },
+            quote! { generate_all!() },
+            None,
+            Some(make_string_finder(vec![
+                "pub struct fx_take_free ;".to_string(),
+                "fn fx_take_member (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+                "fn fx_take_static (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+                "forward declaration (fx_Inc)".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// What an incomplete type is good for is unchanged: a pointer or a reference
+/// to one is something C++ can pass around without the definition, so those
+/// functions bind and work. `std::unique_ptr` of one does not - cxx's glue
+/// for it destroys the pointee - and is refused like a by-value use.
+#[test]
+fn test_incomplete_type_by_pointer_and_reference() {
+    let cpp = indoc! {"
+        struct fx_Inc { uint32_t v; };
+        struct fx_Inc* fx_make() { return new fx_Inc{7}; }
+        const struct fx_Inc& fx_same(const struct fx_Inc& i) { return i; }
+        uint32_t fx_read(const struct fx_Inc& i) { return i.v; }
+        void fx_bump(struct fx_Inc& i) { i.v++; }
+        void fx_destroy(struct fx_Inc* p) { delete p; }
+        std::unique_ptr<fx_Inc> fx_Factory::fx_make_unique() { return std::make_unique<fx_Inc>(); }
+    "};
+    for decl in INCOMPLETE_TYPE_SPELLINGS {
+        let hdr = format!(
+            "#include <cstdint>\n\
+             #include <memory>\n\
+             {decl}\n\
+             struct fx_Inc* fx_make();\n\
+             const struct fx_Inc& fx_same(const struct fx_Inc& i);\n\
+             uint32_t fx_read(const struct fx_Inc& i);\n\
+             void fx_bump(struct fx_Inc& i);\n\
+             void fx_destroy(struct fx_Inc* p);\n\
+             class fx_Factory {{\n\
+             public:\n\
+                 static std::unique_ptr<fx_Inc> fx_make_unique();\n\
+             }};\n"
+        );
+        run_test_ex(
+            cpp,
+            &hdr,
+            quote! {
+                let p = ffi::fx_make();
+                assert_eq!(ffi::fx_read(ffi::fx_same(unsafe { p.as_ref().unwrap() })), 7);
+                ffi::fx_bump(unsafe { std::pin::Pin::new_unchecked(&mut *p) });
+                assert_eq!(ffi::fx_read(unsafe { p.as_ref().unwrap() }), 8);
+                unsafe { ffi::fx_destroy(p) };
+            },
+            directives_from_lists(
+                &[
+                    "fx_make",
+                    "fx_same",
+                    "fx_read",
+                    "fx_bump",
+                    "fx_destroy",
+                    "fx_Factory",
+                ],
+                &[],
+                None,
+            ),
+            None,
+            Some(make_string_finder(vec![
+                "fn fx_make_unique (_uhoh : autocxx :: BindingGenerationFailure)".to_string(),
+                "forward declaration (fx_Inc)".to_string(),
+            ])),
+            None,
+        );
+    }
+}
+
+/// A pointer member is the same use as a pointer parameter, and another place
+/// an elaborated type specifier can be the only declaration a class gets -
+/// where, as in a return type, the class used to come out as an empty one
+/// which autocxx then wrote the C++ to allocate and destroy.
+#[test]
+fn test_incomplete_type_behind_pointer_member() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Holder {
+            struct fx_Inc* p;
+            uint32_t n;
+        };
+        inline uint32_t fx_count(const fx_Holder& h) { return h.n; }
+    "};
+    let rs = quote! {
+        let h = ffi::fx_Holder { p: std::ptr::null_mut(), n: 4 };
+        assert_eq!(ffi::fx_count(&h), 4);
+    };
+    run_test("", hdr, rs, &["fx_count"], &["fx_Holder"]);
+}
+
+/// The contrast: the same signatures over a class the header defines bind,
+/// and are callable.
+#[test]
+fn test_complete_type_by_value_in_same_signatures() {
+    let hdr = indoc! {"
+        #include <cstdint>
+        struct fx_Inc { uint32_t v; };
+        class fx_Solver {
+        public:
+            struct fx_Inc fx_by_member() const { return fx_Inc{1}; }
+            static struct fx_Inc fx_by_static() { return fx_Inc{2}; }
+            uint32_t fx_take_member(struct fx_Inc i) const { return i.v; }
+        };
+        inline struct fx_Inc fx_by_free() { return fx_Inc{3}; }
+        inline uint32_t fx_take_free(struct fx_Inc i) { return i.v; }
+    "};
+    let rs = quote! {
+        let s = ffi::fx_Solver::new().within_unique_ptr();
+        assert_eq!(s.fx_by_member().v, 1);
+        assert_eq!(ffi::fx_Solver::fx_by_static().v, 2);
+        assert_eq!(ffi::fx_by_free().v, 3);
+        assert_eq!(s.fx_take_member(ffi::fx_Inc { v: 4 }), 4);
+        assert_eq!(ffi::fx_take_free(ffi::fx_Inc { v: 5 }), 5);
+    };
+    run_test(
+        "",
+        hdr,
+        rs,
+        &["fx_Solver", "fx_by_free", "fx_take_free"],
+        &["fx_Inc"],
+    );
+}
+
+/// Incomplete where the function is declared is not incomplete: a class
+/// defined further down the header is complete by the end of it, which is
+/// where the generated C++ is compiled. So these bind exactly as if the
+/// definition had come first.
+#[test]
+fn test_type_completed_later_in_header_by_value() {
+    for decl in INCOMPLETE_TYPE_SPELLINGS {
+        let hdr = format!(
+            "#include <cstdint>\n\
+             {decl}\n\
+             struct fx_Inc fx_by_free();\n\
+             uint32_t fx_take_free(struct fx_Inc i);\n\
+             class fx_Solver {{\n\
+             public:\n\
+                 struct fx_Inc fx_by_member() const;\n\
+                 static struct fx_Inc fx_by_static();\n\
+                 uint32_t fx_take_member(struct fx_Inc i) const;\n\
+             }};\n\
+             struct fx_Inc {{ uint32_t v; }};\n\
+             inline fx_Inc fx_Solver::fx_by_member() const {{ return fx_Inc{{1}}; }}\n\
+             inline fx_Inc fx_Solver::fx_by_static() {{ return fx_Inc{{2}}; }}\n\
+             inline uint32_t fx_Solver::fx_take_member(fx_Inc i) const {{ return i.v; }}\n\
+             inline fx_Inc fx_by_free() {{ return fx_Inc{{3}}; }}\n\
+             inline uint32_t fx_take_free(fx_Inc i) {{ return i.v; }}\n"
+        );
+        let rs = quote! {
+            let s = ffi::fx_Solver::new().within_unique_ptr();
+            assert_eq!(s.fx_by_member().v, 1);
+            assert_eq!(ffi::fx_Solver::fx_by_static().v, 2);
+            assert_eq!(ffi::fx_by_free().v, 3);
+            assert_eq!(s.fx_take_member(ffi::fx_Inc { v: 4 }), 4);
+            assert_eq!(ffi::fx_take_free(ffi::fx_Inc { v: 5 }), 5);
+        };
+        run_test(
+            "",
+            &hdr,
+            rs,
+            &["fx_Solver", "fx_by_free", "fx_take_free"],
+            &["fx_Inc"],
+        );
+    }
 }
 
 // --- `returns_borrow_from!` ------------------------------------------------

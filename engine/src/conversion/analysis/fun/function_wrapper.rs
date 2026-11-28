@@ -682,14 +682,23 @@ pub(crate) enum CppFunctionBody {
     /// the receiver cast to that base so that nothing the receiver's own class
     /// declares can decide which member is called.
     ///
-    /// The base is carried as the C++ spelling of its name rather than as a
-    /// [`QualifiedName`], because the cast has to write that spelling and
-    /// nothing else here keeps the base alive: garbage collection drops a base
-    /// class nobody asked for, and the name map codegen would otherwise ask
-    /// then falls back on bindgen's flattened identifier, which names nothing
-    /// in C++. The [`ReceiverMutability`] is the cast's, the receiver being a
+    /// The base is carried twice. Its C++ spelling is what the cast writes and
+    /// is kept here because nothing else keeps it: garbage collection drops a
+    /// base class nobody asked for, and the name map codegen would otherwise
+    /// ask then falls back on bindgen's flattened identifier, which names
+    /// nothing in C++. Its [`QualifiedName`] is what a directive naming the
+    /// member on the base is matched against. That question is asked over
+    /// every spelling the base answers to - a nested base answers to two -
+    /// rather than over the one spelling the cast writes.
+    ///
+    /// The [`ReceiverMutability`] is the cast's, the receiver being a
     /// reference to `const` for a `const` member.
-    BaseClassMethodCall(String, CppEffectiveName, ReceiverMutability),
+    BaseClassMethodCall {
+        base: QualifiedName,
+        base_cpp_spelling: String,
+        method: CppEffectiveName,
+        receiver_mutability: ReceiverMutability,
+    },
     /// Read a data member off the receiver, by the name C++ gives it. This is
     /// the whole body of a synthesized field accessor; see
     /// `analysis::field_accessors`.

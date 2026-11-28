@@ -61,7 +61,7 @@ pub(crate) fn decorate_types_with_constructor_deps(apis: ApiVec<FnPrePhase3>) ->
                 ..
             } => {
                 let constructor_and_allocator_deps = constructors_and_allocators_by_type
-                    .remove(&name.name)
+                    .swap_remove(&name.name)
                     .unwrap_or_default();
                 Api::ConcreteType {
                     name,
@@ -89,7 +89,7 @@ fn decorate_struct(
         Vec::new()
     } else {
         constructors_and_allocators_by_type
-            .remove(&name.name)
+            .swap_remove(&name.name)
             .unwrap_or_default()
     };
     Ok(Box::new(std::iter::once(Api::Struct {
