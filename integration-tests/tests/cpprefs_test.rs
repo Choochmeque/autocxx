@@ -1364,6 +1364,7 @@ fn test_reference_to_pointer_param_is_unsafe_cpprefs() {
     let hdr = indoc! {"
         inline int fx_read_ptr(int* p) { return *p; }
         inline int fx_read_mut_ref(int*& p) { return *p; }
+        inline int fx_read_const_ref(int* const& p) { return *p; }
     "};
     let rs = quote! {
         let mut v = autocxx::c_int(7);
@@ -1374,12 +1375,20 @@ fn test_reference_to_pointer_param_is_unsafe_cpprefs() {
             unsafe { ffi::fx_read_mut_ref(slot.as_cpp_mut_ref()) },
             autocxx::c_int(7)
         );
+        assert_eq!(
+            unsafe { ffi::fx_read_const_ref(slot.as_cpp_ref()) },
+            autocxx::c_int(7)
+        );
     };
     do_run_test(
         "",
         hdr,
         rs,
-        directives_from_lists(&["fx_read_ptr", "fx_read_mut_ref"], &[], None),
+        directives_from_lists(
+            &["fx_read_ptr", "fx_read_mut_ref", "fx_read_const_ref"],
+            &[],
+            None,
+        ),
         None,
         None,
         None,

@@ -43363,6 +43363,16 @@ fn test_reference_to_pointer_param_is_unsafe_on_methods() {
         private:
             int v;
         };
+        class ConstRefReader {
+        public:
+            ConstRefReader(int* const& p) : v(*p) {}
+            static int read_static(int* const& p) { return *p; }
+            int read(int* const& p) const { return *p; }
+            int read_const_pointee(const int* const& p) const { return *p; }
+            int get() const { return v; }
+        private:
+            int v;
+        };
     "};
     let rs = quote! {
         let mut v = autocxx::c_int(7);
@@ -43377,8 +43387,18 @@ fn test_reference_to_pointer_param_is_unsafe_on_methods() {
             unsafe { r.read(std::pin::Pin::new(&mut p)) },
             autocxx::c_int(7)
         );
+
+        assert_eq!(
+            unsafe { ffi::ConstRefReader::read_static(&p) },
+            autocxx::c_int(7)
+        );
+        let r = unsafe { ffi::ConstRefReader::new(&p) }.within_unique_ptr();
+        assert_eq!(r.get(), autocxx::c_int(7));
+        assert_eq!(unsafe { r.read(&p) }, autocxx::c_int(7));
+        let cp: *const autocxx::c_int = p;
+        assert_eq!(unsafe { r.read_const_pointee(&cp) }, autocxx::c_int(7));
     };
-    run_test_denying_unused_unsafe(hdr, rs, &["Reader"]);
+    run_test_denying_unused_unsafe(hdr, rs, &["Reader", "ConstRefReader"]);
 }
 
 /// The other half of the tests above: safe Rust cannot make the call at all.
@@ -43404,6 +43424,7 @@ fn test_subclass_method_with_reference_to_pointer_param_is_unsafe() {
     public:
         Observer() {}
         virtual void foo(int*&) const {}
+        virtual void bar(int* const&) const {}
         virtual ~Observer() {}
     };
     "};
@@ -43425,6 +43446,7 @@ fn test_subclass_method_with_reference_to_pointer_param_is_unsafe() {
             pub struct MyObserver {}
             impl Observer_methods for MyObserver {
                 unsafe fn foo(&self, _p: std::pin::Pin<&mut *mut autocxx::c_int>) {}
+                unsafe fn bar(&self, _p: &*mut autocxx::c_int) {}
             }
         }),
     );
@@ -43468,6 +43490,7 @@ fn test_reference_to_pointer_return_is_safe() {
             Holder() : value(7), slot(&value) {}
             int* give() { return slot; }
             int*& give_mut_ref() { return slot; }
+            int* const& give_const_ref() const { return slot; }
         private:
             int value;
             int* slot;
@@ -43478,6 +43501,8 @@ fn test_reference_to_pointer_return_is_safe() {
         let p = h.pin_mut().give();
         assert_eq!(unsafe { *p }, autocxx::c_int(7));
         let p = *h.pin_mut().give_mut_ref();
+        assert_eq!(unsafe { *p }, autocxx::c_int(7));
+        let p = *h.give_const_ref();
         assert_eq!(unsafe { *p }, autocxx::c_int(7));
     };
     run_test("", hdr, rs, &["Holder"], &[]);
